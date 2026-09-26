@@ -37,7 +37,10 @@ internal sealed partial class ZigLowering
     /// <summary>One field of a comptime aggregate — exactly one of the three is set: an enum-literal
     /// <see cref="Tag"/> (what a platform query actually asks for), a scalar <see cref="Value"/>, or a
     /// <see cref="Nested"/> aggregate (so <c>target.cpu.arch</c> chains).</summary>
-    private sealed record ZigAggField(string? Tag, CExpr? Value, ZigComptimeAggregate? Nested);
+    /// <remarks>A tag spelled with its type (<c>@as(std.Target.Cpu.Arch, .x86_64)</c>) also carries that type
+    /// expression and the module that spells it, so a method call on the field can dispatch.</remarks>
+    private sealed record ZigAggField(string? Tag, CExpr? Value, ZigComptimeAggregate? Nested,
+        Item? TagType = null, ZigLowering? TagTypeScope = null);
 
     /// <summary>A comptime aggregate value: field name → what it holds. Field ORDER is irrelevant
     /// here (unlike the S5c member lists, which report declaration order), so a plain map is the whole
@@ -67,7 +70,14 @@ internal sealed partial class ZigLowering
             // queries are all named, so a tuple is simply not this domain.
             if (init.Content is not Zig.FieldInit fi) { return null; }
             var fieldName = Tok(fi.Arg1);
-            if (ReadComptimeAggField(fi.Arg3) is not { } field) { return null; }
+            if (ReadComptimeAggField(fi.Arg3) is not { } field)
+            {
+                // A field the recorder has no domain for, but that does not make the literal a runtime one: an
+                // address (`.model = &std.Target.x86.cpu.x86_64_v3`) or a call (`.features = featureSet(…)`) in the
+                // typed synthetic `builtin.cpu`. It is left out; a read of it takes the ordinary path.
+                if (fi.Arg3.Content is Zig.PreAddrOf or Zig.CallArgs or Zig.CallNoArgs) { continue; }
+                return null;
+            }
             fields[fieldName] = field;
         }
         return new ZigComptimeAggregate(fields);
@@ -92,6 +102,12 @@ internal sealed partial class ZigLowering
     {
         if (value.Content is Zig.Grouped g) { return ReadComptimeAggField(g.Arg1); }
         if (value.Content is Zig.EnumLit lit) { return new ZigAggField(Tok(lit.Arg1), null, null); }
+        // `@as(std.Target.Cpu.Arch, .x86_64)`: the tag, typed (the synthetic builtin with a real std).
+        if (value.Content is Zig.BuiltinCall { } asCall && Tok(asCall.Arg0) == "@as" && Flatten(asCall.Arg2) is { Count: 2 } asArgs
+            && ReadComptimeAggField(asArgs[1]) is { Tag: { } typedTag })
+        {
+            return new ZigAggField(typedTag, null, null, asArgs[0], this);
+        }
         if (TryEvalComptimeAggregateLiteral(value) is { } nested)
         {
             return new ZigAggField(null, null, nested);

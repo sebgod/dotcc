@@ -15,8 +15,8 @@ namespace DotCC.Tests;
 /// and lowers a SPECIALIZED signature + body — <c>maxOf(i32, …)</c> emits <c>int maxOf__i32(int, int)</c>
 /// while <c>maxOf(f64, …)</c> emits <c>double maxOf__f64(double, double)</c>. The instance is mangled by
 /// the RESOLVED type (an alias for <c>i32</c> keys the same <c>__i32</c> instance), memoized, and its body
-/// drained from the re-entrancy-safe worklist. V1 cuts (loud): a <c>type</c>-RETURNING function (W4) and a
-/// generic METHOD. End-to-end in the <c>comptime-type-param</c> zig-oracle program.
+/// drained from the re-entrancy-safe worklist. (A <c>type</c>-RETURNING function is W4; a generic METHOD instantiates
+/// under its container, see <c>ZigGenericMethodTests</c>.) End-to-end in the <c>comptime-type-param</c> zig-oracle program.
 /// </summary>
 [Collection("ZigFrontend")]
 public sealed class ZigComptimeTypeParamTests
@@ -108,17 +108,17 @@ public sealed class ZigComptimeTypeParamTests
     }
 
     [Fact]
-    public void Comptime_type_parameter_method_is_rejected()
+    public void Comptime_type_parameter_method_instantiates_per_type()
     {
-        // W3b, like W3a, is free functions only — a generic METHOD needs the top-level-pass machinery.
-        var ex = Should.Throw<Exception>(() => EmitZig("""
+        // Once a cut (W3b was free functions only): a comptime-TYPE METHOD instantiates per type.
+        var cs = EmitZig("""
             const S = struct {
                 v: i32,
                 fn asType(self: S, comptime T: type) T { return @intCast(self.v); }
             };
             pub fn main() u8 { const s: S = .{ .v = 5 }; return s.asType(u8); }
-            """));
-        ex.Message.ShouldContain("method");
+            """);
+        cs.ShouldContain("byte S_asType__u8(S self)");
     }
 
     [Fact]

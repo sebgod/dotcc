@@ -59,6 +59,8 @@ internal sealed class ZigFrontend : IFrontend
         // eventual front door) lets a non-curated `std.<x>` navigate the real std.zig root.
         var stdRoot = ResolveStdRoot(Environment.GetEnvironmentVariable("DOTCC_ZIG_LIB_DIR"));
         var moduleGraph = new ZigModuleGraph(stdRoot);
+        // The comptime engine's E2: while Zig lowers, the interpreter may ask for a callee's body now.
+        ir.DemandFuncBody = moduleGraph.TryLowerBodyOnDemand;
         foreach (var path in paths)
         {
             var source = File.ReadAllText(path);
@@ -82,13 +84,23 @@ internal sealed class ZigFrontend : IFrontend
             {
                 throw new CompileException($"parse failed in {Path.GetFileName(path)}: {root}");
             }
-            new ZigLowering(ir, names, errorCodes, testMode, moduleGraph, Path.GetDirectoryName(path),
-                fileStem: Path.GetFileNameWithoutExtension(path)).Lower(root);
+            var lowering = new ZigLowering(ir, names, errorCodes, testMode, moduleGraph, Path.GetDirectoryName(path),
+                fileStem: Path.GetFileNameWithoutExtension(path));
+            moduleGraph.RegisterRoot(lowering);
+            lowering.Lower(root);
         }
         // Drain every lazily-imported module's referenced function bodies at top level (road-to-zig-std
         // S2). References were collected while the roots lowered; this lowers exactly those decls (and
         // their transitive references) to a fixpoint — an unreferenced std-heavy decl never lowers.
         moduleGraph.DrainAll();
+        // Then every deferred `comptime` fold of every module (Milestone T pass 3): a fold may call a
+        // function whose body only the drain lowered (a lazy module's generic instance).
+        moduleGraph.ResolveComptimeFolds(ir);
+        moduleGraph.CheckComptimeReturnsAtRuntime();
+        // A function whose signature carries a comptime-only type (task #113) ran only at comptime: the check above
+        // rejected any runtime call to it, so its runtime copy, which C# could not spell, goes.
+        ir.Functions.RemoveAll(f => ZigLowering.HasComptimeOnlySignature(f.Sym));
+        ir.DemandFuncBody = null;
         // Carry the flat error set to the backend so it can emit the `@errorName` code→name
         // table (Milestone X). Merge into any existing map (a mixed build lowers C first, but C
         // contributes no Zig error names; this also stays correct if a future C path adds some).

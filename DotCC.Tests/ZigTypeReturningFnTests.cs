@@ -17,9 +17,9 @@ namespace DotCC.Tests;
 /// <para>road-to-zig-std G4 lifted the fields-only V1 cut: the reified struct also carries <c>const</c>
 /// members (including <c>const Self = @This();</c>) and METHODS — each method declared under the mangled
 /// container with its body deferred to a top-level drain, so it lowers to the same
-/// <c>Container_method</c> free function an ordinary container's method does. Remaining loud cuts: a
-/// NESTED container member, a runtime parameter on the type function, and (inherited
-/// from W3/W4/W5) a generic or <c>type</c>-returning METHOD. A non-struct return (<c>return T;</c>, a
+/// <c>Container_method</c> free function an ordinary container's method does. NESTED containers, generic
+/// methods and <c>type</c>-returning methods are no longer cuts (2026-09-24); a runtime parameter on the
+/// type function still is. A non-struct return (<c>return T;</c>, a
 /// delegating call) is no longer a cut — see <c>ZigTypeBodyTests</c> (the W4 lift).</para>
 /// End-to-end in the <c>type-returning-fn</c> and <c>generic-container-methods</c> zig-oracle programs.
 /// </summary>
@@ -200,25 +200,25 @@ public sealed class ZigTypeReturningFnTests
     }
 
     [Fact]
-    public void Nested_container_in_the_returned_struct_is_rejected()
+    public void Nested_container_in_the_returned_struct_is_flattened_under_the_instance()
     {
-        // The remaining member cut: a nested container decl in the reified struct would need the nested
-        // type bound under a parent-mangled name scoped to a REIFIED parent — deferred, so it's loud.
-        var ex = Should.Throw<Exception>(() => EmitZig("""
+        // Once a cut: a nested container decl in the reified struct is bound under the INSTANCE's mangled
+        // name (`Outer__u8__Inner`), exactly as pass 0 flattens a top-level container's nested types.
+        var cs = EmitZig("""
             fn Outer(comptime T: type) type {
-                return struct { v: T, const Inner = struct { z: u8 }; };
+                return struct { v: T, i: Inner = .{ .z = 2 }, const Inner = struct { z: u8 }; };
             }
-            pub fn main() u8 { const o: Outer(u8) = .{ .v = 1 }; return o.v; }
-            """));
-        ex.Message.ShouldContain("nested container member");
+            pub fn main() u8 { const o: Outer(u8) = .{ .v = 40 }; return o.v + o.i.z; }
+            """);
+        cs.ShouldContain("unsafe struct Outer__u8__Inner");
+        cs.ShouldContain("public Outer__u8__Inner i;");
     }
 
     [Fact]
-    public void Generic_method_in_the_returned_struct_is_rejected()
+    public void Generic_method_in_the_returned_struct_instantiates_under_the_instance()
     {
-        // A method of the reified struct is an ordinary method, so it inherits the standing W3/W5 cut: a
-        // `comptime`/`anytype` parameter on a METHOD is not supported (free functions only).
-        var ex = Should.Throw<Exception>(() => EmitZig("""
+        // Once a cut: a generic METHOD of a reified struct instantiates under the instance, with its seeds.
+        var cs = EmitZig("""
             fn Box(comptime T: type) type {
                 return struct {
                     v: T,
@@ -227,21 +227,23 @@ public sealed class ZigTypeReturningFnTests
                 };
             }
             pub fn main() u8 { const b: Box(u8) = .{ .v = 5 }; return b.as(u8); }
-            """));
-        ex.Message.ShouldContain("generic method");
+            """);
+        cs.ShouldContain("byte Box__u8_as__u8(Box__u8* self)");
     }
 
     [Fact]
-    public void Type_returning_method_in_the_returned_struct_is_rejected()
+    public void Type_returning_method_in_the_returned_struct_sees_the_owner_seeds()
     {
-        // Likewise the standing W4 cut — a `type`-returning METHOD (`Aligned`'s nested `SentinelSlice`).
-        var ex = Should.Throw<Exception>(() => EmitZig("""
+        // Once the standing W4 cut: a `type`-returning METHOD (`Aligned`'s nested `SentinelSlice`) is a
+        // comptime type constructor under its owner, evaluated with the owner's seeds live, so `Elem()`
+        // delegates to the instance's `T`.
+        var cs = EmitZig("""
             fn Box(comptime T: type) type {
                 return struct { v: T, pub fn Elem() type { return T; } };
             }
-            pub fn main() u8 { const b: Box(u8) = .{ .v = 5 }; return b.v; }
-            """));
-        ex.Message.ShouldContain("`type`-returning method");
+            pub fn main() u8 { const b: Box(u16) = .{ .v = 5 }; const e: Box(u16).Elem() = b.v; return @intCast(e); }
+            """);
+        cs.ShouldContain("ushort e = b.v;");
     }
 
     [Fact]

@@ -36,9 +36,15 @@ internal sealed partial class ZigLowering
         public IReadOnlyList<string>? Strings { get; init; }
         public IReadOnlyList<CType>? Types { get; init; }
         public IReadOnlyList<long>? Ints { get; init; }
+        public IReadOnlyList<ZigFieldAttr>? Attrs { get; init; }
 
-        public int Count => Strings?.Count ?? Types?.Count ?? Ints?.Count ?? 0;
+        public int Count => Strings?.Count ?? Types?.Count ?? Ints?.Count ?? Attrs?.Count ?? 0;
     }
+
+    /// <summary>One <c>std.builtin.Type.Struct.FieldAttributes</c> of a <c>field_attrs</c> list (task #108): the field's
+    /// explicit alignment (null when unspelled, as zig's <c>?usize</c>), and whether it has a default value. dotcc has
+    /// no <c>comptime</c> fields, so <c>.@"comptime"</c> is false.</summary>
+    private sealed record ZigFieldAttr(long? Align, bool HasDefault, string? Struct = null, string? Field = null);
 
     /// <summary>Each name bound to a folded member list (<c>const names = @typeInfo(T).@"struct"
     /// .field_names;</c>). No runtime decl is emitted, exactly as for
@@ -53,11 +59,31 @@ internal sealed partial class ZigLowering
     /// the width and on <c>@sizeOf</c>. Same shape of judgement as `bits` needing a spelling.</summary>
     private readonly HashSet<string> _enumsWithSpelledTag = new(System.StringComparer.Ordinal);
 
+    /// <summary>Enum names declared NON-EXHAUSTIVE (a trailing <c>_</c>), for <c>@typeInfo(E).@"enum".mode</c>.</summary>
+    private readonly HashSet<string> _nonExhaustiveEnums = new(System.StringComparer.Ordinal);
+
     /// <summary>The declared FIELDS of a struct/union type in declaration order, or null when the
     /// type names no registered aggregate. Order is load-bearing: <c>field_names</c> and
     /// <c>field_types</c> are index-parallel, and zig guarantees declaration order.</summary>
     private IReadOnlyList<StructField>? FieldsOfAggregate(CType type)
-        => type.Unqualified is CType.Named n ? _ir.StructFieldsOf(n.Name) : null;
+    {
+        if (type.Unqualified is not CType.Named n) { return null; }
+        EnsureNestedBody(n.Name);
+        return _ir.StructFieldsOf(n.Name);
+    }
+
+    /// <summary>Register a pending nested container's body now (task #135), in the module that reifies its instance and
+    /// with that instance current: a type const of the instance may read its fields (from any module, std.MultiArrayList's
+    /// `@typeInfo(Data)`) before the instance's own body loop gets to it. A no-op once registered.</summary>
+    private void EnsureNestedBody(string name)
+    {
+        if (!_shared.PendingNestedBodies.Remove(name, out var pending)) { return; }
+        var owner = pending.Owner;
+        var savedContainer = owner._currentContainer;
+        owner._currentContainer = pending.Instance;
+        try { owner.RegisterContainerBody(name, pending.Content, pending.Methods); }
+        finally { owner._currentContainer = savedContainer; }
+    }
 
     /// <summary>The MEMBERS of an enum type in declaration order, or null when the type is not a
     /// registered enum. Read off <see cref="IrModule.Enums"/> — an ordered list, unlike the
@@ -66,6 +92,67 @@ internal sealed partial class ZigLowering
         => type.Unqualified is CType.Enum e
             ? _ir.Enums.FirstOrDefault(d => d.Name == e.Name)?.Members
             : null;
+
+    /// <summary>A tuple's field names, its positions spelled as decimal strings, as zig names them.</summary>
+    private static IReadOnlyList<string> TupleFieldNames(CType.Tuple t)
+        => Enumerable.Range(0, t.Elements.Count).Select(i => i.ToString(System.Globalization.CultureInfo.InvariantCulture)).ToList();
+
+    /// <summary>A member name list as a VALUE of zig's <c>[]const [:0]const u8</c>: each name a string literal viewed as a
+    /// slice, all of them in a pinned, program-lifetime array (the comptime memory the zig slice points into). The
+    /// interpreter reads it back as a comptime slice of strings, so a call returning it
+    /// (<c>std.meta.fieldNames(E)</c>) still folds.</summary>
+    private CExpr NameListSlice(IReadOnlyList<string> names)
+    {
+        var name = new CType.Slice(CType.UChar.WithQuals(TypeQual.Const));
+        var element = name.WithQuals(TypeQual.Const);
+        var elems = names.Select(n => CoerceToSlice(ZigStringLiteral(n), name)).ToList();
+        var pinned = new PinnedArray(element, elems, null) { Type = new CType.Pointer(element) };
+        var count = new LitInt(names.Count.ToString(System.Globalization.CultureInfo.InvariantCulture), names.Count) { Type = CType.ULong };
+        return new SliceNew(pinned, count, element, true) { Type = new CType.Slice(element) };
+    }
+
+    /// <summary>The comptime value of an AGGREGATE argument to a <c>comptime x: anytype</c> parameter, with its type: a tuple
+    /// (std.StaticStringMap's <c>initComptime(.{ .{ "one", 1 }, .{ "two", 2 } })</c>, task #100), or a comptime slice of
+    /// them (std.meta.stringToEnum's <c>initComptime(kvs)</c>, task #116). Null when the argument is neither or does not
+    /// evaluate at compile time (the parameter then binds as an ordinary <c>anytype</c>).</summary>
+    private (IrModule.ComptimeValue value, CType type)? ComptimeTupleArg(Item arg)
+    {
+        using var hoist = EnterThrowawayHoist();
+        var lowered = LowerExpr(arg);
+        return lowered.Type.Unqualified switch
+        {
+            CType.Tuple when _ir.EvalComptimeValue(lowered) is IrModule.CtStruct tupleValue => (tupleValue, lowered.Type),
+            CType.Slice when _ir.EvalComptimeValue(lowered) is IrModule.CtSlice sliceValue => (sliceValue, lowered.Type),
+            _ => null,
+        };
+    }
+
+    /// <summary>The comptime value of an argument bound to a <c>comptime x: []const T</c> parameter: an integer member
+    /// list (<c>@typeInfo(E).@"enum".field_values</c>) as a comptime slice of <c>comptime_int</c>, or any argument the
+    /// interpreter evaluates to a slice or array. Null when it is neither.</summary>
+    private IrModule.ComptimeValue? ComptimeSliceArg(Item arg, CType.Slice sliceType)
+    {
+        if (TryFoldTypeInfoList(arg, out var list) || arg.Content is Zig.Ident id && _typeInfoLists.TryGetValue(Tok(id.Arg0), out list))
+        {
+            if (list.Ints is not { } ints)
+            {
+                throw new IrUnsupportedException(
+                    $"zig `{list.Label}` as a comptime slice argument: only an integer member list (`field_values`) is modeled");
+            }
+            var element = sliceType.Element.Unqualified;
+            var elems = ints.Select(v => (IrModule.ComptimeValue)new IrModule.CtInt(v, element)).ToArray();
+            var backing = new IrModule.CtArray(elems, element, new CType.Array(element, elems.Length));
+            return new IrModule.CtSlice(backing, 0, elems.Length, sliceType);
+        }
+        using var hoist = EnterThrowawayHoist();
+        var value = _ir.EvalComptimeValue(LowerExprSink(arg, sliceType));
+        return value switch
+        {
+            IrModule.CtSlice => value,
+            IrModule.CtArray a => new IrModule.CtSlice(a, 0, a.Elems.Length, sliceType),
+            _ => null,
+        };
+    }
 
     /// <summary>Fold a <c>@typeInfo</c> payload field that yields a member LIST — the parallel
     /// arrays <c>field_names</c> / <c>field_types</c> / <c>field_values</c>. Returns false when the
@@ -84,6 +171,19 @@ internal sealed partial class ZigLowering
             list = bound;
             return true;
         }
+        // A list-valued const of the container in scope or one enclosing it (std.MultiArrayList's
+        // `const field_names = @typeInfo(Elem).@"struct".field_names;`, walked by `inline for` in a method of its nested
+        // `Slice`, task #108): the const's own right-hand side, read with the method's seeds live.
+        if (expr.Content is Zig.Ident cid && _symbols.Resolve(Tok(cid.Arg0)) is null)
+        {
+            for (var c = _currentContainer; c is not null; c = _containerParents.GetValueOrDefault(c))
+            {
+                if (_containerConsts.TryGetValue(c, out var consts) && consts.TryGetValue(Tok(cid.Arg0), out var decl))
+                {
+                    return decl.Item1 is null && decl.Item2 != expr && TryFoldTypeInfoList(decl.Item2, out list);
+                }
+            }
+        }
         if (expr.Content is not Zig.Field f || !TryEvalTypeInfo(f.Arg0, out var info)) { return false; }
         var field = Tok(f.Arg2);
         switch (field)
@@ -99,6 +199,13 @@ internal sealed partial class ZigLowering
                     list = new ZigComptimeList { Label = field, Strings = nm.Select(x => x.Name).ToList() };
                     return true;
                 }
+                // A TUPLE (`@TypeOf(.{ 42, "x" })`, the args of every std format call) is a struct whose
+                // fields are named by position: "0", "1", ... (std.Io.Writer.print reads them).
+                if (info.Type.Unqualified is CType.Tuple nt)
+                {
+                    list = new ZigComptimeList { Label = field, Strings = TupleFieldNames(nt) };
+                    return true;
+                }
                 throw new IrUnsupportedException(
                     $"zig `@typeInfo({info.Type.Describe()}).{info.Tag}.field_names`: only a registered struct / union / "
                     + "enum has declared fields");
@@ -107,6 +214,11 @@ internal sealed partial class ZigLowering
                 if (FieldsOfAggregate(info.Type) is { } tf)
                 {
                     list = new ZigComptimeList { Label = field, Types = tf.Select(x => x.Type).ToList() };
+                    return true;
+                }
+                if (info.Type.Unqualified is CType.Tuple tt)
+                {
+                    list = new ZigComptimeList { Label = field, Types = tt.Elements };
                     return true;
                 }
                 throw new IrUnsupportedException(
@@ -129,12 +241,97 @@ internal sealed partial class ZigLowering
                     + "(road-to-zig-std S5c). `@hasDecl` works, since membership needs no order");
 
             case "field_attrs":
+                if (info.Type.Unqualified is CType.Named { Name: var attrStruct } && FieldsOfAggregate(info.Type) is { } af)
+                {
+                    list = new ZigComptimeList { Label = field, Attrs = af.Select(x => FieldAttrOf(attrStruct, x.Name)).ToList() };
+                    return true;
+                }
                 throw new IrUnsupportedException(
-                    $"zig `@typeInfo({info.Type.Describe()}).{info.Tag}.field_attrs`: per-field alignment / default-value "
-                    + "attributes are not modeled (road-to-zig-std S5c)");
+                    $"zig `@typeInfo({info.Type.Describe()}).{info.Tag}.field_attrs`: only a registered struct / union has "
+                    + "field attributes");
         }
         return false;
     }
+
+    /// <summary>The <c>field_attrs</c> entry of <paramref name="structName"/>'s field <paramref name="fieldName"/> (task
+    /// #108): its spelled <c>align(N)</c>, evaluated in the module that declared it, and whether it has a default. A field
+    /// with no recorded attributes (a reified struct's) has neither.</summary>
+    private ZigFieldAttr FieldAttrOf(string structName, string fieldName)
+    {
+        if (!_shared.StructFieldAttrs.TryGetValue((structName, fieldName), out var a)) { return new ZigFieldAttr(null, false); }
+        long? align = null;
+        if (a.Align is { } alignItem)
+        {
+            align = a.Owner.ComptimeIntValue(a.Owner.LowerExpr(alignItem))
+                ?? throw new IrUnsupportedException(
+                    $"the alignment of '{structName}.{fieldName}' is not a comptime-known integer");
+        }
+        return new ZigFieldAttr(align, a.HasDefault, structName, fieldName);
+    }
+
+    /// <summary>A member of one <c>field_attrs</c> entry, folded while lowering (task #108): <c>.@"align"</c> is a
+    /// <c>?usize</c> (null when unspelled), <c>.@"comptime"</c> false. <c>.default_value_ptr</c> is null for a field
+    /// with no default; a defaulted one's pointer to its comptime value is not modeled, a loud cut.</summary>
+    private static CExpr FieldAttrMember(ZigFieldAttr attr, string member)
+    {
+        var optUsize = new CType.Optional(CType.ULong);
+        return member switch
+        {
+            "align" => attr.Align is { } a
+                ? new Cast(optUsize, new LitInt(a.ToString(System.Globalization.CultureInfo.InvariantCulture), a) { Type = CType.ULong }) { Type = optUsize }
+                : new DefaultLit { Type = optUsize },
+            "comptime" => new LitBool(false) { Type = CType.Bool },
+            "default_value_ptr" when !attr.HasDefault => new DefaultLit { Type = new CType.Pointer(CType.Void) },
+            "default_value_ptr" => throw new IrUnsupportedException(
+                "a defaulted field's `field_attrs[i].default_value_ptr` (a pointer to its comptime default) is not modeled yet"),
+            _ => throw new IrUnsupportedException($"std.builtin.Type.Struct.FieldAttributes has no member '{member}'"),
+        };
+    }
+
+    /// <summary><c>attrs.defaultValue(FieldType)</c> on a comptime <c>field_attrs</c> entry (std.mem.zeroInit's
+    /// <c>else if (f_attr.defaultValue(f_type)) |val|</c>, task #162): a comptime OPTIONAL, null for a field with no default
+    /// and otherwise the default the struct declares, lowered in the module that declares it. False when
+    /// <paramref name="call"/> is not such a call. An integer default is what a folded optional carries; any other default
+    /// is a loud cut.</summary>
+    private bool TryFieldAttrDefaultValue(Item call, out (bool HasValue, long Value, CType Inner) info)
+    {
+        info = default;
+        if (DefaultValueCall(call) is not var (callee, fieldTypeItem)) { return false; }
+        ZigFieldAttr? attr = null;
+        if (callee.Arg0.Content is Zig.Ident aid && _symbols.Resolve(Tok(aid.Arg0)) is null
+            && _comptimeAttrs.TryGetValue(Tok(aid.Arg0), out var bound))
+        {
+            attr = bound;
+        }
+        else if (callee.Arg0.Content is Zig.Index aix && TryFoldTypeInfoList(aix.Arg0, out var attrList) && attrList.Attrs is { } attrs)
+        {
+            attr = attrs[ComptimeListIndex(attrList, aix.Arg2)];
+        }
+        if (attr is null) { return false; }
+        var fieldType = LowerType(fieldTypeItem);
+        if (!attr.HasDefault)
+        {
+            info = (false, 0, fieldType);
+            return true;
+        }
+        if (attr.Struct is { } structName && attr.Field is { } fieldName
+            && _shared.StructFieldAttrs.TryGetValue((structName, fieldName), out var source)
+            && source.Owner._structFieldDefaults.TryGetValue((structName, fieldName), out var defaultItem)
+            && _ir.ConstEval(source.Owner.LowerFieldDefault(structName, fieldType, defaultItem)) is { } v)
+        {
+            info = (true, v, fieldType);
+            return true;
+        }
+        throw new IrUnsupportedException(
+            "zig `field_attrs[i].defaultValue(T)` of a field whose default is not a comptime integer is not modeled yet");
+    }
+
+    /// <summary>The receiver and the <c>FieldType</c> argument of a <c>receiver.defaultValue(FieldType)</c> call, or null.</summary>
+    private static (Zig.Field Callee, Item FieldType)? DefaultValueCall(Item call)
+        => call.Content is Zig.CallArgs { Arg0.Content: Zig.Field { Arg2: var methodTok } callee } dv
+           && Tok(methodTok) == "defaultValue" && Flatten(dv.Arg2) is [var fieldTypeItem]
+            ? (callee, fieldTypeItem)
+            : null;
 
     /// <summary>Fold a use of a comptime member list: its <c>.len</c> (by a wide margin the commonest
     /// reflection operation in real std) or a comptime INDEX into it. Returns false when the
@@ -150,6 +347,21 @@ internal sealed partial class ZigLowering
             value = new LitInt(lenList.Count.ToString(System.Globalization.CultureInfo.InvariantCulture), lenList.Count)
                 { Type = CType.Int };
             return true;
+        }
+        // `<attrs>[i].@"align"` at a comptime index, and `f_attrs.@"align"` of a capture bound to one (task #108).
+        if (expr.Content is Zig.Field af)
+        {
+            if (af.Arg0.Content is Zig.Index aix && TryFoldTypeInfoList(aix.Arg0, out var attrList) && attrList.Attrs is { } attrs)
+            {
+                value = FieldAttrMember(attrs[ComptimeListIndex(attrList, aix.Arg2)], Tok(af.Arg2));
+                return true;
+            }
+            if (af.Arg0.Content is Zig.Ident aid && _symbols.Resolve(Tok(aid.Arg0)) is null
+                && _comptimeAttrs.TryGetValue(Tok(aid.Arg0), out var boundAttr))
+            {
+                value = FieldAttrMember(boundAttr, Tok(af.Arg2));
+                return true;
+            }
         }
         // `<list>[i]` at a comptime index
         if (expr.Content is Zig.Index ix && TryFoldTypeInfoList(ix.Arg0, out var idxList))
@@ -167,6 +379,23 @@ internal sealed partial class ZigLowering
         return false;
     }
 
+    /// <summary>The width zig infers for an untyped enum's tag: the bits of its largest member value (members count up
+    /// from 0), 0 for a single member.</summary>
+    private int InferredTagBits(CType.Enum en)
+    {
+        var members = MembersOfEnum(en)?.Count ?? 0;
+        return members <= 1 ? 0 : 64 - System.Numerics.BitOperations.LeadingZeroCount((ulong)(members - 1));
+    }
+
+    /// <summary>The standard unsigned carrier for an inferred tag of <paramref name="bits"/> bits.</summary>
+    private static CType InferredTagCarrier(int bits) => bits switch
+    {
+        <= 8 => CType.UChar,
+        <= 16 => CType.UShort,
+        <= 32 => CType.UInt,
+        _ => CType.ULong,
+    };
+
     /// <summary>Fold a comptime INDEX into a list of TYPES — the type-position counterpart of
     /// <see cref="TryFoldTypeInfoListValue"/> — plus the <c>tag_type</c> of an enum. Consulted from
     /// <see cref="LowerType"/> and the type-alias RHS.</summary>
@@ -180,25 +409,22 @@ internal sealed partial class ZigLowering
         {
             if (tinfo.Type.Unqualified is CType.Enum en)
             {
-                // Only a SPELLED tag (`enum(u8) {…}`) is answered. zig INFERS one for an untyped enum —
-                // the smallest unsigned int holding the largest member, `u2` for four members — while
-                // dotcc defaults to `int`, so answering there would disagree with zig on the width and
-                // on `@sizeOf(tag_type)`. A wrong type is worse than a named gap.
-                if (!_enumsWithSpelledTag.Contains(en.Name))
-                {
-                    throw new IrUnsupportedException(
-                        $"zig `@typeInfo({en.Name}).@\"enum\".tag_type`: this enum's tag type is INFERRED, and zig infers "
-                        + "the smallest unsigned int that holds its largest member while dotcc defaults to `int` — "
-                        + "reporting that would disagree on the width. Spell the tag (`enum(u8) {…}`) and it is answered "
-                        + "(road-to-zig-std S5c)");
-                }
-                type = en.Underlying;
+                // A SPELLED tag (`enum(u8) {…}`) is the enum's own underlying type. An untyped enum's is zig's INFERRED
+                // one (std.enums.EnumIndexer's `@as(@typeInfo(E).@"enum".tag_type, …)`): the smallest unsigned int that
+                // holds its largest member, `u2` for four, in the smallest standard carrier, with that declared width
+                // riding along (InferredTagBits) so `@bitSizeOf` answers zig's 2, not the carrier's 8.
+                type = _enumsWithSpelledTag.Contains(en.Name) ? en.Underlying : InferredTagCarrier(InferredTagBits(en));
+                return true;
+            }
+            // A tagged union's tag_type is its tag enum (the synthesized `U_Tag`, or the `union(E)` enum), task #142.
+            if (tinfo.Type.Unqualified is CType.Named { Name: var unionName } && _unions.TryGetValue(unionName, out var unionInfo))
+            {
+                type = unionInfo.TagType;
                 return true;
             }
             throw new IrUnsupportedException(
-                $"zig `@typeInfo({tinfo.Type.Describe()}).{tinfo.Tag}.tag_type`: dotcc models a tagged union's tag as a "
-                + "synthesized enum that is not addressable as a type yet — a plain `enum`'s tag_type is "
-                + "(road-to-zig-std S5c)");
+                $"zig `@typeInfo({tinfo.Type.Describe()}).{tinfo.Tag}.tag_type` is null: the union has no tag "
+                + "(`info.tag_type orelse …` takes its fallback)");
         }
         if (expr.Content is not Zig.Index ix || !TryFoldTypeInfoList(ix.Arg0, out var list)) { return false; }
         // A non-TYPE element is not an error here: this runs speculatively from the type-alias probe
@@ -230,6 +456,15 @@ internal sealed partial class ZigLowering
             throw new IrUnsupportedException(
                 $"zig `{name}`: the member name must be a comptime string — a literal, or an `inline for` capture "
                 + "over a member list");
+        }
+        // `@hasDecl(root, "std_options")` (std.zig's `options`): a MODULE operand asks about its top-level
+        // declarations. dotcc's synthetic `root` is empty, so std takes its defaults, as for a program that
+        // declares no overrides.
+        if (name == "@hasDecl" && args[0].Content is Zig.Ident or Zig.Field
+            && _typeAliases.GetValueOrDefault(args[0].Content is Zig.Ident mi ? Tok(mi.Arg0) : "") is null
+            && ResolveModulePath(args[0]) is { Lowering: { } declModule })
+        {
+            return new LitBool(declModule.DeclaresTopLevel(member)) { Type = CType.Bool };
         }
         var type = LowerType(args[0]);
         var present = name == "@hasField"
@@ -267,7 +502,23 @@ internal sealed partial class ZigLowering
                 "zig `@field`: the field name must be a comptime string — a literal, or an `inline for` capture "
                 + "over a member list");
         }
+        // `@field(T, name)` with `T` an enum TYPE (std.meta.stringToEnum's `.{ name, @field(T, name) }`, task #116): the member
+        // it names, as `T.name` is. `T` may be a type const of an enclosing container (std.MultiArrayList.Slice.swap's
+        // `@field(Field, field_name)`, `Field` declared on the instance, task #108).
+        if (bargs[0].Content is Zig.Ident typeIdent && _symbols.Resolve(Tok(typeIdent.Arg0)) is null
+            && TryLookupContainerType(Tok(typeIdent.Arg0), out var receiverType) && receiverType.Unqualified is CType.Enum receiverEnum)
+        {
+            return ResolveEnumLit(fieldName, receiverEnum);
+        }
         var receiver = LowerExpr(bargs[0]);
+        // A TUPLE's fields are named by position (`"0"`, `"1"`: what `field_names` lists for `.{ a, b }`), so
+        // `@field(args, field_names[i])` in std.Io.Writer.print is its i-th element.
+        if (receiver.Type.Unqualified is CType.Tuple tuple
+            && int.TryParse(fieldName, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var position)
+            && position < tuple.Elements.Count)
+        {
+            return new TupleIndex(receiver, position, tuple.Elements[position]) { Type = tuple.Elements[position] };
+        }
         var isPtr = receiver.Type.Unqualified is CType.Pointer;
         var fieldType = _ir.StructFieldType(receiver.Type, fieldName)
             ?? throw new IrUnsupportedException(
@@ -280,7 +531,14 @@ internal sealed partial class ZigLowering
     /// served at all, and saying so beats lowering something that cannot work.</summary>
     private int ComptimeListIndex(ZigComptimeList list, Item indexItem)
     {
-        if (EvalComptimeValue(indexItem) is not LitInt { Value: { } n })
+        // A literal or comptime binding, else any index the const-folder settles (a `const` whose
+        // initializer folded, std.Io.Writer.print's `arg_to_print`).
+        long? folded = EvalComptimeValue(indexItem) is LitInt { Value: { } lit } ? lit : null;
+        if (folded is null)
+        {
+            using (EnterThrowawayHoist()) { folded = _ir.ConstEval(LowerExpr(indexItem)); }
+        }
+        if (folded is not { } n)
         {
             throw new IrUnsupportedException(
                 $"zig `{list.Label}[i]`: the index must be comptime-known (a literal or a comptime `const`) — a member "

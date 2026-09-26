@@ -67,6 +67,15 @@ public static partial class Compiler
         WarningFlags warnings = WarningFlags.Default,
         bool testMode = false)
     {
+        // clang's shape (`clang: error: no such file or directory: 'x.c'`), checked before any frontend
+        // opens the file, so a missing input is a diagnostic rather than an unhandled IO exception.
+        foreach (var path in inputPaths)
+        {
+            if (!File.Exists(path))
+            {
+                throw new CompileException($"error: no such file or directory: '{path}'");
+            }
+        }
         var request = new Frontends.FrontendRequest(
             inputPaths, includeDirs, defines, dialect, names, warnings, testMode);
         var anyZig = inputPaths.Any(IsZigSource);

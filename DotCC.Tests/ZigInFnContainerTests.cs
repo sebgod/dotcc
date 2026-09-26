@@ -14,9 +14,9 @@ namespace DotCC.Tests;
 /// section ON THE FLY (top-level containers pre-register in pass 0; a local one is first seen during
 /// body lowering) under a function-mangled IR name (<c>&lt;fn&gt;__&lt;P&gt;</c>) so two bodies' like-named
 /// locals never collide, and maps the plain name to that type (shadow-saved, restored at body exit) so
-/// it does not leak into a sibling function. Emits no runtime decl. V1 is struct-only, fields-only —
-/// a local enum/union or a method/const member is a loud cut. End-to-end in the <c>in-fn-struct</c>
-/// zig-oracle program.
+/// it does not leak into a sibling function. Emits no runtime decl. A local enum / union registers the
+/// same way (task #111), fields only. End-to-end in the <c>in-fn-struct</c> and
+/// <c>local_enum_and_union_decls</c> zig-oracle programs.
 /// </summary>
 [Collection("ZigFrontend")]
 public sealed class ZigInFnContainerTests
@@ -90,33 +90,53 @@ public sealed class ZigInFnContainerTests
     }
 
     [Fact]
-    public void Method_in_a_local_struct_is_rejected_loudly()
+    public void Method_in_a_local_struct_is_declared_under_the_function_mangled_name()
     {
-        // A method inside a local container needs the pass-1 free-function machinery only the
-        // top-level passes run — a clear V1 cut, not a silent drop.
-        var ex = Should.Throw<Exception>(() => EmitZig("""
+        // A method inside a local container (std.sort's `Context`, task #48) is declared under the
+        // container's function-mangled name, its body deferred like a reified generic's. zig answers 42.
+        var cs = EmitZig("""
             pub fn main() u8 {
                 const P = struct {
                     x: i32,
-                    fn get(self: P) i32 { return self.x; }
+                    fn get(self: @This()) i32 { return self.x + 41; }
                 };
                 const p: P = .{ .x = 1 };
-                return @intCast(p.x);
+                return @intCast(p.get());
             }
-            """));
-        ex.Message.ShouldContain("fields-only");
+            """);
+        cs.ShouldContain("internal static unsafe int main__P_get(main__P self)");
+        cs.ShouldContain("return (byte)main__P_get(p);");
     }
 
     [Fact]
-    public void Local_enum_is_rejected_loudly()
+    public void Local_enum_lowers_under_the_function_mangled_name()
     {
-        // The grammar admits a local enum/union, but V1 lowers struct only.
-        var ex = Should.Throw<Exception>(() => EmitZig("""
+        // Task #111 lifted the struct-only cut: a local enum registers as `<fn>__<E>`.
+        var cs = EmitZig("""
             pub fn main() u8 {
                 const E = enum { a, b };
-                return 0;
+                return @intFromEnum(E.b);
+            }
+            """);
+        cs.ShouldContain("main__E.b");
+    }
+
+    [Fact]
+    public void Local_enum_with_a_method_is_rejected_loudly()
+    {
+        // Fields only: a method on a local enum needs a container-level declaration.
+        var ex = Should.Throw<Exception>(() => EmitZig("""
+            pub fn main() u8 {
+                const E = enum {
+                    a,
+                    b,
+                    fn first() E {
+                        return .a;
+                    }
+                };
+                return @intFromEnum(E.first());
             }
             """));
-        ex.Message.ShouldContain("struct-only");
+        ex.Message.ShouldContain("fields-only");
     }
 }

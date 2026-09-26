@@ -34,7 +34,7 @@ The local zig `0.17.0-dev.667+0569f1f6a` install ships the full std source at
 | `@import("root")` | used by `std.zig` (the `std_options` override pattern, via `@hasDecl`) | the root module must be addressable |
 | `test "…" {}` blocks | **1857** | must parse-and-DROP or most std files won't even parse — tiny brick, giant coverage lever |
 | `packed struct` | 556 uses | sub-byte bit-packing (dotcc V1 byte-packs) becomes load-bearing |
-| `@Vector` | 447 uses | do NOT build SIMD — bias std away via target config + scalarize the remainder (see S9) |
+| `@Vector` | 447 uses | do NOT build SIMD — bias std away via target config + scalarize the remainder (see S9). **Superseded 2026-09-24 by the maintainer's target-identity decision: `@Vector` lowers to .NET's vector types (T5 ✅).** |
 | inline `asm` | 463 uses | all inside the platform floor / cpu feature probes → tier (c), redirected not lowered |
 | atomics (`@atomic*` 280, `@cmpxchg*` 54) | | `Interlocked`/`Volatile` mapping needed for `std.Thread`/`std.atomic` (tier (c) edges) |
 | `threadlocal` | 80 uses | C `_Thread_local` → `[ThreadStatic]` precedent exists; port to the Zig side |
@@ -309,7 +309,8 @@ that retire curated shortcuts.
 
 > **Status update (2026-09-04) — S6 DONE: `inline for` over a comptime list.**
 > The consumer S5c's lists were built for. A member list has no runtime representation, so a plain
-> `for` cannot walk one; `inline for` can, because it is not a loop — it UNROLLS at lowering time
+> `for` cannot walk one (later, task #93: `field_names` got one, a pinned array of string slices, so a
+> plain `for` walks that list; `field_types` still has none); `inline for` can, because it is not a loop — it UNROLLS at lowering time
 > into one copy of the body per element. The existing unroller could not be reused as-is: it binds
 > each capture to a runtime symbol initialized by an emitted `const cap = …;`, and a list element may
 > be a TYPE (no runtime slot exists) or a comptime STRING (which `@field` must read at lowering
@@ -542,7 +543,8 @@ that retire curated shortcuts.
 >    (C# CS0101) — the deferred module-qualified container naming, now observed against real std.
 >
 > **Cuts:** a nested container in an ENUM/UNION body; a cross-MODULE qualified nested type
-> (`std.fmt.Number.Mode` spelled in another file); a nested container in a W4-reified struct.
+> (`std.fmt.Number.Mode` spelled in another file). (A nested container in a W4-reified struct: done
+> 2026-09-24, flattened per instance.)
 >
 > Validation: 6 emit pins (`ZigNestedContainerTests`) + 1 superseded cut pin flipped positive + the
 > `nested_containers` zig-oracle program + `examples/zig-nested-containers/`, exit 42 == real zig.
@@ -599,7 +601,7 @@ that retire curated shortcuts.
 > programs (`import_generic_fn`, `string_literal_len`, `decl_literals`, `import_decl_literal`),
 > == real zig 0.17.0-dev.667.
 
-> **Status update (2026-09-23, desktop) — a file as a struct type** (bufPrint's wall 1, the S1 cut).
+> **Status update (2026-09-23, desktop): a file as a struct type** (bufPrint's wall 1, the S1 cut).
 >
 > 1. **File-as-struct.** A file with top-level fields registers them as a struct
 >    (`Io_Writer__Writer`), `@This()` at file scope names it, and a method or static call on it routes
@@ -627,6 +629,358 @@ that retire curated shortcuts.
 > (exit 42). Unit 1778/1778; functional with the local zig oracle and real std 440/0, == real zig
 > 0.17.0-dev.667 (the build was gone from ziglang.org; fetched from a community mirror and
 > minisign-verified against zig's key).
+
+> **Status update (2026-09-23, desktop): re-exports + curated namespaces per member** (G2/G5 front
+> door). An eight-entry-point probe against real std (bufPrint, parseInt, maxInt, mem.eql,
+> mem.indexOfScalar, array_list.Aligned, AutoHashMap, mem.sort) found two cheap gates in front of
+> most of them:
+>
+> 1. **A curated std namespace claimed every member.** `std.mem.indexOfScalar` stopped at "not
+>    modeled yet" even with a std tree configured. `CuratedStdNamespaceFns` now lists what each of
+>    `std.mem` / `std.debug` / `std.testing` lowers by hand; any other member navigates to source.
+> 2. **Re-exported declarations** (633 in the pin). `ResolveExportedDecl` follows a top-level
+>    `const NAME = name;` / `= mod.name;` to the module that owns the function, generic,
+>    type-returning generic or type, recorded syntactically so preparing a module never fans out.
+>
+> A bad emit surfaced on the way and was fixed in #124: module-qualifying an imported function glued
+> the prefix onto the ESCAPED name (`inner__@double`).
+>
+> **Re-measured:** `indexOfScalar` → `findScalar` now instantiates in `mem.zig`, and
+> `std.AutoHashMap(u32, u8)` resolves through `std.zig`. They converge on two shared walls: a
+> sibling GENERIC call inside an imported module (`findScalarPos`, and parseInt's
+> `parseIntWithSign`), and a module-qualified type CALL in a type position (`zig type: CallArgs`,
+> for both `hash_map` and `array_list.Aligned(u8, null)`). Then `comptime_int` (maxInt, 380 uses) and
+> the `{}` void value (mem.sort).
+>
+> Validation: 7 pins (`ZigReexportTests` 5, `ZigCuratedStdVsNavigationTests` 2) + zig-oracle program
+> `import_reexports` == real zig 0.17.0-dev.667.
+
+> **Status update (2026-09-23, desktop): std's everyday syntax, void, and reified type consts.**
+> Walking the eight-probe list turned up mostly PARSE gaps behind declarations the resilient parser
+> had silently skipped. A reference to such a declaration now raises its parse error ("zig
+> `findScalarPos` in mem.zig did not parse ...") instead of "unresolved name", which is what made
+> the rest findable. Landed: `comptime if` statements and anonymous `enum {…}` types; the void value
+> `{}` with void parameters, locals and returns erased by type (a `void` parameter had been a live
+> bad emit); `align(E)` pointer / slice types, general sentinels in types and slicing, trailing call
+> commas and `inline fn` (so `array_list.Aligned`, i.e. std.ArrayList, parses end to end); member
+> `comptime {}` blocks, block continue expressions, and `orelse return <ident>` (a silent LALR.CC
+> group-precedence resolution, pre-existing); sibling type-returning calls in a lazy module; TYPE
+> const members of a reified struct (`pub const Slice = …`, `pub const Unmanaged = …`).
+>
+> **Probes re-measured:** `std.mem.eql` runs (curated); `indexOfScalar` reaches findScalarPos, which
+> reads a top-level value const of mem.zig (a lazy module lowers none yet; and folding it honestly
+> selects std's @Vector paths, a backend-identity decision recorded in the plan's task list);
+> `parseInt` parses to a `switch (…) {…};` used as an `if` body; `maxInt` needs `comptime_int` (the
+> comptime-call engine); `array_list.Aligned(u8, null)` reaches `SentinelSlice`, a type-returning
+> METHOD; `AutoHashMap` reaches hash_map's Custom, which parses to a runtime multi-object
+> `for (a, b, c) |x, y, z|` (592 in std); `mem.sort` reaches std.sort.asc's closure idiom
+> (`struct { pub fn inner … }.inner`); `bufPrint` still walls on the `Writer.VTable` pointer chain.
+
+> **Status update (2026-09-24, desktop): bufPrint reaches the format engine.** Every wall between
+> `std.fmt.bufPrint` and the body of `std.Io.Writer.print` is down (PR #125). The comptime-call engine
+> V1: a `comptime_int` return (`std.math.maxInt` / `minInt`, real std) is evaluated at the call, either
+> immediately when the body is comptime `const` bindings plus a `return` (so an enum member of
+> `maxInt(usize)` registers) or as a fold resolved after the whole module graph drains. A pointer to a
+> container that cannot lower is opaque (`VTable.sendFile`'s `*File.Reader`), and a container holding
+> one by value fails with it. A fn-pointer field is callable (`w.vtable.drain(…)`). A generic top-level
+> function of a file-as-struct is a method (`w.print(fmt, args)`). Then `print`'s own syntax and values:
+> jump prong bodies (`'{', '}' => break,`), `comptime switch` in value position, `&.{ … }` in static
+> storage (`Writer.fixed`'s vtable), a lazy module's function named as a value, `enum(u64)` members
+> above `long.MaxValue` (`std.Io.Limit`), and a statement `unreachable`.
+>
+> A **silent miscompile** fell out on the way and is fixed: zig's `break` in a switch prong exits the
+> enclosing loop, but it lowered to a C# `break` that exits only the switch (the loop kept iterating).
+>
+> **bufPrint's next wall:** `@typeInfo(@TypeOf(args)).@"struct".field_names` over a TUPLE type
+> (`.{42}`), then the format engine proper: a `comptime var` struct with comptime method calls
+> (`std.fmt.ArgState`), `comptime std.fmt.Placeholder.parse(&array)`, `@field(args, name)`, and
+> `printValue`. `std.math.maxInt` now runs; the other probes stand as in the previous block.
+>
+> Then the tuple wall fell too, with `print`'s prelude: `@typeInfo` member lists over a tuple (its
+> positions `"0"`, `"1"`, …), a module-qualified type alias (`std.fmt.ArgSetType`) with its declared
+> width, a local `const` that folds (so the `field_names.len > max_format_args` `@compileError` guard
+> prunes), and `@as(comptime_int, n)`.
+>
+> **The format engine is the next SEGMENT, not a brick.** `print`'s loop is comptime code over a
+> lowering-tier value domain dotcc does not have yet (its comptime vars are integers, by the T-milestone
+> firewall). Measured on the pinned `Writer.print`, it needs, in order:
+> 1. a comptime STRUCT var mutated by comptime method calls (`comptime var arg_state: std.fmt.ArgState
+>    = .{ … }; arg_state.nextArg(pos)`), and a comptime STRING var grown by `++` over comptime slices
+>    of a comptime string (`literal = literal ++ fmt[start..end];`);
+> 2. `break` / `continue` inside an `inline while` (the scan `inline while (i < fmt.len) : (i += 1)
+>    { switch (fmt[i]) { '{', '}' => break, else => {} } }`), today a loud cut;
+> 3. a comptime CALL returning an aggregate with a tagged union (`comptime
+>    std.fmt.Placeholder.parse(&placeholder_array)`), then a comptime `switch` over that union;
+> 4. `@field(args, field_names[k])` on a tuple, and the `printValue` type dispatch (to `printInt`).
+> The IR interpreter already models comptime structs and arrays (`CtStruct` / `CtArray`), so the
+> likely shape is to run the unrolled loop's comptime state through it rather than to grow a second
+> domain at the lowering tier.
+>
+> **Progress (2026-09-24):** item 2 (comptime `break` / `continue` in an unrolled `inline while`, with a
+> bare `inline while (true)`, a stepping `: (i += 1)`, comptime-var updates in the body, and a
+> `switch` over a comptime value folding while unrolling) and the STRING half of item 1 (a comptime
+> string var grown by `++` over comptime slices) are done: print's literal scan now folds exactly
+> (oracles `comptime_format_scan`, `comptime_string_var`). What stops `print` now is the STRUCT half of
+> item 1, `comptime var arg_state: std.fmt.ArgState = .{ … }` with `arg_state.nextArg(pos)` at comptime.
+> Two design facts decide its shape: the methods take `self: *@This()`, and the IR interpreter has no
+> pointer values (the T-milestone firewall); and the method bodies belong to a LAZY module, so they
+> are not lowered when print's unrolled body needs their results. The candidate shape: bind the
+> comptime struct as the interpreter's mutable `CtStruct`, let a pointer to it be the struct itself
+> (in-place mutation is then by-reference for free), and interpret the method from its lowered body,
+> lowering that body on demand first (which needs the re-entrancy guard the drains have).
+
+> **Then the other probes (2026-09-24).** Each advanced to a wall that is a real design question rather
+> than a gap:
+> - **`std.fmt.parseInt` RUNS from source**, == real zig (the `Dotcc_matches_zig_std_fmt_parse_int_from_source`
+>   differential: signed, a base prefix, `_` separators, overflow). The last walls were the declared width
+>   an `anytype` argument's VALUE carries (now tracked per value), `comptime assert`,
+>   `@disableInstrumentation()`, and a backend bad emit: a folded-away `else if` arm left a bare `else` that
+>   absorbed the next statement (any multi-statement or empty arm is now braced). Before that:
+> - `std.fmt.parseInt`: a local comptime alias of another module's GENERIC function chosen by a comptime
+>   switch (`const add = switch (sign) { .pos => math.add, … }`), comptime bools from type comparisons, a
+>   value `if` that folds, a value switch with a `return` arm, variadic `@min` / `@max`, parenthesized
+>   types, and a latent lazy-declaration scoping bug all fell. It now stops at `math.cast(u8, c)`'s
+>   `maxInt(@TypeOf(x))`: the declared width of an `anytype` argument, which the `@typeInfo` fidelity
+>   rule refuses (a `u5` value lowers to `byte`, like a `u8`). Fix sketch in deferred.md.
+> - `std.mem.indexOfScalar`: a lazy module's top-level value consts now lower where they are named
+>   (`use_vectors_for_comparison`), with trailing-comma case lists and `@inComptime()`. It stops at
+>   `std.simd.suggestVectorLength(T)` (a `?comptime_int` over `builtin.cpu`), which is dotcc's TARGET
+>   identity: the honest answer is null (scalars), a decision for the user (deferred.md).
+> - `std.AutoHashMap`: the runtime multi-object `for (metadata, keys, values) |m, k, v|`, an assignment
+>   prong body, and a parse-skip diagnostic through a same-module alias (`HashMapUnmanaged = Custom`)
+>   let `Custom` parse whole. Then G4's nested-container cut fell: a reified type's nested containers
+>   (`Entry`, `Iterator`, the packed `Metadata`) flatten to `<instance>__Name` with the instance's seeds,
+>   a container's own TYPE const (`const FingerPrint = u7;`) types its field, and a field default names a
+>   sibling const (`= free`). On the way, debug.zig's `SafetyLock`: an `if` choosing between two inline
+>   enum TYPES, a field default that is a value `if`, a module-level bool (`runtime_safety`) folded
+>   through a `switch (builtin.mode)` while containers still register, and the tail after a comptime-taken
+>   `return` left unanalysed, as zig does (oracles `reified_nested_containers`, `comptime_type_arms`). Then
+>   `FieldIterator`, a type-returning METHOD, fell (evaluated in its owner's scope, oracle
+>   `type_returning_methods`), and std-internal code now names curated surfaces as user code does
+>   (`const std = @import("std.zig"); const mem = std.mem;` makes `mem.Allocator` the runtime allocator).
+>   Then the GENERIC METHOD cut fell (`fetchRemoveAdapted(…, ctx: anytype)`, oracle `generic_methods`), with a
+>   type const naming a qualified one (`Size = Unmanaged.Size`) and a method body naming its container's
+>   const bare (`slot_tombstone`). Then `@typeInfo(Hash).int.bits` / `@typeInfo(FingerPrint).int.bits` over
+>   container type consts (they now carry the width they spelled). It stops at `AutoContext(K)`, whose
+>   `hash` / `eql` are container CONSTS bound to closure-idiom function values (`pub const hash =
+>   getAutoHashFn(K, @This());`), called as methods. Then those fell (container-const function values as
+>   methods, `comptime {}` guards with `if` / `@compileError` / `assert` in closure-idiom bodies, `@branchHint`,
+>   `comptime` keeping its result location, the curated `Alignment`'s `fromByteUnits` / `forward` /
+>   `backward` / `check`, a `switch` as an `and` / `or` operand, and a lazy module's top-level CALL consts
+>   evaluated only when named, so hash/crc.zig's `Crc(u3, .{ … })` no longer sinks std.hash). It stops in
+>   `std.mem.asBytes(&key)` (Wyhash's input): `AsBytesReturnType` reads `@typeInfo(P).pointer.size`, which
+>   dotcc cannot recover (`*T` and `[*]T` lower to one C pointer), under an `assert` in a type body. `asBytes`
+>   is curated instead (a byte slice over the item). Then auto_hash's forms fell (`if … return … else`,
+>   `inline` prongs, `.undefined`/`.null`, comptime type questions folding across modules, a type-choosing
+>   `switch`, `@call`, `@divExact`, `&arr` as `*[N]T`), with two latent bugs found and fixed: a method declared
+>   on demand mid-body cleared that body's container scope (DeclareMethod set it to null instead of
+>   restoring it), and an enum member named `default` was not escaped. It stops at std.mem's
+>   `native_endian = builtin.cpu.arch.endian()`: a METHOD on the synthetic `builtin`, a target question.
+> - `std.mem.sort`: the closure idiom (`return struct { pub fn inner … }.inner;`) and comptime FUNCTION
+>   parameters landed, with an inline `@import(…).name` re-export, `noalias`, by-reference pair captures
+>   and `comptime { … }` prongs; then, past the value-width brick and a nested statement `switch` in
+>   std.math.sqrt, std.sort.block reaches `std.simd.suggestVectorLength` through std.mem, the same
+>   TARGET-identity decision as indexOfScalar. **Two of the eight probes now wait on that one decision.**
+> - `array_list.Aligned(u8, null)` is past `SentinelSlice` and stops at `AlignedManaged(T, alignment)`,
+>   which forwards the owner's comptime OPTIONAL seed as an argument (done, oracle
+>   `comptime_optional_forwarding`), then `toOwnedSliceSentinel`'s `comptime sentinel: T` (a generic method,
+>   done), then `.empty` of a container another module declares (lowered by its owner, oracle
+>   `cross_module_decl_literal`), the empty slice `&.{}` / `&[_]T{}`, a bare sibling call, and `@memmove`.
+>   Then a `catch |e| switch` over a `!void` (a statement switch now), `test` blocks inside container bodies
+>   (std.math.Order; `std.math.order` now runs from source == zig), `comptime_int` locals and lazy consts, and
+>   non-curated std VALUES read across modules. It stops at `std.atomic.cache_line =
+>   cacheLineForCpu(builtin.cpu)`, a function over the real `std.Target.Cpu`: dotcc's TARGET identity again
+>   (the task-#20 family; `builtin` is duck-typed precisely to avoid std.Target's CPU tables).
+
+### The target-identity segment (decided 2026-09-24)
+
+Four probes stop at the same question: what dotcc's target IS. `std.simd.suggestVectorLength` (indexOfScalar,
+mem.sort), `builtin.cpu.arch.endian()` (std.mem's `native_endian`, under AutoHashMap), and
+`std.atomic.cache_line = cacheLineForCpu(builtin.cpu)` (ArrayList). **Decision: model a REAL
+`std.Target.Cpu`**, so std's own functions answer from source, rather than curating each answer. The
+maintainer's refinement: dotcc is a .NET program, so it fills that value from the HOST through .NET's own
+facts at dotcc's compile time (`RuntimeInformation.ProcessArchitecture`, `BitConverter.IsLittleEndian`,
+`System.Runtime.Intrinsics.X86.Avx2.IsSupported`, `Arm.AdvSimd.IsSupported`, …), as zig's default
+`-mcpu=native` does; and `@Vector(N, T)` lowers to `Vector128<T>` / `Vector256<T>`, which the JIT compiles to
+SSE/AVX/NEON. A build on a newer CPU stays CORRECT on an older one (the intrinsic vector types have software
+fallbacks), so taking the build host's features is safe. The answer is fixed at compile time, as in zig: the
+vector length feeds TYPES.
+
+- **T1 ✅** cross-module qualified nested types (`std.Target.Cpu.Arch`).
+- **T2 ✅** a container nested in an enum body; `std.Target.Cpu.Arch.endian()` runs from Target.zig == zig.
+- **T3a ✅** with a real std, the synthetic builtin spells the architecture with zig's own type
+  (`@as(std.Target.Cpu.Arch, .x86_64)`): `builtin.cpu.arch.endian()` is Target.zig's method, and
+  `builtin.cpu.arch == .x86_64` still folds. AutoHashMap is past `native_endian`.
+- **T3 ✅ (2026-09-24)** with a real std, the synthetic `builtin.cpu` is a typed `std.Target.Cpu` read off the host:
+  `.model = &std.Target.x86.cpu.x86_64_vN` (the level the host reaches) and `.features = std.Target.x86.featureSet(&.{ … })`
+  from `System.Runtime.Intrinsics.X86` (aarch64: `generic` + `Arm.*`, unverified, T6). Reaching it needed: a value const
+  of a container another module declares (`std.Target.x86.cpu.x86_64_v3`), an alias to a nested type
+  (`const CpuModel = std.Target.Cpu.Model;`), a top-level const aliasing a reified container's method
+  (`pub const featureSet = CpuFeature.FeatureSetFns(Feature).featureSet;`) called bare or through its module, a
+  type-returning method of another module's container (`CpuFeature.FeatureSetFns(Feature)`), `@field(Target,
+  @tagName(family))` as a module path (the `has(…)` parameter type), a wider-than-128 integer as a width-only type
+  argument (`Log2Int(@Int(.unsigned, 384))`), `@splat(0)` for an inline-array field, `&.{ .a, .b }` at a slice sink,
+  a module value const read as a value (`builtin.cpu`), and in the interpreter: top-level const aggregates, `++` /
+  `--`, value and statement `switch`, a narrow unsigned splice, and the runtime expression kept when a value has no
+  C# literal form (a non-zero inline array). A folded `comptime (a or b)` is typed `bool`.
+  **Milestone: `std.array_list.Aligned(u8, null)` runs from source** (`list.append` through `page_allocator`, its
+  growth policy reading `std.atomic.cache_line = cacheLineForCpu(builtin.cpu)`), == zig; fixed on the way: runtime
+  slices are mutable (`items.len += 1`, `items.ptr = …`), `return voidCall();` in a `void` / `!void` function, and an
+  error union over a pointer rendering `ErrUnion<byte*>`. Real-std differentials
+  `Dotcc_matches_zig_std_builtin_cpu_features_from_source`, `Dotcc_matches_zig_std_array_list_from_source`.
+- **T4 ✅ (2026-09-24)** comptime evaluation over that value: `std.simd.suggestVectorLength(u8)` runs std.simd's
+  own `suggestVectorLengthForCpu(T, comptime cpu: std.Target.Cpu)` and answers as zig does for this host (AVX2: 32
+  lanes of `u8`). Needed: a comptime STRUCT generic parameter (the instance keyed by a digest of the value, the body
+  reading it as a comptime aggregate); `?comptime_int` results comptime-only like `comptime_int` ones, and a call
+  returning one comptime by its type (`if (suggestVectorLength(T)) |n|`, `… orelse 0`); `and` / `or` folding on a
+  settled left side (zig's comptime short-circuit: `T == bool and cpu.has(…)` never analyses the right side for
+  `u8`); a question over a comptime aggregate (`cpu.has(…)`) asked of the interpreter; and in the interpreter:
+  error unions (`ceilPowerOfTwo(…) catch unreachable`, `try`), `void` calls, `@max` / `@min` and zig's division
+  builtins. An on-demand body whose lowering fails is un-marked, so its real error surfaces instead of an
+  "already started" miss. `prefer_256_bit` is reported where .NET keeps Vector512 unaccelerated on an AVX-512 host,
+  as LLVM's tuning does. Real-std differential `Dotcc_matches_zig_std_simd_suggest_vector_length_from_source`
+  (host-dependent value, equality with zig). **Next:** mem_index now stops at `@Vector` itself (T5).
+- **E1 ✅** (the comptime engine, extending the IR interpreter by the maintainer's choice) a pointer to a
+  comptime aggregate is the aggregate: `comptime total()` mutates a struct through `self: *Acc` and an array
+  through `*[N]u32`. Runtime fix alongside: `buf[i]` through a `*[N]T` indexes the elements.
+- **E2 ✅** a callee's body lowers ON DEMAND when a comptime value is needed mid-lowering: the interpreter
+  asks the front end (`IrModule.DemandFuncBody`), which lowers the pending body (a later pass-2 function, a
+  lazy module's body, a generic instance, a reified method) inside a `FnStateScope` that saves and restores
+  the caller's per-function state and symbol scopes; every drain skips a body already started. An array
+  extent calls at compile time (`[lenFor(u8)]u8`), `comptime f()` resolves at once when it can,
+  `comptime_int` is a type (the interpreter's 128 bits), a comptime `null` exists (`CtNull`), and
+  `if (comptime f()) |x|` over a `?comptime_int` folds both ways, which is `suggestVectorLength`'s shape.
+- **E3 ✅ (core)** a `comptime var s: S = .{…}` of a struct / array type lives in the interpreter
+  (`IrModule.ComptimeGlobals`) while its function lowers; a reference is a LIVE `ComptimeFold` (the
+  interpreter reads and mutates the current value, a runtime use renders the snapshot taken there), so
+  `comptime st.nextArg(null) orelse …` advances `std.fmt.ArgState` exactly as zig does. Alongside: the
+  `x orelse label: {…}` fallback arm (parse + lowering, runs only on null), `orelse` over a comptime-known
+  optional folds, and the interpreter runs forward `goto` / labeled statements (a labeled value block),
+  optional `.HasValue` / `.Value`, `orelse`, and `@popCount` / `@clz` / `@ctz`. The "did not evaluate"
+  error now names the call and where the interpreter stopped. The typed `builtin.cpu` value (T3) reuses the
+  same persistence.
+- **bufPrint, `Placeholder.parse` from source ✅ (2026-09-24):** `std.fmt.Placeholder.parse(…)` is a static
+  call through a type another LAZY module declares (declared and instantiated in its owner, so its body sees
+  fmt's own `Parser`); `fmt[a..b].*` / `&arr` stay comptime strings; `std.fmt.Parser` parses now
+  (`.{ .none = {} }`: a `FieldValue` nonterminal, symbol 175); a `@compileError` whose message is built from a
+  runtime value lowers to the `unreachable` trap (zig only raises it on a comptime path that takes it); a
+  capture `if` in value position takes the result sink and may have a labeled-block arm; an enum literal at an
+  optional sink; the untyped `const default_alignment = .right;` typed by its reader; the union layout table
+  is shared across modules; a value switch over a union fills its result through the statement union switch
+  (a `|v|` capture prong included), which retires the "tagged-union value-switch with block prongs" cut;
+  `x catch unreachable` in value position renders a C# `throw` expression. Multi-file oracle
+  `fmt_parse_shapes`; unit `ZigFmtParseShapesTests`.
+- **Comptime union and slice values ✅ (2026-09-24):** `const p = comptime parse(…)` of an aggregate lives in
+  the interpreter (E3's `ComptimeGlobals`); a switch over `p.arg`, comptime or not, selects its prong at
+  lowering time (the union's tag read by the interpreter, a `|n|` capture bound to the spliced payload), and
+  `p.arg != .number` folds. The interpreter gained comptime SLICES (`CtSlice` over a comptime array, a string
+  literal being its bytes), element pointers (`CtElemPtr`: `.Ptr`, pointer arithmetic, indexing), zero values
+  for enums / optionals / pointers / slices, and a union payload's ACTIVE variant (only it splices back, since
+  the payload is an overlaid C# struct); a byte slice splices back as a string literal; an enum tag splices
+  with a cast. Fixed alongside: `s[1..]` over a string literal counted its NUL. Oracle `comptime_union_values`.
+  **Wall next:** the comptime `Placeholder.parse(…)` call needs its body lowered, and that body reaches
+  `std.mem.findScalarPos`'s SIMD branch (guarded by `!@inComptime()` at runtime): `@Vector`, so the target
+  segment T3 → T4 → T5 is now on bufPrint's critical path too.
+  **Update (2026-09-24): bufPrint RUNS from real std, == zig** (G3's `bufPrint` goal): real-std differential
+  `Dotcc_matches_zig_std_fmt_buf_print_from_source` formats a comptime_int, `u32` / `i32` / `u8` / `u64` / `i8`
+  values (negatives included) and several arguments per format, folding the bytes to a checksum (159 == zig). The
+  last layer was four C# bad emits in std's integer printing (a compound assignment through `.?`, an array stored
+  through and returned from a slice deref, an `unreachable` switch arm; oracle `fmt_stores_and_returns`).
+- **std.mem.sort RUNS from real std, == zig (2026-09-24, task #48)**: block sort and insertion sort over 60 values,
+  ascending (std.sort.asc), descending (std.sort.desc) and by a custom context and comparator (`ByMod.less`), the
+  orders folded to a checksum (differential `Dotcc_matches_zig_std_mem_sort_from_source`, 137 == zig). Needed: a
+  struct declared inside a generic WITH methods (std.sort's local `Context`), whose deferred bodies carry the
+  instance's comptime seeds and comptime function parameter; a comparator named through its container; a `void`
+  field (a `{}` context) with no storage and its reads erased; `@ptrCast` of a single-item pointer to a byte
+  slice (std.mem.swap); a folded comptime_int past `long` typed to fit (std.math.sqrt_int's `maxInt(T)`); a call
+  returning `[N]T` binding a typed array local and value generics whose signature spells a comptime parameter
+  (std.mem.reverse's `reverseVector`). And a **silent miscompile** fixed on the way: `var b = a;` of an array
+  aliased the storage (the C# rep is the element pointer) where zig copies; decls and assignments of an array VALUE
+  now copy (oracle `array_value_copies`).
+- **std.AutoHashMap RUNS from real std, == zig (2026-09-24, task #51)**: 200 inserts through several growths,
+  overwrites, removals, hits and misses, `count()` and an iterator (differential
+  `Dotcc_matches_zig_std_auto_hash_map_from_source`, 131 == zig). Needed: `errdefer comptime unreachable;` dropped
+  (zig's no-error-return assertion); an error union of an OPTIONAL (`!?KV`: `ErrUnion<T>` lost its `unmanaged`
+  constraint, which rejected `Nullable<T>`); a `packed struct`'s sub-byte fields as bit-fields (hash_map's one-byte
+  `Metadata`); `@ptrCast` of a struct pointer to a byte slice sized by the C# `sizeof` (std.mem.swap swapped ZERO
+  bytes before, because a named struct's CType.SizeOf is 0, so the grown map was never swapped in and the next put
+  read a null header); Wyhash's shapes (a slice at a `*const [N]u8` parameter, `@bitCast` of a byte array, a cast
+  operand starting with `*` after a non-keyword type); and `return @intCast(…)` in a `!T` function. The comptime
+  interpreter's `unreachable` diagnostic now names the functions it stopped in. What the path needed, all now in: a comptime OPTIONAL bound from `comptime switch (…) { .none => null, … }`
+  (`arg_pos`), so `comptime arg_state.nextArg(arg_pos) orelse @compileError(…)` never analyses its fallback; a
+  tuple field named by a member-list index (`@field(args, field_names[i])`, a tuple's fields being `"0"`, `"1"`);
+  a comptime byte-slice field of a comptime aggregate as a comptime string (`placeholder.specifier_arg`);
+  `std.options.fmt_max_depth` as ONE field's default of a default-initialized module const (std.Options itself
+  cannot lower: a generic fn-type field and `@EnumLiteral()`), with `@hasDecl(root, …)` over dotcc's empty
+  synthetic root folding false; a switch over a TYPE (`switch (@TypeOf(value))`); a statement switch over a
+  comptime value in a generic instance selecting its prong, so `invalidFmtError` prongs are never analysed; a
+  comptime-settled `or` / `and` not lowering its right side (std.math.cast's `is_comptime or maxInt(@TypeOf(x))
+  > …`); declared widths carried through `?T` returns (shared across modules now), folded and runtime captures,
+  tuple-literal `anytype` arguments per element and on through a parameter; a `const x = 42;` binding an
+  `anytype` as comptime_int; and grammar: an if- or switch-expression as a call argument, prongs
+  `=> if (c) switch …`, `=> if (x) |v| return …` and `=> for (…) …`, and function TYPES with `comptime`
+  parameters or a `switch` return (parsed so std.Options parses; lowering those is a named cut). Oracles
+  `prong_forms_type_switch`, `comptime_optional_switch`, `tuple_field_by_name`, `comptime_or_short_circuit`;
+  unit `ZigFormatEngineTests`.
+- **std's string helpers RUN from real std, == zig (2026-09-24, tasks #52 to #55)**: one program doing
+  `bufPrint("{s}{d}:{x},", .{ "k", i, i * 37 })` into an ArrayList via `appendSlice`, then `splitScalar`,
+  `tokenizeScalar`, `indexOf`, `eql`, `startsWith` and `endsWith` over the text (differential
+  `Dotcc_matches_zig_std_string_pipeline_from_source`, 55 == zig). Needed: a switch-typed struct field and a value `if
+  (switch …) |x|` (grammar), a local struct selected by an if-capture over a comptime optional, the `and` / `or`
+  left-operand settle in unrolled and generic bodies, `@bitCast` of a slice deref, `sliceAsBytes`, a std file's
+  `@This()` self alias, tuple pointer elements as `nint` (CS0306), and a string literal tuple element without its NUL
+  (it printed `k\0` before, a silent wrong answer).
+- **A root file's `const root = @This();` (2026-09-24, task #56)**: `root.helper()`, `root.Point`, `root.limit`
+  and `&root.helper` (oracle `root_self_alias`, 60 == zig). The root unit gets a synthetic module over its own
+  lowering, so every module-qualified path serves it; and a module's top-level function is now a value through
+  any module path (`const f = util.helper;`), which failed through a real import too.
+- **std's small helpers RUN from real std, == zig (2026-09-24, tasks #57 to #59)**: trim, lastIndexOfScalar, count,
+  replaceScalar, reverse, math.clamp, mem.min / max, mem.join, StringHashMap, sort.insertion, eqlIgnoreCase, a padded
+  bufPrint, readInt, splitSequence and tokenizeAny in one differential (230 == zig). Needed: `@TypeOf` over several
+  operands, empty array literals, a curated `dupe`, mem.zig's `Allocator` mapped to the curated type, an array at a
+  `![]T` return, and a pure `stackalloc` hoisted out of a ternary arm. std.fmt.parseFloat is a campaign of its own: six
+  walls down (type switches and comparisons over unlowered floats, a switch-typed local, field-value `if` / `switch`,
+  `&.{…}` comptime strings, `inline for` over a comptime string, `if (c) return x else y`); then three more (a type body's
+  own type alias in its methods and generic-method instances, a `FloatInfo.from(T)` type probe that no longer throws, a
+  type comparison folded as a call argument), then four more: a labeled switch expression (grammar; std.math.shl), a
+  comptime-only struct from a type-argument call binding at compile time (FloatInfo.from), a comptime int switch with a
+  `@compileError` prong folding (std.math.floatMantissaBits), and a reified struct's consts before its fields (Decimal's
+  `[max_digits]u8`).
+- **★ std.fmt.parseFloat RUNS from real std, bit-exact == zig (2026-09-25, task #59 DONE)**: 23 f64 inputs and three
+  f32 ones, every path (fast, Eisel-Lemire, slow Decimal, hex, subnormal, overflow, inf / nan, invalid), 112 == zig. The
+  final walls included THREE SILENT WRONG ANSWERS: `1 << 52` of an untyped literal shifted by 52 MOD 32 in C#'s `int`;
+  `opt orelse error.E` returned the error's code as the payload; `buf.* = @bitCast(v)` through a `*[8]u8` assigned the
+  pointer. Found only because the differential compared exact bits across 26 inputs, not one happy-path value.
+- **std.bit_set RUNS from real std, == zig (2026-09-24, task #61)**: StaticBitSet / IntegerBitSet (set, toggle,
+  setValue, unset, count, isSet, findFirstSet, `.full`), 33 == zig. Needed: `packed struct(T)` (declared and returned;
+  grammar), `u0` in a type comparison, prefix `-%`, an integer into a `?usize` return, and `unchecked` around a
+  constant `~` narrowed to a byte. Also task #62: a compound assignment hoists a captured value `if`.
+- **std.Io.Writer.Allocating's shapes (2026-09-24, task #60)**: container functions as vtable values, `@fieldParentPtr`,
+  raw allocator calls, `Alignment.of`, an error-union value `if |x| … else |e|`, and a SILENT CRASH fixed: `&vtable` of a
+  container const was a copy on the current frame. std.fmt.allocPrint itself stops at the platform floor (task #63):
+  the vtable names `sendFile`, whose body needs `File.Handle` = `std.posix.fd_t`. A decision (model the handle, or a
+  runtime-trap stub for an unreachable vtable slot) is pending.
+- **T5 ✅ (2026-09-24)** `@Vector(N, T)` lowers to .NET's `Vector64/128/256/512<T>` by total width (a bool vector,
+  what a comparison yields, is a `ulong` lane mask), and real `std.mem.indexOfScalar` runs from source through its
+  SIMD path, == zig. Vector surface: `@splat`, an array / slice / `slice[i..][0..N].*` loaded at a vector sink, a list
+  literal, element-wise arithmetic and bitwise ops (a scalar operand splatted), comparisons as masks, `@reduce`
+  (`.Or`/`.And`/`.Xor` over a mask, `.Add`/`.Min`/`.Max` over numbers), `@select`, a lane read, and `@typeInfo`'s
+  `.vector` (`len`, `child`); the operations route through `DotCC.Libc.ZigVec`. findScalarPos needed more than
+  vectors: `break` / `continue` inside an unrolled `inline for` (a jump past the copies / to the end of one, and a
+  copy that always breaks, a folded `comptime if (…) break;`, ends the unroll so no nonexistent `@Vector` width is
+  formed); a comptime-known `inline for` index counting as a constant; std.simd.VectorIndex's
+  `IntFittingRange(0, len - 1)`, whose type body opens with `assert(…)`, binds an enum const at its annotation and
+  switches over a comptime integer with a `|pos_max|` capture; `comptime_int` as a TYPE (`CType.ComptimeInt`, an
+  `__int128` carrier unequal to `i128`), so `log2(pos_max)` binds its `anytype` as a comptime VALUE (one instance per
+  value, zig's rule), `@typeInfo` answers `.comptime_int`, and the `.comptime_int => comptime { … return … }` prong
+  runs in place; a switch expression as a call argument (grammar); and std.simd.iota's returning `comptime { … }`
+  block lowered as a plain block. Oracles `simd_vectors` / `simd_masks` / `inline_for_break_comptime_int`, real-std
+  differential `Dotcc_matches_zig_std_mem_index_of_scalar_simd_from_source` (82: hits in the unrolled loop, both tail
+  blocks and the scalar remainder); unit `ZigVectorTests`. **Cuts:** a vector width with no .NET type
+  (`@Vector(3, u8)`), `/` `%` and shifts on vectors, `@shuffle`, a runtime bool-vector literal. (A comptime_int
+  argument beyond 64 bits, sort's `log2(maxInt(usize) + 1)`, landed with tasks #41 and #83.)
+- **T6 (backlog)** arm64 hosts: verify and complete the `Arm` intrinsics → `std.Target.aarch64` mapping when this runs on
+  arm64 (the maintainer's request, 2026-09-24; tracked in `docs/plans/deferred.md`, target identity).
 
 ### S0 — the wall-finder + std pin (S; do FIRST, it steers everything)
 
@@ -834,7 +1188,8 @@ place a poison IS needed is the top-level tombstone, and that is what landed.
 - `@Int(signedness, bits)` (207 uses) → `CType` integer constructor — after
   S9's arbitrary-width brick, arbitrary `bits` values work. `@Pointer`,
   `@Struct`, `@Enum`, `@Union` (≤14 uses each) follow the same 1:1 pattern,
-  demand-driven. **The old monolithic `@Type(info)` does not exist in the pin —
+  demand-driven. `@Struct` landed with task #93 (std.enums.EnumFieldStruct, for
+  EnumSet and EnumArray), as a type-returning function's result. **The old monolithic `@Type(info)` does not exist in the pin —
   don't build it.**
 - `@compileError(msg)`: an instantiation-trace-carrying diagnostic that fires
   ONLY when the branch survives comptime folding (the subtle bit — 596 uses sit
@@ -983,8 +1338,9 @@ peephole (or delete it):
      (`std.ArrayList(u8).init(…)`), so the `init`/`.empty` constructor idiom works either way; and a
      reified type nests (a `Box(T)` field / return inside `Wrap(T)`, verified against zig). Oracle
      `generic-container-methods` == zig; example `examples/zig-generic-container/`. **Still cut:** a
-     nested container member, and a generic / `type`-returning METHOD — the latter is exactly
-     `Aligned`'s nested `pub fn SentinelSlice(comptime s: T) type`, so it returns as a G4 blocker.
+     nothing on the method side: the nested container member, the `type`-returning METHOD
+     (`Aligned`'s `pub fn SentinelSlice(comptime s: T) type`) and the generic METHOD cuts all fell
+     2026-09-24.
      (Its other prerequisite, LEFT-TO-RIGHT comptime-param binding — `comptime start: T` typed by an
      earlier `comptime T: type` — **✅ DONE 2026-08-09**: `EvalTypeReturningCall` now resolves
      arguments in the same two phases `InstantiateGeneric` does.)

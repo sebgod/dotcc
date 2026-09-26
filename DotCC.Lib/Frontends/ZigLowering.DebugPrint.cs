@@ -114,7 +114,7 @@ internal sealed partial class ZigLowering
     /// decoder; <c>{{</c>/<c>}}</c> fold to literal braces, a literal <c>%</c> is doubled to <c>%%</c>
     /// (printf-escaped), and the placeholder count must match the argument count (as real Zig
     /// enforces at comptime).</summary>
-    private string TranslateZigDebugFormat(string rawLexeme, IReadOnlyList<CExpr> args)
+    private string TranslateZigDebugFormat(string rawLexeme, List<CExpr> args)
     {
         // A `\\`-prefixed multiline string as a format is a rare V1 cut; a normal `"…"` literal expands
         // its `\u{…}` escapes to `\xNN` first (same reshaping the ordinary StrLit path does).
@@ -123,7 +123,7 @@ internal sealed partial class ZigLowering
             throw new IrUnsupportedException(
                 "zig `std.debug.print`: a multiline (`\\\\`) format string is not supported yet (wall-plan W6)");
         }
-        var inner = UnquoteStringLiteral(ExpandZigUnicodeEscapes(rawLexeme));
+        var inner = UnquoteStringLiteral(NormalizeZigByteEscapes(rawLexeme));
         var sb = new StringBuilder(inner.Length + 8);
         int ai = 0;
         int i = 0;
@@ -152,7 +152,16 @@ internal sealed partial class ZigLowering
                     throw new IrUnsupportedException(
                         $"zig `std.debug.print`: more `{{…}}` placeholders than the {args.Count} argument(s) supplied");
                 }
-                sb.Append(DebugConv(spec, args[ai].Type));
+                // `{}` of a bool prints `true` / `false` (task #81): the argument becomes that string.
+                if (spec.Trim() is "" or "any" && IsZigBoolValue(args[ai]))
+                {
+                    args[ai] = new CondExpr(args[ai], BoolWord("true"), BoolWord("false")) { Type = new CType.Pointer(CType.Char) };
+                    sb.Append("%s");
+                }
+                else
+                {
+                    sb.Append(DebugConv(spec, args[ai].Type));
+                }
                 ai++;
                 i = close + 1;
                 continue;
@@ -173,6 +182,24 @@ internal sealed partial class ZigLowering
                 $"zig `std.debug.print`: {args.Count} argument(s) but {ai} `{{…}}` placeholder(s) — they must match");
         }
         return "\"" + sb + "\"";
+    }
+
+    /// <summary>True for a zig `bool` value: a `_Bool`-typed expression, or a comparison / logical operator (typed
+    /// C `int` in the IR, as C types them).</summary>
+    private static bool IsZigBoolValue(CExpr e)
+    {
+        while (e is Paren p) { e = p.Inner; }
+        return e.Type?.Unqualified is CType.Prim { Name: "_Bool" }
+            || e is Binary { Op: BinOp.Eq or BinOp.Ne or BinOp.Lt or BinOp.Gt or BinOp.Le or BinOp.Ge or BinOp.LogAnd or BinOp.LogOr }
+            || e is Unary { Op: UnOp.LogNot };
+    }
+
+    /// <summary>The string literal <paramref name="word"/> (<c>true</c> / <c>false</c>) for a bool printed by <c>{}</c>.</summary>
+    private static LitStr BoolWord(string word)
+    {
+        var segs = new List<string> { "\"" + word + "\"" };
+        DotCC.EmitHelpers.EncodeStringLiteral(segs, out var byteLen);
+        return new LitStr(segs) { Type = new CType.Array(CType.Char, byteLen) };
     }
 
     /// <summary>Map one Zig format placeholder spec (the text between the braces) + its argument's type
@@ -216,10 +243,10 @@ internal sealed partial class ZigLowering
             + $"`{argType?.Describe() ?? "?"}` (float / bool / slice / struct formatting is not supported yet — wall-plan W6)");
     }
 
-    /// <summary>Require a NUL-terminated string-pointer argument for <c>{s}</c> — a string literal /
-    /// <c>[*:0]const u8</c> / <c>[*c]const u8</c> (a byte pointer or char array). A slice (<c>[]const
-    /// u8</c>) is a V1 cut: Zig's <c>{s}</c> prints exactly <c>.len</c> bytes, while C <c>%s</c> reads to
-    /// a NUL — they can diverge, so it's rejected rather than silently mismatched.</summary>
+    /// <summary>Require a string argument for <c>{s}</c>: a NUL-terminated string pointer (a string literal /
+    /// <c>[*:0]const u8</c> / <c>[*c]const u8</c>, a byte pointer or char array), or a byte SLICE (<c>[]const u8</c>),
+    /// which the runtime builder prints as exactly <c>.len</c> bytes (its <c>Arg(ConstSlice&lt;byte&gt;)</c> overload), as
+    /// zig's <c>{s}</c> does, never reading to a NUL.</summary>
     private static void RequireStr(CType? argType)
     {
         var t = argType?.Unqualified;
@@ -227,12 +254,13 @@ internal sealed partial class ZigLowering
         {
             CType.Pointer ptr => IsByteSized(ptr.Pointee),
             CType.Array arr => IsByteSized(arr.Element),
+            CType.Slice slice => IsByteSized(slice.Element),
             _ => false,
         };
         if (ok) { return; }
         throw new IrUnsupportedException(
             $"zig `std.debug.print`: the `{{s}}` placeholder needs a NUL-terminated string pointer "
-            + $"(a string literal / `[*:0]const u8`), got `{argType?.Describe() ?? "?"}` — a slice `{{s}}` is not supported yet (wall-plan W6)");
+            + $"(a string literal / `[*:0]const u8`) or a byte slice, got `{argType?.Describe() ?? "?"}`");
     }
 
     /// <summary>True for a one-byte integer element (a <c>char</c> / <c>u8</c> / <c>i8</c>) — the element

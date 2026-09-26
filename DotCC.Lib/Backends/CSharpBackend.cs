@@ -39,7 +39,7 @@ internal sealed class CSharpBackend
     /// type-spelling map (<see cref="ITarget"/>, the seam a second target slots
     /// into). The statement / expression emitter in this class is still the
     /// C#-specific one.</summary>
-    private readonly ITarget _target = new CSharpTarget();
+    private readonly CSharpTarget _target = new();
 
     /// <summary>Project a neutral <see cref="CType"/> onto the target's type
     /// spelling — replaces the type model's old baked-in <c>CsType</c> property.</summary>
@@ -90,7 +90,7 @@ internal sealed class CSharpBackend
             else if (fn.Sym.Storage != Storage.Static && !fn.Variadic)
             {
                 var ret = fn.Sym.Type is CType.Func f ? cg.Cs(f.Return) : "int";
-                var ps = string.Join(", ", fn.Params.Select(p => $"{cg.Cs(p.Type)} {p.TargetName}"));
+                var ps = string.Join(", ", fn.Params.Where(p => !IsVoidParam(p.Type)).Select(p => $"{cg.Cs(p.Type)} {p.TargetName}"));
                 exports.Add(new DotCC.EmitHelpers.Export(fn.Sym.Name, ret, ps));
             }
         }
@@ -132,11 +132,11 @@ internal sealed class CSharpBackend
             // abstract AddressTaken fact.)
             if (NintStorage(g.Sym))
             {
-                var ninit = g.Init is { } i0 ? $" = (nint)({cg.Coerced(i0, g.Sym.Type)})" : "";
+                var ninit = g.Init is { } i0 ? $" = (nint)({cg.StaticInit(i0, g.Sym.Type)})" : "";
                 globals.Append($"    public static unsafe nint {g.Sym.TargetName}{ninit};\n");
                 continue;
             }
-            var init = g.Init is { } i ? " = " + cg.Coerced(i, g.Sym.Type) : "";
+            var init = g.Init is { } i ? " = " + cg.StaticInit(i, g.Sym.Type) : "";
             globals.Append($"    public static unsafe {cg.Cs(g.Sym.Type)} {g.Sym.TargetName}{init};\n");
         }
 
@@ -144,6 +144,8 @@ internal sealed class CSharpBackend
         var structs = new StringBuilder();
         foreach (var t in unit.Types) { structs.Append(cg.StructText(t)); }
         foreach (var en in unit.Enums) { structs.Append(cg.EnumText(en)); }
+        // The zig optional-array value types (task #151), last: every type above has rendered by now.
+        structs.Append(cg._target.OptionalArrayTypesText());
 
         // Zig test-mode manifest (empty for a normal build): each test's display name paired with the
         // emitted method name (TargetName — the same spelling `Func` above prints at line ~411), so the
@@ -197,6 +199,9 @@ internal sealed class CSharpBackend
                 fi = fj;
                 continue;
             }
+            // A zig `void` field (std.sort's `sub_ctx: @TypeOf(context)` for a `{}` context) has no storage, and C#
+            // has no void field (CS0670): it is left out, as its initializers and argument uses are erased too.
+            if (f.Type.Unqualified is CType.VoidType) { fi++; continue; }
             if (t.IsUnion) { sb.Append("    [System.Runtime.InteropServices.FieldOffset(0)]\n"); }
             // An array member is C-inline storage, not a pointer field. A primitive
             // element lowers to a C# `fixed` buffer (inline, indexable, decays to a
@@ -226,6 +231,18 @@ internal sealed class CSharpBackend
             sb.Append("    public ").Append(Cs(f.Type)).Append(' ').Append(DotCC.EmitHelpers.Id(f.Name)).Append(";\n");
             fi++;
         }
+        if (t.Layout == AggregateLayout.Packed && !t.IsUnion)
+        {
+            // zig compares a packed struct as its backing integer (std.meta.eql's `.@"packed" => a == b`): the
+            // bytes of the storage, which the masked bit-field setters keep free of stray bits.
+            var bytes = $"System.Runtime.InteropServices.MemoryMarshal.AsBytes(new System.ReadOnlySpan<{t.Name}>(in {{0}}))";
+            sb.Append("    public static bool operator ==(").Append(t.Name).Append(" a, ").Append(t.Name).Append(" b) => System.MemoryExtensions.SequenceEqual(")
+              .Append(string.Format(System.Globalization.CultureInfo.InvariantCulture, bytes, "a")).Append(", ")
+              .Append(string.Format(System.Globalization.CultureInfo.InvariantCulture, bytes, "b")).Append(");\n");
+            sb.Append("    public static bool operator !=(").Append(t.Name).Append(" a, ").Append(t.Name).Append(" b) => !(a == b);\n");
+            sb.Append("    public override bool Equals(object o) => o is ").Append(t.Name).Append(" other && this == other;\n");
+            sb.Append("    public override int GetHashCode() => 0;\n");
+        }
         sb.Append("}\n\n");
         return wrappers.Append(sb).ToString();
     }
@@ -237,10 +254,15 @@ internal sealed class CSharpBackend
     {
         var sb = new StringBuilder();
         sb.Append("enum ").Append(e.Name).Append(" : ").Append(Cs(e.Underlying)).Append("\n{\n");
+        // A 64-bit UNSIGNED enum carries its members' bit patterns in the `long` value, so a member
+        // above long.MaxValue (Zig `enum(u64)`'s maxInt) prints as the unsigned value it is.
+        var unsigned64 = e.Underlying.Unqualified is CType.Prim { Integer: true, Signed: false, Bytes: 8 };
         foreach (var m in e.Members)
         {
-            sb.Append("    ").Append(DotCC.EmitHelpers.Id(m.Name)).Append(" = ")
-              .Append(m.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)).Append(",\n");
+            sb.Append("    ").Append(DotCC.EmitHelpers.EnumMemberId(m.Name)).Append(" = ")
+              .Append(unsigned64
+                  ? unchecked((ulong)m.Value).ToString(System.Globalization.CultureInfo.InvariantCulture)
+                  : m.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)).Append(",\n");
         }
         sb.Append("}\n\n");
         return sb.ToString();
@@ -385,7 +407,7 @@ internal sealed class CSharpBackend
     /// <summary>C# permits a <c>fixed</c> buffer only of these primitive element
     /// types — every other array member must go through an <c>[InlineArray]</c>
     /// wrapper instead.</summary>
-    private static bool IsFixedBufferType(string cs) => cs is
+    internal static bool IsFixedBufferType(string cs) => cs is
         "bool" or "byte" or "sbyte" or "short" or "ushort" or "int" or "uint"
         or "long" or "ulong" or "char" or "float" or "double";
 
@@ -395,7 +417,10 @@ internal sealed class CSharpBackend
     {
         var retTy = fn.Sym.Type is CType.Func f ? f.Return : CType.Int;
         _currentRet = retTy;
-        var ps = string.Join(", ", fn.Params.Select(p => $"{Cs(p.Type)} {p.TargetName}"));
+        // A zig `void` parameter (`context: void`, std.sort's) is zero-sized with no runtime value, and C#
+        // has no void parameter: it is erased here, from every call's arguments (CallText, IndirectCall)
+        // and from delegate* types (CSharpTarget), consistently, so arity still lines up.
+        var ps = string.Join(", ", fn.Params.Where(p => !IsVoidParam(p.Type)).Select(p => $"{Cs(p.Type)} {p.TargetName}"));
         // A variadic C function gets a trailing `params VaArg[] _va`; C# converts
         // each variadic actual to a VaArg at the call site (carries pointers too).
         if (fn.Variadic) { ps = ps.Length == 0 ? "params VaArg[] _va" : ps + ", params VaArg[] _va"; }
@@ -427,7 +452,7 @@ internal sealed class CSharpBackend
         // body that falls off the end is a Zig success, so it returns Ok(default).
         if (retTy is CType.ErrorUnion eu)
         {
-            var ts = eu.Payload is CType.VoidType ? "Unit" : Cs(eu.Payload);
+            var ts = ErrUnionPayloadArg(eu);
             sb.Append("{\n");
             sb.Append(Pad(1)).Append("try\n");
             Stmt(sb, body, 1);
@@ -486,6 +511,20 @@ internal sealed class CSharpBackend
     /// braced to keep the hoisted statements inside the controller).</summary>
     private int _hoistedCount;
 
+    /// <summary>True while rendering a static field's initializer (task #115): an array literal there has static storage
+    /// (zig's global `&[_]u8{ 1, 2 }`, C's file-scope compound literal), so it is pinned for the program's life rather than
+    /// a <c>stackalloc</c>, which a static initializer cannot hold.</summary>
+    private bool _staticInit;
+
+    /// <summary>Render a global's initializer, coerced to <paramref name="type"/>, with <see cref="_staticInit"/> set.</summary>
+    internal string StaticInit(CExpr init, CType type)
+    {
+        var prev = _staticInit;
+        _staticInit = true;
+        try { return Coerced(init, type); }
+        finally { _staticInit = prev; }
+    }
+
     /// <summary>Monotonic counter naming the block-local temps an array compound
     /// literal hoists to (<c>__cl0</c>, <c>__cl1</c>, …) when it appears outside
     /// initializer position. Unique within any function scope; never reset.</summary>
@@ -518,11 +557,20 @@ internal sealed class CSharpBackend
     private string NoHoist(System.Func<string> render)
     {
         var prev = _canHoist;
+        var prevPure = _canHoistPure;
+        _canHoistPure = prev || prevPure;
         _canHoist = false;
         var text = render();
         _canHoist = prev;
+        _canHoistPure = prevPure;
         return text;
     }
+
+    /// <summary>True while rendering a conditional sub-expression (see <see cref="NoHoist"/>) of a statement that
+    /// could hoist: a SIDE-EFFECT-FREE temp (a <c>stackalloc</c> of constant elements) may still hoist, since
+    /// evaluating it unconditionally changes nothing observable. Not set where no statement can take a temp at all
+    /// (a loop condition).</summary>
+    private bool _canHoistPure;
 
     private void Stmt(StringBuilder sb, CStmt s, int ind)
     {
@@ -596,7 +644,10 @@ internal sealed class CSharpBackend
                 // any non-statement-position use.)
                 if (IsUnreachableCall(inner))
                 {
-                    sb.Append(pad).Append("throw new System.Diagnostics.UnreachableException(\"unreachable() reached\");\n");
+                    // A trap that says why (task #63: a function compiled as a trap carries its reason as one plain string
+                    // segment, already free of quotes and backslashes); the bare form is C23's `unreachable()`.
+                    var reason = inner is Call { Args: [LitStr { Segments: [var segment] }] } ? segment : "\"unreachable() reached\"";
+                    sb.Append(pad).Append("throw new System.Diagnostics.UnreachableException(").Append(reason).Append(");\n");
                     break;
                 }
                 if (inner is CondExpr { Type.Unqualified: CType.VoidType } ct)
@@ -604,7 +655,8 @@ internal sealed class CSharpBackend
                     // A void-typed ternary in statement position is a real if/else
                     // (CS0173 forbids a void `?:` value) — synthesize an If and recurse
                     // so it nests/braces correctly and takes no trailing `;`.
-                    Stmt(sb, new If(ct.Cond, new ExprStmt(ct.Then), new ExprStmt(ct.Else)) { Pos = es.Pos }, ind);
+                    // A pure arm has nothing to run (a `catch unreachable` over a `!void`'s payload arm), so it is left out.
+                    Stmt(sb, new If(ct.Cond, new ExprStmt(ct.Then), IsPure(ct.Else) ? null : new ExprStmt(ct.Else)) { Pos = es.Pos }, ind);
                 }
                 else if (inner is CommaOp co)
                 {
@@ -661,7 +713,9 @@ internal sealed class CSharpBackend
                 }
                 break;
             case While w:
-                sb.Append(pad).Append($"while (Cond.B({Expr(DecayEnum(w.Cond))}))\n");
+                // zig's `while (true)` renders bare, so C#'s flow analysis sees the loop never falls out (a function
+                // whose every exit is inside it, std.fmt.parse_float's scanDigit, would otherwise be CS0161).
+                sb.Append(pad).Append(w.Cond is LitBool { Value: true } ? "while (true)\n" : $"while (Cond.B({Expr(DecayEnum(w.Cond))}))\n");
                 WithNormalBreak(() => Nested(sb, w.Body, ind));
                 break;
             case DoWhile dw:
@@ -755,7 +809,9 @@ internal sealed class CSharpBackend
                     ExprStmt e => Expr(e.Expr),
                     _ => "",
                 };
-                var cond = fr.Cond is null ? "" : $"Cond.B({Expr(DecayEnum(fr.Cond))})";
+                // zig's `while (true) : (i -= 1)` (std.mem.findLastLinear) has no condition to spell, so C# sees the loop
+                // never falls out, as a bare `while (true)` does (CS0161 otherwise).
+                var cond = fr.Cond is null or LitBool { Value: true } ? "" : $"Cond.B({Expr(DecayEnum(fr.Cond))})";
                 var post = fr.Post is null ? "" : Expr(fr.Post);
                 sb.Append(pad).Append($"for ({init}; {cond}; {post})\n");
                 WithNormalBreak(() => Nested(sb, fr.Body, ind));
@@ -1027,6 +1083,14 @@ internal sealed class CSharpBackend
     private void Nested(StringBuilder sb, CStmt s, int ind)
     {
         if (s is Block) { Stmt(sb, s, ind); return; }
+        // A brace-less Seq of other than one statement cannot stand as an embedded statement: an EMPTY one
+        // (a folded comptime `if`) would leave `else` bare and absorb the NEXT statement, and several would
+        // leave all but the first unconditional. Brace it; nothing an arm declares may leak past it anyway.
+        if (s is Seq { Stmts.Count: not 1 } seq)
+        {
+            Stmt(sb, new Block(seq.Stmts), ind);
+            return;
+        }
         var before = _hoistedCount;
         var tmp = new StringBuilder();
         Stmt(tmp, s, ind + 1);
@@ -1057,6 +1121,14 @@ internal sealed class CSharpBackend
         DeferGuard g => Terminates(g.Body),
         _ => false,
     };
+
+    /// <summary>The generic argument of an error union's runtime <c>ErrUnion&lt;P&gt;</c>: <c>Unit</c> for
+    /// <c>!void</c>, <c>nuint</c> for a pointer payload (a pointer cannot be a generic argument; the <c>try</c>
+    /// unwrap casts it back), else the payload's own type. The same rule the type rendering follows.</summary>
+    private string ErrUnionPayloadArg(CType.ErrorUnion eu) =>
+        eu.Payload is CType.VoidType ? "Unit"
+        : eu.Payload.Unqualified is CType.Pointer ? "nuint"
+        : Cs(eu.Payload);
 
     /// <summary>True when an expression is (a paren-chain around) the C23
     /// <c>unreachable()</c> call — which the <see cref="ExprStmt"/> emitter lowers
@@ -1127,6 +1199,17 @@ internal sealed class CSharpBackend
 
     /// <summary>The fenced read of a volatile lvalue text — C's volatile read.</summary>
     private static string VolatileRead(string lv) => $"global::System.Threading.Volatile.Read(ref {lv})";
+
+    /// <summary>True for an access zig performs as a zero-size no-op (task #135): a <c>void</c> field (omitted from its
+    /// struct), or a <c>void</c>-as-data (<c>Unit</c>) element or pointee read through a pointer that may be
+    /// <c>undefined</c>.</summary>
+    private static bool IsZeroSizeAccess(CExpr e) => e switch
+    {
+        Member { Type.Unqualified: CType.VoidType } => true,
+        Index { Type.Unqualified: CType.VoidType or CType.Named { Name: "Unit" } } => true,
+        Unary { Op: UnOp.Deref, Type.Unqualified: CType.VoidType or CType.Named { Name: "Unit" } } => true,
+        _ => false,
+    };
 
     /// <summary>True when an lvalue's storage roots at a file-scope global / static
     /// local — a C# static field, hence a moveable variable whose address must go
@@ -1274,7 +1357,7 @@ internal sealed class CSharpBackend
             }
             var cast = $"({t2})({Expr(value)})";
             // An out-of-range CONSTANT cast is CS0221 unless wrapped in unchecked.
-            if (TryConstInt(value, out var k) && !ConstFitsTarget(k, t2))
+            if (TryConstInt(value, out var k) && !ConstFitsTarget(k, t2) || IsConstExpr(value) && HasPromotingUnary(value))
             {
                 cast = $"unchecked({cast})";
             }
@@ -1525,9 +1608,11 @@ internal sealed class CSharpBackend
             case ErrUnionOk ok:
             {
                 var eu = (CType.ErrorUnion)ok.Type;
-                var ts = eu.Payload is CType.VoidType ? "Unit" : Cs(eu.Payload);
+                var ts = ErrUnionPayloadArg(eu);
                 var arg = ok.Payload is null ? "default"
                         : eu.Payload is CType.VoidType ? Expr(ok.Payload)  // a Unit-valued `try`-of-!void
+                        // A pointer payload rides as a `nuint` (see ErrUnionPayloadArg).
+                        : eu.Payload.Unqualified is CType.Pointer ? $"(nuint)({Expr(ok.Payload)})"
                         : Coerced(ok.Payload, eu.Payload);
                 return ($"ErrUnion<{ts}>.Ok({arg})", PPrimary);
             }
@@ -1535,8 +1620,7 @@ internal sealed class CSharpBackend
             case ErrUnionErr err:
             {
                 var eu = (CType.ErrorUnion)err.Type;
-                var ts = eu.Payload is CType.VoidType ? "Unit" : Cs(eu.Payload);
-                return ($"ErrUnion<{ts}>.Err({Expr(err.Code)})", PPrimary);
+                return ($"ErrUnion<{ErrUnionPayloadArg(eu)}>.Err({Expr(err.Code)})", PPrimary);
             }
             // `try e` → ErrUnion.Try(e): the payload on success, else throw ZigErrorReturn
             // (caught at the enclosing `!T` function's emitted try/catch boundary — see Func).
@@ -1556,8 +1640,8 @@ internal sealed class CSharpBackend
             // coerced to the ctor's `ulong`.
             case SliceNew sn:
             {
-                var name = sn.Const ? "ConstSlice" : "Slice";
-                return ($"new {name}<{Cs(sn.Element.Unqualified)}>({Expr(sn.Ptr)}, {Coerced(sn.Len, CType.ULong)})", PPrimary);
+                // A slice of arrays or of pointers takes the target's own shape (CSharpTarget.SliceType, tasks #152 / #153).
+                return ($"new {_target.SliceType(sn.Element.Unqualified, sn.Const)}({Expr(sn.Ptr)}, {Coerced(sn.Len, CType.ULong)})", PPrimary);
             }
             // A Zig allocator `a.alloc(T, n)` (Milestone F). Receiver null → the DEVIRTUALIZED
             // C-heap default: a direct `ZigAlloc.AllocCHeap<T>(n, oom)` (→ Libc.malloc, no vtable).
@@ -1678,7 +1762,9 @@ internal sealed class CSharpBackend
             case TupleNew tn:
             {
                 var tt = (CType.Tuple)tn.TupleType.Unqualified;
-                var vals = tn.Elements.Select((e, i) => Coerced(e, tt.Elements[i])).ToList();
+                var vals = tn.Elements.Select((e, i) => CSharpTarget.IsPointerLikeTupleElement(tt.Elements[i])
+                    ? $"(nint)({Coerced(e, tt.Elements[i])})"   // a pointer-like element rides as nint (CS0306)
+                    : Coerced(e, tt.Elements[i])).ToList();
                 return (BuildValueTupleCtor(tt.Elements, vals), PPrimary);
             }
             // A Zig tuple index `t[N]` (Milestone G) → `<tuple>.Item{N+1}` (ValueTuple's 1-based
@@ -1690,6 +1776,11 @@ internal sealed class CSharpBackend
                 var tiIdx = ti.Index;
                 while (tiIdx >= 7) { sbTi.Append(".Rest"); tiIdx -= 7; }
                 sbTi.Append(".Item").Append(tiIdx + 1);
+                // A pointer-like element is carried as nint (see CSharpTarget.TupleElementType): cast back on read.
+                if (CSharpTarget.IsPointerLikeTupleElement(ti.Element))
+                {
+                    return ($"(({Cs(ti.Element.Unqualified)})({sbTi}))", PPrimary);
+                }
                 return (sbTi.ToString(), PPostfix);
             }
             // A bare unresolved identifier: the backend escapes the raw name.
@@ -1705,7 +1796,7 @@ internal sealed class CSharpBackend
             {
                 var enumTy = Cs(ec.Sym.Type.Unqualified);
                 if (_typeShadowedGlobals.Contains(enumTy)) { enumTy = "global::" + enumTy; }
-                return ($"{enumTy}.{DotCC.EmitHelpers.Id(ec.Sym.Name)}", PPostfix);
+                return ($"{enumTy}.{DotCC.EmitHelpers.EnumMemberId(ec.Sym.Name)}", PPostfix);
             }
             // A bare function name used as a value decays to its address — C#
             // needs the explicit `&` to form a delegate* (C allows the bare name).
@@ -1721,13 +1812,25 @@ internal sealed class CSharpBackend
                 ? ($"&{v.Sym.TargetName}", PUnary)
                 : QualifiedRead(v, GlobalName(v.Sym), PPrimary);
             case IndirectCall ic:
-                return ($"{Sub(ic.Callee, PPostfix)}({string.Join(", ", ic.Args.Select(a => Sub(a, PAssign)))})", PPostfix);
+                return ($"{Sub(ic.Callee, PPostfix)}({string.Join(", ", ic.Args.Where(a => !IsVoidParam(a.Type)).Select(a => Sub(a, PAssign)))})", PPostfix);
             case Paren p: return Render(p.Inner); // explicit C parens are redundant; precedence re-adds as needed
             case Cast c: return RenderCast(c);
             case BitCast bc:
                 // Zig `@bitCast` — same-size bit reinterpret. `Unsafe.BitCast<TFrom, TTo>` is the
                 // AOT-clean primitive (it static-asserts the size match); the source type is the
                 // operand's lowered type, the destination the result-location sink.
+                // An ARRAY operand (std.mem.readInt's `@bitCast(buffer.*)` over `*const [4]u8`) renders as its element
+                // pointer, which is not the array's bits: read the target from that memory instead.
+                if (bc.Operand.Type.Unqualified is CType.Array)
+                {
+                    return ($"System.Runtime.CompilerServices.Unsafe.ReadUnaligned<{Cs(bc.Target)}>({Sub(bc.Operand, PAssign)})", PPrimary);
+                }
+                // A comptime-length slice deref'd to its array (std.mem.eqlBytes' `@bitCast(a[n..][0..4].*)`) lowers as the
+                // slice: read from its data pointer the same way.
+                if (bc.Operand.Type.Unqualified is CType.Slice)
+                {
+                    return ($"System.Runtime.CompilerServices.Unsafe.ReadUnaligned<{Cs(bc.Target)}>({Sub(bc.Operand, PPostfix)}.Ptr)", PPrimary);
+                }
                 return ($"System.Runtime.CompilerServices.Unsafe.BitCast<{Cs(bc.Operand.Type)}, {Cs(bc.Target)}>({Sub(bc.Operand, PAssign)})", PPrimary);
             case SizeOfExpr so:
                 // C's `sizeof` yields `size_t` — unsigned, `ulong` in dotcc's
@@ -1755,6 +1858,9 @@ internal sealed class CSharpBackend
                 var memberAddr = decays ? $"(byte*)__t.{m}" : $"(byte*)&__t.{m}";
                 return ($"((System.Func<ulong>)(() => {{ {Cs(o.StructType)} __t = default; return (ulong)({memberAddr} - (byte*)&__t); }}))()", PPrimary);
             }
+            // A zero-size element read through a pointer loads nothing in zig (see the store above).
+            case Index or Unary { Op: UnOp.Deref } when IsZeroSizeAccess(e):
+                return ("default(Unit)", PPrimary);
             case Index ix:
             {
                 // A PARTIAL subscript of a multi-dimensional array — the result is
@@ -1768,6 +1874,9 @@ internal sealed class CSharpBackend
                 var t = $"{Sub(ix.Base, PPostfix)}[{Expr(DecayEnum(ix.Idx))}]";
                 return QualifiedRead(ix, t, PPostfix);
             }
+            // A `void` field is omitted from its struct (StructText), so reading one is the void value itself.
+            case Member { Type.Unqualified: CType.VoidType }:
+                return ("default(Unit)", PPrimary);
             case Member m:
             {
                 var dot = $"{Sub(m.Base, PPostfix)}{(m.Arrow ? "->" : ".")}{DotCC.EmitHelpers.Id(m.Field)}";
@@ -1778,6 +1887,13 @@ internal sealed class CSharpBackend
                 if (m.Type.Unqualified is CType.Array arr && !IsFixedBufferType(Cs(arr.FlatElement)))
                 {
                     return ($"({Cs(m.Type)})&{dot}", PUnary);
+                }
+                // A primitive array member of a GLOBAL (a C# static field, moveable) is a fixed buffer C# will not decay to
+                // a pointer outside a `fixed` statement (CS1666; std.MultiArrayList's `for (sizes.bytes, sizes.fields)` over
+                // a comptime-evaluated static, task #108): its element pointer through Unsafe.AsPointer, as `&global` is.
+                if (m.Type.Unqualified is CType.Array fixedArr && !m.Arrow && RootsAtGlobal(m.Base))
+                {
+                    return ($"({Cs(fixedArr.FlatElement)}*)System.Runtime.CompilerServices.Unsafe.AsPointer(ref {dot}[0])", PUnary);
                 }
                 return QualifiedRead(m, dot, PPostfix);
             }
@@ -1793,12 +1909,19 @@ internal sealed class CSharpBackend
                 // one in `_pending`.) Outside a hoistable context (e.g. a loop
                 // condition, re-evaluated each iteration) fall back to the inline
                 // stackalloc, which still binds in a pointer-initializer.
-                var lit = $"stackalloc {Cs(sa.Element)}[]{{ {string.Join(", ", sa.Elems.Select(Expr))} }}";
-                if (!_canHoist) { return (lit, PPrimary); }
+                // Each element stores at the element type, as an array declaration's does (`.{ k, k + 1 }` at a `[3]u8`
+                // field: C# promotes `k + 1` to int, CS0266).
+                var elemsCs = string.Join(", ", sa.Elems.Select(x => Coerced(x, sa.Element)));
+                if (_staticInit) { return ($"Libc.GlobalArrayFrom<{Cs(sa.Element)}>(new {Cs(sa.Element)}[]{{ {elemsCs} }})", PPrimary); }
+                var lit = $"stackalloc {Cs(sa.Element)}[]{{ {elemsCs} }}";
+                if (!_canHoist && !(_canHoistPure && sa.Elems.All(IsPure))) { return (lit, PPrimary); }
                 var name = $"__cl{_clCounter++}";
                 _pending.Add($"{Cs(sa.Element)}* {name} = {lit}");
                 return (name, PPrimary);
             }
+            // zig's void value `{}` where a value is spelled (stored into a `[N]void` element, a `?void` result): the
+            // runtime's empty `Unit`, as C# has no void value (task #114). A discarded one emits nothing, as before.
+            case DefaultLit { Type.Unqualified: CType.VoidType }: return ("default(Unit)", PPrimary);
             case DefaultLit: return ($"default({Cs(e.Type)})", PPrimary);
             // A promoted malloc → a zero-initialized stack struct value.
             case StackNew sn: return ($"new {Cs(sn.StructType)}()", PPrimary);
@@ -1834,8 +1957,12 @@ internal sealed class CSharpBackend
                             or BinOp.Le or BinOp.Ge or BinOp.LogAnd or BinOp.LogOr };
                     }
                     var cboolMismatch = t.Type.IsArithmetic && CBoolRendered(t.Then) != CBoolRendered(t.Else);
+                    // An `unreachable` arm (zig's `x catch unreachable`, lowered to a ternary on the error
+                    // test) is a C# throw expression: the void call has no value to give the other arm's type.
                     string Arm(CExpr a) => NoHoist(() =>
-                        cboolMismatch && CBoolRendered(a)
+                        IsUnreachableCall(a)
+                            ? "throw new System.Diagnostics.UnreachableException(\"unreachable() reached\")"
+                            : cboolMismatch && CBoolRendered(a)
                             ? CoercionCast(a, Cs(t.Type))
                             : t.Type.IsArithmetic && a.Type.IsArithmetic && Cs(a.Type.Unqualified) != Cs(t.Type)
                             ? CoercionCast(a, Cs(t.Type))
@@ -1864,7 +1991,11 @@ internal sealed class CSharpBackend
                             : Sub(DecayEnum(l.CaseExpr!), PCond);
                     string ArmText(SwitchExprArm a) => NoHoist(() =>
                     {
-                        var val = Coerced(a.Value, sw.Type);
+                        // An `unreachable` arm (std.fmt.digitToChar's `else => unreachable`) is a throw expression:
+                        // the void call has no value of the switch's type, as in the ternary's arms.
+                        var val = IsUnreachableCall(a.Value)
+                            ? "throw new System.Diagnostics.UnreachableException(\"unreachable() reached\")"
+                            : Coerced(a.Value, sw.Type);
                         return a.Labels is null
                             ? $"_ => {val}"
                             : $"{string.Join(" or ", a.Labels.Select(LabelPat))} => {val}";
@@ -1884,6 +2015,12 @@ internal sealed class CSharpBackend
                     return Render(co.Items[^1]);
                 }
                 return (CommaValue(co), PPrimary);
+            // A store of a ZERO-SIZE value (task #135): a `void` field, which the struct omits (std.array_hash_map's
+            // `result.hash = …` when `Hash` is `void`), or a `void`-as-data element through a pointer, which zig's
+            // std.MultiArrayList leaves `undefined` for a zero-size field (`items(.hash)[i] = …`). zig stores nothing,
+            // so only the value's own effects remain, as a discard; C#'s one-byte `Unit` would write through that pointer.
+            case Assign { Target: var zeroTarget } zeroStore when IsZeroSizeAccess(zeroTarget):
+                return ($"_ = {Sub(zeroStore.Value, PAssign)}", PAssign);
             case Assign a when a.Target.Type.IsAtomic:
                 {
                     // An atomic lvalue stores seq-cst (Atomic.Store, returns the stored
@@ -2021,11 +2158,19 @@ internal sealed class CSharpBackend
             // &fn where fn is a function already decays to `&fn` in the VarRef
             // case — don't emit a second `&`.
             case UnOp.AddrOf when u.Operand is VarRef { Sym.Kind: SymKind.Func }: return Render(u.Operand);
+            // The address of a ROW of a multi-dimensional array (`for (rows) |*r|` over a `[][3]u8`, task #152): a pointer to
+            // an array is the array's own flat element pointer, which the row subscript (`base + i * N`) already is.
+            case UnOp.AddrOf when u.Operand is Index { Type.Unqualified: CType.Array }: return Render(u.Operand);
             // &global — a file-scope global / static local lowers to a C# static
             // field, which is a MOVEABLE variable (`&field` is CS0212). Take its
             // address via Unsafe.AsPointer: dotcc's globals are unmanaged value
             // types in non-moving static storage, so the pointer is stable. (Lua
             // leans on this: &absentkey, &dummynode_.)
+            // &arrayGlobal — an array global is stored as its element pointer (a pinned backing store), so its address
+            // IS that pointer (zig's `&small` in std.fmt.float.render's table pointers); `Unsafe.AsPointer<T*>` would not
+            // compile (CS0306).
+            case UnOp.AddrOf when u.Operand is VarRef { Sym.IsGlobal: true } arrGlobal && arrGlobal.Type.Unqualified is CType.Array:
+                return ($"({Cs(u.Type)}){Render(arrGlobal).Text}", PUnary);
             case UnOp.AddrOf when RootsAtGlobal(u.Operand):
                 return ($"({Cs(u.Type)})System.Runtime.CompilerServices.Unsafe.AsPointer(ref {BareLValue(u.Operand)})", PUnary);
             // &<rvalue> — the address of a materialized temporary: a C compound literal
@@ -2184,7 +2329,7 @@ internal sealed class CSharpBackend
     private string CoercionCast(CExpr e, string to)
     {
         var text = $"({to})({Sub(e, PUnary)})";
-        return IsIntegerCs(to) && IsConstExpr(e) && !(TryConstInt(e, out var v) && ConstFitsTarget(v, to))
+        return IsIntegerCs(to) && IsConstExpr(e) && (HasPromotingUnary(e) || !(TryConstInt(e, out var v) && ConstFitsTarget(v, to)))
             ? $"unchecked({text})"
             : text;
     }
@@ -2212,15 +2357,38 @@ internal sealed class CSharpBackend
         {
             return ($"({Cs(c.Target)})({Cs(fv.Type)})&{fv.Sym.TargetName}", PUnary);
         }
-        var text = $"({Cs(c.Target)}){Sub(c.Operand, PUnary)}";
+        var operandText = Sub(c.Operand, PUnary);
+        var targetText = Cs(c.Target);
+        // `(System.UInt128)*a` parses as a MULTIPLICATION in C#: a cast to a NON-keyword type followed by a unary
+        // `*`, `-`, `+` or `&` is ambiguous with the binary operator, so the operand is parenthesized there (a keyword
+        // type, `(ulong)-1`, is unambiguous and keeps its shape).
+        if (operandText.Length > 0 && operandText[0] is '*' or '-' or '+' or '&' && IsBareTypeName(targetText))
+        {
+            operandText = $"({operandText})";
+        }
+        var text = $"({targetText}){operandText}";
         if (c.Target.Unqualified is CType.Prim { Integer: true } pt
             && IsConstExpr(c.Operand)
-            && !(TryConstInt(c.Operand, out var cv) && ConstFitsTarget(cv, Cs(pt))))
+            && (HasPromotingUnary(c.Operand) || !(TryConstInt(c.Operand, out var cv) && ConstFitsTarget(cv, Cs(pt)))))
         {
             return ($"unchecked({text})", PPrimary);
         }
         return (text, PUnary);
     }
+
+    /// <summary>True when a constant expression applies <c>~</c>: C# evaluates it on the operand PROMOTED to <c>int</c>
+    /// (<c>~(byte)0</c> is <c>-1</c>, zig's <c>~@as(u8, 0)</c> is 255), and the folder cannot see through the inner cast to
+    /// prove it fits, so the narrowing cast is wrapped in <c>unchecked</c> (std.bit_set's
+    /// <c>.full = .{ .mask = ~@as(MaskInt, 0) }</c>). A negation folds the way C# computes it, so it needs no such rule.</summary>
+    private static bool HasPromotingUnary(CExpr e) => e switch
+    {
+        Unary { Op: UnOp.BitNot } => true,
+        Unary u => HasPromotingUnary(u.Operand),
+        Paren p => HasPromotingUnary(p.Inner),
+        Cast c => HasPromotingUnary(c.Operand),
+        Binary b => HasPromotingUnary(b.Left) || HasPromotingUnary(b.Right),
+        _ => false,
+    };
 
     /// <summary>True when <paramref name="e"/> is a C constant expression — only
     /// literals, enum constants, <c>sizeof</c>, and operators over constant
@@ -2299,10 +2467,12 @@ internal sealed class CSharpBackend
     private string StructInitText(StructInit si)
     {
         var sb = new StringBuilder("new ").Append(Cs(si.Type)).Append(" { ");
+        var written = 0;
         for (var i = 0; i < si.Members.Count; i++)
         {
-            if (i > 0) { sb.Append(", "); }
             var m = si.Members[i];
+            if (m.FieldType.Unqualified is CType.VoidType) { continue; }   // a `void` field has no storage (see the layout)
+            if (written++ > 0) { sb.Append(", "); }
             sb.Append(DotCC.EmitHelpers.Id(m.Name)).Append(" = ").Append(Coerced(m.Value, m.FieldType));
         }
         return sb.Append(" }").ToString();
@@ -2314,6 +2484,19 @@ internal sealed class CSharpBackend
     /// <c>Func&lt;&gt;</c> type argument (CS0306) — it must round-trip through
     /// <c>nint</c> in those forms. Covers raw pointers, function pointers, and a
     /// decayed array.</summary>
+    /// <summary>A cast target C# may read as an EXPRESSION: an identifier or dotted name (<c>System.UInt128</c>), not a
+    /// keyword type (<c>ulong</c>) or a pointer / generic type (<c>byte*</c>), which only a type can be.</summary>
+    private static bool IsBareTypeName(string t) =>
+        !CSharpKeywordTypes.Contains(t) && t.Length > 0 && (char.IsLetter(t[0]) || t[0] == '_')
+        && t.All(ch => char.IsLetterOrDigit(ch) || ch is '_' or '.');
+
+    /// <summary>The C# keyword type names, after which a cast parses unambiguously whatever the operand.</summary>
+    private static readonly HashSet<string> CSharpKeywordTypes = new(System.StringComparer.Ordinal)
+    {
+        "bool", "byte", "sbyte", "short", "ushort", "int", "uint", "long", "ulong", "nint", "nuint",
+        "float", "double", "decimal", "char", "object", "string",
+    };
+
     private static bool IsPointerType(CType t) => t.Unqualified is CType.Pointer or CType.Func or CType.Array;
 
     /// <summary>Render a comma operand standing in statement position — for the
@@ -2520,16 +2703,24 @@ internal sealed class CSharpBackend
         if (types.Count == 0) { return "default(System.ValueTuple)"; }
         if (types.Count <= 7)
         {
-            var ta = string.Join(", ", types.Select(t => Cs(t.Unqualified)));
+            var ta = string.Join(", ", types.Select(TupleElementCs));
             return $"new System.ValueTuple<{ta}>({string.Join(", ", vals)})";
         }
-        var headTypes = string.Join(", ", types.Take(7).Select(t => Cs(t.Unqualified)));
+        var headTypes = string.Join(", ", types.Take(7).Select(TupleElementCs));
         var restTypes = types.Skip(7).ToList();
         var restTypeStr = Cs(new CType.Tuple(restTypes));   // the nested TRest ValueTuple type
         var headVals = string.Join(", ", vals.Take(7));
         var restCtor = BuildValueTupleCtor(restTypes, vals.Skip(7).ToList());
         return $"new System.ValueTuple<{headTypes}, {restTypeStr}>({headVals}, {restCtor})";
     }
+
+    /// <summary>A tuple element's C# type (a pointer-like one as <c>nint</c>, see CSharpTarget.TupleElementType).</summary>
+    private string TupleElementCs(CType t) => CSharpTarget.IsPointerLikeTupleElement(t) ? "nint" : Cs(t.Unqualified);
+
+    /// <summary>True for a zig <c>void</c> parameter (or argument) type, which the C# emit erases: C# has
+    /// no void parameter, and zig's void carries no data. A C <c>f(void)</c> never reaches here as a
+    /// parameter (the C binder reads it as an empty list).</summary>
+    internal static bool IsVoidParam(CType t) => t.Unqualified is CType.VoidType;
 
     private string CallText(Call c)
     {
@@ -2553,6 +2744,7 @@ internal sealed class CSharpBackend
             // A known parameter coerces the arg to its type; a variadic-tail or
             // unknown-signature arg takes C's default argument promotions — notably
             // an enum decays to its underlying int (C# has no enum→int for `.Arg`).
+            if (c.ParamTypes is { } vpts && i < vpts.Count && IsVoidParam(vpts[i])) { continue; }   // erased (see Func)
             a.Add(c.ParamTypes is { } pts && i < pts.Count
                 ? CoercedArg(c.Args[i], pts[i])
                 : Sub(DecayEnum(c.Args[i]), PAssign));

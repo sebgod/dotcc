@@ -129,6 +129,43 @@ public sealed class ZigAllocRuntimeTests
     }
 
     [Fact]
+    public unsafe void Free_accepts_a_const_slice()
+    {
+        byte* buf = stackalloc byte[64];
+        var fba = FixedBufferAllocator.Init(buf, 64);
+        var a = ZigAlloc.FbaAllocator(&fba);
+
+        var r1 = a.Alloc<uint>(4, Oom);
+        fba.EndIndex.ShouldBe(16UL);
+
+        // zig's `free` takes a `[]const T` too (std.StaticStringMap.deinit, task #100): the same memory goes back.
+        a.Free<uint>(new ConstSlice<uint>(r1.Value.Ptr, r1.Value.Len));
+        fba.EndIndex.ShouldBe(0UL);
+    }
+
+    [Fact]
+    public unsafe void Arena_over_a_small_fixed_buffer_grows_the_way_zig_does()
+    {
+        // Task #120: zig's ArenaAllocator grows its current node in place when the backing allocator can (an FBA grows its
+        // last allocation), else sizes a new node from what is needed. A fixed 4 KiB first chunk had failed with
+        // OutOfMemory over a 1 KiB buffer that zig's arena fits in (std.ArrayListUnmanaged appends, zig returns 29).
+        byte* buf = stackalloc byte[1024];
+        var fba = FixedBufferAllocator.Init(buf, 1024);
+        var arena = ArenaAllocator.Init(ZigAlloc.FbaAllocator(&fba));
+        var a = ZigAlloc.ArenaToAllocator(&arena);
+
+        for (var k = 0; k < 10; k++)
+        {
+            var r = a.Alloc<ulong>(4, Oom);
+            r.IsErr.ShouldBeFalse();
+            r.Value[3] = (ulong)k;
+        }
+        // Ten 32-byte requests grew one chunk in place: nowhere near the whole buffer.
+        fba.EndIndex.ShouldBeLessThan(512UL);
+        (arena.Current->Prev == null).ShouldBeTrue();
+    }
+
+    [Fact]
     public unsafe void Fixed_buffer_allocator_free_of_a_non_last_allocation_is_a_no_op()
     {
         byte* buf = stackalloc byte[64];

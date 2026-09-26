@@ -454,12 +454,18 @@ public sealed class ZigFrontendTests
         // calls over the peer-resolved operand type (evaluated once). Previously loud cuts.
         var cs = EmitZig(
             "pub fn main() u8 {\n" +
-            "    const mn = @min(@as(i8, 3), 7);\n" +
-            "    const mx = @max(@as(i8, 1), 2);\n" +
-            "    const rm = @rem(@as(i8, 7), 3);\n" +
-            "    const dt = @divTrunc(@as(i8, 7), 3);\n" +
-            "    const md = @mod(@as(i8, -7), 3);\n" +
-            "    const df = @divFloor(@as(i8, -7), 3);\n" +
+            // RUNTIME operands for @min/@max: comptime-known ones fold to their literal.
+            "    var lo: i8 = 3;\n" +
+            "    lo += 0;\n" +
+            "    const mn = @min(lo, 7);\n" +
+            "    const mx = @max(lo, 2);\n" +
+            // RUNTIME operands for the division helpers too: two constants fold (a quotient may size an array).
+            "    var sv: i8 = 7;\n" +
+            "    sv += 0;\n" +
+            "    const rm = @rem(sv, 3);\n" +
+            "    const dt = @divTrunc(sv, 3);\n" +
+            "    const md = @mod(-sv, 3);\n" +
+            "    const df = @divFloor(-sv, 3);\n" +
             // A RUNTIME operand: a comptime-known one folds to its literal (the W4 lift's bit-count fold).
             "    var pv: u8 = 11;\n" +
             "    pv += 0;\n" +
@@ -476,13 +482,19 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Rejects_variadic_min_beyond_two_operands_as_a_loud_cut()
+    public void Variadic_min_and_max_fold_when_comptime_known_and_nest_at_runtime()
     {
-        // Zig's `@min`/`@max` are variadic; V1 lowers the binary form and makes a wider call a clear
-        // arity error (not a silent wrong result).
-        var ex = Should.Throw<CompileException>(() => EmitZig(
-            "pub fn main() u8 { return @min(1, 2, 3); }\n"));
-        ex.Message.ShouldContain("variadic");
+        // Zig's `@min`/`@max` are variadic (road-to-zig-std G3): all-constant operands fold to a literal
+        // (so `@Int(s, @max(8, bits))` has its width), and runtime ones nest the binary helper.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    var r: u8 = 9;\n" +
+            "    r += 0;\n" +
+            "    const k: u8 = @min(4, 2, 3);\n" +
+            "    return @max(r, k, 1);\n" +
+            "}\n");
+        cs.ShouldContain("byte k = 2;");
+        cs.ShouldContain("ZigMath.Max(ZigMath.Max(");
     }
 
     [Fact]
@@ -492,7 +504,9 @@ public sealed class ZigFrontendTests
         // (address as usize) → an unchecked `(ulong)ptr` cast (road-to-zig-std B3). Previously loud cuts.
         var cs = EmitZig(
             "pub fn main() u8 {\n" +
-            "    const x: u8 = 0b00010000;\n" +
+            // A RUNTIME operand (a comptime-known `const` folds instead, as it does in zig).
+            "    var x: u8 = 0b00010000;\n" +
+            "    _ = &x;\n" +
             "    const lz = @clz(x);\n" +
             "    const tz = @ctz(x);\n" +
             "    var a = [_]u8{ 0, 0, 0 };\n" +
@@ -508,12 +522,17 @@ public sealed class ZigFrontendTests
     public void Lowers_byteSwap_and_abs_builtins()
     {
         // @byteSwap → ZigMath.ByteSwap<T> (same type); @abs → ZigMath.Abs128 cast to the operand's
-        // UNSIGNED peer (Zig's `@abs(iN)` → `uN`), so `@abs(i8)` → `(byte)…`, `@abs(i32)` → `(uint)…`.
+        // UNSIGNED peer (Zig's `@abs(iN)` → `uN`), so `@abs(i8)` → `(byte)…`, `@abs(i32)` → `(uint)…`. The operands are
+        // runtime values: a compile-time-known one folds to its magnitude (task #143).
         var cs = EmitZig(
             "pub fn main() u8 {\n" +
             "    const bs: u16 = @byteSwap(@as(u16, 0x0102));\n" +
-            "    const a1: u32 = @abs(@as(i8, -5));\n" +
-            "    const a2: u32 = @abs(@as(i32, -100));\n" +
+            "    var n8: i8 = -5;\n" +
+            "    _ = &n8;\n" +
+            "    var n32: i32 = -100;\n" +
+            "    _ = &n32;\n" +
+            "    const a1: u32 = @abs(n8);\n" +
+            "    const a2: u32 = @abs(n32);\n" +
             "    return @intCast((bs & 0xFF) + a1 + a2 - 100);\n" +
             "}\n");
         cs.ShouldContain("ZigMath.ByteSwap");
@@ -941,29 +960,73 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Rejects_a_bare_inline_while_without_a_continue_expr()
+    public void Unrolls_a_bare_inline_while_whose_body_advances_a_comptime_var()
     {
-        // Only the continue-expression form `inline while (c) : (i = …)` is unrolled in V1; a bare
-        // `inline while (c) body` (counter mutated in the body) is a clear deferred error.
-        var ex = Should.Throw<CompileException>(() => EmitZig(
+        // A bare `inline while (c) body` (road-to-zig-std G3, std.Io.Writer.print's outer loop): the body's
+        // assignment to the `comptime var` runs at lowering time, so the condition advances and the
+        // unrolling stops; the var's final value substitutes after the loop.
+        var cs = EmitZig(
             "pub fn main() u8 {\n" +
             "    comptime var i: u8 = 0;\n" +
             "    inline while (i < 3) { i = i + 1; }\n" +
-            "    return i + 39;\n}\n"));
-        ex.Message.ShouldContain("inline while");
+            "    return i + 39;\n}\n");
+        cs.ShouldContain("3 + 39");
     }
 
     [Fact]
-    public void Rejects_break_inside_an_inline_for()
+    public void Break_and_continue_inside_an_inline_for_jump_out_of_the_unrolled_copies()
     {
-        // A bare `break`/`continue` in an `inline for` body targets the loop, which unrolling removes —
-        // a clear deferred error, never a silent C# "break outside loop".
-        var ex = Should.Throw<CompileException>(() => EmitZig(
+        // Unrolling removes the loop, so a `break` jumps past the last copy and a `continue` to the end of
+        // its own copy (never a C# "break outside loop"). zig answers 43 (skip 0, sum 1, then break).
+        var cs = EmitZig(
             "pub fn main() u8 {\n" +
             "    var sum: u8 = 0;\n" +
-            "    inline for (0..3) |i| { sum += @intCast(i); if (sum > 0) break; }\n" +
-            "    return sum + 42;\n}\n"));
-        ex.Message.ShouldContain("inline for");
+            "    inline for (0..3) |i| { if (i == 0) continue; sum += @intCast(i); if (sum > 0) break; }\n" +
+            "    return sum + 42;\n}\n");
+        cs.ShouldMatch(@"goto __ifbrk\d+;");
+        cs.ShouldMatch(@"goto __ifbrk\d+_c0;");
+        cs.ShouldMatch(@"__ifbrk\d+:\s*\{\s*\}");
+    }
+
+    [Fact]
+    public void A_value_generic_whose_return_type_spells_its_comptime_param_binds_to_a_typed_array_local()
+    {
+        // std.mem.reverse's `const left_shuffled: [simd_size]T = reverseVector(simd_size, T, left_slice);`:
+        // the `[N]u8` return is lowered per instance (N is only known there), and the call's fresh copy
+        // initializes the typed array local. zig answers 61.
+        var cs = EmitZig(
+            "fn rev(comptime N: usize, a: []const u8) [N]u8 {\n" +
+            "    var res: [N]u8 = undefined;\n" +
+            "    inline for (0..N) |i| {\n" +
+            "        res[i] = a[N - i - 1];\n" +
+            "    }\n" +
+            "    return res;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const src = [_]u8{ 1, 2, 3, 4 };\n" +
+            "    const r: [4]u8 = rev(4, &src);\n" +
+            "    return r[0] * 10 + r[3];\n}\n");
+        cs.ShouldContain("internal static unsafe byte* rev__4(ConstSlice<byte> a)");
+        cs.ShouldContain("byte* r = rev__4(new ConstSlice<byte>(src, 4UL));");
+    }
+
+    [Fact]
+    public void A_comptime_if_break_in_an_inline_for_stops_the_unroll()
+    {
+        // zig analyses no iteration after a comptime-taken `break` (std.mem.findScalarPos relies on it to
+        // never form a `@Vector` of a width that does not exist), so later copies are not lowered at all.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    var n: u8 = 0;\n" +
+            "    inline for (0..4) |j| {\n" +
+            "        const w = 32 / (1 << j);\n" +
+            "        comptime if (w < 16) break;\n" +
+            "        n += w;\n" +
+            "    }\n" +
+            "    return n;\n}\n");
+        cs.ShouldContain("ulong j__2 = 2UL;");   // the copy whose `w` (8) takes the break
+        cs.ShouldNotContain("j__3");             // and no copy after it
+        cs.ShouldMatch(@"int w__2 = [^;]+;\s*goto __ifbrk\d+;");
     }
 
     [Fact]
@@ -997,17 +1060,17 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Rejects_inline_for_with_an_index_capture()
+    public void Unrolls_inline_for_with_an_index_capture()
     {
-        // The indexed `inline for (arr, 0..) |x, i|` and by-ref `|*x|` forms are deferred in V1 —
-        // a clear error, not a silent miscompile.
-        var ex = Should.Throw<CompileException>(() => EmitZig(
+        // The indexed `inline for (arr, 0..) |x, i|`, once a V1 cut, unrolls (task #108): each copy binds its element and
+        // its comptime index. zig returns 45.
+        var cs = EmitZig(
             "pub fn main() u8 {\n" +
             "    const items = [_]u32{ 1, 2, 3 };\n" +
             "    var sum: u32 = 0;\n" +
             "    inline for (items, 0..) |x, i| { sum += x + @as(u32, @intCast(i)); }\n" +
-            "    return @intCast(sum + 36);\n}\n"));
-        ex.Message.ShouldContain("inline");
+            "    return @intCast(sum + 36);\n}\n");
+        cs.ShouldContain("uint x__2 = items[2];");
     }
 
     [Fact]
@@ -1093,7 +1156,7 @@ public sealed class ZigFrontendTests
         var cs = EmitZig(
             "pub fn main() u8 {\n" +
             "    var x: u8 = 0;\n" +
-            "    if (3 > 2) { x = 42; } else { x = 1; }\n" +
+            "    if (x < 2) { x = 42; } else { x = 1; }\n" +   // a RUNTIME condition (`3 > 2` folds, as in zig)
             "    while (x > 100) { x = x + 1; }\n" +
             "    return x;\n}\n");
         cs.ShouldContain("if (Cond.B(");
@@ -1526,14 +1589,14 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Rejects_a_bare_enum_literal_without_a_sink()
+    public void Accepts_a_bare_enum_literal_const_without_a_sink()
     {
-        // A bare `.member` with no known result type can't pick an enum — real zig needs the
-        // result type. dotcc rejects rather than miscompiling (an untyped `const`).
-        var ex = Should.Throw<CompileException>(() => EmitZig(
+        // A bare `.member` with no result type is zig's comptime-only `@EnumLiteral()` (task #113): an untyped `const`
+        // of one is valid zig and lives only at compile time, so its declaration emits nothing. (This pin used to reject
+        // it, a cut zig itself does not make.)
+        Should.NotThrow(() => EmitZig(
             "const Color = enum { red, green };\n" +
             "pub fn main() u8 { const c = .red; _ = c; return 0; }\n"));
-        ex.Message.ShouldContain("result type");
     }
 
     [Fact]
@@ -2082,13 +2145,13 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Rejects_open_ended_slice_of_a_bare_pointer()
+    public void An_open_slice_of_a_c_pointer_is_a_pointer_without_a_len()
     {
-        // A `[*c]T` C-pointer has no length, so `p[lo..]` cannot infer a high bound —
-        // rejected with a clear error (matching Zig, which also forbids it).
+        // A `[*c]T` C-pointer has no length, so `p[lo..]` is the pointer advanced by `lo` (task #140), still a
+        // `[*c]T`: zig accepts the slice and rejects the `.len` ("type '[*c]u8' does not support field access").
         var ex = Should.Throw<CompileException>(() => EmitZig(
             "fn f(p: [*c]u8) usize { const s = p[1..]; return s.len; }\npub fn main() u8 { return 0; }\n"));
-        ex.Message.ShouldContain("open-ended slice");
+        ex.Message.ShouldContain("no field 'len'");
     }
 
     [Fact]
@@ -3104,15 +3167,15 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Rejects_std_mem_zeroes_of_an_array_type()
+    public void Rejects_std_mem_zeroes_of_a_slice_type()
     {
-        // An array `zeroes` would need a zeroed array VALUE; arrays lower to a pointer, so `default`
-        // is a null pointer — a clear cut, not a silent wrong value.
+        // An array's `zeroes` is a zeroed array value (task #162); a slice's would be a null slice, which is not
+        // modeled, so it stays a clear cut rather than a silent wrong value.
         var ex = Should.Throw<CompileException>(() => EmitZig(
             "const std = @import(\"std\");\n" +
-            "pub fn main() u8 { const z = std.mem.zeroes([4]u8); return z[0]; }\n"));
+            "pub fn main() u8 { const z = std.mem.zeroes([]const u8); return @intCast(z.len); }\n"));
         ex.Message.ShouldContain("zeroes");
-        ex.Message.ShouldContain("array");
+        ex.Message.ShouldContain("slice");
     }
 
     [Fact]
@@ -3368,13 +3431,13 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Rejects_a_block_bodied_switch_expression_prong()
+    public void Lowers_a_block_bodied_switch_expression_prong_that_returns()
     {
-        // A block-bodied prong in a switch EXPRESSION needs a labeled `break :blk v` (a later L
-        // increment); for now it's a clear error.
-        var ex = Should.Throw<CompileException>(() =>
-            EmitZig("pub fn main() u8 { const x: u8 = switch (1) { 1 => { return 2; }, else => 0 }; return x; }\n"));
-        ex.Message.ShouldContain("yield a value");
+        // A block prong in a switch EXPRESSION that never completes is `noreturn`, which zig accepts where a value is
+        // wanted (task #103); zig returns 2. A block that can complete is still rejected
+        // (ZigStdHelperShapesTests.A_value_switch_block_prong_that_can_complete_is_still_rejected).
+        var cs = EmitZig("pub fn main() u8 { const x: u8 = switch (1) { 1 => { return 2; }, else => 0 }; return x; }\n");
+        cs.ShouldContain("return 2;");
     }
 
     [Fact]
@@ -3479,11 +3542,16 @@ public sealed class ZigFrontendTests
     [Fact]
     public void Rejects_a_labeled_value_block_initializing_a_global()
     {
-        // A global needs a comptime value; a value-block initializes via runtime statements.
+        // A global's labeled-block initializer runs at compile time (task #79), so it may not read a runtime `var`: zig
+        // reports "unable to resolve comptime value", and dotcc rejects it too rather than leave `g` at its default.
         var ex = Should.Throw<CompileException>(() => EmitZig(
-            "const g: i32 = blk: { break :blk 5; };\n" +
+            "var r: i32 = 3;\n" +
+            "const g: i32 = blk: { break :blk r; };\n" +
             "pub fn main() u8 { return @as(u8, @intCast(g)); }\n"));
-        ex.Message.ShouldContain("comptime value");
+        ex.Message.ShouldContain("did not evaluate at compile time");
+        // A comptime-known block is its value.
+        EmitZig("const g: i32 = blk: { break :blk 5; };\n" +
+                "pub fn main() u8 { return @as(u8, @intCast(g)); }\n").ShouldContain("int g = 5;");
     }
 
     // ---- Milestone L (part 3): labeled loops + labeled break/continue ----
@@ -4011,7 +4079,8 @@ public sealed class ZigFrontendTests
         // hoist.)
         var cs = EmitZig(
             "pub fn main() u8 {\n" +
-            "    const c = true;\n" +
+            "    var c = true;\n" +
+            "    _ = &c;\n" +   // a RUNTIME condition: a comptime-known `const c` folds the if away
             "    const r: i32 = 1 + (if (c) @as(i32, 20) else @as(i32, 8));\n" +
             "    return @as(u8, @intCast(r));\n" +
             "}\n");
@@ -4033,7 +4102,7 @@ public sealed class ZigFrontendTests
             "    while (nextLT(&i, 9)) |v| { sum += v; }\n" +
             "    return @as(u8, @intCast(sum));\n" +
             "}\n");
-        cs.ShouldContain("while (Cond.B(true))");
+        cs.ShouldContain("while (true)");
         cs.ShouldContain("int? __cap = nextLT");
         cs.ShouldContain("Cond.B(__cap.HasValue)");
         cs.ShouldContain("int v = __cap.Value;");
@@ -4067,7 +4136,7 @@ public sealed class ZigFrontendTests
             "    while (p) |q| { _ = q; p = null; }\n" +
             "    return 0;\n" +
             "}\n");
-        cs.ShouldContain("while (Cond.B(true))");
+        cs.ShouldContain("while (true)");
         cs.ShouldContain("if (Cond.B(__cap))");
         cs.ShouldContain("int* q = __cap;");
     }
@@ -4085,7 +4154,7 @@ public sealed class ZigFrontendTests
             "    while (nextLT(&i, 3)) |v| { sum += v; } else { sum += 100; }\n" +
             "    return @as(u8, @intCast(sum));\n" +
             "}\n");
-        cs.ShouldContain("while (Cond.B(true))");
+        cs.ShouldContain("while (true)");
         cs.ShouldContain("int v = __cap.Value;");
         cs.ShouldContain("sum += 100");   // the else body runs on natural exit
         cs.ShouldContain("break;");
@@ -4104,9 +4173,10 @@ public sealed class ZigFrontendTests
             "    while (nextLT(&i, 4)) |v| : (cnt = cnt + 1) { sum += v; }\n" +
             "    return @as(u8, @intCast(sum + cnt));\n" +
             "}\n");
-        cs.ShouldContain("for (");            // the cont form lowers to a `for` (post = cont)
-        cs.ShouldContain("cnt = cnt + 1");    // the continue-expression as the for post
-        cs.ShouldContain("int v = __cap.Value;");
+        // The cont form lowers to a `for` (post = cont) whose INIT declares the capture, so the post may read it too
+        // (task #105); each turn assigns it.
+        cs.ShouldContain("for (int v = default(int); ; cnt = cnt + 1)");
+        cs.ShouldContain("v = __cap.Value;");
     }
 
     [Fact]
@@ -4304,9 +4374,11 @@ public sealed class ZigFrontendTests
         // clamp helper. Both operands are already `u8`, so C# infers `T = byte` with no casts.
         var cs = EmitZig(
             "pub fn main() u8 {\n" +
-            "    const a: u8 = 200;\n" +
-            "    const b: u8 = 100;\n" +
-            "    const c: u8 = a +| b;\n" + // 300 -> 255
+            "    var a: u8 = 200;\n" +
+            "    _ = &a;\n" +
+            "    var b: u8 = 100;\n" +
+            "    _ = &b;\n" +
+            "    const c: u8 = a +| b;\n" + // 300 -> 255 (runtime operands: comptime ones fold, task #108)
             "    return c;\n" +
             "}\n");
         cs.ShouldContain("ZigMath.SatAdd(a, b)");
@@ -4318,8 +4390,10 @@ public sealed class ZigFrontendTests
         // `*|` is multiplicative-precedence; routes through `ZigMath.SatMul<T>`.
         var cs = EmitZig(
             "pub fn main() u8 {\n" +
-            "    const a: u8 = 100;\n" +
-            "    const b: u8 = 100;\n" +
+            "    var a: u8 = 100;\n" +
+            "    _ = &a;\n" +
+            "    var b: u8 = 100;\n" +
+            "    _ = &b;\n" +
             "    const c: u8 = a *| b;\n" + // 10000 -> 255
             "    return c;\n" +
             "}\n");
@@ -4333,7 +4407,8 @@ public sealed class ZigFrontendTests
         // cast so C# infers `T = byte` (and the runtime clamps at the u8 range, not int).
         var cs = EmitZig(
             "pub fn main() u8 {\n" +
-            "    const a: u8 = 250;\n" +
+            "    var a: u8 = 250;\n" +
+            "    _ = &a;\n" +
             "    const c: u8 = a +| 5;\n" + // 255 (no saturation, but clamped at u8)
             "    return c;\n" +
             "}\n");
@@ -4346,8 +4421,10 @@ public sealed class ZigFrontendTests
         // Two `i32` operands need no peer casts — C# infers `T = int` directly.
         var cs = EmitZig(
             "pub fn main() u8 {\n" +
-            "    const a: i32 = 100;\n" +
-            "    const b: i32 = 200;\n" +
+            "    var a: i32 = 100;\n" +
+            "    _ = &a;\n" +
+            "    var b: i32 = 200;\n" +
+            "    _ = &b;\n" +
             "    const c: i32 = a +| b;\n" +
             "    return @as(u8, @intCast(c - 258));\n" +
             "}\n");
@@ -5182,18 +5259,23 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void A_non_undefined_array_field_in_a_struct_literal_is_rejected()
+    public void A_non_undefined_array_field_in_a_struct_literal_is_copied_in_after_the_literal()
     {
-        // The other half of the same rule: an array field with real contents would need element-wise
-        // stores into a pinned buffer, which an initializer EXPRESSION can't express. A loud cut
-        // naming the workaround — never a silent CS1666.
-        var ex = Should.Throw<CompileException>(() => EmitZig(
+        // The other half of the same rule: an array field with real contents can't be set by a C# object initializer,
+        // so in a body the literal is a hoisted temp whose array field is copied in after it (task #78).
+        var cs = EmitZig(
             "const B = struct { items: [4]u8, len: usize };\n" +
             "pub fn main() u8 {\n" +
             "    const b: B = .{ .items = [_]u8{ 1, 2, 3, 4 }, .len = 4 };\n" +
-            "    return @intCast(b.len);\n}\n"));
-        ex.Message.ShouldContain("'items' is an array");
-        ex.Message.ShouldContain("var v: B = undefined");
+            "    return @intCast(b.len + b.items[3]);\n}\n");
+        cs.ShouldContain("B __anf0 = new B { len = 4 };");
+        cs.ShouldContain("memcpy(__anf0.items, ");
+        // At module scope the same statements run in a synthesized initializer, never a silent CS1666.
+        EmitZig(
+            "const B = struct { items: [4]u8, len: usize };\n" +
+            "const g: B = .{ .items = [_]u8{ 1, 2, 3, 4 }, .len = 4 };\n" +
+            "pub fn main() u8 {\n" +
+            "    return @intCast(g.len);\n}\n").ShouldContain("B g = __init_g();");
     }
 
     // ---- @typeInfo — comptime reflection, folded at lowering time (road-to-zig-std S5) ----
@@ -5277,8 +5359,9 @@ public sealed class ZigFrontendTests
             "    };\n" +
             "}\n" +
             "pub fn main() u8 { return signBit(i32) + signBit(u32) + signBit(f32); }\n");
-        cs.ShouldContain("Cond.B(true) ? 1 : 0");    // i32 — signed
-        cs.ShouldContain("Cond.B(false) ? 1 : 0");   // u32 — unsigned
+        // The value `if` on the folded signedness selects its arm at lowering time (road-to-zig-std G3).
+        cs.ShouldMatch(@"byte signBit__i32\(\)\s*\{\s*return 1;");   // i32 — signed
+        cs.ShouldMatch(@"byte signBit__u32\(\)\s*\{\s*return 0;");   // u32 — unsigned
         cs.ShouldContain("return 9;");               // f32 — not an int at all
     }
 
@@ -5372,16 +5455,26 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Declared_int_width_is_still_a_loud_cut_through_anytype()
+    public void Declared_int_width_through_anytype_is_the_width_the_value_was_spelled_with()
     {
-        // What remains genuinely unknowable: an `anytype` param's type is INFERRED from a value, and
-        // `@TypeOf(x)` on a `u21` variable yields the widened `uint` — no spelling anywhere. Still a
-        // loud cut, and the message now names which case it is.
+        // An `anytype` param's type is inferred from a value, and `@TypeOf(x)` on a `u21` variable lowers to
+        // the widened `uint`; the WIDTH now rides the value (road-to-zig-std G3), so it is answered: 21.
+        var cs = EmitZig(
+            "fn bitsOfVal(a: anytype) u16 { return @typeInfo(@TypeOf(a)).int.bits; }\n" +
+            "pub fn main() u8 { const x: u21 = 1; return @intCast(bitsOfVal(x)); }\n");
+        cs.ShouldContain("return 21;");
+    }
+
+    [Fact]
+    public void Declared_int_width_through_anytype_is_a_loud_cut_when_the_value_has_no_spelling()
+    {
+        // A value with no spelled width anywhere (arithmetic over an untyped literal and a runtime value)
+        // still refuses rather than answer the widened width.
         var ex = Should.Throw<CompileException>(() => EmitZig(
             "fn bitsOfVal(a: anytype) u16 { return @typeInfo(@TypeOf(a)).int.bits; }\n" +
-            "pub fn main() u8 { const x: u21 = 1; return @intCast(bitsOfVal(x)); }\n"));
+            "fn get() u21 { return 1; }\n" +
+            "pub fn main() u8 { var y: u21 = 1; y += 0; return @intCast(bitsOfVal(y * get())); }\n"));
         ex.Message.ShouldContain("declared width is not known here");
-        ex.Message.ShouldContain("anytype");
     }
 
     [Fact]
@@ -5502,12 +5595,8 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void A_spelled_enum_tag_type_resolves_but_an_inferred_one_is_a_loud_cut()
+    public void A_spelled_or_inferred_enum_tag_type_resolves()
     {
-        // zig INFERS an untyped enum's tag type as the smallest unsigned int holding its largest
-        // member (`u2` for four members); dotcc defaults to `int`. Answering there would disagree on
-        // the width and on @sizeOf, so only a SPELLED tag is reported — the same shape of judgement
-        // `bits` makes about a declared width.
         var cs = EmitZig(
             "const E = enum(u8) { a, b };\n" +
             "pub fn main() u8 {\n" +
@@ -5516,14 +5605,17 @@ public sealed class ZigFrontendTests
             "    return t;\n}\n");
         UserCode(cs).ShouldContain("byte t = 42;");
 
-        var ex = Should.Throw<CompileException>(() => EmitZig(
+        // zig INFERS an untyped enum's tag type as the smallest unsigned int holding its largest
+        // member (`u2` for four members). Task #89 (std.enums.EnumIndexer) lifted the old loud cut:
+        // the tag type answers with that width for `bits`, carried in the smallest byte-multiple.
+        cs = EmitZig(
             "const E = enum { a, b, c, d };\n" +
             "pub fn main() u8 {\n" +
             "    const Tag = @typeInfo(E).@\"enum\".tag_type;\n" +
             "    const t: Tag = 3;\n" +
-            "    return t;\n}\n"));
-        ex.Message.ShouldContain("INFERRED");
-        ex.Message.ShouldContain("Spell the tag");
+            "    return @as(u8, @typeInfo(Tag).int.bits) * 10 + t;\n}\n");
+        UserCode(cs).ShouldContain("byte t = 3;");
+        UserCode(cs).ShouldContain("return (byte)((byte)2 * 10 + t);");
     }
 
     [Fact]
@@ -5544,8 +5636,13 @@ public sealed class ZigFrontendTests
             "    const d: u8 = if (@hasDecl(P, \"K\")) 1 else 0;\n" +
             "    const e: u8 = if (@hasDecl(P, \"nope\")) 1 else 0;\n" +
             "    return a + b + c + d + e;\n}\n");
-        UserCode(cs).ShouldContain("Cond.B(true)");
-        UserCode(cs).ShouldContain("Cond.B(false)");
+        // The membership question settles the `if` at lowering time: only the taken arm lowers.
+        var user = UserCode(cs);
+        user.ShouldContain("byte a = 1;");
+        user.ShouldContain("byte b = 0;");
+        user.ShouldContain("byte c = 1;");
+        user.ShouldContain("byte d = 1;");
+        user.ShouldContain("byte e = 0;");
     }
 
     [Fact]
@@ -5569,7 +5666,8 @@ public sealed class ZigFrontendTests
             "const P = struct { x: i32 };\n" +
             "fn take(n: u8) u8 { return n; }\n" +
             "pub fn main() u8 { return take(@typeInfo(P).@\"struct\".field_names); }\n"));
-        ex.Message.ShouldContain("comptime member LIST");
+        // `field_names` is a value now (task #93), so this is zig's own type error, not a missing representation.
+        ex.Message.ShouldContain("expected type");
     }
 
     [Fact]
@@ -5602,13 +5700,26 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Pointer_size_is_a_loud_cut_because_dotcc_collapses_pointer_kinds()
+    public void Pointer_size_is_a_loud_cut_where_no_spelling_gives_the_class()
     {
-        // `*T`, `[*]T` and `[*c]T` all lower to one C pointer, so the pointer SIZE class genuinely is
-        // not recoverable — cut rather than guessed at `.one`.
+        // `*T`, `[*]T` and `[*c]T` all lower to one C pointer, so where nothing SPELLED the class (a struct field read
+        // through `@TypeOf`) it is not recoverable: cut rather than guessed at `.one`. zig returns 98.
         var ex = Should.Throw<CompileException>(() => EmitZig(
-            "pub fn main() u8 { const s = @typeInfo(*u8).pointer.size; return if (s == .one) 42 else 0; }\n"));
+            "const H = struct { p: [*]const u8 };\n" +
+            "pub fn main() u8 {\n" +
+            "    const h = H{ .p = \"abc\" };\n" +
+            "    const s = @typeInfo(@TypeOf(h.p)).pointer.size;\n" +
+            "    return if (s == .many) h.p[1] else 0;\n" +
+            "}\n"));
         ex.Message.ShouldContain("pointer SIZE class");
+    }
+
+    [Fact]
+    public void Pointer_size_spelled_by_the_type_binds_as_a_comptime_tag()
+    {
+        // Task #150: `*u8` spells `.one`, so `const s = …pointer.size;` binds the tag and `s == .one` folds. zig returns 42.
+        var cs = EmitZig("pub fn main() u8 { const s = @typeInfo(*u8).pointer.size; return if (s == .one) 42 else 0; }\n");
+        cs.ShouldContain("return 42;");
     }
 
     [Fact]
@@ -5731,8 +5842,9 @@ public sealed class ZigFrontendTests
             "    inline for (@typeInfo(P).@\"struct\".field_names) |f| { if (@hasField(P, f)) { n += 1; } }\n" +
             "    return n;\n" +
             "}\n");
-        UserCode(cs).ShouldContain("Cond.B(true)");
-        UserCode(cs).ShouldNotContain("Cond.B(false)");
+        // Each copy's `@hasField(P, f)` settles to true, so both increments lower with no runtime test.
+        System.Text.RegularExpressions.Regex.Matches(UserCode(cs), @"n \+= \(byte\)\(1\);").Count.ShouldBe(2);
+        UserCode(cs).ShouldNotContain("Cond.B(");
     }
 
     [Fact]
@@ -5755,14 +5867,14 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void A_plain_for_over_a_member_list_says_to_use_inline_for()
+    public void A_plain_for_walks_field_names_at_runtime()
     {
-        // A member list has no runtime representation, so a runtime `for` cannot walk one — and the
-        // error names the construct that can.
-        var ex = Should.Throw<CompileException>(() => EmitZig(
+        // `field_names` is comptime memory a runtime slice may point into (task #93: a pinned array of string slices),
+        // so a plain `for` walks it, as zig does (this program returns 2 there).
+        var cs = EmitZig(
             "const P = struct { x: i32, y: i32 };\n" +
-            "pub fn main() u8 { for (@typeInfo(P).@\"struct\".field_names) |n| { _ = n; } return 0; }\n"));
-        ex.Message.ShouldContain("inline for");
+            "pub fn main() u8 { var t: usize = 0; for (@typeInfo(P).@\"struct\".field_names) |n| { t += n.len; } return @intCast(t); }\n");
+        cs.ShouldContain("new ConstSlice<byte>(Libc.L(\"x\\0\"u8), 1UL), new ConstSlice<byte>(Libc.L(\"y\\0\"u8), 1UL)");
     }
 
     [Fact]
@@ -5781,7 +5893,7 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void A_parallel_inline_for_needs_both_operands_to_be_comptime_lists()
+    public void A_parallel_inline_for_needs_every_operand_to_be_a_comptime_list()
     {
         var ex = Should.Throw<CompileException>(() => EmitZig(
             "const P = struct { x: i32, y: i32 };\n" +
@@ -5790,7 +5902,7 @@ public sealed class ZigFrontendTests
             "    inline for (@typeInfo(P).@\"struct\".field_names, a) |n, v| { _ = n; _ = v; }\n" +
             "    return 0;\n" +
             "}\n"));
-        ex.Message.ShouldContain("BOTH to be comptime lists");
+        ex.Message.ShouldContain("requires every operand to be a comptime list");
     }
 
     [Fact]
@@ -5806,30 +5918,15 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Break_inside_an_unrolled_comptime_for_is_rejected()
+    public void Break_inside_an_unrolled_comptime_for_ends_it_after_one_copy()
     {
-        var ex = Should.Throw<CompileException>(() => EmitZig(
+        var cs = EmitZig(
             "const P = struct { x: i32, y: i32 };\n" +
             "pub fn main() u8 {\n" +
             "    inline for (@typeInfo(P).@\"struct\".field_names) |n| { _ = n; break; }\n" +
             "    return 0;\n" +
-            "}\n"));
-        ex.Message.ShouldContain("no enclosing loop to target");
-    }
-
-    [Fact]
-    public void A_runtime_parallel_for_over_two_slices_is_a_named_cut()
-    {
-        // The grammar accepts `for (a, b) |x, y|`; only the comptime form is lowered, and the error
-        // says which.
-        var ex = Should.Throw<CompileException>(() => EmitZig(
-            "pub fn main() u8 {\n" +
-            "    var a = [_]u8{ 1, 2 };\n" +
-            "    var b = [_]u8{ 3, 4 };\n" +
-            "    for (a, b) |x, y| { _ = x; _ = y; }\n" +
-            "    return 0;\n" +
-            "}\n"));
-        ex.Message.ShouldContain("runtime lockstep walk");
+            "}\n");
+        System.Text.RegularExpressions.Regex.Matches(cs, @"goto __ifbrk\d+;").Count.ShouldBe(1);
     }
 
     // ---- reification builtins + `@compileError` (road-to-zig-std S7) ----
@@ -6055,23 +6152,27 @@ public sealed class ZigFrontendTests
     [Fact]
     public void The_aggregate_reification_builtins_are_named_cuts()
     {
-        // `@Struct`/`@Union`/`@Enum`/`@Pointer` take comptime AGGREGATE arguments; the cut says so
-        // rather than half-reifying a layout.
+        // `@Union`/`@Enum`/`@Pointer` take comptime AGGREGATE arguments; the cut says so rather than half-reifying a
+        // layout. `@Struct` is modeled as a type-returning function's result (task #93), which names it; a bare
+        // `const S = @Struct(…)` has no instance to be named after.
         var ex = Should.Throw<CompileException>(() => EmitZig(
             "const S = @Struct(.auto, null, &.{\"a\"}, &.{u8}, &.{.{}});\n" +
             "pub fn main() u8 { var s: S = undefined; _ = s; return 0; }\n"));
-        ex.Message.ShouldContain("comptime AGGREGATE arguments");
+        ex.Message.ShouldContain("has no name to take");
+        var union = Should.Throw<CompileException>(() => EmitZig(
+            "const U = @Union(.auto, null, &.{\"a\"}, &.{u8}, &.{.{}});\n" +
+            "pub fn main() u8 { var u: U = undefined; _ = u; return 0; }\n"));
+        union.Message.ShouldContain("comptime AGGREGATE arguments");
     }
 
     [Fact]
-    public void A_vector_type_is_a_named_cut_for_being_SIMD()
+    public void A_vector_width_dotnet_has_no_vector_type_for_is_a_named_cut()
     {
-        // 475 uses, and none of them are a reflection gap — it is a whole execution model dotcc's
-        // scalar backend does not have. Named separately so it does not read as "S7 is unfinished".
+        // `@Vector(N, T)` lowers to .NET's Vector64/128/256/512 (target T5), so its lanes must fill one of them.
         var ex = Should.Throw<CompileException>(() => EmitZig(
-            "const V = @Vector(4, u8);\n" +
+            "const V = @Vector(3, u8);\n" +
             "pub fn main() u8 { var v: V = undefined; _ = v; return 0; }\n"));
-        ex.Message.ShouldContain("SIMD");
+        ex.Message.ShouldContain("Vector64/128/256/512");
     }
 
     [Fact]
@@ -6230,7 +6331,7 @@ public sealed class ZigFrontendTests
         // It is a description, not a library: nothing in it should reach the emitted program.
         var cs = EmitZig(
             "const builtin = @import(\"builtin\");\n" +
-            "pub fn main() u8 { return @intCast(@intFromBool(builtin.link_libc) * 42); }\n");
+            "pub fn main() u8 { return @intCast(@as(u8, @intFromBool(builtin.link_libc)) * 42); }\n");
         UserCode(cs).ShouldNotContain("link_libc");
         UserCode(cs).ShouldNotContain("zig_backend");
         UserCode(cs).ShouldNotContain("stage2_llvm");

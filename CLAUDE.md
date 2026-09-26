@@ -83,7 +83,7 @@ Load-bearing rules:
 - **Unit (`DotCC.Tests`)**: emit pins — compile inline sources, assert on the emitted string.
 - **Functional (`DotCC.FunctionalTests`)**: a fixture = a folder under `Fixtures/` with sources + `expected-stdout.txt`; dotcc → Roslyn compile in-process → invoke with console redirected → compare. Adding a fixture is just dropping a folder.
 - **Differential oracles are opt-in env-gated** (MSVC, gcc-in-WSL, zig, native shared-lib round-trip); the committed sidecar IS the cached reference output. **`Process.Start` is confined to oracle modes** — never on the always-on path.
-- After a `.lalr.yaml` edit, FULL-build before testing (a stale generated parse table makes a correct grammar change look broken). Run suites serially, never two test processes in parallel.
+- After a `.lalr.yaml` edit, FULL-build before testing (a stale generated parse table makes a correct grammar change look broken). Run suites serially, never two `dotnet test` / build processes in parallel; the functional suite may instead run sharded across several hosts of its prebuilt exe (`Scripts/run-functional-sharded.sh`, see [`docs/testing.md`](docs/testing.md)).
 
 ## Conventions to respect
 

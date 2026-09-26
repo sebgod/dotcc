@@ -47,13 +47,12 @@ public unsafe struct AllocatorVTable
     public delegate*<void*, ulong, Alignment, ulong, byte*> alloc;
 
     /// <summary>In-place resize: <c>(ctx, memory: []u8, alignment, new_len, ret_addr) → bool</c>.
-    /// Stored for shape-fidelity (so a custom vtable matches real zig); dotcc's own <c>realloc</c>
-    /// emulates via alloc+copy+free, and <c>a.resize</c>/<c>a.remap</c> are deferred, so this is
-    /// never invoked by dotcc-lowered code today.</summary>
+    /// dotcc's own <c>realloc</c> emulates via alloc+copy+free; std code reaches this through
+    /// <c>a.rawResize</c> (<see cref="ZigAlloc.RawResize"/>) and <c>a.resize</c>.</summary>
     public delegate*<void*, Slice<byte>, Alignment, ulong, ulong, CBool> resize;
 
     /// <summary>Resize-possibly-moving: <c>(ctx, memory: []u8, alignment, new_len, ret_addr) → ?[*]u8</c>.
-    /// Stored for shape-fidelity; not invoked by dotcc dispatch (see <see cref="resize"/>).</summary>
+    /// Reached through <c>a.rawRemap</c> (<see cref="ZigAlloc.RawRemap"/>, std.Io.Writer.Allocating) and <c>a.remap</c>.</summary>
     public delegate*<void*, Slice<byte>, Alignment, ulong, ulong, byte*> remap;
 
     /// <summary>Raw free: <c>(ctx, memory: []u8, alignment, ret_addr) → void</c>.</summary>
@@ -78,6 +77,22 @@ public readonly struct Alignment
 
     /// <summary>Zig's <c>Alignment.toByteUnits()</c> — the alignment in bytes.</summary>
     public ulong toByteUnits() => _bytes;
+
+    /// <summary>Zig's <c>Alignment.fromByteUnits(n)</c> — the alignment of <paramref name="bytes"/> bytes (a
+    /// power of two), as std's hash_map spells its buffer alignment (<c>comptime .fromByteUnits(…)</c>).</summary>
+    public static Alignment fromByteUnits(ulong bytes) => new(bytes);
+
+    /// <summary><c>a.toByteUnits()</c> called on a curated <c>std.mem.Alignment</c> value (emitted statically).</summary>
+    public static ulong ToByteUnits(Alignment a) => a._bytes;
+
+    /// <summary><c>a.forward(address)</c> — <paramref name="address"/> rounded UP to the alignment.</summary>
+    public static ulong Forward(Alignment a, ulong address) => (address + a._bytes - 1) & ~(a._bytes - 1);
+
+    /// <summary><c>a.backward(address)</c> — <paramref name="address"/> rounded DOWN to the alignment.</summary>
+    public static ulong Backward(Alignment a, ulong address) => address & ~(a._bytes - 1);
+
+    /// <summary><c>a.check(address)</c> — whether <paramref name="address"/> is aligned.</summary>
+    public static bool Check(Alignment a, ulong address) => (address & (a._bytes - 1)) == 0;
 }
 
 /// <summary>
@@ -113,6 +128,12 @@ public unsafe struct Allocator
     /// <see cref="Alloc{T}"/>, passing the byte-length <c>[]u8</c> back to the raw free (Zig
     /// allocators take the size at free time).</summary>
     public void Free<T>(Slice<T> s) where T : unmanaged
+        => Vtable.free(Ctx, new Slice<byte>((byte*)s.Ptr, s.Len * (ulong)sizeof(T)), AlignOf<T>(), 0);
+
+    /// <summary><c>a.free(slice)</c> of a <c>[]const T</c> (std.StaticStringMap.deinit's
+    /// <c>allocator.free(self.len_indexes[0..self.len_indexes_len])</c>): zig's <c>free</c> takes any
+    /// slice, const or not, as the memory it gives back.</summary>
+    public void Free<T>(ConstSlice<T> s) where T : unmanaged
         => Vtable.free(Ctx, new Slice<byte>((byte*)s.Ptr, s.Len * (ulong)sizeof(T)), AlignOf<T>(), 0);
 
     /// <summary>The byte alignment dotcc passes for an element type <typeparamref name="T"/>.
@@ -317,6 +338,63 @@ public static unsafe class ZigAlloc
     /// <see cref="Libc.free"/>.</summary>
     public static void FreeCHeap<T>(Slice<T> s) where T : unmanaged => Libc.free(s.Ptr);
 
+    /// <summary><c>a.rawAlloc(len, alignment, ret_addr)</c>: the vtable's byte-level alloc, null on failure
+    /// (std.Io.Writer.Allocating grows its buffer this way).</summary>
+    public static byte* RawAlloc(Allocator a, ulong len, Alignment alignment, ulong retAddr)
+        => a.Vtable.alloc(a.Ctx, len, alignment, retAddr);
+
+    /// <summary><c>a.rawResize(memory, alignment, new_len, ret_addr)</c>: whether the block resized in place.</summary>
+    public static CBool RawResize(Allocator a, Slice<byte> memory, Alignment alignment, ulong newLen, ulong retAddr)
+        => a.Vtable.resize(a.Ctx, memory, alignment, newLen, retAddr);
+
+    /// <summary><c>a.rawRemap(memory, alignment, new_len, ret_addr)</c>: the possibly-moved block, null when it could not.</summary>
+    public static byte* RawRemap(Allocator a, Slice<byte> memory, Alignment alignment, ulong newLen, ulong retAddr)
+        => a.Vtable.remap(a.Ctx, memory, alignment, newLen, retAddr);
+
+    /// <summary><c>a.rawFree(memory, alignment, ret_addr)</c>: the vtable's byte-level free.</summary>
+    public static void RawFree(Allocator a, Slice<byte> memory, Alignment alignment, ulong retAddr)
+        => a.Vtable.free(a.Ctx, memory, alignment, retAddr);
+
+    /// <summary><c>allocator.dupe(T, m)</c>: allocate <c>m.len</c> elements through <paramref name="a"/> and copy
+    /// <paramref name="src"/> into them. Returns the copy, or the error code <paramref name="oom"/> when the
+    /// allocation fails.</summary>
+    public static ErrUnion<Slice<T>> Dupe<T>(Allocator a, ConstSlice<T> src, ushort oom) where T : unmanaged
+    {
+        var fresh = a.Alloc<T>(src.Len, oom);
+        if (!fresh.IsErr && src.Len > 0)
+        {
+            ulong bytes = src.Len * (ulong)sizeof(T);
+            Buffer.MemoryCopy(src.Ptr, fresh.Value.Ptr, bytes, bytes);
+        }
+        return fresh;
+    }
+
+    /// <summary><c>a.dupeSentinel(T, m, s)</c> → <c>Error![:s]T</c>: a copy of <paramref name="src"/> with
+    /// <paramref name="sentinel"/> stored one past its end, so the allocation holds <c>len + 1</c> elements and the
+    /// returned slice the <c>len</c> before the sentinel (zig's <c>[:s]T</c> layout).</summary>
+    public static ErrUnion<Slice<T>> DupeSentinel<T>(Allocator a, ConstSlice<T> src, T sentinel, ushort oom) where T : unmanaged
+    {
+        var fresh = a.Alloc<T>(src.Len + 1, oom);
+        if (fresh.IsErr) { return fresh; }
+        if (src.Len > 0)
+        {
+            ulong bytes = src.Len * (ulong)sizeof(T);
+            Buffer.MemoryCopy(src.Ptr, fresh.Value.Ptr, bytes, bytes);
+        }
+        fresh.Value.Ptr[src.Len] = sentinel;
+        return ErrUnion<Slice<T>>.Ok(new Slice<T>(fresh.Value.Ptr, src.Len));
+    }
+
+    /// <summary><c>a.allocSentinel(T, n, s)</c> → <c>Error![:s]T</c>: <c>n + 1</c> elements with
+    /// <paramref name="sentinel"/> at index <paramref name="n"/>, returned as the <c>n</c>-long slice before it.</summary>
+    public static ErrUnion<Slice<T>> AllocSentinel<T>(Allocator a, ulong n, T sentinel, ushort oom) where T : unmanaged
+    {
+        var fresh = a.Alloc<T>(n + 1, oom);
+        if (fresh.IsErr) { return fresh; }
+        fresh.Value.Ptr[n] = sentinel;
+        return ErrUnion<Slice<T>>.Ok(new Slice<T>(fresh.Value.Ptr, n));
+    }
+
     /// <summary>The <b>devirtualized</b> <c>page_allocator.create(T)</c> — a direct
     /// <see cref="Libc.malloc"/> of <c>sizeof(T)</c> bytes, no vtable. The address is carried as a
     /// <c>nuint</c> (see <see cref="Allocator.Create{T}"/> for why).</summary>
@@ -498,25 +576,35 @@ public static unsafe class ZigAlloc
     /// 16-aligned (malloc returns ≥16-aligned), so every handed-out pointer is 16-aligned.</summary>
     internal const int ArenaHeaderBytes = 32;
 
-    /// <summary>The default usable capacity of a freshly-grown arena chunk (a larger request grows a
-    /// chunk sized to fit it instead).</summary>
-    private const nuint ArenaDefaultChunk = 4096;
-
-    /// <summary>Raw arena allocation — bump within the current chunk, growing a new one from the
-    /// backing allocator when the request doesn't fit. Requests are 16-byte-aligned so mixed-type
-    /// allocations stay aligned. Returns null only when the backing allocator is exhausted.</summary>
+    /// <summary>Raw arena allocation — bump within the current chunk, growing when the request doesn't fit the way zig's
+    /// ArenaAllocator does: first the current chunk IN PLACE through the backing allocator's resize (a FixedBufferAllocator
+    /// grows its last allocation), else a new chunk sized from what is needed, <c>alignForward(big + big / 2, 2)</c> with
+    /// <c>big = previous chunk + header + request + 16</c>. A fixed 4 KiB first chunk had failed with OutOfMemory over a
+    /// 1 KiB buffer zig's arena fits in. Requests are 16-byte-aligned so mixed-type allocations stay aligned. Returns null
+    /// only when the backing allocator is exhausted.</summary>
     private static byte* ArenaAlloc(void* ctx, ulong len, Alignment alignment, ulong retAddr)
     {
         var self = (ArenaAllocator*)ctx;
         nuint need = ((nuint)len + 15) & ~(nuint)15;   // round up to a 16-byte multiple
+        if (self->Current is var current && current != null && current->Used + need > current->Cap)
+        {
+            nuint grown = current->Used + need;
+            var held = new Slice<byte>((byte*)current, (ulong)((nuint)ArenaHeaderBytes + current->Cap));
+            if ((int)self->Backing.Vtable.resize(self->Backing.Ctx, held, alignment, (ulong)((nuint)ArenaHeaderBytes + grown), 0) != 0)
+            {
+                current->Cap = grown;
+            }
+        }
         if (self->Current == null || self->Current->Used + need > self->Current->Cap)
         {
-            nuint cap = need > ArenaDefaultChunk ? need : ArenaDefaultChunk;
-            byte* raw = self->Backing.Vtable.alloc(self->Backing.Ctx, (ulong)((nuint)ArenaHeaderBytes + cap), alignment, 0);
+            nuint previous = self->Current == null ? 0 : (nuint)ArenaHeaderBytes + self->Current->Cap;
+            nuint big = previous + (nuint)ArenaHeaderBytes + need + 16;
+            nuint total = (big + big / 2 + 1) & ~(nuint)1;
+            byte* raw = self->Backing.Vtable.alloc(self->Backing.Ctx, (ulong)total, alignment, 0);
             if (raw == null) { return null; }
             var ch = (ArenaChunk*)raw;
             ch->Prev = self->Current;
-            ch->Cap = cap;
+            ch->Cap = total - (nuint)ArenaHeaderBytes;
             ch->Used = 0;
             self->Current = ch;
         }

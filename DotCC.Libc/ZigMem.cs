@@ -42,6 +42,23 @@ public static class ZigMem
         for (ulong i = 0; i < source.Len; i++) { d[i] = s[i]; }
     }
 
+    /// <summary><c>@memmove(dest, source)</c> — copy <c>source.len</c> elements into <c>dest</c> where the two
+    /// may OVERLAP (array_list's in-place shifts): the direction is chosen so every element is read before it
+    /// is overwritten, as C's <c>memmove</c>.</summary>
+    public static unsafe void Move<T>(Slice<T> dest, ConstSlice<T> source) where T : unmanaged
+    {
+        T* d = dest.Ptr;
+        T* s = source.Ptr;
+        if (d <= s)
+        {
+            for (ulong i = 0; i < source.Len; i++) { d[i] = s[i]; }
+        }
+        else
+        {
+            for (ulong i = source.Len; i > 0; i--) { d[i - 1] = s[i - 1]; }
+        }
+    }
+
     /// <summary><c>@memset(dest, value)</c> — set every element of <c>dest</c> to
     /// <paramref name="value"/>.</summary>
     public static unsafe void Set<T>(Slice<T> dest, T value) where T : unmanaged
@@ -63,6 +80,43 @@ public static class ZigMem
         return new ConstSlice<T>(p, n);
     }
 
+    /// <summary><c>std.mem.sliceTo(s, end)</c> over a const slice (or an array / string literal viewed as one): the
+    /// elements before the first one equal to <paramref name="end"/>, or all of them when none is (task #127).</summary>
+    public static unsafe ConstSlice<T> SliceTo<T>(ConstSlice<T> s, T end) where T : unmanaged
+    {
+        ulong n = 0;
+        while (n < s.Len && !SameElem(s.Ptr + n, &end)) { n++; }
+        return new ConstSlice<T>(s.Ptr, n);
+    }
+
+    /// <summary><c>std.mem.sliceTo(s, end)</c> over a mutable slice: the same prefix, still mutable, as zig preserves
+    /// the pointer's constness.</summary>
+    public static unsafe Slice<T> SliceTo<T>(Slice<T> s, T end) where T : unmanaged
+    {
+        ulong n = 0;
+        while (n < s.Len && !SameElem(s.Ptr + n, &end)) { n++; }
+        return new Slice<T>(s.Ptr, n);
+    }
+
+    /// <summary><c>std.mem.sliceTo(p, end)</c> over a many-item pointer (<c>[*:end]T</c> / <c>[*c]T</c>): unbounded, the
+    /// elements before the first one equal to <paramref name="end"/>, which zig takes as the pointer's sentinel.</summary>
+    public static unsafe ConstSlice<T> SliceToSentinel<T>(T* p, T end) where T : unmanaged
+    {
+        ulong n = 0;
+        while (!SameElem(p + n, &end)) { n++; }
+        return new ConstSlice<T>(p, n);
+    }
+
+    /// <summary>Byte-wise equality of two elements, AOT-clean for any unmanaged type (no equality constraint), as
+    /// <see cref="IsZeroElem{T}"/> is for the zero sentinel.</summary>
+    private static unsafe bool SameElem<T>(T* a, T* b) where T : unmanaged
+    {
+        byte* x = (byte*)a;
+        byte* y = (byte*)b;
+        for (int k = 0; k < sizeof(T); k++) { if (x[k] != y[k]) { return false; } }
+        return true;
+    }
+
     /// <summary>True when the element at <paramref name="p"/> is all-zero bytes — the sentinel test
     /// for <see cref="SpanZ{T}"/>. Byte-wise so it is AOT-clean and works for any unmanaged
     /// element type without an equality constraint.</summary>
@@ -72,4 +126,12 @@ public static class ZigMem
         for (int k = 0; k < sizeof(T); k++) { if (b[k] != 0) { return false; } }
         return true;
     }
+
+    /// <summary>The payload of a value optional, IN PLACE: zig's by-ref capture <c>if (opt) |*v|</c> (std.enums.EnumMap)
+    /// points <c>v</c> at the optional's own payload, so a write through <c>v</c> changes the optional and a later write to
+    /// the optional is seen through <c>v</c>. <see cref="System.Nullable.GetValueRefOrDefaultRef{T}"/> is the BCL's ref to
+    /// that field (no layout assumption); the caller has already tested <c>HasValue</c>.</summary>
+    public static unsafe T* OptionalPayload<T>(T?* optional) where T : unmanaged
+        => (T*)System.Runtime.CompilerServices.Unsafe.AsPointer(
+            ref System.Runtime.CompilerServices.Unsafe.AsRef(in System.Nullable.GetValueRefOrDefaultRef(in *optional)));
 }

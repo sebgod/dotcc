@@ -30,6 +30,77 @@ internal sealed partial class ZigLowering
         public void Dispose() => _owner._currentContainer = _saved;
     }
 
+    /// <summary>Restores what <see cref="EnterReifiedSeeds"/> installed: the type aliases its type seeds
+    /// shadowed (with their declared widths and pointer size classes), and the symbol scope its value / optional
+    /// seeds were declared in.</summary>
+    private readonly ref struct ReifiedSeedScope
+    {
+        private readonly ZigLowering? _owner;
+        private readonly List<(string Name, CType? Prev, int? PrevBits, string? PrevPtrSize)>? _shadows;
+
+        internal ReifiedSeedScope(ZigLowering? owner, List<(string Name, CType? Prev, int? PrevBits, string? PrevPtrSize)>? shadows)
+        {
+            _owner = owner;
+            _shadows = shadows;
+        }
+
+        public void Dispose()
+        {
+            if (_owner is not { } o || _shadows is not { } sh) { return; }
+            for (var i = sh.Count - 1; i >= 0; i--)
+            {
+                var (name, prev, prevBits, prevPtrSize) = sh[i];
+                if (prev is { } p) { o._typeAliases[name] = p; } else { o._typeAliases.Remove(name); }
+                o.SetDeclaredIntBits(name, prevBits);
+                o.SetDeclaredPtrSize(name, prevPtrSize);
+            }
+            o._symbols.ExitScope();
+        }
+    }
+
+    /// <summary>Re-install the comptime seeds a REIFIED container was instantiated with (road-to-zig-std
+    /// G4/G5), around lowering one of its members lazily: a field default materialized in a struct
+    /// literal, or a <c>Type.NAME</c> const. Both are stored raw and lowered at the USE site, where the
+    /// instantiation's <c>T</c> / <c>cap</c> / <c>n</c> are otherwise out of scope (the method-body drain
+    /// re-applies them the same way). A container nested in an instance (std.crypto.sha3's `pub const Options = struct
+    /// { delim: u8 = default_delim };` in Keccak, task #161) sees its nearest reified ancestor's seeds, as zig's lexical
+    /// scoping gives them. A no-op for any other container.</summary>
+    private ReifiedSeedScope EnterReifiedSeeds(string container)
+    {
+        if (ReifiedAncestor(container) is not { } seedsKey || !_reifiedSeeds.TryGetValue(seedsKey, out var seeds))
+        {
+            return new ReifiedSeedScope(null, null);
+        }
+        _symbols.EnterScope();
+        var shadows = new List<(string Name, CType? Prev, int? PrevBits, string? PrevPtrSize)>();
+        foreach (var seed in seeds.Types)
+        {
+            shadows.Add((seed.Name,
+                         _typeAliases.TryGetValue(seed.Name, out var prev) ? prev : (CType?)null,
+                         _declaredIntBits.TryGetValue(seed.Name, out var pb) ? pb : (int?)null,
+                         _declaredPtrSize.GetValueOrDefault(seed.Name)));
+            _typeAliases[seed.Name] = seed.Type;
+            SetDeclaredIntBits(seed.Name, seed.DeclaredBits);
+            // A pointer seed's size class (`Rev([*]const u8)` reads `.many`, task #150); a seed without one clears it.
+            SetDeclaredPtrSize(seed.Name, seed.PointerSize);
+        }
+        foreach (var seed in seeds.Values) { DeclareValueSeed(seed); }
+        foreach (var (name, hasValue, value, inner) in seeds.Optionals)
+        {
+            var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = new CType.Optional(inner) });
+            _comptimeOptionalVars[sym] = (hasValue, value, inner);
+        }
+        if (_reifiedAggregateSeeds.TryGetValue(seedsKey, out var aggregates))
+        {
+            foreach (var (name, value, type) in aggregates)
+            {
+                var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = type });
+                _ir.ComptimeGlobals[sym] = value;
+            }
+        }
+        return new ReifiedSeedScope(this, shadows);
+    }
+
     /// <summary>Make <paramref name="container"/> the current container until the returned guard is
     /// disposed — the scope <c>@This()</c>, a <c>Self</c> alias, a nested type name and a sibling method
     /// resolve in.</summary>

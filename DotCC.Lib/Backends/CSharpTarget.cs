@@ -30,11 +30,19 @@ internal sealed class CSharpTarget : ITarget
         // `CallConvCdecl` modifier resolves without a using. Default (managed) is
         // unchanged — `&fn` of dotcc's own methods stays a managed delegate*.
         CType.Func f => (f.IsNativeCallConv ? "delegate* unmanaged[Cdecl]<" : "delegate*<")
-            + string.Join(", ", f.Params.Select(RenderType).Append(RenderType(f.Return))) + ">",
+            + string.Join(", ", f.Params.Where(p => !CSharpBackend.IsVoidParam(p)).Select(RenderType).Append(RenderType(f.Return))) + ">",
         CType.Named n => n.Name,
         CType.Enum e => e.Name,
+        // A Zig SIMD vector: a bool one is its lane bitmask, a numeric one .NET's vector of its width.
+        CType.Vector { IsMask: true } => "ulong",
+        CType.Vector v => "System.Runtime.Intrinsics." + (v.NetFamily
+            ?? throw new IrUnsupportedException($"zig {v.Describe()}: {v.Bits} bits has no .NET vector type (64 / 128 / 256 / 512)"))
+            + "<" + RenderType(v.Element) + ">",
         CType.ComplexType => "System.Numerics.Complex",
         CType.Float128Type => "Float128",
+        // A Zig optional ARRAY `?[N]T` (std.crypto.blake3's `Options.key: ?[key_length]u8`, task #151): an array lowers to
+        // a pointer and `T*?` is no C# type, so it is a generated value type with Nullable's surface (OptionalArrayTypesText).
+        CType.Optional { Inner.Unqualified: CType.Array optionalArray } => OptionalArrayName(optionalArray),
         // A Zig value optional `?T` → C# Nullable<T> (`T?`): null = none, `.?` = .Value,
         // `orelse` = `??`. (An optional POINTER `?*T` is a bare nullable `T*`, never this.)
         CType.Optional o => RenderType(o.Inner) + "?",
@@ -53,7 +61,7 @@ internal sealed class CSharpTarget : ITarget
         // A Zig slice `[]T` → the runtime `Slice<T>` fat-pointer value type; `[]const T`
         // (a const-qualified element) → `ConstSlice<T>`. The element is rendered unqualified
         // (the const lives in the slice type's identity, not a C# `const`).
-        CType.Slice s => (s.Element.IsConst ? "ConstSlice<" : "Slice<") + RenderType(s.Element.Unqualified) + ">",
+        CType.Slice s => SliceType(s.Element.Unqualified, s.Element.IsConst),
         // A Zig `std.mem.Allocator` → the runtime `Allocator` fat-pointer value type
         // (Milestone F). The concrete `FixedBufferAllocator` is a `CType.Named` (renders its name).
         CType.Allocator => "Allocator",
@@ -65,6 +73,9 @@ internal sealed class CSharpTarget : ITarget
         // would be a parenthesised expression, not a tuple. Empty → the non-generic `System.ValueTuple`;
         // arity > 7 nests via the 8th `TRest` field (`ValueTuple<T1..T7, ValueTuple<T8..>>`).
         CType.Tuple tup => RenderValueTuple(tup.Elements),
+        // zig's comptime-only enum-literal type (task #113) reaching runtime code: zig rejects a runtime value of it too.
+        CType.EnumLiteral el => throw new IrUnsupportedException(
+            $"zig enum literal `.{el.Name}` needs a known result type at runtime (use a typed declaration, a return, an assignment, or a switch on the enum)"),
         _ => throw new IrUnsupportedException("C# target cannot render type " + t.GetType().Name),
     };
 
@@ -77,12 +88,22 @@ internal sealed class CSharpTarget : ITarget
         if (elems.Count == 0) { return "System.ValueTuple"; }
         if (elems.Count <= 7)
         {
-            return "System.ValueTuple<" + string.Join(", ", elems.Select(e => RenderType(e.Unqualified))) + ">";
+            return "System.ValueTuple<" + string.Join(", ", elems.Select(TupleElementType)) + ">";
         }
-        var head = string.Join(", ", elems.Take(7).Select(e => RenderType(e.Unqualified)));
+        var head = string.Join(", ", elems.Take(7).Select(TupleElementType));
         var rest = RenderValueTuple(elems.Skip(7).ToList());
         return "System.ValueTuple<" + head + ", " + rest + ">";
     }
+
+    /// <summary>A tuple element's C# type: a pointer-like element (a pointer, an array, a function pointer) rides as
+    /// <c>nint</c>, since C# forbids a pointer type argument (CS0306), e.g. the string literal in std.fmt's
+    /// <c>.{ "hey", x }</c>; the backend converts it at construction and on each element read.</summary>
+    internal string TupleElementType(CType element) =>
+        IsPointerLikeTupleElement(element) ? "nint" : RenderType(element.Unqualified);
+
+    /// <summary>Whether a tuple element is carried as <c>nint</c> (see <see cref="TupleElementType"/>).</summary>
+    internal static bool IsPointerLikeTupleElement(CType element) =>
+        element.Unqualified is CType.Pointer or CType.Array or CType.Func;
 
     public string RenderIntLit(LitInt lit) =>
         lit.Type.Unqualified is CType.Prim { Integer: true, Bytes: >= 16 } p128
@@ -114,7 +135,12 @@ internal sealed class CSharpTarget : ITarget
         }
         : "";
 
-    public string RenderFloatLit(LitFloat lit) => lit.Text;
+    public string RenderFloatLit(LitFloat lit)
+        // A `float`-typed literal without its suffix (a zig untyped literal at an `f32` sink: std.fmt.parse_float's
+        // `[_]f32{ 1e0, 1e1, … }`) is spelled with `F`, since C# will not narrow a double literal (CS0664).
+        => lit.Type?.Unqualified == CType.Float && lit.Text.Length > 0 && lit.Text[^1] is not ('f' or 'F')
+            ? lit.Text + "F"
+            : lit.Text;
 
     /// <summary>Map a C primitive (keyed on its canonical C name) to the C# type it
     /// lowers to. <c>char</c>→<c>byte</c> so <c>char*</c> arithmetic walks bytes;
@@ -145,6 +171,87 @@ internal sealed class CSharpTarget : ITarget
         "long double" => "double",
         _ => throw new IrUnsupportedException("C# target has no spelling for primitive " + p.Name),
     };
+
+    /// <summary>The C# slice type over <paramref name="element"/> (a zig <c>[]T</c>, or <c>[]const T</c> when
+    /// <paramref name="isConst"/>). A pointer is no C# type argument, so two element kinds take another shape: a slice of
+    /// ARRAYS (<c>[][8]u32</c>, task #152) views rows of one flat run, so it is a slice of the innermost element whose
+    /// <c>.Len</c> counts rows (<c>s[i]</c> is <c>s.Ptr + i * N</c>); a slice of POINTERS (<c>[][*]const u8</c>, task #153)
+    /// is the runtime's <c>PtrSlice</c> over the pointees, whose <c>.Ptr</c> is a <c>T**</c>.</summary>
+    internal string SliceType(CType element, bool isConst)
+    {
+        if (element is CType.Array rows)
+        {
+            return (isConst ? "ConstSlice<" : "Slice<") + RenderType(rows.FlatElement.Unqualified) + ">";
+        }
+        // A pointer to an array renders as the array's flat element pointer, so its pointee is that element.
+        if (element is CType.Pointer { Pointee: var pointee }
+            && (pointee.Unqualified is CType.Array pointedRows ? pointedRows.FlatElement : pointee).Unqualified
+                is var target && target is not (CType.Pointer or CType.VoidType or CType.Func or CType.Array))
+        {
+            return (isConst ? "ConstPtrSlice<" : "PtrSlice<") + RenderType(target) + ">";
+        }
+        return (isConst ? "ConstSlice<" : "Slice<") + RenderType(element) + ">";
+    }
+
+    /// <summary>The generated value types standing for zig optional arrays <c>?[N]T</c> (task #151), by name: the
+    /// element's C# spelling and the flat element count. Filled as types render; the backend emits one declaration per
+    /// entry once everything has rendered (<see cref="OptionalArrayTypesText"/>).</summary>
+    private readonly SortedDictionary<string, (string Element, int Count)> _optionalArrays = new(System.StringComparer.Ordinal);
+
+    /// <summary>The name of the value type standing for <c>?[N]T</c>, registering it for <see cref="OptionalArrayTypesText"/>.
+    /// Its elements are a <c>fixed</c> buffer, so the element must be a primitive C# allows there.</summary>
+    private string OptionalArrayName(CType.Array array)
+    {
+        var element = RenderType(array.FlatElement);
+        var spelled = "?[" + (array.Count?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "_") + "]" + array.Element.Describe();
+        if (!CSharpBackend.IsFixedBufferType(element))
+        {
+            throw new IrUnsupportedException(
+                $"zig optional array `{spelled}`: only an array of integers or floats is supported yet");
+        }
+        var count = FlatCount(array)
+            ?? throw new IrUnsupportedException($"zig optional array `{spelled}`: the array needs a comptime-known length");
+        var name = "ZigOptArray_" + element + "_" + count.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        _optionalArrays[name] = (element, count);
+        return name;
+    }
+
+    /// <summary>The flat element count of a (possibly nested) array, or null when a dimension is not comptime-known.</summary>
+    private static int? FlatCount(CType t) => t.Unqualified is CType.Array { Count: var n } a
+        ? n is int outer && FlatCount(a.Element) is int inner ? outer * inner : null
+        : 1;
+
+    /// <summary>One declaration per zig optional array type rendered so far (task #151): the elements inline in a
+    /// <c>fixed</c> buffer beside a has-value flag, behind the <c>HasValue</c> / <c>Value</c> surface the lowering reads
+    /// off a <c>Nullable</c>. <c>Value</c> is the element pointer (an array IS its element pointer here); a <c>T*</c>
+    /// converts in by copying the elements, a null one to none (so <c>x = null</c> and a <c>null</c> field default need no
+    /// rewrite); <c>x == null</c> tests for none, the only comparison zig allows an optional array.</summary>
+    internal string OptionalArrayTypesText()
+    {
+        var sb = new System.Text.StringBuilder();
+        foreach (var (name, (element, count)) in _optionalArrays)
+        {
+            var bytes = $"sizeof({element}) * {count}";
+            sb.Append("/// <summary>zig `?[").Append(count).Append(']').Append(element).Append("`: the elements inline beside a has-value flag.</summary>\n")
+              .Append("unsafe struct ").Append(name).Append("\n{\n")
+              .Append("    public fixed ").Append(element).Append(" Buf[").Append(count).Append("];\n")
+              .Append("    public bool HasValue;\n")
+              .Append("    public ").Append(element).Append("* Value => HasValue ? (").Append(element)
+              .Append("*)System.Runtime.CompilerServices.Unsafe.AsPointer(ref this) : throw new System.InvalidOperationException(\"attempt to use null value\");\n")
+              .Append("    public static implicit operator ").Append(name).Append('(').Append(element).Append("* p)\n    {\n")
+              .Append("        var r = default(").Append(name).Append(");\n")
+              .Append("        if (p == null) { return r; }\n")
+              .Append("        System.Buffer.MemoryCopy(p, r.Buf, ").Append(bytes).Append(", ").Append(bytes).Append(");\n")
+              .Append("        r.HasValue = true;\n        return r;\n    }\n")
+              .Append("    public static bool operator ==(").Append(name).Append(" a, ").Append(element)
+              .Append("* b) => b == null ? !a.HasValue : throw new System.InvalidOperationException(\"zig compares an optional array only with null\");\n")
+              .Append("    public static bool operator !=(").Append(name).Append(" a, ").Append(element).Append("* b) => !(a == b);\n")
+              .Append("    public override bool Equals(object o) => false;\n")
+              .Append("    public override int GetHashCode() => HasValue ? 1 : 0;\n")
+              .Append("}\n\n");
+        }
+        return sb.ToString();
+    }
 }
 
 /// <summary>The .NET / C# backend's identifier policy: escape C# keywords with

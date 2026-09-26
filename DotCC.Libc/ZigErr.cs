@@ -30,12 +30,13 @@ namespace DotCC.Libc;
 /// </para>
 /// <para>
 /// V1 erases the error SET: every error union shares one flat global code space
-/// (so <c>!T</c> / <c>anyerror!T</c> / <c>E!T</c> all lower the same way), and the
-/// payload <c>T</c> must be <c>unmanaged</c> (a value type) — an error union over a
-/// pointer is deferred (a C# generic can't take a pointer type argument).
+/// (so <c>!T</c> / <c>anyerror!T</c> / <c>E!T</c> all lower the same way). The payload
+/// <c>T</c> is unconstrained: a pointer payload rides as a <c>nuint</c> (a C# generic can't
+/// take a pointer type argument), and an OPTIONAL one is a <c>Nullable&lt;T&gt;</c>, which an
+/// <c>unmanaged</c> or <c>struct</c> constraint would reject (std.hash_map's <c>!?KV</c>).
 /// </para>
 /// </remarks>
-public readonly struct ErrUnion<T> where T : unmanaged
+public readonly struct ErrUnion<T>
 {
     /// <summary>The error code — 0 means success (a payload is present), any other
     /// value is an error from the flat global error set.</summary>
@@ -43,9 +44,14 @@ public readonly struct ErrUnion<T> where T : unmanaged
 
     /// <summary>The success payload (meaningful only when <see cref="Code"/> == 0;
     /// <c>default</c> otherwise).</summary>
-    public readonly T Value;
+    [System.Diagnostics.CodeAnalysis.AllowNull] public readonly T Value;
 
     private ErrUnion(ushort code, T value) { Code = code; Value = value; }
+
+    /// <summary>An error union: the payload stays <c>default</c>, a struct field left unassigned. <see cref="Value"/>
+    /// is <c>AllowNull</c> because an unconstrained <typeparamref name="T"/> (a Nullable payload of <c>!?T</c>) has no
+    /// non-null default.</summary>
+    private ErrUnion(ushort code) { Code = code; }
 
     /// <summary>True when this union holds an error rather than a payload.</summary>
     public bool IsErr => Code != 0;
@@ -55,7 +61,7 @@ public readonly struct ErrUnion<T> where T : unmanaged
 
     /// <summary>An error union carrying <paramref name="code"/> (<c>return error.Foo;</c>).
     /// <paramref name="code"/> must be non-zero (0 is the success sentinel).</summary>
-    public static ErrUnion<T> Err(ushort code) => new(code, default);
+    public static ErrUnion<T> Err(ushort code) => new(code);
 }
 
 /// <summary>
@@ -92,13 +98,18 @@ public static class ErrUnion
     /// <summary><c>try u</c> — yield the payload on success, or propagate the error by
     /// throwing <see cref="ZigErrorReturn"/> (caught at the enclosing <c>!T</c>
     /// function's emitted boundary). An expression, so it works in any position.</summary>
-    public static T Try<T>(ErrUnion<T> u) where T : unmanaged
+    public static T Try<T>(ErrUnion<T> u)
         => u.IsErr ? throw new ZigErrorReturn(u.Code) : u.Value;
+
+    /// <summary><c>opt orelse error.E</c> — an error union: the payload when <paramref name="value"/> has one, else the
+    /// error <paramref name="code"/> (std.fmt.parseFloat's <c>return parseInfOrNan(…) orelse error.InvalidCharacter;</c>).</summary>
+    public static ErrUnion<T> OrError<T>(T? value, ushort code) where T : struct
+        => value is { } payload ? ErrUnion<T>.Ok(payload) : ErrUnion<T>.Err(code);
 
     /// <summary><c>u catch fallback</c> — yield the payload on success, else
     /// <paramref name="fallback"/>. No propagation. The lowering only uses this when
     /// <paramref name="fallback"/> is side-effect-free (a literal / variable), so
     /// evaluating it unconditionally is observationally identical to Zig's lazy form.</summary>
-    public static T Catch<T>(ErrUnion<T> u, T fallback) where T : unmanaged
+    public static T Catch<T>(ErrUnion<T> u, T fallback)
         => u.IsErr ? fallback : u.Value;
 }

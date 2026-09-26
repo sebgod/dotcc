@@ -43,7 +43,12 @@ public sealed record LitInt(string Digits, long? Value) : CExpr;
 /// literal node; its <c>true</c>/<c>false</c> are <c>&lt;stdbool.h&gt;</c> macros → 1/0). The
 /// backend renders it as C# <c>true</c>/<c>false</c>; its <see cref="CExpr.Type"/> is
 /// <see cref="CType.Bool"/> (→ the store-normalising <c>CBool</c>, which takes a C# <c>bool</c>).</summary>
-public sealed record LitBool(bool Value) : CExpr;
+public sealed record LitBool(bool Value) : CExpr
+{
+    /// <summary>Zig's <c>@inComptime()</c>: <c>false</c> in emitted code, but TRUE to the comptime interpreter while it
+    /// runs a function or block (std.mem.swap's comptime branch swaps whole values, its runtime one bytes).</summary>
+    public bool InComptime { get; init; }
+}
 
 /// <summary>A floating constant. <see cref="Text"/> is the target-neutral decimal
 /// spelling (a hex-float normalised to round-trippable decimal; a long-double
@@ -285,6 +290,12 @@ public sealed record Paren(CExpr Inner) : CExpr;
 public sealed record ComptimeFold(CExpr Inner) : CExpr
 {
     public CExpr? Resolved { get; set; }
+
+    /// <summary>A reference to a comptime AGGREGATE variable (the Zig comptime engine's E3): the
+    /// interpreter reads <see cref="CExpr"/> <see cref="Inner"/>, the variable's CURRENT value (so a comptime
+    /// method call mutates it in place), while <see cref="Resolved"/> is the snapshot taken where the
+    /// reference was lowered, which is what a runtime use renders.</summary>
+    public bool Live { get; init; }
 }
 
 /// <summary>The null pointer constant (C23 <c>nullptr</c>). A typed node rather

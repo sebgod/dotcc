@@ -301,6 +301,24 @@ public unsafe ref struct PrintfBuilder
     /// mirrors <see cref="Arg(int)"/> but with <c>long.ToString</c> so the
     /// full 64-bit value survives.
     /// </summary>
+    /// <summary>A zig <c>comptime_int</c> value (C# <see cref="System.Int128"/>, e.g. <c>const g = std.math.gcd(48, 180);</c>):
+    /// formatted by the 64-bit overload that holds it, else as its full decimal / hex digits.</summary>
+    public PrintfBuilder Arg(System.Int128 v)
+    {
+        if (v >= long.MinValue && v <= long.MaxValue) { return Arg((long)v); }
+        if (v >= 0 && v <= ulong.MaxValue) { return Arg((ulong)v); }
+        var spec = ConsumeUntilSpec();
+        var ci = CultureInfo.InvariantCulture;
+        var s = spec.Conv switch
+        {
+            (byte)'x' => (spec.Alt ? "0x" : "") + v.ToString("x", ci),
+            (byte)'X' => (spec.Alt ? "0X" : "") + v.ToString("X", ci),
+            _ => v.ToString(ci),
+        };
+        Emit(ApplyWidth(s, spec));
+        return this;
+    }
+
     public PrintfBuilder Arg(long v)
     {
         var spec = ConsumeUntilSpec();
@@ -350,6 +368,20 @@ public unsafe ref struct PrintfBuilder
     /// distinguish signed/unsigned at the format-string level.
     /// </summary>
     public PrintfBuilder Arg(uint v) => Arg((long)v);
+
+    /// <summary>A zig byte slice for <c>%s</c> (<c>std.debug.print("{s}", .{slice})</c>): exactly <c>Len</c> bytes, with no
+    /// NUL to look for, as zig's <c>{s}</c> prints; a precision still caps it.</summary>
+    public PrintfBuilder Arg(ConstSlice<byte> v)
+    {
+        var spec = ConsumeUntilSpec();
+        var s = v.Len == 0 ? "" : System.Text.Encoding.UTF8.GetString(v.Ptr, checked((int)v.Len));
+        if (spec.Precision >= 0 && spec.Precision < s.Length) { s = s[..spec.Precision]; }
+        Emit(ApplyWidth(s, spec));
+        return this;
+    }
+
+    /// <summary>A mutable zig byte slice for <c>%s</c>: as <see cref="Arg(ConstSlice{byte})"/>.</summary>
+    public PrintfBuilder Arg(Slice<byte> v) => Arg((ConstSlice<byte>)v);
 
     public PrintfBuilder Arg(byte* v)
     {

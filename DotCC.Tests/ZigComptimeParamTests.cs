@@ -15,7 +15,8 @@ namespace DotCC.Tests;
 /// call reuses it. The comptime value is baked into the body as a literal, and a comptime-known <c>if</c>
 /// inside an instance folds to its taken branch (so a recursive generic like <c>fib</c> prunes its base
 /// case and terminates instead of instantiating forever). The instance bodies lower from a re-entrancy-safe
-/// worklist drained after pass 2. V1 cuts (loud): a generic METHOD and a non-constant comptime argument.
+/// worklist drained after pass 2. A generic METHOD instantiates under its container (see <c>ZigGenericMethodTests</c>). V1 cut (loud):
+/// a non-constant comptime argument.
 /// (A <c>comptime T: type</c> TYPE param is now supported — see <see cref="ZigComptimeTypeParamTests"/>,
 /// wall-plan W3b.) End-to-end in the <c>comptime-param</c> zig-oracle program.
 /// </summary>
@@ -122,17 +123,17 @@ public sealed class ZigComptimeParamTests
     }
 
     [Fact]
-    public void Comptime_param_method_is_rejected()
+    public void Comptime_param_method_instantiates_per_value()
     {
-        // W3a is free functions only — a generic METHOD needs machinery only the top-level passes run.
-        var ex = Should.Throw<Exception>(() => EmitZig("""
+        // Once a cut (W3a was free functions only): a comptime-value METHOD instantiates per value.
+        var cs = EmitZig("""
             const S = struct {
                 v: i32,
                 fn addN(self: S, comptime N: i32) i32 { return self.v + N; }
             };
             pub fn main() u8 { const s: S = .{ .v = 5 }; return @intCast(s.addN(10)); }
-            """));
-        ex.Message.ShouldContain("method");
+            """);
+        cs.ShouldContain("int S_addN__10(S self)");
     }
 
     [Fact]

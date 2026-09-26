@@ -12,7 +12,7 @@ namespace DotCC.Ir;
 /// <see cref="DotCC.CompileException"/> so callers catch the one public
 /// compile-error type regardless of whether the cause was a parse error, an
 /// invalid type, or an unsupported construct.</summary>
-public sealed class IrUnsupportedException : DotCC.CompileException
+public class IrUnsupportedException : DotCC.CompileException
 {
     public IrUnsupportedException(string node) : base($"dotcc does not yet support: {node}") { }
 }

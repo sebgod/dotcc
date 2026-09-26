@@ -258,6 +258,44 @@ symbols:
                    #     with a token outside FIRST(BoolOr), so it never competes with a value fallback.
   - CaptureArm     # 167 the fallback after `catch |e|` — a FallbackArm, or `return [v]` (the no-capture
                    #     `catch return` keeps its own productions, so `return` lives only here)
+  - Arg            # 168 one call ARGUMENT: an Expr, or `{}` the void value (std passes it 108 times, the
+                   #     `context: void` of std.sort). Kept out of Expr so `{` never competes with a Block.
+  - PtrAlign       # 169 `align(E)` inside a pointer / slice type (`*align(4) const T`, `[]align(a) T`):
+                   #     561 uses in std, 548 of them the six shapes below. Parsed, and not tracked: C#
+                   #     pointers carry no alignment, as `align` on a declaration is already a no-op.
+  - ProngJump      # 170 a JUMP prong body: `break [:l [v]]` / `continue [:l]` (`'{', '}' => break,` in
+                   #     Writer.print; about 330 in std). A separate symbol from FallbackArm, whose
+                   #     block and `switch` arms would compete with the Block / RhsExpr prongs.
+  - NOALIAS        # 171 the `noalias` parameter qualifier (`noalias a: *T` in std.mem.swap), IGNORED by the
+                   #     lexer: an aliasing promise to the optimizer, with no meaning for a C# pointer.
+  - TypeArm        # 172 an inline `enum {…}` / `struct {…}` as an arm of a TYPE-choosing `if` (debug.zig's
+                   #     `pub const State = if (runtime_safety) enum { unlocked, locked } else enum { unknown };`).
+                   #     No RhsExpr starts with `enum` / `struct`, so after `if ( Expr )` it is a clean shift.
+  - TestBlock      # 173 a `test "name"/ident/(anon) { … }` block as a CONTAINER member (std.math.Order's
+                   #     `test invert { … }` inside the enum body), parsed and DROPPED like the top-level form.
+  - ReturnArm      # 174 `return Expr` as the THEN arm of an `if` statement with an `else` (zig's then-arm is an
+                   #     expression, so no `;`): `if (c) return 1 else return 2;`, std.meta.eql's
+                   #     `if (b) |b_p| return eql(a_p, b_p) else |_| return false;`.
+  - FieldValue     # 175 the value of a named field init: an Expr, or the void value `{}` (`.{ .none = {} }`,
+                   #     std.fmt.Parser.specifier's `return .{ .none = {} };`).
+  - 'asm'          # 176 inline assembly, PARSED ONLY: std guards it behind comptime target checks (std.crypto.sha2's
+                   #     SHA-NI path), so a dead branch must parse; lowering one is a loud cut (asm stays out of scope).
+  - 'volatile'     # 177 `asm volatile (…)`
+  - '->'           # 178 an asm output's result type: `[ret] "=r" (-> u32)`
+  - AsmExpr        # 179 `asm [volatile] ("template" [: outputs [: inputs [: clobbers]]])`
+  - AsmTail        # 180 the `: outputs : inputs : clobbers` sections, each optional from the right
+  - AsmItems       # 181 a comma list of operands, possibly empty, trailing comma allowed
+  - AsmItem        # 182 `[name] "constraint" (expr)` or `[name] "constraint" (-> Type)`
+  - IfOperand      # 183 `if (c) a else b` as the RIGHT operand of `==` / `!=`, arms at the operand (Bitwise) level
+  - AssignArm      # 184 `x op= v` with no `;` of its own, as the THEN arm of an `if` statement with an `else`
+  - ProngType      # 185 a container TYPE as a switch prong's value (`.@"union" => |u| struct { … }`)
+  - ForObjs        # 186 the objects of a multi-object `for (a, b, 0.., …)`, two or more
+  - ForObj         # 187 one object: an Expr, an open range `N..`, or a bounded range `N..M`
+  - ForCaps        # 188 the captures of a multi-object `for`: `|x, *y, i, …|`, two or more
+  - ForCap         # 189 one capture: `x` (a per-iteration copy) or `*x` (a pointer into the object)
+  - VoidElem       # 190 `{}`, zig's void value, as a positional list element (`[3]void{ {}, {}, {} }`, task #114)
+  - ConcatIf       # 191 `if (c) a else b` as the right operand of a whole-RHS `++` (`"0123456789" ++ if (upper) "ABCDEF" else "abcdef"`, task #170)
+  - 'noinline'     # 192 `noinline fn`: an optimizer hint on a function (std.hash.XxHash3's `noinline fn hashLong`, task #177)
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -274,6 +312,12 @@ productions:
     rules:
       - { lhs: Decl, rhs: [FnDef] }
       - { lhs: Decl, rhs: ['pub', FnDef],  action: pubFn }
+      # `inline fn` / `pub inline fn` (379 in std; `math.maxInt` is one). A hint to the optimizer that
+      # lowers as an ordinary function. `inline` starts no other declaration, so it is a clean shift.
+      - { lhs: Decl, rhs: ['inline', FnDef],        action: inlineFn }
+      - { lhs: Decl, rhs: ['pub', 'inline', FnDef], action: pubInlineFn }
+      - { lhs: Decl, rhs: ['noinline', FnDef],        action: noinlineFn }
+      - { lhs: Decl, rhs: ['pub', 'noinline', FnDef], action: pubNoinlineFn }
       - { lhs: Decl, rhs: [VarDecl] }
       - { lhs: Decl, rhs: ['pub', VarDecl], action: pubVar }
       # `export fn` / `pub export fn` (Milestone R, part 4) — force C-ABI external linkage. dotcc
@@ -348,6 +392,10 @@ productions:
       # is not accepted (a useless zero-size aggregate — a documented cut).
       - { lhs: ContainerDecl, rhs: ['const', IDENT, '=', 'extern', 'struct', '{', FieldDecls, '}', ';'], action: externStructDecl }
       - { lhs: ContainerDecl, rhs: ['const', IDENT, '=', 'packed', 'struct', '{', FieldDecls, '}', ';'], action: packedStructDecl }
+      # `packed struct(u32) { … }` names its BACKING integer (480 in std: std.bit_set's Integer, os flag words). The
+      # layout is the packed one either way; zig itself rejects fields that do not total the backing width, so the
+      # backing type is parsed and not re-checked. `(` after `struct` is a clean shift, distinct from `{`.
+      - { lhs: ContainerDecl, rhs: ['const', IDENT, '=', 'packed', 'struct', '(', Type, ')', '{', FieldDecls, '}', ';'], action: packedStructDeclBacked }
       - { lhs: ContainerDecl, rhs: ['const', IDENT, '=', 'enum', '{', EnumFields, '}', ';'],             action: enumDecl }
       - { lhs: ContainerDecl, rhs: ['const', IDENT, '=', 'enum', '(', Type, ')', '{', EnumFields, '}', ';'], action: enumDeclTyped }
       # Tagged union (Milestone D3 + R): `const U = union(enum) { a: T, b, … };` (auto-inferred tag)
@@ -456,6 +504,18 @@ productions:
     rules:
       - { lhs: Stmt, rhs: ['if', '(', Expr, ')', Stmt],                 action: stmtIf }
       - { lhs: Stmt, rhs: ['if', '(', Expr, ')', Stmt, 'else', Stmt],   action: stmtIfElse }
+      # `comptime if (c) stmt [else stmt]` — an `if` STATEMENT evaluated at compile time (std's
+      # findScalarPos: `comptime if (block_x_len < 4) break;` inside an `inline for`). The condition must
+      # fold; the untaken arm is never lowered. In this rightmost group so `else` binds as for a plain
+      # `if`. After `comptime`, `if` is disjoint from FIRST(VarDecl), FIRST(Block) and FIRST(Prefix) (an
+      # `if` EXPRESSION lives only in RhsExpr), so the existing `comptime` forms keep their lookahead.
+      - { lhs: Stmt, rhs: ['comptime', 'if', '(', Expr, ')', Stmt],                 action: stmtComptimeIf }
+      - { lhs: Stmt, rhs: ['comptime', 'if', '(', Expr, ')', Stmt, 'else', Stmt],   action: stmtComptimeIfElse }
+      # zig parses `comptime if …` as an EXPRESSION statement, so a block-bodied one takes a closing `;`
+      # (`comptime if (c) {…} else {…};`). Both spellings are accepted: `;` cannot start a Stmt, so the
+      # shift after the last arm is unambiguous.
+      - { lhs: Stmt, rhs: ['comptime', 'if', '(', Expr, ')', Stmt, ';'],               action: stmtComptimeIfSemi }
+      - { lhs: Stmt, rhs: ['comptime', 'if', '(', Expr, ')', Stmt, 'else', Stmt, ';'], action: stmtComptimeIfElseSemi }
       # Payload-capturing `if` (Milestone M): `if (opt) |x| then [else …]` binds an optional's
       # payload (or, in part 3, an error-union's success value) in the then-branch. After the
       # condition `')'`, a `'|'` lookahead selects the capture form — no Stmt begins with `'|'`
@@ -465,11 +525,44 @@ productions:
       # capture (part 3) and the by-ref `|*x|` form (part 4) extend these two productions.
       - { lhs: Stmt, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', Stmt],                 action: stmtIfCapture }
       - { lhs: Stmt, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', Stmt, 'else', Stmt],   action: stmtIfCaptureElse }
+      # The by-ref capture `if (opt) |*v|` (std.enums.EnumMap.init, task #94): `v` points AT the payload. After
+      # `'|'`, a `'*'` lookahead selects it over the by-value `IDENT` form, conflict-free.
+      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', '|', '*', IDENT, '|', Stmt],                 action: stmtIfCaptureRef }
+      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', '|', '*', IDENT, '|', Stmt, 'else', Stmt],   action: stmtIfCaptureRefElse }
       # `if (eu) |x| then else |e| elsebody` — error-union capture (Milestone M, part 3): bind the
       # success payload to `x` in the then-branch, the error to `e` in the else-branch. After the
       # then-Stmt's `else`, a `|` lookahead selects this error-capture form over the plain
       # `… else Stmt` above (no Stmt begins with `|`) — conflict-free, same rightmost group.
       - { lhs: Stmt, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', Stmt, 'else', '|', IDENT, '|', Stmt], action: stmtIfCaptureErrElse }
+      # A `return Expr` then-arm with no `;` of its own, ended by the `else` (the `;` ends the else arm).
+      # After `return Expr`, `else` selects the arm and `;` the ordinary return statement: a 1-token split.
+      - { lhs: ReturnArm, rhs: ['return', Expr], action: returnArm }
+      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', ReturnArm, 'else', Stmt], action: stmtIfReturnElse }
+      # An assignment then-arm with no `;` of its own, ended by the `else` (std.fmt.float.formatScientific's
+      # `if (olength > 1) index += olength - 1 else index -= 1;`, task #96). It shares its whole prefix with the
+      # assignment STATEMENT (`Expr op= RhsExpr ';'`), so the decision is the 1-token split after the value: `;`
+      # ends the statement, `else` the arm. Every operator is spelled out: a reduced AssignOp would have to be
+      # chosen before the value, where the statement form still shifts.
+      - { lhs: AssignArm, rhs: [Expr, '=', RhsExpr], action: assignArm }
+      - { lhs: AssignArm, rhs: [Expr, '+=', RhsExpr], action: assignArm }
+      - { lhs: AssignArm, rhs: [Expr, '-=', RhsExpr], action: assignArm }
+      - { lhs: AssignArm, rhs: [Expr, '*=', RhsExpr], action: assignArm }
+      - { lhs: AssignArm, rhs: [Expr, '/=', RhsExpr], action: assignArm }
+      - { lhs: AssignArm, rhs: [Expr, '%=', RhsExpr], action: assignArm }
+      - { lhs: AssignArm, rhs: [Expr, '<<=', RhsExpr], action: assignArm }
+      - { lhs: AssignArm, rhs: [Expr, '>>=', RhsExpr], action: assignArm }
+      - { lhs: AssignArm, rhs: [Expr, '&=', RhsExpr], action: assignArm }
+      - { lhs: AssignArm, rhs: [Expr, '|=', RhsExpr], action: assignArm }
+      - { lhs: AssignArm, rhs: [Expr, '^=', RhsExpr], action: assignArm }
+      - { lhs: AssignArm, rhs: [Expr, '+%=', RhsExpr], action: assignArm }
+      - { lhs: AssignArm, rhs: [Expr, '-%=', RhsExpr], action: assignArm }
+      - { lhs: AssignArm, rhs: [Expr, '*%=', RhsExpr], action: assignArm }
+      - { lhs: AssignArm, rhs: [Expr, '+|=', RhsExpr], action: assignArm }
+      - { lhs: AssignArm, rhs: [Expr, '-|=', RhsExpr], action: assignArm }
+      - { lhs: AssignArm, rhs: [Expr, '*|=', RhsExpr], action: assignArm }
+      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', AssignArm, 'else', Stmt], action: stmtIfAssignElse }
+      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', ReturnArm, 'else', Stmt], action: stmtIfCaptureReturnElse }
+      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', ReturnArm, 'else', '|', IDENT, '|', Stmt], action: stmtIfCaptureReturnErrElse }
 
       # Payload-capturing `while` — mirrors the if-capture family, in the same rightmost/dangling-else
       # group (the `else` shift-reduce is resolved identically). `while (opt) |x| body` binds an
@@ -484,6 +577,15 @@ productions:
       # selects this over the plain `… else Stmt` above (no Stmt begins with `'|'`) — conflict-free,
       # exactly like stmtIfCaptureErrElse.
       - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', '|', IDENT, '|', Stmt, 'else', '|', IDENT, '|', Stmt], action: stmtWhileCaptureErrElse }
+      # `for (…) |…| body else elsebody` (task #108, std.meta.FieldEnum's `for (values, 0..) |v, i| { … break; } else
+      # { return EnumTag; }`): the else runs when the loop ends without a `break`. In this dangling-else group, as the
+      # while-capture else is, so a Stmt body followed by `else` shifts into it.
+      - { lhs: LoopStmt, rhs: ['for', '(', Expr, ')', '|', IDENT, '|', Stmt, 'else', Stmt],           action: stmtForSliceElse }
+      - { lhs: LoopStmt, rhs: ['for', '(', ForObjs, ')', '|', ForCaps, '|', Stmt, 'else', Stmt],      action: stmtForMultiElse }
+      # The plain `while (c) body else elsebody` statement (std.bit_set.DynamicBitSetUnmanaged.findFirstSet, task #130:
+      # `while (offset < self.bit_length) { if (mask[0] != 0) break; … } else return null;`), in this group for the same
+      # dangling-else reason.
+      - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', Stmt, 'else', Stmt],                         action: stmtWhileElse }
       # `while (opt) |x| : (cont) body` — capture-while WITH a continue-expression (runs after each
       # iteration AND on `continue`), lowered to the C `For` IR (post = cont) so `continue` runs the
       # cont — faithful to Zig, like the non-capture stmtWhileCont pair. After `'|' IDENT '|'`, a `':'`
@@ -492,6 +594,20 @@ productions:
       # combination is not modeled — rare.)
       - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', '|', IDENT, '|', ':', '(', Expr, AssignOp, RhsExpr, ')', Stmt], action: stmtWhileCaptureContAssign }
       - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', '|', IDENT, '|', ':', '(', Expr, ')', Stmt],                    action: stmtWhileCaptureCont }
+
+  # `switch (x) { prong, … }` as a STATEMENT. Each prong is `CaseVals => Block`; Zig switch has NO
+  # fall-through, so the lowering appends a `break` to each section. The trailing-comma forms differ only
+  # by the optional comma after the last prong. The `;`-closed forms are zig's expression statement: a
+  # `switch` in a non-block statement position (the body of an `if` / capture `if`) takes a closing `;`,
+  # as in fmt.zig's parseIntWithSign `if (x) |c| switch (c) { … };`. That `;` is ambiguous with the one
+  # closing `comptime if (c) STMT;`, and either reading means the same, so this group is RIGHTMOST:
+  # the switch takes the `;` (the dangling-else resolution).
+  - derivation: rightmost
+    rules:
+      - { lhs: Stmt, rhs: ['switch', '(', Expr, ')', '{', Prongs, '}'],      action: stmtSwitch }
+      - { lhs: Stmt, rhs: ['switch', '(', Expr, ')', '{', Prongs, ',', '}'], action: stmtSwitchTrailing }
+      - { lhs: Stmt, rhs: ['switch', '(', Expr, ')', '{', Prongs, '}', ';'],      action: stmtSwitchSemi }
+      - { lhs: Stmt, rhs: ['switch', '(', Expr, ')', '{', Prongs, ',', '}', ';'], action: stmtSwitchTrailingSemi }
 
   - derivation: none
     rules:
@@ -509,6 +625,9 @@ productions:
       # the other. The op-vs-`)` after the inner Expr is a clean shift/reduce decision.
       - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', ':', '(', Expr, AssignOp, RhsExpr, ')', Stmt], action: stmtWhileContAssign }
       - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', ':', '(', Expr, ')', Stmt],                    action: stmtWhileCont }
+      # A BLOCK continue expression, `while (c) : ({ a += 1; b += 1; }) body` (17 in std; hash_map's
+      # iterators). `{` is outside FIRST(Expr), so after `: (` it is a 1-token shift decision.
+      - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', ':', '(', Block, ')', Stmt],                   action: stmtWhileContBlock }
       # The assignment operator inside a continue-expression. Every op the statement-level
       # assignment family accepts (plain `=`, the compound `+=`…`^=`, the wrapping `+%=`…`*%=`,
       # and the saturating `+|=`…`*|=`) reduces to `AssignOp` — so the continue clause covers
@@ -570,8 +689,6 @@ productions:
       # Zig switch has NO fall-through, so the lowering appends a `break` to each section
       # (the C# backend would otherwise synthesize C's fall-through). The two productions
       # differ only by an optional trailing comma after the last prong.
-      - { lhs: Stmt, rhs: ['switch', '(', Expr, ')', '{', Prongs, '}'],      action: stmtSwitch }
-      - { lhs: Stmt, rhs: ['switch', '(', Expr, ')', '{', Prongs, ',', '}'], action: stmtSwitchTrailing }
       # `for (start..end) |i| body` — the range `for`. Lowers to the C IR
       # `for (usize i = start; i < end; i++) body`; the `|i|` capture is the usize loop index
       # (Zig's range-for index type). The body is a Stmt (single statement or a block), like
@@ -582,14 +699,25 @@ productions:
       # the lookahead selects — `..` → range, `)` → slice, `,` → slice+index. (The by-ref `|*x|`
       # forms are below; a non-zero index start `for (s, 5..)` is deferred.)
       - { lhs: LoopStmt, rhs: ['for', '(', Expr, ')', '|', IDENT, '|', Stmt], action: stmtForSlice }
-      - { lhs: LoopStmt, rhs: ['for', '(', Expr, ',', Expr, '..', ')', '|', IDENT, ',', IDENT, '|', Stmt], action: stmtForSliceIdx }
+      # The MULTI-object `for (a, b, 0.., …) |x, *y, i, …|` (task #108): any number of objects (an Expr, an open range
+      # `N..`, a bounded `N..M`) and as many captures, each by value or by reference, plus zig fmt's trailing comma. It
+      # replaced nine fixed shapes (pairs, triples, `(s, 0..)`, by-ref pairs) that std.MultiArrayList outgrew
+      # (`for (a, &b, c) |x, *y, z|`, `for (a, b, 0..)`, four objects). After `for ( Expr`, `)` selects the single-object
+      # forms, `..` the range form or a range object, and `,` this one; after `ForObjs ','`, `)` is the trailing comma.
+      - { lhs: LoopStmt, rhs: ['for', '(', ForObjs, ')', '|', ForCaps, '|', Stmt],      action: stmtForMulti }
+      - { lhs: LoopStmt, rhs: ['for', '(', ForObjs, ',', ')', '|', ForCaps, '|', Stmt], action: stmtForMultiTrail }
       # `for (a, b) |x, y| body` — the PARALLEL form: two operands walked in lockstep, one capture
       # each (road-to-zig-std S6). Conflict-free against the indexed form above by the SAME 1-token
       # lookahead the block already relies on: after `for ( Expr ',' Expr`, `..` selects the indexed
       # production and `)` this one — distinct terminals, so it is a shift either way. Measured in the
       # pinned std this is the DOMINANT member-list shape (`inline for (info.field_names,
       # info.field_types) |field_name, field_type|`, 17 uses vs 11 single-list).
-      - { lhs: LoopStmt, rhs: ['for', '(', Expr, ',', Expr, ')', '|', IDENT, ',', IDENT, '|', Stmt], action: stmtForSlicePair }
+      # A THREE-object runtime `for (a, b, c) |x, y, z|` (40 in std; hash_map's `for (metadata, keys,
+      # values) |m, k, v|`, road-to-zig-std G5), and a trailing comma after the last object (zig fmt's
+      # one-object-per-line layout). After `Expr ',' Expr`, a `,` then `Expr` / `)` extends this family
+      # and `..` / `)` select the forms above; each is a distinct terminal, so every decision is a shift.
+      # BY-REFERENCE captures in the pair form (std.mem.swap's `for (a_bytes, b_bytes) |*ab, *bb|`): a
+      # leading `*` (vs IDENT) at each capture position is a distinct terminal, so each shape is a shift.
       # `for (s) |*x| body` — BY-REFERENCE element capture (Milestone M, part 4): `x` is a `*T` into
       # the slice, so `x.* = …` writes through to the element. After the capture `'|'`, a `'*'`
       # lookahead selects this over the by-value `'|' IDENT '|'` form (distinct tokens) — conflict-free.
@@ -597,7 +725,6 @@ productions:
       # `for (s, 0..) |*x, i| body` — the BY-REFERENCE element capture WITH the usize index (Milestone
       # Z). Same `'*'`-after-`'|'` lookahead selects it over the by-value indexed `'|' IDENT ',' …` form
       # — conflict-free; `x` is a `*T` into the slice and `i` the index.
-      - { lhs: LoopStmt, rhs: ['for', '(', Expr, ',', Expr, '..', ')', '|', '*', IDENT, ',', IDENT, '|', Stmt], action: stmtForSliceIdxRef }
       # A loop is a statement; and a `label:` may prefix one — `outer: while (…) { … break :outer; }`
       # (Milestone L, part 3). `IDENT ':' LoopStmt` reuses the same `:` lookahead trick as the value-
       # block: at statement start an IDENT also begins an Expr, but a Primary is never followed by
@@ -606,6 +733,11 @@ productions:
       # assume a loop target for `break :lbl` / `continue :lbl`.
       - { lhs: Stmt, rhs: [LoopStmt] }
       - { lhs: Stmt, rhs: [IDENT, ':', LoopStmt], action: labeledLoop }
+      # A labeled block as a STATEMENT, zig's `LabeledStatement <- BlockLabel? (Block / LoopStatement / SwitchExpr)`
+      # (std.bit_set.DynamicBitSetUnmanaged.resize: `if (old_allocation.len != new_masks + 1) realloc: { … break
+      # :realloc; … }`, task #130). Its value is void, so a `break :lbl;` leaves it. After `IDENT ':'`, a `{` or a
+      # `switch` selects it over the labeled loop in one token, by the same `:` split as above.
+      - { lhs: Stmt, rhs: [LabeledBlock], action: labeledBlockStmt }
       # `inline for (lo..hi) |i| body` — a comptime-UNROLLED counted loop (Milestone T, part 3): the
       # body is replicated once per iteration with `i` bound to a compile-time-constant index, so the
       # loop disappears (no runtime `for`). Reuses the `LoopStmt` factor exactly like `labeledLoop` — a
@@ -626,6 +758,17 @@ productions:
       # error for a method, since FieldDecls admits no `fn`).
       - { lhs: Stmt, rhs: ['return', 'struct', '{', FieldDecls, '}', ';'], action: returnStructType }
       - { lhs: Stmt, rhs: ['return', 'struct', '{', '}', ';'],             action: returnStructTypeEmpty }
+      # A type-returning function's `return packed struct { … };` / `return packed struct(MaskInt) { … };`
+      # (std.bit_set.Integer): the same reified struct, with the packed layout.
+      - { lhs: Stmt, rhs: ['return', 'packed', 'struct', '{', FieldDecls, '}', ';'], action: returnPackedStructType }
+      - { lhs: Stmt, rhs: ['return', 'packed', 'struct', '(', Type, ')', '{', FieldDecls, '}', ';'], action: returnPackedStructTypeBacked }
+      # `return extern struct { … };` (std.bit_set.ArrayBitSet): the reified struct with the C-ABI
+      # sequential layout, the same shape as the top-level `extern struct` decl.
+      - { lhs: Stmt, rhs: ['return', 'extern', 'struct', '{', FieldDecls, '}', ';'], action: returnExternStructType }
+      # `return struct { pub fn inner(…) … }.inner;` — zig's CLOSURE idiom (std.sort.asc; 22 in std): the
+      # function returns a METHOD of an anonymous struct as a comptime function value. After the closing
+      # `}`, a `.` (not `;`) selects this form: distinct terminals, a shift either way.
+      - { lhs: Stmt, rhs: ['return', 'struct', '{', FieldDecls, '}', '.', IDENT, ';'], action: returnStructMember }
       - { lhs: Stmt, rhs: [VarDecl] }
       # An in-function container decl (wall-plan W2): `const P = struct { … };` inside a body.
       # ContainerDecl is otherwise a top-level `Decl` (line ~277); admitting it here too lets a
@@ -735,9 +878,7 @@ productions:
       - { lhs: OrElse, rhs: [OrElse, 'catch', BoolOr],  action: catchOp }
       - { lhs: OrElse, rhs: [OrElse, 'catch', '|', IDENT, '|', BoolOr], action: catchCapture }
       - { lhs: OrElse, rhs: [OrElse, 'orelse', 'return', BoolOr], action: orElseReturn }
-      - { lhs: OrElse, rhs: [OrElse, 'orelse', 'return'],         action: orElseReturnVoid }
       - { lhs: OrElse, rhs: [OrElse, 'catch', 'return', BoolOr],  action: catchReturn }
-      - { lhs: OrElse, rhs: [OrElse, 'catch', 'return'],          action: catchReturnVoid }
       # STATEMENT-shaped fallbacks (road-to-zig-std — ~1,000 sites in the pinned std: `catch |err| switch
       # (err) {…}` alone is 498, `catch {…}` 150, `orelse {…}` 105, `orelse break` 102). The fallback runs
       # only on the error / none path: a `break`/`continue` (optionally labeled, a labeled break optionally
@@ -747,6 +888,11 @@ productions:
       - { lhs: OrElse, rhs: [OrElse, 'orelse', FallbackArm],                  action: orElseArm }
       - { lhs: OrElse, rhs: [OrElse, 'catch', FallbackArm],                   action: catchArm }
       - { lhs: OrElse, rhs: [OrElse, 'catch', '|', IDENT, '|', CaptureArm],   action: catchCaptureArm }
+      # `catch |e| return if (e == error.Big) 7 else 8` (task #146): a value `if` as the returned value. `if` is not in
+      # FIRST(BoolOr), so one token after `return` picks it. The arms are BoolOr, not IfExpr's greedy RhsExpr: an RhsExpr
+      # arm would take a following `catch` into itself, and resolving that collapsed a shared state so that NO
+      # `x catch …` parsed any more. A `catch` / `orelse` inside an arm needs parentheses here.
+      - { lhs: CaptureArm,  rhs: ['return', 'if', '(', Expr, ')', BoolOr, 'else', BoolOr], action: fbReturnIf }
       - { lhs: OrElse, rhs: [BoolOr] }
 
   # `rightmost` so a `:` after `break`/`continue` SHIFTS into the label (the dangling-else device):
@@ -761,12 +907,19 @@ productions:
       - { lhs: FallbackArm, rhs: ['continue', ':', IDENT],      action: fbContinueLabel }
       - { lhs: FallbackArm, rhs: [Block],                       action: fbBlock }
       - { lhs: FallbackArm, rhs: [SwitchExpr],                  action: fbSwitch }
+      # `arg_index orelse init: { const arg = self.next_arg; self.next_arg += 1; break :init arg; }`
+      # (std.fmt.ArgState.nextArg): a labeled VALUE block runs only on the none / error path. `rightmost`
+      # shifts the `:` after the label, as for `break :l` above.
+      - { lhs: FallbackArm, rhs: [LabeledBlock],                action: fbLabeled }
       - { lhs: CaptureArm,  rhs: [FallbackArm] }
       # `catch |e| return v` — VALUE form only. A void `catch |e| return;` would leave `e` unused, which
       # zig rejects, so it has no legitimate use; and with it the parser would face `return` vs `return
       # BoolOr` on an IDENT lookahead that FOLLOW(OrElse) also contains, which resolved to the void form
       # and misparsed `return e` as `return;` + a stray `e`. Value-only has no such choice.
       - { lhs: CaptureArm,  rhs: ['return', BoolOr],            action: fbReturn }
+      # `catch |e| return switch (e) { … }` (task #80): the returned value is a switch expression, which is not in the
+      # operator cascade. After `return`, `switch` is not in FIRST(BoolOr), so one token of lookahead picks it.
+      - { lhs: CaptureArm,  rhs: ['return', SwitchExpr],        action: fbReturnSwitch }
 
   # ===== slice 2a: control-flow as expression =====
   # A value-position expression is either an operator-expression (the cascade,
@@ -783,6 +936,9 @@ productions:
   - derivation: none
     rules:
       - { lhs: RhsExpr, rhs: [Expr] }
+      # `x = {};` / `return {};` / `const v = {};` — the void value at a right-hand side (58 in std). Only
+      # RhsExpr reaches it, never a statement start, so it cannot be mistaken for an empty Block.
+      - { lhs: RhsExpr, rhs: ['{', '}'], action: voidValue }
       - { lhs: RhsExpr, rhs: [IfExpr] }
       # `switch` as a VALUE (Milestone L) — same structural trick as IfExpr: a RhsExpr
       # alternative, NOT a Primary, so it never starts an Expr-cascade sub-operand and never
@@ -791,6 +947,16 @@ productions:
       # set, so the alternative is conflict-free. Reuses the same `Prongs`, whose bodies may now
       # be a bare value Expr (`v => e`) — a switch expression's prongs YIELD a value.
       - { lhs: RhsExpr, rhs: [SwitchExpr] }
+      # `comptime switch (…) {…}` / `comptime if (…) a else b` in value position (road-to-zig-std G3:
+      # std.Io.Writer.print's `const arg_pos = comptime switch (placeholder.arg) {…}`; 12 in std). The
+      # `comptime` Prefix operator reaches only the Expr cascade, which neither form is in; after
+      # `comptime`, a `switch` / `if` lookahead starts no Prefix, so these are conflict-free.
+      - { lhs: RhsExpr, rhs: ['comptime', SwitchExpr], action: comptimeSwitchExpr }
+      - { lhs: RhsExpr, rhs: ['comptime', IfExpr],     action: comptimeIfExpr }
+      # `const first = comptime first: { …; break :first a ++ b ++ c; };` (std.unicode's utf8ValidateSliceImpl, task #82):
+      # a labeled block run at compile time. After `comptime IDENT`, the `:` lookahead selects the label, as for a bare
+      # labeled block (a Primary is never followed by `:`).
+      - { lhs: RhsExpr, rhs: ['comptime', LabeledBlock], action: comptimeLabeledBlock }
       # A labeled block as a VALUE (Milestone L, part 2) — `blk: { …; break :blk v; }`. Same
       # structural trick as IfExpr/SwitchExpr: a RhsExpr alternative, NOT a Primary, so it never
       # starts an Expr-cascade sub-operand. `blk:` is `IDENT ':'`; the RhsExpr cascade's other
@@ -807,18 +973,51 @@ productions:
       # of the operator cascade. `while`/`for` at statement start stay LoopStmt (a different context);
       # the value form is reached only after `=`/`return`/an init — like the if/switch expressions.
       - { lhs: RhsExpr, rhs: [LoopExpr] }
+      # `const charset = "0123456789" ++ if (case == .upper) "ABCDEF" else "abcdef";` (std.fmt.bytesToHex, task #170): an
+      # `if` as the right operand of `++`, only as a WHOLE right-hand side and with Prefix-level arms. zig's else arm is a
+      # full expression; here nothing may follow it, so `a ++ if (c) b else d ++ e` (zig: else `d ++ e`) is a parse
+      # error rather than a silent `(a ++ if …) ++ e`. No Mul starts with `if`, so after `Add ++` the `if` is a clean shift.
+      - { lhs: RhsExpr, rhs: [Add, '++', ConcatIf], action: concatIf }
+      - { lhs: ConcatIf, rhs: ['if', '(', Expr, ')', Prefix, 'else', Prefix], action: concatIfOperand }
 
   - derivation: none
     rules:
       - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', RhsExpr, 'else', RhsExpr], action: ifExpr }
+      # A value `if` whose THEN arm returns from the function (std.fmt.parse_float's FloatStream.first:
+      # `return if (self.hasLen(1)) return self.firstUnchecked() else null;`). `return` is not in FIRST(RhsExpr),
+      # so the arm is its own production rather than a `return` expression everywhere.
+      - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', 'return', Expr, 'else', RhsExpr], action: ifExprReturnThen }
+      # An `if` choosing between two inline container TYPES (a type const's RHS, folded at lowering time).
+      - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', TypeArm, 'else', TypeArm], action: ifExprTypeArms }
+      # The captured form (std.mem.eqlBytes' `const Scan = if (std.simd.suggestVectorLength(u8)) |vec_size| struct {…}
+      # else struct {…};`): after the capture, `struct` / `enum` starts a TypeArm, not a RhsExpr.
+      - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', TypeArm, 'else', TypeArm], action: ifExprCaptureTypeArms }
+      - { lhs: TypeArm, rhs: ['enum', '{', EnumFields, '}'],   action: typeArmEnum }
+      - { lhs: TypeArm, rhs: ['struct', '{', FieldDecls, '}'], action: typeArmStruct }
       # Value-position captured `if` — `if (opt) |x| thenExpr else elseExpr` (S4a). The `|` after the
       # `)` cannot start a RhsExpr (it is only an infix bitwise-or), so this is conflict-free with the
       # plain ifExpr above. `else` is mandatory (an expression yields a value on both paths). Mirrors
       # the statement forms `stmtIfCapture*`; the optional/pointer payload binds `x` in the then-branch.
       - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', RhsExpr, 'else', RhsExpr], action: ifExprCapture }
+      # Over an error union, with the error captured too (std.Io.Writer.Allocating.sendFile:
+      # `if (file_reader.getSize()) |size| size - pos else |_| std.atomic.cache_line`). `|` after `else` is a clean
+      # shift, distinct from an RhsExpr start, as in the statement form.
+      - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', RhsExpr, 'else', '|', IDENT, '|', RhsExpr], action: ifExprCaptureErr }
+      # The condition may be a `switch` expression (std.mem.SplitIterator.next's
+      # `if (switch (delimiter_type) { .scalar => findScalarPos(…), … }) |delim_start| … else …`). `switch` is not
+      # in FIRST(Expr), so after `if (` it is a clean shift; the record is the same.
+      - { lhs: IfExpr, rhs: ['if', '(', SwitchExpr, ')', '|', IDENT, '|', RhsExpr, 'else', RhsExpr], action: ifExprCapture }
       - { lhs: SwitchExpr, rhs: ['switch', '(', Expr, ')', '{', Prongs, '}'],      action: switchExpr }
+      # `switch (if (from < 0) @max(…) else to) { … }` (std.math.IntFittingRange): a value `if` as the subject.
+      # `if` is not in FIRST(Expr), so after `switch (` it is a clean shift; the record is the same.
+      - { lhs: SwitchExpr, rhs: ['switch', '(', IfExpr, ')', '{', Prongs, '}'],    action: switchExpr }
+      - { lhs: SwitchExpr, rhs: ['switch', '(', IfExpr, ')', '{', Prongs, ',', '}'], action: switchExprTrailing }
       - { lhs: SwitchExpr, rhs: ['switch', '(', Expr, ')', '{', Prongs, ',', '}'], action: switchExprTrailing }
       - { lhs: LabeledBlock, rhs: [IDENT, ':', Block], action: labeledBlock }
+      # A labeled SWITCH as a value (std.math.shl: `casted_shift_amt: switch (@typeInfo(T)) { .int => |info| { …
+      # break :casted_shift_amt v; … }, … }`): the same value block, its body the switch. After `IDENT ':'`, a
+      # `{` or a `switch` decides the form in one token.
+      - { lhs: LabeledBlock, rhs: [IDENT, ':', SwitchExpr], action: labeledSwitch }
       # The value-position loops. A braced `Block` body (the value form runs statements and yields via
       # `break v`); the `else RhsExpr` clause supplies the value on normal completion. The `while`-else
       # and the most common `for (slice) |x|`-else forms, each optionally labeled (`lbl: … else …`,
@@ -828,15 +1027,38 @@ productions:
       - { lhs: LoopExpr, rhs: ['for', '(', Expr, ')', '|', IDENT, '|', Block, 'else', RhsExpr],           action: forElseExpr }
       - { lhs: LoopExpr, rhs: [IDENT, ':', 'while', '(', Expr, ')', Block, 'else', RhsExpr],              action: labeledWhileElseExpr }
       - { lhs: LoopExpr, rhs: [IDENT, ':', 'for', '(', Expr, ')', '|', IDENT, '|', Block, 'else', RhsExpr], action: labeledForElseExpr }
+      # `const mask = for (self.masks) |mask| { if (mask != 0) break mask; … } else return null;`
+      # (std.bit_set.ArrayBitSet.findFirstSet): the else RETURNS from the function instead of yielding, so the
+      # loop's value comes from its `break`s alone. `return` is not in FIRST(RhsExpr): a clean shift after `else`.
+      - { lhs: LoopExpr, rhs: ['while', '(', Expr, ')', Block, 'else', ReturnArm],                 action: whileElseReturnExpr }
+      # A value `while` with an assignment continue-expression (std.bit_set.ArrayBitSet.eql:
+      # `return while (i < num_masks) : (i += 1) { … break false; } else true;`). After `)`, a `:` or a `{`
+      # decides between this and the plain value `while` in one token.
+      - { lhs: LoopExpr, rhs: ['while', '(', Expr, ')', ':', '(', Expr, AssignOp, RhsExpr, ')', Block, 'else', RhsExpr], action: whileContAssignElseExpr }
+      - { lhs: LoopExpr, rhs: ['for', '(', Expr, ')', '|', IDENT, '|', Block, 'else', ReturnArm],  action: forElseReturnExpr }
+      # The by-ref capture (`for (&self.masks) |*mask| { … break mask; } else return null;`, toggleFirstSet): the
+      # break yields the element POINTER. After `|`, a `*` or an IDENT decides the capture form in one token.
+      - { lhs: LoopExpr, rhs: ['for', '(', Expr, ')', '|', '*', IDENT, '|', Block, 'else', RhsExpr],    action: forRefElseExpr }
+      - { lhs: LoopExpr, rhs: ['for', '(', Expr, ')', '|', '*', IDENT, '|', Block, 'else', ReturnArm],  action: forRefElseReturnExpr }
+      # The comptime-unrolled value loop (std.enums.tagName, task #131: `return inline for (field_names, field_values)
+      # |f_name, f_value| { if (@intFromEnum(e) == f_value) break f_name; } else null;`), over one comptime list or several
+      # in lockstep. `inline` is not in FIRST of any other RhsExpr form, so it decides the production in one token.
+      - { lhs: LoopExpr, rhs: ['inline', 'for', '(', Expr, ')', '|', IDENT, '|', Block, 'else', RhsExpr],       action: inlineForElseExpr }
+      - { lhs: LoopExpr, rhs: ['inline', 'for', '(', ForObjs, ')', '|', ForCaps, '|', Block, 'else', RhsExpr], action: inlineForMultiElseExpr }
 
   - derivation: leftmost
     rules:
       - { lhs: BoolOr, rhs: [BoolOr, 'or', BoolAnd], action: boolOr }
+      # A `switch` as the RIGHT operand of `or` / `and` (std.meta.hasUniqueRepresentation:
+      # `!ptr.attrs.@"allowzero" and switch (ptr.size) { … }`). No Compare starts with `switch`, so after
+      # the operator it is a clean shift; the value switch stays out of the rest of the operator cascade.
+      - { lhs: BoolOr, rhs: [BoolOr, 'or', SwitchExpr], action: boolOrSwitch }
       - { lhs: BoolOr, rhs: [BoolAnd] }
 
   - derivation: leftmost
     rules:
       - { lhs: BoolAnd, rhs: [BoolAnd, 'and', Compare], action: boolAnd }
+      - { lhs: BoolAnd, rhs: [BoolAnd, 'and', SwitchExpr], action: boolAndSwitch }
       - { lhs: BoolAnd, rhs: [Compare] }
 
   # Compare is non-associative (PEG: `BitwiseExpr (CompareOp BitwiseExpr)?`) — no
@@ -845,6 +1067,14 @@ productions:
     rules:
       - { lhs: Compare, rhs: [Bitwise, '==', Bitwise], action: cmpEq }
       - { lhs: Compare, rhs: [Bitwise, '!=', Bitwise], action: cmpNe }
+      # An `if` expression as the RIGHT operand of `==` / `!=` (std.fmt.float.binaryToDecimal's
+      # `ieee_mantissa != if (explicit_leading_bit) (…) else 0`). No Bitwise starts with `if`, so after the
+      # operator it is a clean shift, exactly as `+ switch` below. Its arms are Bitwise, the level of a
+      # Compare operand: a full-expression else arm (zig's) would make `… else y catch z` ambiguous with a
+      # `catch` around the whole comparison, and resolving that broke every top-level `f() catch return`.
+      - { lhs: Compare, rhs: [Bitwise, '==', IfOperand], action: cmpEqIf }
+      - { lhs: Compare, rhs: [Bitwise, '!=', IfOperand], action: cmpNeIf }
+      - { lhs: IfOperand, rhs: ['if', '(', Expr, ')', Bitwise, 'else', Bitwise], action: ifOperand }
       - { lhs: Compare, rhs: [Bitwise, '<', Bitwise],  action: cmpLt }
       - { lhs: Compare, rhs: [Bitwise, '>', Bitwise],  action: cmpGt }
       - { lhs: Compare, rhs: [Bitwise, '<=', Bitwise], action: cmpLe }
@@ -868,6 +1098,9 @@ productions:
     rules:
       - { lhs: Add, rhs: [Add, '+', Mul], action: add }
       - { lhs: Add, rhs: [Add, '-', Mul], action: sub }
+      # `x + switch (…) {…}` (std.math.IntFittingRange's width): after the operator, `switch` can only open a
+      # value switch, a clean shift, exactly as `and switch` above.
+      - { lhs: Add, rhs: [Add, '+', SwitchExpr], action: addSwitch }
       # Array/string CONCAT `a ++ b` (Zig's PLUS2 — an Add-level, left-assoc binary op). Parses today;
       # lowering (comptime array/string concat) is deferred (loud cut) — the goal here is parse coverage
       # (std's `@compileError("…" ++ @tagName(x))` and similar comptime string building).
@@ -905,6 +1138,9 @@ productions:
     rules:
       - { lhs: Prefix, rhs: ['!', Prefix],  action: preNot }
       - { lhs: Prefix, rhs: ['-', Prefix],  action: preNeg }
+      # Wrapping negation `-%x` (std.math.boolMask's `-%@as(MaskInt, …)`): `-%` is already a token (the infix `a -% b`),
+      # and in prefix position it can only start an operand, so the two uses never meet in one state.
+      - { lhs: Prefix, rhs: ['-%', Prefix], action: preNegWrap }
       - { lhs: Prefix, rhs: ['~', Prefix],  action: preBitNot }
       - { lhs: Prefix, rhs: ['&', Prefix],  action: preAddrOf }
       - { lhs: Prefix, rhs: ['try', Prefix], action: preTry }
@@ -964,6 +1200,29 @@ productions:
       # `[]const T` — a const slice. The `const` after `]` is unambiguous (no Type starts
       # with a bare `const`), so it stays conflict-free against `[]T` / `[Expr]T`.
       - { lhs: Type, rhs: ['[', ']', 'const', Type], action: tySliceConst }
+      # `volatile` on a pointee (`[]volatile T`, `*volatile T`, `*const volatile T`; std.crypto.secureZero's
+      # `s: []volatile T`). One prefix production composes under every pointer / slice form. `volatile` is outside
+      # FIRST(Expr) except after `asm`, where no Type is expected, so it is a 1-token shift. Lowering accepts it only
+      # as a pointee, as zig does.
+      - { lhs: Type, rhs: ['volatile', Type],       action: tyVolatile }
+      # The same pointer / slice forms with an alignment (`PtrAlign`, symbol 169). `align` is a keyword,
+      # outside FIRST(Type), so after `*` / `[*]` / `[ ]` it is a 1-token shift decision.
+      - { lhs: Type, rhs: ['*', PtrAlign, Type],                action: tyPointerAlign }
+      - { lhs: Type, rhs: ['*', PtrAlign, 'const', Type],       action: tyPtrConstAlign }
+      - { lhs: Type, rhs: ['[*]', PtrAlign, Type],              action: tyManyPtrAlign }
+      - { lhs: Type, rhs: ['[*]', PtrAlign, 'const', Type],     action: tyManyPtrConstAlign }
+      - { lhs: Type, rhs: ['[', ']', PtrAlign, Type],           action: tySliceAlign }
+      - { lhs: Type, rhs: ['[', ']', PtrAlign, 'const', Type],  action: tySliceConstAlign }
+      # A GENERAL sentinel (`[:s]T`, `[:sentinel]const T`, `[*:null]T`; 77 uses in std, Aligned's
+      # SentinelSlice among them). `[:0]` / `[*:0]` stay their own single tokens; any other sentinel
+      # lexes as `[` `:` Expr `]`, and `:` is outside FIRST(Expr) and `]`, so after `[` (or `[` `*`)
+      # it is a 1-token shift decision. The sentinel is erased in the type, exactly as `[:0]`'s is.
+      - { lhs: Type, rhs: ['[', ':', Expr, ']', Type],                     action: tySentSliceExpr }
+      - { lhs: Type, rhs: ['[', ':', Expr, ']', 'const', Type],            action: tySentSliceConstExpr }
+      - { lhs: Type, rhs: ['[', ':', Expr, ']', PtrAlign, Type],           action: tySentSliceAlignExpr }
+      - { lhs: Type, rhs: ['[', ':', Expr, ']', PtrAlign, 'const', Type],  action: tySentSliceConstAlignExpr }
+      - { lhs: Type, rhs: ['[', '*', ':', Expr, ']', Type],                action: tySentPtrExpr }
+      - { lhs: Type, rhs: ['[', '*', ':', Expr, ']', 'const', Type],       action: tySentPtrConstExpr }
       - { lhs: Type, rhs: ['[', Expr, ']', Type], action: tyArray }
       # `[N:0]T` sentinel-terminated array (Milestone O, part 4) — N+1 elements of storage (the
       # trailing slot holds the sentinel 0), logical length N. Conflict-free against `tyArray`:
@@ -998,6 +1257,10 @@ productions:
       - { lhs: Type, rhs: ['fn', '(', ')', CallConv, Type],                    action: tyFnNoArgs }
       - { lhs: Type, rhs: ['fn', '(', FnTypeParams, ')', CallConv, '!', Type], action: tyFnErr }
       - { lhs: Type, rhs: ['fn', '(', ')', CallConv, '!', Type],               action: tyFnNoArgsErr }
+      # A fn type whose RETURN type is a comptime `switch` (std.Options' `elf_debug_info_search_paths: ?fn (…)
+      # switch (@import("builtin").object_format) { … }`). `switch` is not in FIRST(Type), so after the
+      # CallConv it is a 1-token shift. Parsed so the declaring container parses; lowering it is a named cut.
+      - { lhs: Type, rhs: ['fn', '(', FnTypeParams, ')', CallConv, SwitchExpr], action: tyFnSwitchRet }
       - { lhs: Type, rhs: [ErrUnion] }
 
   # ANNOTATION type (road-to-zig-std S9 — the `:`-in-307 residual). An `AType` is a plain `Type`
@@ -1018,6 +1281,13 @@ productions:
       - { lhs: AType, rhs: [Type] }
       - { lhs: AType, rhs: ['struct', '{', FieldDecls, '}'], action: inlineStructType }
       - { lhs: AType, rhs: ['struct', '{', '}'],             action: inlineStructTypeEmpty }
+      # The enum twin: `comptime sign: enum { pos, neg }` (std's parseIntWithSign). Same annotation-only
+      # slot, so the value-position `const E = enum {…}` (enumDecl) keeps no competitor.
+      - { lhs: AType, rhs: ['enum', '{', EnumFields, '}'],   action: inlineEnumType }
+      # The union twins (task #104): `x: union(enum) { a: u8, b: u16 }` as a parameter / field / annotation type. The
+      # same annotation-only slot, so the value-position `const U = union(enum) {…}` (unionDeclEnum) keeps no competitor.
+      - { lhs: AType, rhs: ['union', '(', 'enum', ')', '{', UnionVariants, '}'], action: inlineUnionEnumType }
+      - { lhs: AType, rhs: ['union', '{', UnionVariants, '}'],                   action: inlineUnionType }
 
   - derivation: none
     rules:
@@ -1048,6 +1318,9 @@ productions:
     rules:
       - { lhs: FnTypeParam, rhs: [Type],             action: fnTypeParamUnnamed }
       - { lhs: FnTypeParam, rhs: [IDENT, ':', Type], action: fnTypeParamNamed }
+      # A `comptime` parameter in a function TYPE (std.Options' `logFn: fn (comptime message_level: log.Level, …)
+      # void`): parsed so the declaring container parses; lowering one is a named cut (a generic function type).
+      - { lhs: FnTypeParam, rhs: ['comptime', IDENT, ':', Type], action: fnTypeParamComptime }
 
   # Postfix chain (left-assoc): field access, deref, optional-unwrap, index, call.
   - derivation: leftmost
@@ -1064,6 +1337,10 @@ productions:
       # Expr-start) selects this production. Valid only on a known-length source (slice
       # or array); a bare pointer has no length (rejected in lowering, as Zig does).
       - { lhs: Suffix, rhs: [Suffix, '[', Expr, '..', ']'], action: sliceOpen }
+      # Sentinel-terminated slicing `a[lo .. hi :s]` / `a[lo .. :s]` (73 in std; array_list's
+      # toOwnedSliceSentinel). `:` follows no Expr anywhere else, so it is a 1-token shift decision.
+      - { lhs: Suffix, rhs: [Suffix, '[', Expr, '..', Expr, ':', Expr, ']'], action: sliceRangeSentinel }
+      - { lhs: Suffix, rhs: [Suffix, '[', Expr, '..', ':', Expr, ']'],       action: sliceOpenSentinel }
       - { lhs: Suffix, rhs: [Suffix, '(', ArgList, ')'], action: callArgs }
       - { lhs: Suffix, rhs: [Suffix, '(', ')'],          action: callNoArgs }
       - { lhs: Suffix, rhs: [Primary] }
@@ -1074,6 +1351,7 @@ productions:
       - { lhs: Primary, rhs: [INTEGER],             action: intLit }
       - { lhs: Primary, rhs: [FLOAT],               action: floatLit }
       - { lhs: Primary, rhs: [STRING],              action: strLit }
+      - { lhs: Primary, rhs: [AsmExpr] }
       # A parenthesized value: `( Expr )` grouping OR a parenthesized VALUE-position control-flow
       # construct — `( if … )` / `( switch … )` / `( blk: {…} )` / `( while/for … else … )`. Using
       # `RhsExpr` (which subsumes Expr) makes these reachable as a Primary WITHOUT putting the bare
@@ -1092,11 +1370,19 @@ productions:
       - { lhs: Primary, rhs: ['false'],             action: falseLit }
       - { lhs: Primary, rhs: [CHAR],                action: charLit }
       - { lhs: Primary, rhs: ['.', IDENT],          action: enumLit }
+      # `.undefined` / `.null` — the `std.builtin.Type` tags named after keywords (auto_hash's
+      # `switch (@typeInfo(Key)) { .undefined, .null, … }`). After `.` the keyword is a clean shift.
+      - { lhs: Primary, rhs: ['.', 'undefined'],    action: enumLitUndefined }
+      - { lhs: Primary, rhs: ['.', 'null'],         action: enumLitNull }
       # Anonymous struct literal `.{ … }` (Milestone D1). The leading `.` is the SAME token
       # as enumLit's; they split cleanly on the next symbol (`{` → struct literal, IDENT →
       # enum literal). An empty `.{}` zero-inits the (sink-typed) struct.
       - { lhs: Primary, rhs: ['.', '{', FieldInits, '}'], action: anonStructInit }
       - { lhs: Primary, rhs: ['.', '{', '}'],             action: anonStructInitEmpty }
+      # The closure idiom in EXPRESSION position (std/sort/block.zig: `const lessThan = if (builtin.mode ==
+      # .Debug) struct { fn lessThan(…) … }.lessThan else lessThanFn;`): a method of an anonymous struct as a
+      # function value. The trailing `.` IDENT is required, which keeps it apart from a struct TYPE.
+      - { lhs: Primary, rhs: ['struct', '{', FieldDecls, '}', '.', IDENT], action: structMemberExpr }
       # `error.Foo` — an error-value literal. `error` is a distinct keyword token, so this
       # never collides with the `Suffix '.' IDENT` field access (which starts from a
       # Primary/IDENT). After `error`, a `'.'` selects the value literal and a `'{'` the set
@@ -1119,8 +1405,71 @@ productions:
 
   - derivation: leftmost
     rules:
-      - { lhs: ArgList, rhs: [Expr, ',', ArgList], action: argsCons }
-      - { lhs: ArgList, rhs: [Expr],                action: argsOne }
+      - { lhs: ArgList, rhs: [Arg, ',', ArgList], action: argsCons }
+      - { lhs: ArgList, rhs: [Arg],                action: argsOne }
+      # A trailing comma (`f(a, b,)`, zig fmt's layout for every multi-line call). Right
+      # recursion makes it clean: after `Arg ','`, a `)` reduces here and anything else starts an Arg.
+      - { lhs: ArgList, rhs: [Arg, ','],           action: argsTrail }
+
+  # A call argument (symbol 168): an ordinary Expr (a transparent pass-through, so every existing
+  # argument lowers unchanged) or `{}`, zig's void value. `{` is not in FIRST(Expr), so the choice is a
+  # 1-token shift decision.
+  - derivation: none
+    rules:
+      - { lhs: PtrAlign, rhs: ['align', '(', Expr, ')'], action: ptrAlign }
+
+  - derivation: none
+    rules:
+      - { lhs: Arg, rhs: [Expr] }
+      - { lhs: Arg, rhs: ['{', '}'], action: voidArg }
+      # A switch EXPRESSION as an argument (std.math.log2's `math.log2_int(switch (s) { … }, x)`),
+      # transparent like the Expr arm. `switch` is not in FIRST(Expr), so it is a shift decision too.
+      - { lhs: Arg, rhs: [SwitchExpr] }
+      # And an if-EXPRESSION (std.Io.Writer.printValue's `w.writeAll(if (i < n) ", " else " }")`).
+      - { lhs: Arg, rhs: [IfExpr] }
+      # And a labeled value-block (std.hash.XxHash3.final's `acc.digest(len, last_block: { … break :last_block p; })`,
+      # task #178). `IDENT ':'` starts it where an Expr's IDENT would reduce to a Primary; no Primary is ever followed by
+      # ':' (the invariant LabeledBlock already relies on as a RhsExpr), so the ':' lookahead decides.
+      - { lhs: Arg, rhs: [LabeledBlock] }
+      # An inline container TYPE as an argument (`@as(struct { a: u8 }, .{ .a = 4 })`, `@as(enum { x, y }, .y)`,
+      # `@as(union(enum) { … }, …)`, task #110), reusing AType's inline actions. `enum` / `union` are not in
+      # FIRST(Expr); `struct {…}` shares its prefix with the closure idiom `struct {…}.f`, which continues with
+      # `.`, a token no Arg is followed by, so the choice after `}` is still one token.
+      - { lhs: Arg, rhs: ['struct', '{', FieldDecls, '}'],                     action: inlineStructType }
+      - { lhs: Arg, rhs: ['enum', '{', EnumFields, '}'],                       action: inlineEnumType }
+      - { lhs: Arg, rhs: ['union', '(', 'enum', ')', '{', UnionVariants, '}'], action: inlineUnionEnumType }
+      - { lhs: Arg, rhs: ['union', '{', UnionVariants, '}'],                   action: inlineUnionType }
+
+  - derivation: none
+    rules:
+      - { lhs: ForObjs, rhs: [ForObj, ',', ForObj],  action: forObjsTwo }
+      - { lhs: ForObjs, rhs: [ForObjs, ',', ForObj], action: forObjsCons }
+      - { lhs: ForObj, rhs: [Expr],                  action: forObj }
+      - { lhs: ForObj, rhs: [Expr, '..'],            action: forObjFrom }
+      - { lhs: ForObj, rhs: [Expr, '..', Expr],      action: forObjRange }
+      # Any number of captures, one included (a transparent pass-through), so a count mismatch reaches DecomposeForMulti's
+      # check rather than a parse error.
+      - { lhs: ForCaps, rhs: [ForCap] }
+      - { lhs: ForCaps, rhs: [ForCaps, ',', ForCap], action: forCapsCons }
+      - { lhs: ForCap, rhs: [IDENT],                 action: forCapVal }
+      - { lhs: ForCap, rhs: ['*', IDENT],            action: forCapRef }
+
+  - derivation: none
+    rules:
+      - { lhs: ProngType, rhs: ['struct', '{', FieldDecls, '}'],                     action: inlineStructType }
+      - { lhs: ProngType, rhs: ['enum', '{', EnumFields, '}'],                       action: inlineEnumType }
+      - { lhs: ProngType, rhs: ['union', '(', 'enum', ')', '{', UnionVariants, '}'], action: inlineUnionEnumType }
+      - { lhs: ProngType, rhs: ['union', '{', UnionVariants, '}'],                   action: inlineUnionType }
+
+  # A named field init's value: an Expr, or `{}` (void; `{` is not in FIRST(Expr), so conflict-free).
+  - derivation: none
+    rules:
+      - { lhs: FieldValue, rhs: [Expr] }
+      - { lhs: FieldValue, rhs: ['{', '}'], action: voidValue }
+      # A value `if` / `switch` (std.fmt.parse_float's `.max_mantissa_digits = if (MantissaT == u64) 19 else 38`):
+      # `if` / `switch` are not in FIRST(Expr), so the field value stays conflict-free, as RhsExpr's are.
+      - { lhs: FieldValue, rhs: [IfExpr] }
+      - { lhs: FieldValue, rhs: [SwitchExpr] }
 
   # ===== switch prongs (Milestone C2) =====
   # LEFT-recursive prong list — the form that makes the optional trailing comma a clean
@@ -1176,6 +1525,69 @@ productions:
       - { lhs: Prong, rhs: [CaseVals, '=>', '|', '*', IDENT, '|', RhsExpr],           action: prongCaptureRefExpr }
       - { lhs: Prong, rhs: [CaseVals, '=>', '|', '*', IDENT, '|', 'return', RhsExpr], action: prongCaptureRefReturn }
       - { lhs: Prong, rhs: [CaseVals, '=>', '|', '*', IDENT, '|', 'return'],          action: prongCaptureRefReturnVoid }
+      # A JUMP prong body `v => break`, `v => continue :outer`, `v => |e| break :blk e` (road-to-zig-std
+      # G3). In zig `break`/`continue` are expressions, so they sit directly after `=>`; dotcc keeps them
+      # statements and admits them here as explicit prong forms, like `return`. `break`/`continue` are in
+      # no other prong body's FIRST set, so the choice is one token of lookahead.
+      - { lhs: Prong, rhs: [CaseVals, '=>', ProngJump],                  action: prongJump }
+      # An ASSIGNMENT prong body `v => lhs = rhs` (hash_map's `.stage2_llvm => _ = &dbHelper,`), or a compound one
+      # (`0 => hits += 1,`): no Prong is ever followed by an assignment operator, so after the body's `Expr` it shifts
+      # into this form, conflict-free (AssignOp is the continue-expression's operator set).
+      - { lhs: Prong, rhs: [CaseVals, '=>', Expr, AssignOp, RhsExpr],    action: prongAssign }
+      # Its capture twin (`.on => |v| total += v,`, task #109), split from prongCaptureExpr the same way.
+      - { lhs: Prong, rhs: [CaseVals, '=>', '|', IDENT, '|', Expr, AssignOp, RhsExpr], action: prongCaptureAssign }
+      # A container TYPE as a prong's value (std.MultiArrayList's `const Elem = switch (@typeInfo(T)) { .@"struct" => T,
+      # .@"union" => |u| struct { … }, … }`, task #108): the plain / capture expr prong actions over a ProngType, so every
+      # consumer of those prongs sees a type item. The closure idiom `struct {…}.f` continues with `.`, which no Prong is
+      # followed by, so the choice after `}` is one token.
+      - { lhs: Prong, rhs: [CaseVals, '=>', ProngType],                  action: prongExpr }
+      - { lhs: Prong, rhs: [CaseVals, '=>', '|', IDENT, '|', ProngType], action: prongCaptureExpr }
+      # A `comptime { … }` prong body (std.math.sqrt's `.comptime_int => comptime { … }`): after `comptime`,
+      # a `{` starts no Prefix (the `comptime` value operator's operand), so this is a clean shift.
+      - { lhs: Prong, rhs: [CaseVals, '=>', 'comptime', Block],          action: prongComptimeBlock }
+      - { lhs: Prong, rhs: [CaseVals, '=>', '|', IDENT, '|', ProngJump], action: prongCaptureJump }
+      # An `inline` prong (std.meta.eql's `inline else => |val, tag| …`, Target.zig's `inline else => |f|`):
+      # `inline` starts no CaseVals, so it is a clean shift wrapping any prong. A PAYLOAD + TAG capture
+      # `|val, tag|` splits from `|val|` on the `,` after the first name.
+      - { lhs: Prong, rhs: ['inline', Prong], action: inlineProng }
+      # A capture `if` with NO `else` as a (void) prong body — auto_hash's `.optional => if (key) |k| hash(…),`.
+      # Its body is a plain Expr ended by `,` / `}`, where an `else` would continue the if-EXPRESSION prong
+      # (whose arms are RhsExprs): a 1-token split, with no dangling else to resolve.
+      - { lhs: Prong, rhs: [CaseVals, '=>', 'if', '(', Expr, ')', '|', IDENT, '|', Expr], action: prongIfCapture }
+      # An else-less `if` whose body is a switch statement (std.Io.Writer.printValue's
+      # `3 => if (fmt[0] == 'b' and …) switch (@typeInfo(T)) { … },`). Ended by `,` / `}` like the form above;
+      # an if-EXPRESSION prong would continue with `else`, and its arms are not SwitchExprs, so no conflict.
+      - { lhs: Prong, rhs: [CaseVals, '=>', 'if', '(', Expr, ')', SwitchExpr], action: prongIfSwitch }
+      # An else-less `if` whose body is a BLOCK (std.crypto.sha2's `.x86_64 => if (… comptime cpu.hasAll(…)) { … },`).
+      # Ended by `,` / `}`; an if-EXPRESSION prong continues with `else`.
+      - { lhs: Prong, rhs: [CaseVals, '=>', 'if', '(', Expr, ')', Block], action: prongIfBlock }
+      # An else-less `if` whose body is a plain expression (std.mem.ReverseIterator's `.one => if (@typeInfo(ptr.child)
+      # != .array) @compileError("…"),`, task #141). Ended by `,` / `}` like the capture form; an if-EXPRESSION prong
+      # continues with `else`, so the split is one token after the body.
+      - { lhs: Prong, rhs: [CaseVals, '=>', 'if', '(', Expr, ')', Expr], action: prongIfExpr }
+      # A capture prong whose body is a capture-`if` statement (std.meta.FieldEnum's `.@"union" => |u| if (u.tag_type)
+      # |EnumTag| { … }`, task #108). After the prong's `|x|`, `if` then `(` Expr `)` `|` distinguishes it from the
+      # value-if RhsExpr only at the `{` of its Block, which no RhsExpr's then-arm starts with.
+      - { lhs: Prong, rhs: [CaseVals, '=>', '|', IDENT, '|', 'if', '(', Expr, ')', '|', IDENT, '|', Block], action: prongCaptureIfCaptureBlock }
+      # A capture `if` whose body RETURNS (std.Io.Writer.printInt's
+      # `.signed => if (std.math.cast(isize, value)) |x| return printIntAny(w, x, …),`). `return` does not
+      # start an Expr, so after the capture it is a 1-token split from prongIfCapture.
+      - { lhs: Prong, rhs: [CaseVals, '=>', 'if', '(', Expr, ')', '|', IDENT, '|', ReturnArm], action: prongIfCaptureReturn }
+      # A loop STATEMENT as a prong body (std.Io.Writer.writeSplat's `else => for (0..splat) |_| { … },`).
+      - { lhs: Prong, rhs: [CaseVals, '=>', LoopStmt], action: prongLoop }
+      - { lhs: Prong, rhs: [CaseVals, '=>', '|', IDENT, ',', IDENT, '|', Block],             action: prongCaptureTag }
+      - { lhs: Prong, rhs: [CaseVals, '=>', '|', IDENT, ',', IDENT, '|', RhsExpr],           action: prongCaptureTagExpr }
+      - { lhs: Prong, rhs: [CaseVals, '=>', '|', IDENT, ',', IDENT, '|', 'return', RhsExpr], action: prongCaptureTagReturn }
+
+  # The jump forms. FOLLOW(Prong) is `,` / `}`, so a label after `:` and a value after the label are
+  # clean shift decisions (neither `,` nor `}` starts an RhsExpr).
+  - derivation: none
+    rules:
+      - { lhs: ProngJump, rhs: ['break'],                       action: pjBreak }
+      - { lhs: ProngJump, rhs: ['break', ':', IDENT],           action: pjBreakLabel }
+      - { lhs: ProngJump, rhs: ['break', ':', IDENT, RhsExpr],  action: pjBreakLabelValue }
+      - { lhs: ProngJump, rhs: ['continue'],                    action: pjContinue }
+      - { lhs: ProngJump, rhs: ['continue', ':', IDENT],        action: pjContinueLabel }
 
   # Case values: a comma-list of value Exprs, or `else` (the default). The `,` here never
   # clashes with the prong-separator `,` because FOLLOW(CaseVals) = { '=>' } — after a value
@@ -1193,6 +1605,11 @@ productions:
       - { lhs: CaseVals, rhs: ['else'],                           action: caseElse }
       - { lhs: CaseVals, rhs: [Expr, '...', Expr],               action: caseRangeOne }
       - { lhs: CaseVals, rhs: [Expr, '...', Expr, ',', CaseVals], action: caseRangeCons }
+      # A TRAILING comma before `=>` (zig fmt's one-value-per-line layout: mem.zig's `use_vectors`
+      # lists `.stage2_aarch64,\n .stage2_powerpc,\n .stage2_riscv64,\n => false`). FOLLOW(CaseVals)
+      # is `=>`, which starts no Expr, so after `Expr ','` the `=>` lookahead cleanly reduces this form.
+      - { lhs: CaseVals, rhs: [Expr, ','],                        action: caseValsTrail }
+      - { lhs: CaseVals, rhs: [Expr, '...', Expr, ','],           action: caseRangeTrail }
 
   # ===== struct container body (Milestone D2 — a field-only list in D1) =====
   # A struct body is a list of MEMBERS: fields (`name: Type`, comma-separated) interleaved
@@ -1219,6 +1636,18 @@ productions:
       - { lhs: Member, rhs: [FieldDecl],       action: memberFieldLast }
       - { lhs: Member, rhs: [FnDef],           action: memberMethod }
       - { lhs: Member, rhs: ['pub', FnDef],    action: memberPubMethod }
+      - { lhs: Member, rhs: ['inline', FnDef],        action: memberInlineMethod }
+      - { lhs: Member, rhs: ['pub', 'inline', FnDef], action: memberPubInlineMethod }
+      - { lhs: Member, rhs: ['noinline', FnDef],        action: memberNoinlineMethod }
+      - { lhs: Member, rhs: ['pub', 'noinline', FnDef], action: memberPubNoinlineMethod }
+      # A container-level `comptime { … }` block (hash_map.zig's `comptime { assert(@sizeOf(Metadata) == 1); }`):
+      # analysis-only, dropped like the top-level form (topComptime). `comptime` starts no other member.
+      - { lhs: Member, rhs: ['comptime', Block],      action: memberComptime }
+      # A `test` block inside a container body: `test` starts no other member, so it is a clean shift.
+      - { lhs: Member, rhs: [TestBlock],              action: memberTest }
+      - { lhs: TestBlock, rhs: ['test', STRING, Block], action: testBlockNamed }
+      - { lhs: TestBlock, rhs: ['test', IDENT, Block],  action: testBlockIdent }
+      - { lhs: TestBlock, rhs: ['test', Block],         action: testBlockAnon }
       # A container-level `const` member, reusing the existing VarDecl nonterminal. V1 lowers only
       # the ubiquitous self-type alias `const Self = @This();` (any alias name; RHS `@This()`) —
       # naming the container type inside its own methods without repeating it; a non-`@This()`
@@ -1249,7 +1678,17 @@ productions:
       # fail first on the `=`, and it's a hard requirement for the file-is-a-struct idiom. After
       # `IDENT : Type` the `=` (default) vs `,`/`}` (bare field) decision is a clean 1-token split.
       # The default is materialized only for fields OMITTED from a `.{…}` literal (see BuildStructInit).
-      - { lhs: FieldDecl, rhs: [IDENT, ':', AType, '=', Expr], action: structFieldDefault }
+      # The default is a value-position RhsExpr, so an `if` may choose it (debug.zig's SafetyLock:
+      # `state: State = if (runtime_safety) .unlocked else .unknown,`); `,` / `}` still end it.
+      - { lhs: FieldDecl, rhs: [IDENT, ':', AType, '=', RhsExpr], action: structFieldDefault }
+      # A field with an alignment (std.crypto.sha2's `s: [8]u32 align(16),`). After the type, `align` is a 1-token shift
+      # (it is never in FOLLOW(AType) inside a field list otherwise).
+      - { lhs: FieldDecl, rhs: [IDENT, ':', AType, 'align', '(', Expr, ')'],                  action: structFieldAligned }
+      - { lhs: FieldDecl, rhs: [IDENT, ':', AType, 'align', '(', Expr, ')', '=', RhsExpr], action: structFieldAlignedDefault }
+      # A field whose TYPE is a comptime `switch` (std.mem.SplitIterator's
+      # `delimiter: switch (delimiter_type) { .sequence, .any => []const T, .scalar => T },`). `switch` is
+      # not in FIRST(AType), so after `IDENT :` it is a 1-token shift.
+      - { lhs: FieldDecl, rhs: [IDENT, ':', SwitchExpr], action: structFieldSwitch }
 
   # Enum body as a MEMBER list (right-recursive over EnumMember, like struct's FieldDecls) — so
   # value members, methods (`fn`/`pub fn`), and consts (`const Self = @This();`) interleave. The
@@ -1271,6 +1710,12 @@ productions:
       - { lhs: EnumMember, rhs: [EnumField],       action: enumMemberFieldLast }
       - { lhs: EnumMember, rhs: [FnDef],           action: enumMemberMethod }
       - { lhs: EnumMember, rhs: ['pub', FnDef],    action: enumMemberPubMethod }
+      - { lhs: EnumMember, rhs: ['inline', FnDef],        action: enumMemberInlineMethod }
+      - { lhs: EnumMember, rhs: ['pub', 'inline', FnDef], action: enumMemberPubInlineMethod }
+      - { lhs: EnumMember, rhs: ['noinline', FnDef],        action: enumMemberNoinlineMethod }
+      - { lhs: EnumMember, rhs: ['pub', 'noinline', FnDef], action: enumMemberPubNoinlineMethod }
+      - { lhs: EnumMember, rhs: ['comptime', Block],      action: enumMemberComptime }
+      - { lhs: EnumMember, rhs: [TestBlock],              action: enumMemberTest }
       - { lhs: EnumMember, rhs: [VarDecl],         action: enumMemberConst }
       - { lhs: EnumMember, rhs: ['pub', VarDecl],  action: enumMemberPubConst }
       # Nested container decl inside an enum body (road-to-zig-std S9) — same const-led
@@ -1303,6 +1748,12 @@ productions:
       - { lhs: UnionMember, rhs: [UnionVariant],       action: unionMemberVariantLast }
       - { lhs: UnionMember, rhs: [FnDef],              action: unionMemberMethod }
       - { lhs: UnionMember, rhs: ['pub', FnDef],       action: unionMemberPubMethod }
+      - { lhs: UnionMember, rhs: ['inline', FnDef],        action: unionMemberInlineMethod }
+      - { lhs: UnionMember, rhs: ['pub', 'inline', FnDef], action: unionMemberPubInlineMethod }
+      - { lhs: UnionMember, rhs: ['noinline', FnDef],        action: unionMemberNoinlineMethod }
+      - { lhs: UnionMember, rhs: ['pub', 'noinline', FnDef], action: unionMemberPubNoinlineMethod }
+      - { lhs: UnionMember, rhs: ['comptime', Block],      action: unionMemberComptime }
+      - { lhs: UnionMember, rhs: [TestBlock],              action: unionMemberTest }
       - { lhs: UnionMember, rhs: [VarDecl],            action: unionMemberConst }
       - { lhs: UnionMember, rhs: ['pub', VarDecl],     action: unionMemberPubConst }
       # Nested container decl inside a union body (road-to-zig-std S9) — same const-led
@@ -1316,6 +1767,10 @@ productions:
     rules:
       - { lhs: UnionVariant, rhs: [IDENT, ':', AType], action: unionVariantPayload }
       - { lhs: UnionVariant, rhs: [IDENT],             action: unionVariantVoid }
+      # `undefined,` / `null,` (std.builtin.Type's void variants): zig's primitive VALUES, but plain names in a
+      # container's field list. dotcc lexes them as keywords, so the variant admits them by name.
+      - { lhs: UnionVariant, rhs: ['undefined'],       action: unionVariantVoid }
+      - { lhs: UnionVariant, rhs: ['null'],            action: unionVariantVoid }
 
   # Anonymous struct literal `.{ .f = v, … }` — Zig's result-located init, where the type
   # is inferred from the sink (a typed `const`/`var`, a `return`, a field's declared type).
@@ -1330,13 +1785,44 @@ productions:
 
   - derivation: none
     rules:
-      - { lhs: FieldInit, rhs: ['.', IDENT, '=', Expr], action: fieldInit }
+      - { lhs: FieldInit, rhs: ['.', IDENT, '=', FieldValue], action: fieldInit }
       # Positional element (Milestone G) — a tuple init `.{ a, b }` reuses the SAME FieldInits
       # list as the named struct init `.{ .f = v }` (the surface is identical until the first
       # element). Lowering rejects a literal that MIXES positional + named. A named `.IDENT =`
       # vs a `.member` enum-literal positional element split on the token after `.IDENT` (`=`
       # named — shift; `,`/`}` enum-literal — reduce), so they stay LALR(1)-distinct.
       - { lhs: FieldInit, rhs: [Expr], action: fieldInitPositional }
+      # `{}` as a positional element (`[3]void{ {}, {}, {} }`, task #114): through its own nonterminal, so the element is the
+      # same positional record with a void value. `{` is not in FIRST(Expr), so it stays conflict-free.
+      - { lhs: FieldInit, rhs: [VoidElem], action: fieldInitPositional }
+      - { lhs: VoidElem, rhs: ['{', '}'], action: voidValue }
+
+  # The VOID `orelse return` / `catch return` forms, LAST on purpose: LALR.CC resolves a shift/reduce
+  # conflict by group order (an earlier group wins) before the derivation rule ever applies. A struct
+  # field default (`f: T = expr`) may be followed straight by the next member, so an IDENT can follow an
+  # expression, and in the state after `orelse return` that made the void REDUCE outrank the IDENT shift:
+  # `x orelse return err` failed to parse at `err` while `x orelse return 0` worked (road-to-zig-std,
+  # hash_map's getOrPutContextAdapted). Lowest precedence here means the value form takes the IDENT.
+  - derivation: none
+    rules:
+      - { lhs: OrElse, rhs: [OrElse, 'orelse', 'return'],         action: orElseReturnVoid }
+      - { lhs: OrElse, rhs: [OrElse, 'catch', 'return'],          action: catchReturnVoid }
+
+  # Inline assembly (std.crypto.sha2's SHA-NI / ARMv8 paths). The template is a STRING (zig allows any comptime
+  # string; std always writes a literal), so an Expr is never followed by `:` here, keeping the label invariant.
+  - derivation: none
+    rules:
+      - { lhs: AsmExpr, rhs: ['asm', '(', STRING, AsmTail, ')'],             action: asmExpr }
+      - { lhs: AsmExpr, rhs: ['asm', 'volatile', '(', STRING, AsmTail, ')'], action: asmVolatileExpr }
+      - { lhs: AsmTail, rhs: [],                                              action: asmTailNone }
+      - { lhs: AsmTail, rhs: [':', AsmItems],                                 action: asmTailOut }
+      - { lhs: AsmTail, rhs: [':', AsmItems, ':', AsmItems],                  action: asmTailIn }
+      - { lhs: AsmTail, rhs: [':', AsmItems, ':', AsmItems, ':', Expr],       action: asmTailClobbers }
+      - { lhs: AsmItems, rhs: [],                                             action: asmItemsNone }
+      - { lhs: AsmItems, rhs: [AsmItem],                                      action: asmItemsOne }
+      - { lhs: AsmItems, rhs: [AsmItem, ',', AsmItems],                       action: asmItemsCons }
+      - { lhs: AsmItem, rhs: ['[', IDENT, ']', STRING, '(', Expr, ')'],       action: asmItemExpr }
+      - { lhs: AsmItem, rhs: ['[', IDENT, ']', STRING, '(', '->', Type, ')'], action: asmItemReturn }
 
 lexer:
   root:
@@ -1377,6 +1863,8 @@ lexer:
     - { symbol: 'export',   match: 'export' }
     - { symbol: 'callconv', match: 'callconv' }
     - { symbol: 'align',    match: 'align' }
+    - { symbol: 'asm',      match: 'asm' }
+    - { symbol: 'volatile', match: 'volatile' }
     - { symbol: 'linksection', match: 'linksection' }
     # `errdefer` (8 chars) and `defer` (5): longest-match beats IDENT; `errdefer` vs the
     # `error` keyword — `errdefer` is longer, so it wins on its own input; `error` still
@@ -1385,6 +1873,10 @@ lexer:
     - { symbol: 'errdefer', match: 'errdefer' }
     - { symbol: 'comptime', match: 'comptime' }
     - { symbol: 'inline',   match: 'inline' }
+    # `noinline` (8 chars): first-rule-wins on the tie with IDENT; longest-match keeps `noinline_x` an IDENT.
+    - { symbol: 'noinline', match: 'noinline' }
+    # `noalias` is a keyword (first-rule-wins on the 7-char tie with IDENT), dropped: see NOALIAS.
+    - { symbol: NOALIAS,    match: 'noalias', action: ignore }
     # `test` is a reserved keyword in Zig, so promoting it never steals an identifier. Longest-match
     # keeps `testing`/`tests` as IDENT; first-rule-wins on the 4-char tie makes bare `test` the keyword.
     - { symbol: 'test',     match: 'test' }
@@ -1411,6 +1903,7 @@ lexer:
     # doesn't matter — grouped here with the other multi-char ops for clarity.
     - { symbol: '+=',  match: '\+=' }
     - { symbol: '-=',  match: '\-=' }
+    - { symbol: '->',  match: '\->' }
     - { symbol: '*=',  match: '\*=' }
     - { symbol: '/=',  match: '/=' }
     - { symbol: '%=',  match: '%=' }

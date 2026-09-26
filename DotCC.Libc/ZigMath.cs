@@ -137,6 +137,31 @@ public static class ZigMath
         return !T.IsZero(r) && (T.IsNegative(r) != T.IsNegative(b)) ? r + b : r;
     }
 
+    /// <summary><c>@mod(a, b)</c> of floats: the floored remainder, taking the sign of the divisor (zig allows no
+    /// <c>%</c> on a runtime float, so this is how a float remainder is spelled).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static double Mod(double a, double b)
+    {
+        var r = a % b;
+        return r != 0 && (r < 0) != (b < 0) ? r + b : r;
+    }
+
+    /// <summary><c>@mod(a, b)</c> of <c>f32</c> floats (see the <c>double</c> overload).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static float Mod(float a, float b)
+    {
+        var r = a % b;
+        return r != 0 && (r < 0) != (b < 0) ? r + b : r;
+    }
+
+    /// <summary><c>@rem(a, b)</c> of floats: the truncated remainder (sign of the dividend), C#'s <c>%</c>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static double Rem(double a, double b) => a % b;
+
+    /// <summary><c>@rem(a, b)</c> of <c>f32</c> floats.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static float Rem(float a, float b) => a % b;
+
     /// <summary><c>@divFloor(a, b)</c> — division rounding toward negative infinity (unlike C#'s <c>/</c>,
     /// toward zero). For non-negative operands the two coincide.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -184,6 +209,54 @@ public static class ZigMath
         buf.Reverse();
         return T.ReadLittleEndian(buf, isUnsigned: !T.IsNegative(T.AllBitsSet));
     }
+
+    /// <summary><c>@byteSwap(v)</c> of a 128-bit vector: each lane's bytes reversed (std.mem.nativeToLittle over a
+    /// <c>@Vector</c>, task #144).</summary>
+    public static System.Runtime.Intrinsics.Vector128<T> ByteSwap<T>(System.Runtime.Intrinsics.Vector128<T> v)
+        where T : unmanaged, System.Numerics.IBinaryInteger<T>
+    {
+        System.Span<T> lanes = stackalloc T[System.Runtime.Intrinsics.Vector128<T>.Count];
+        System.Runtime.Intrinsics.Vector128.CopyTo(v, lanes);
+        for (var i = 0; i < lanes.Length; i++) { lanes[i] = ByteSwap(lanes[i]); }
+        return System.Runtime.Intrinsics.Vector128.Create<T>(lanes);
+    }
+
+    /// <summary><c>@byteSwap(v)</c> of a 256-bit vector: each lane's bytes reversed.</summary>
+    public static System.Runtime.Intrinsics.Vector256<T> ByteSwap<T>(System.Runtime.Intrinsics.Vector256<T> v)
+        where T : unmanaged, System.Numerics.IBinaryInteger<T>
+    {
+        System.Span<T> lanes = stackalloc T[System.Runtime.Intrinsics.Vector256<T>.Count];
+        System.Runtime.Intrinsics.Vector256.CopyTo(v, lanes);
+        for (var i = 0; i < lanes.Length; i++) { lanes[i] = ByteSwap(lanes[i]); }
+        return System.Runtime.Intrinsics.Vector256.Create<T>(lanes);
+    }
+
+    /// <summary><c>@bitReverse(x)</c> — reverse the low <paramref name="bits"/> bits of <typeparamref name="T"/> (the
+    /// operand's declared width, so a <c>u3</c> held in a byte reverses three bits, as zig does). A signed result is
+    /// the reversed bit pattern read at the carrier's width.</summary>
+    public static T BitReverse<T>(T x, int bits) where T : System.Numerics.IBinaryInteger<T>
+    {
+        var v = System.UInt128.CreateTruncating(x);
+        System.UInt128 r = 0;
+        for (var i = 0; i < bits; i++)
+        {
+            r = (r << 1) | (v & 1);
+            v >>= 1;
+        }
+        return T.CreateTruncating(r);
+    }
+
+    /// <summary>Zig's <c>@round</c>: to the nearest integer, a half rounding AWAY from zero (.NET's default is to even).</summary>
+    public static double RoundAway(double x) => System.Math.Round(x, System.MidpointRounding.AwayFromZero);
+
+    /// <summary>Zig's <c>@round</c> on an f32 (see <see cref="RoundAway(double)"/>).</summary>
+    public static float RoundAway(float x) => System.MathF.Round(x, System.MidpointRounding.AwayFromZero);
+
+    /// <summary>Zig's <c>@exp2</c>: 2 raised to <paramref name="x"/>.</summary>
+    public static double Exp2(double x) => System.Math.Pow(2.0, x);
+
+    /// <summary>Zig's <c>@exp2</c> on an f32.</summary>
+    public static float Exp2(float x) => System.MathF.Pow(2f, x);
 
     /// <summary>The magnitude of an integer as an unsigned 128-bit value — the exact-width backbone of
     /// <c>@abs</c>, which returns the UNSIGNED peer of <c>iN</c> (so <c>@abs(i8 -128) == u8 128</c>,

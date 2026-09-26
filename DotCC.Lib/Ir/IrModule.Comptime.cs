@@ -2,6 +2,7 @@
 
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 
 namespace DotCC.Ir;
 
@@ -23,7 +24,10 @@ namespace DotCC.Ir;
 // value-comptime from sliding into type-comptime — the moment a comptime
 // expression would need a type-as-value or a comptime pointer, it simply isn't
 // a `ComptimeValue` and the eval returns null (the caller decides whether that
-// position requires a constant). Integer arithmetic is carried in
+// position requires a constant). One deliberate hole (the comptime-engine segment
+// E1): the aggregates are MUTABLE references, so a pointer to a comptime struct or
+// array evaluates to the aggregate itself (`self: *Acc`, `fill(&buf, v)`), with no
+// pointer variant; a pointer to a scalar still is not a value. Integer arithmetic is carried in
 // <see cref="System.Int128"/> so a comptime computation that genuinely exceeds
 // 64 bits (now that the i128/u128/__int128 types exist) has somewhere to live.
 // ---------------------------------------------------------------------------
@@ -55,7 +59,12 @@ internal sealed partial class IrModule
     /// <c>undefined</c>-initialized struct (<see cref="ZeroValue"/>). Still NO pointer variant — a
     /// struct value is a flat by-value record, the firewall holds (an array sibling, <c>CtArray</c>,
     /// is the next increment).</summary>
-    internal sealed record CtStruct(Dictionary<string, ComptimeValue> Fields, CType Type) : ComptimeValue;
+    internal sealed record CtStruct(Dictionary<string, ComptimeValue> Fields, CType Type) : ComptimeValue
+    {
+        /// <summary>For the payload of a tagged UNION (an overlaid C# struct), the variant last written: only
+        /// it splices back, since writing every overlaid field would let the last one clobber it.</summary>
+        public string? Active { get; set; }
+    }
 
     /// <summary>A comptime fixed-array value (Milestone T — comptime aggregates / lookup tables) —
     /// N element values, MUTABLE in place so a comptime <c>t[i] = v;</c> updates an element and a
@@ -63,6 +72,133 @@ internal sealed partial class IrModule
     /// <see cref="CType.Array"/>. Splices back as a <see cref="StackArray"/>. Still NO pointer
     /// variant — the array is a flat by-value vector, the firewall holds.</summary>
     internal sealed record CtArray(ComptimeValue[] Elems, CType Element, CType Type) : ComptimeValue;
+
+    /// <summary>A comptime <c>null</c> (the comptime engine's E2): what a <c>?comptime_int</c> function
+    /// such as <c>std.simd.suggestVectorLength</c> returns when it has no answer. A present optional is
+    /// just its payload, so this is the only optional value there is. <see cref="Type"/> is the optional
+    /// (or pointer) type it was typed at; it splices back as <c>default(T)</c>.</summary>
+    internal sealed record CtNull(CType Type) : ComptimeValue;
+
+    /// <summary>The result of a comptime call to a <c>void</c> function (<c>std.debug.assert(…)</c>): no value, but
+    /// not a failure either. It is only ever discarded.</summary>
+    /// <summary>A comptime ERROR (the failure side of an error union: <c>error.Overflow</c> from
+    /// <c>std.math.ceilPowerOfTwo</c>). A success is just its payload, so this is the only error-union value there is.</summary>
+    internal sealed record CtError(System.Int128 Code) : ComptimeValue;
+
+    /// <summary>A comptime enum literal with no result type yet (<c>.kw_if</c> in a tuple, task #113): its name, so two
+    /// tuples that differ only in one key their own instances.</summary>
+    internal sealed record CtEnumLiteral(string Name) : ComptimeValue;
+
+    internal sealed record CtVoid : ComptimeValue
+    {
+        /// <summary>The one void value.</summary>
+        public static readonly CtVoid Value = new();
+    }
+
+    /// <summary>A comptime SLICE (the comptime engine, for std.fmt's format strings): a window of
+    /// <see cref="Length"/> elements of a comptime array starting at <see cref="Offset"/>. A string literal is a
+    /// byte array, so <c>fmt[a..b]</c>, <c>.len</c> and <c>fmt[i]</c> evaluate. <see cref="Type"/> is the slice
+    /// type; a byte slice splices back as a string literal.</summary>
+    internal sealed record CtSlice(CtArray Backing, long Offset, long Length, CType Type) : ComptimeValue;
+
+    /// <summary>A pointer to an element of a comptime array (a slice's <c>.Ptr</c>, moved by pointer
+    /// arithmetic): the one pointer the interpreter models, since it never leaves the array it points into.</summary>
+    internal sealed record CtElemPtr(CtArray Backing, long Index, CType Type) : ComptimeValue;
+
+    /// <summary>The comptime engine's E3: comptime variables that outlive one evaluation, keyed by their
+    /// <see cref="Symbol"/>. A Zig <c>comptime var s: S = .{…}</c> of an aggregate type lives here while its
+    /// function lowers, so each <c>comptime s.method()</c> sees (and mutates) the value the previous one
+    /// left. Read after the call frame; assigned in place.</summary>
+    internal Dictionary<Symbol, ComptimeValue> ComptimeGlobals { get; } = new();
+
+    /// <summary>A front end's top-level CONST aggregates by symbol, with their initializers: a comptime
+    /// evaluation reading one evaluates the initializer, once (<see cref="EvalConstGlobal"/>).</summary>
+    internal Dictionary<Symbol, CExpr> ConstGlobalInits { get; } = new();
+
+    /// <summary>Each evaluated <see cref="ConstGlobalInits"/> entry (a const is never written, so one value
+    /// serves every read); null marks one being evaluated, so a self-reference stops.</summary>
+    private readonly Dictionary<Symbol, ComptimeValue?> _constGlobalValues = new();
+
+    /// <summary>The comptime value of a top-level const aggregate (see <see cref="ConstGlobalInits"/>).</summary>
+    private ComptimeValue? EvalConstGlobal(Symbol sym, CExpr init)
+    {
+        if (_constGlobalValues.TryGetValue(sym, out var known)) { return known; }
+        _constGlobalValues[sym] = null;
+        var saved = _comptimeFrame;
+        _comptimeFrame = null;   // an initializer reads no caller's locals
+        try
+        {
+            var value = EvalComptime(init);
+            _constGlobalValues[sym] = value;
+            return value;
+        }
+        finally
+        {
+            _comptimeFrame = saved;
+        }
+    }
+
+    /// <summary>Evaluate <paramref name="e"/> to a comptime value, calls included (the comptime engine's
+    /// E3: the initial value of a comptime aggregate variable). Null when it is not a compile-time value.
+    /// The result is a fresh copy, never an alias of a value another variable holds.</summary>
+    internal ComptimeValue? EvalComptimeValue(CExpr e) =>
+        TryEvalTop(e, allowCalls: true) is { } v ? CloneComptime(v) : null;
+
+    /// <summary>A short, stable digest of a comptime value's contents (FNV-1a over a canonical spelling), for keying
+    /// a generic instance by a comptime STRUCT argument (<c>comptime cpu: std.Target.Cpu</c>).</summary>
+    internal static string ComptimeDigest(ComptimeValue v)
+    {
+        var sb = new System.Text.StringBuilder();
+        void Spell(ComptimeValue x)
+        {
+            switch (x)
+            {
+                case CtInt i: sb.Append('i').Append(i.Value.ToString(CultureInfo.InvariantCulture)); break;
+                case CtFloat f: sb.Append('f').Append(f.Value.ToString("R", CultureInfo.InvariantCulture)); break;
+                case CtBool b: sb.Append(b.Value ? 'T' : 'F'); break;
+                case CtNull: sb.Append('n'); break;
+                case CtEnumLiteral el: sb.Append('e').Append(el.Name).Append(';'); break;
+                case CtArray a: sb.Append('['); foreach (var e in a.Elems) { Spell(e); sb.Append(','); } sb.Append(']'); break;
+                case CtSlice sl:
+                    sb.Append('<');
+                    for (var k = 0; k < sl.Length; k++) { Spell(sl.Backing.Elems[sl.Offset + k]); sb.Append(','); }
+                    sb.Append('>');
+                    break;
+                case CtStruct s:
+                    sb.Append('{');
+                    foreach (var kv in s.Fields.OrderBy(kv => kv.Key, System.StringComparer.Ordinal))
+                    {
+                        sb.Append(kv.Key).Append('=');
+                        Spell(kv.Value);
+                        sb.Append(';');
+                    }
+                    sb.Append('}');
+                    break;
+                default: sb.Append('?'); break;
+            }
+        }
+        Spell(v);
+        var h = 2166136261u;
+        foreach (var ch in sb.ToString()) { h = unchecked((h ^ ch) * 16777619u); }
+        return h.ToString("x8", CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>Splice a comptime value back as an IR literal (see <see cref="Splice"/>); null when it has no C#
+    /// literal form (a non-zero inline array), so a runtime use of it stays loud.</summary>
+    internal CExpr? SpliceComptimeValue(ComptimeValue v)
+    {
+        try { return Splice(v); }
+        catch (UnspliceableComptime) { return null; }
+    }
+
+    /// <summary>A deep copy of a comptime value: struct and array values are mutable references, so a
+    /// value stored under a second name must not share them.</summary>
+    private static ComptimeValue CloneComptime(ComptimeValue v) => v switch
+    {
+        CtStruct s => new CtStruct(s.Fields.ToDictionary(kv => kv.Key, kv => CloneComptime(kv.Value)), s.Type) { Active = s.Active },
+        CtArray a => new CtArray(a.Elems.Select(CloneComptime).ToArray(), a.Element, a.Type),
+        _ => v,
+    };
 
     // The eval-step budget. Expression-only folding (Milestone T part 1) is bounded by
     // the tree size, so this is a safety net here; comptime calls / `inline` loops
@@ -122,17 +258,122 @@ internal sealed partial class IrModule
             _ => null,
         };
 
+    /// <summary>Evaluate an integer constant expression in 128 bits, for a value beyond
+    /// <c>long</c>: an <c>enum(u64)</c> member of <c>maxInt(u64)</c> (std.Io.Limit's <c>unlimited</c>).
+    /// Null when it is not a constant the interpreter folds.</summary>
+    internal System.Int128? ConstEval128(CExpr e) =>
+        TryEvalTop(e, allowCalls: false) switch
+        {
+            CtInt i => i.Value,
+            CtBool b => b.Value ? 1 : 0,
+            _ => null,
+        };
+
     /// <summary>The top-level eval entry: reset the step budget + call frame, then evaluate. A
     /// <see cref="ComptimeAbort"/> (a body construct the interpreter doesn't evaluate) maps to null
     /// (not a compile-time constant); the step-budget overflow surfaces as a loud error.</summary>
     private ComptimeValue? TryEvalTop(CExpr e, bool allowCalls)
     {
+        // Re-entrant: a body lowered on demand (DemandFuncBody) may fold a constant of its own while an
+        // outer evaluation is suspended mid-call, so the outer frame, budget and mode are put back.
+        var (steps, frame, calls) = (_comptimeSteps, _comptimeFrame, _comptimeAllowCalls);
+        // The reason a miss is reported for is the OUTERMOST evaluation's: a nested one (a fold during a body lowered on
+        // demand) keeps its miss to itself, so the outer diagnostic names what actually stopped the outer evaluation.
+        var (outerMiss, nested) = (ComptimeMiss, _topEvalDepth > 0);
+        if (!nested) { ComptimeMiss = null; }
+        _topEvalDepth++;
         _comptimeSteps = 0;
         _comptimeFrame = null;
         _comptimeAllowCalls = allowCalls;
         try { return EvalComptime(e); }
-        catch (ComptimeAbort) { return null; }
+        catch (ComptimeAbort ex) { ComptimeMiss ??= ex.Message; return null; }
+        catch (ComptimeGoto) { return null; }   // a backward or stray jump: not evaluated
+        finally
+        {
+            (_comptimeSteps, _comptimeFrame, _comptimeAllowCalls) = (steps, frame, calls);
+            _topEvalDepth--;
+            if (nested) { ComptimeMiss = outerMiss; }
+        }
     }
+
+    /// <summary>How many <see cref="TryEvalTop"/> evaluations are in progress (re-entrant through on-demand lowering).</summary>
+    private int _topEvalDepth;
+
+    /// <summary>Run <paramref name="body"/> in a fresh comptime frame (calls allowed) and return the value it left in
+    /// <paramref name="result"/>: a container const computed by a labeled block (std.hash.crc's
+    /// <c>const lookup_table = blk: { … break :blk table; };</c>), which zig evaluates at compile time. Null when the
+    /// body is not something the interpreter runs; <see cref="ComptimeMiss"/> then says why.</summary>
+    internal ComptimeValue? EvalComptimeBlock(CStmt body, Symbol result, bool returnIsResult = false)
+    {
+        var (steps, frame, calls) = (_comptimeSteps, _comptimeFrame, _comptimeAllowCalls);
+        _comptimeSteps = 0;
+        var local = new Dictionary<Symbol, ComptimeValue>();
+        _comptimeFrame = local;
+        _comptimeAllowCalls = true;
+        ComptimeMiss = null;
+        try
+        {
+            EvalComptimeStmt(body);
+            return local.TryGetValue(result, out var v) ? CloneComptime(v) : null;
+        }
+        catch (ComptimeAbort ex) { ComptimeMiss ??= ex.Message; return null; }
+        catch (ComptimeGoto) { return null; }
+        // A function's whole-body `comptime { … return x; }` (task #100): an early `return` IS the block's result.
+        catch (ComptimeReturn r) when (returnIsResult) { return r.Value is { } rv ? CloneComptime(rv) : null; }
+        catch (ComptimeReturn) { ComptimeMiss ??= "a `return` inside a const's initializer block"; return null; }
+        finally { (_comptimeSteps, _comptimeFrame, _comptimeAllowCalls) = (steps, frame, calls); }
+    }
+
+    /// <summary>A comptime block run ONE STATEMENT AT A TIME against a persistent frame (task #100): the front end lowers a
+    /// statement, runs it here, and the frame's locals are published to <see cref="ComptimeGlobals"/> so the NEXT statement's
+    /// lowering can fold them (std.StaticStringMap.initComptime's <c>var len_indexes: [self.max_len + 1]u32</c>, sized by what the
+    /// block computed so far). <see cref="EndComptimeSession"/> withdraws them.</summary>
+    internal sealed class ComptimeSession
+    {
+        internal readonly Dictionary<Symbol, ComptimeValue> Frame = new();
+        internal int Steps;
+    }
+
+    /// <summary>Start a <see cref="ComptimeSession"/>.</summary>
+    internal ComptimeSession BeginComptimeSession() => new();
+
+    /// <summary>Run one lowered statement of a <see cref="ComptimeSession"/>: (true, value) when it returned (the block's
+    /// result), (false, null) when it ran through, null when it does not evaluate at compile time. Its locals are published
+    /// for the lowering of the next statement.</summary>
+    internal (bool Returned, ComptimeValue? Value)? RunComptimeSessionStmt(ComptimeSession session, CStmt stmt)
+    {
+        var (steps, frame, calls) = (_comptimeSteps, _comptimeFrame, _comptimeAllowCalls);
+        _comptimeSteps = session.Steps;
+        _comptimeFrame = session.Frame;
+        _comptimeAllowCalls = true;
+        ComptimeMiss = null;
+        try
+        {
+            EvalComptimeStmt(stmt);
+            return (false, null);
+        }
+        catch (ComptimeReturn r) { return (true, r.Value is { } rv ? CloneComptime(rv) : null); }
+        catch (ComptimeAbort ex) { ComptimeMiss ??= ex.Message; return null; }
+        catch (ComptimeGoto) { return null; }
+        finally
+        {
+            session.Steps = _comptimeSteps;
+            (_comptimeSteps, _comptimeFrame, _comptimeAllowCalls) = (steps, frame, calls);
+            foreach (var (sym, value) in session.Frame) { ComptimeGlobals[sym] = value; }
+        }
+    }
+
+    /// <summary>End a <see cref="ComptimeSession"/>: its locals stop being comptime values for the lowering.</summary>
+    internal void EndComptimeSession(ComptimeSession session)
+    {
+        foreach (var sym in session.Frame.Keys) { ComptimeGlobals.Remove(sym); }
+    }
+
+    /// <summary>The comptime engine's E2 hook: asked for a callee whose body is not lowered yet, it lowers
+    /// the body now (the Zig front-end's on-demand lowering) and answers whether it did. Installed by the
+    /// Zig front-end for the length of its lowering, null otherwise (the C front-end has no deferred
+    /// bodies).</summary>
+    internal System.Func<Symbol, bool>? DemandFuncBody { get; set; }
 
     private static bool InLongRange(System.Int128 v) =>
         v >= long.MinValue && v <= long.MaxValue;
@@ -140,8 +381,32 @@ internal sealed partial class IrModule
     /// <summary>Resolve a deferred <c>comptime EXPR</c> to a spliced literal <see cref="CExpr"/>, or
     /// null if it does not evaluate to a compile-time constant value. The Zig front-end's post-pass
     /// calls this once every function body is lowered, so a comptime call can interpret its callee.</summary>
-    internal CExpr? ResolveComptimeFold(CExpr inner) =>
-        TryEvalTop(inner, allowCalls: true) is { } v ? Splice(v) : null;
+    internal CExpr? ResolveComptimeFold(CExpr inner)
+    {
+        ComptimeMiss = null;
+        if (TryEvalTop(inner, allowCalls: true) is not { } v) { return null; }
+        // A value with no C# literal form (a struct with a non-zero inline-array field: std.Target's
+        // `Feature.Set{ .ints = … }`) keeps the expression it came from. The fold's callee is interpreted, so
+        // it is pure, and running it yields the same value.
+        // An enum-typed call (`comptime Indexer.keyForIndex(i)`) evaluates to its tag integer, which C# will not store
+        // into the enum without a cast (`E key = 0UL;` had been emitted).
+        try { return inner.Type?.Unqualified is CType.Enum en ? SpliceElement(v, en) : Splice(v); }
+        catch (UnspliceableComptime) { return inner; }
+    }
+
+    /// <summary>A comptime value C# cannot write as a literal (see <see cref="ResolveComptimeFold"/>).</summary>
+    private sealed class UnspliceableComptime : System.Exception { }
+
+    /// <summary>Why the most recent comptime evaluation stopped (the construct the interpreter does not
+    /// evaluate), for the "did not evaluate" diagnostic. Null when nothing was recorded.</summary>
+    internal string? ComptimeMiss { get; private set; }
+
+    /// <summary>The loud error for a <c>comptime</c> value that does not fold, naming where the
+    /// interpreter stopped when it knows.</summary>
+    internal IrUnsupportedException ComptimeFoldFailure(CExpr inner) => new(
+        "`comptime` expression did not evaluate to a compile-time constant value"
+        + (inner is Call { CalleeSym: { } callee } ? $" (a call to '{callee.Name}')" : "")
+        + (ComptimeMiss is { } why ? $"; the interpreter stopped at {why}" : ""));
 
     /// <summary>Re-materialize a <see cref="ComptimeValue"/> as an IR literal, so the rest of the
     /// pipeline (lower → emit) sees an ordinary constant. Int / float / bool splice to the matching
@@ -149,13 +414,35 @@ internal sealed partial class IrModule
     /// increment).</summary>
     private CExpr Splice(ComptimeValue v) => v switch
     {
+        // A `std.mem.Alignment` (its byte units, task #108): rebuilt through the carrier's constructor.
+        CtInt { Type.Unqualified: CType.Named { Name: "Alignment" } } al => new Call("Alignment.fromByteUnits",
+            new List<CExpr> { SpliceInt(new CtInt(al.Value, CType.ULong)) }, new List<CType> { CType.ULong }, null) { Type = al.Type },
         CtInt i => SpliceInt(i),
         CtFloat f => new LitFloat(FormatComptimeFloat(f.Value)) { Type = f.Type },
         CtBool b => new LitBool(b.Value) { Type = CType.Bool },
+        // A tuple (an overflow builtin's `.{ result, bit }`): its elements, in order, each at its element type (an enum
+        // member in std.meta.stringToEnum's `.{ name, @field(T, name) }` is the member, not its tag integer, task #116).
+        CtStruct { Type.Unqualified: CType.Tuple tupleType } ts => new TupleNew(
+            tupleType.Elements.Select((elementType, k) => ts.Fields.TryGetValue(k.ToString(CultureInfo.InvariantCulture), out var tv)
+                ? SpliceElement(tv, elementType.Unqualified) : throw new UnspliceableComptime()).ToList(), tupleType) { Type = tupleType },
         CtStruct s => SpliceStruct(s),
         CtArray a => SpliceArray(a),
+        CtNull n => new DefaultLit { Type = n.Type },
+        CtSlice sl => SpliceSlice(sl),
+        // A void result (`comptime std.debug.assert(…)` as a statement): zig's `{}`, which lowers to the same node.
+        CtVoid => new DefaultLit { Type = CType.Void },
+        // An enum literal with no result type yet (task #113): the node it came from, coerced where it meets an enum.
+        CtEnumLiteral el => new DefaultLit { Type = new CType.EnumLiteral(el.Name) },
         _ => throw new IrUnsupportedException("comptime value cannot be spliced back (int/float/bool/struct/array)"),
     };
+
+    /// <summary>Splice one element of a comptime array or slice at its ELEMENT type: an integer stored into an enum element
+    /// (std.enums' `r.* = @enumFromInt(f_value)`, still a comptime_int) is cast from the enum's underlying type, since C# has
+    /// no conversion from a 128-bit carrier to an enum.</summary>
+    private CExpr SpliceElement(ComptimeValue v, CType element)
+        => element is CType.Enum en && v is CtInt ci
+            ? new Cast(element, SpliceInt(new CtInt(ci.Value, en.Underlying))) { Type = element }
+            : Splice(v);
 
     /// <summary>Splice a comptime array value back as a <see cref="StackArray"/> — a dense element
     /// list (each element recursively spliced). At a local <c>const</c> use site this lowers to a
@@ -163,7 +450,7 @@ internal sealed partial class IrModule
     private CExpr SpliceArray(CtArray a)
     {
         var elems = new List<CExpr>(a.Elems.Length);
-        foreach (var e in a.Elems) { elems.Add(Splice(e)); }
+        foreach (var e in a.Elems) { elems.Add(SpliceElement(e, a.Element.Unqualified)); }
         return new StackArray(a.Element, elems) { Type = a.Type };
     }
 
@@ -178,14 +465,157 @@ internal sealed partial class IrModule
         {
             throw new IrUnsupportedException("comptime struct value cannot be spliced (unknown struct type)");
         }
+        var isUnion = StructIsUnion.GetValueOrDefault(named.Name);
         var members = new List<FieldInit>();
         foreach (var f in fields)
         {
             if (f.Name.Length == 0) { continue; }                       // anonymous padding bit-field
+            if (isUnion && f.Name != s.Active) { continue; }            // an overlaid union: the active variant only
             if (!s.Fields.TryGetValue(f.Name, out var fv)) { continue; } // unsupplied → C# zero default
-            members.Add(new FieldInit(f.Name, f.Type, Splice(fv)));
+            // An array field is inline storage, which a C# object initializer cannot set: an all-zero one is
+            // the zero default, anything else has no literal form.
+            if (f.Type.Unqualified is CType.Array)
+            {
+                if (IsZero(fv)) { continue; }
+                throw new UnspliceableComptime();
+            }
+            // An enum field (a union's tag) takes its value as the enum type: C# has no implicit int → enum. A pointer field
+            // to comptime data (std.StaticStringMap's `kvs = &.{ .keys = &final_keys, … }`, task #100) points at it pinned.
+            var spliced = f.Type.Unqualified is CType.Pointer ptrField && SplicePointerTo(fv, ptrField) is { } pointed
+                ? pointed
+                : Splice(fv);
+            if (f.Type.Unqualified is CType.Enum && fv is CtInt) { spliced = new Cast(f.Type, spliced) { Type = f.Type }; }
+            members.Add(new FieldInit(f.Name, f.Type, spliced));
         }
         return new StructInit(members) { Type = named };
+    }
+
+    /// <summary>Splice a comptime struct whose array fields hold real values (std.bit_set's <c>full</c>, a
+    /// <c>.{ .masks = masks }</c> computed by a labeled block): the object initializer of every other field, and
+    /// each non-zero array field apart, for the caller to copy in after the literal (a C# object initializer
+    /// cannot set inline array storage). Null when the value is not a struct, or a field has no static form.</summary>
+    internal (CExpr Init, List<(string Field, CType.Array Type, CtArray Value)> Arrays)? SpliceStructDeferringArrays(ComptimeValue v)
+    {
+        if (v is not CtStruct s || s.Type.Unqualified is not CType.Named named
+            || !StructFields.TryGetValue(named.Name, out var fields) || StructIsUnion.GetValueOrDefault(named.Name))
+        {
+            return null;
+        }
+        var arrays = new List<(string Field, CType.Array Type, CtArray Value)>();
+        var members = new List<FieldInit>();
+        try
+        {
+            foreach (var f in fields)
+            {
+                if (f.Name.Length == 0 || !s.Fields.TryGetValue(f.Name, out var fv)) { continue; }
+                if (f.Type.Unqualified is CType.Array arrayType)
+                {
+                    if (IsZero(fv)) { continue; }
+                    if (fv is not CtArray arrayValue) { return null; }
+                    arrays.Add((f.Name, arrayType, arrayValue));
+                    continue;
+                }
+                var spliced = Splice(fv);
+                if (f.Type.Unqualified is CType.Enum && fv is CtInt) { spliced = new Cast(f.Type, spliced) { Type = f.Type }; }
+                members.Add(new FieldInit(f.Name, f.Type, spliced));
+            }
+        }
+        catch (UnspliceableComptime) { return null; }
+        return (new StructInit(members) { Type = named }, arrays);
+    }
+
+    /// <summary>A pointer to comptime data as a pointer into program-lifetime memory (task #100): E1 evaluates <c>&amp;arr</c> to
+    /// the array and <c>&amp;.{ … }</c> to the struct themselves, so a pointer-typed field holding one pins it in a
+    /// <see cref="PinnedArray"/> and points at its first element; a pointer INTO an array (<see cref="CtElemPtr"/>) pins the
+    /// backing array and offsets. Null for any other value (a null pointer, an integer address), spliced as usual.</summary>
+    private CExpr? SplicePointerTo(ComptimeValue v, CType.Pointer pointerType)
+    {
+        switch (v)
+        {
+            case CtArray a:
+            {
+                var elem = a.Element.Unqualified;
+                var elems = a.Elems.Select(e => SpliceElement(e, elem)).ToList();
+                return new PinnedArray(elem, elems, null) { Type = pointerType };
+            }
+            case CtStruct s when s.Type.Unqualified is CType.Named:
+                return new PinnedArray(s.Type.Unqualified, new List<CExpr> { Splice(s) }, null) { Type = pointerType };
+            case CtElemPtr ep:
+            {
+                var elem = ep.Backing.Element.Unqualified;
+                var elems = ep.Backing.Elems.Select(e => SpliceElement(e, elem)).ToList();
+                CExpr pinned = new PinnedArray(elem, elems, null) { Type = pointerType };
+                if (ep.Index == 0) { return pinned; }
+                var offset = new LitInt(ep.Index.ToString(CultureInfo.InvariantCulture), ep.Index) { Type = CType.Long };
+                return new Binary(BinOp.Add, pinned, offset) { Type = pointerType };
+            }
+            default:
+                return null;
+        }
+    }
+
+    /// <summary>Splice a comptime slice back. A byte slice (a comptime string, std.fmt's
+    /// <c>Placeholder.specifier_arg</c>) becomes a string literal viewed as the slice; any other element type is
+    /// not spliced yet.</summary>
+    private CExpr SpliceSlice(CtSlice sl)
+    {
+        if (sl.Type.Unqualified is not CType.Slice { Element: var elem })
+        {
+            throw new IrUnsupportedException("comptime slice value cannot be spliced (not a slice type)");
+        }
+        // Any other element (std.enums' `[]const comptime_int` / `[]const E`): its elements in a pinned, program-lifetime
+        // array, viewed as the slice (the comptime memory a zig slice of comptime data points into).
+        if (elem.Unqualified is not CType.Prim { Integer: true, Bytes: 1 })
+        {
+            var elems = new List<CExpr>((int)sl.Length);
+            for (var k = 0; k < sl.Length; k++) { elems.Add(SpliceElement(sl.Backing.Elems[sl.Offset + k], elem.Unqualified)); }
+            var pinned = new PinnedArray(elem.Unqualified, elems, null) { Type = new CType.Pointer(elem.Unqualified) };
+            var count = new LitInt(sl.Length.ToString(System.Globalization.CultureInfo.InvariantCulture), sl.Length) { Type = CType.ULong };
+            return new SliceNew(pinned, count, elem, elem.IsConst) { Type = sl.Type };
+        }
+        var sb = new System.Text.StringBuilder("\"");
+        for (var k = 0; k < sl.Length; k++)
+        {
+            var b = sl.Backing.Elems[sl.Offset + k] is CtInt ci ? (int)(ci.Value & 0xFF) : 0;
+            sb.Append("\\x").Append(b.ToString("X2", System.Globalization.CultureInfo.InvariantCulture));
+        }
+        sb.Append('"');
+        var segs = new List<string> { sb.ToString() };
+        DotCC.EmitHelpers.EncodeStringLiteral(segs, out var byteLen);
+        var lit = new LitStr(segs) { Type = new CType.Array(CType.Char, byteLen) };
+        var len = new LitInt(sl.Length.ToString(System.Globalization.CultureInfo.InvariantCulture), sl.Length) { Type = CType.ULong };
+        return new SliceNew(lit, len, elem, elem.IsConst) { Type = sl.Type };
+    }
+
+    /// <summary>True for a comptime value that is all zeros (an integer 0, a false, an array or struct of them).</summary>
+    private static bool IsZero(ComptimeValue v) => v switch
+    {
+        CtInt i => i.Value == 0,
+        CtBool b => !b.Value,
+        CtFloat f => f.Value == 0,
+        CtArray a => a.Elems.All(IsZero),
+        CtStruct s => s.Fields.Values.All(IsZero),
+        CtNull => true,
+        _ => false,
+    };
+
+    /// <summary>The elements a comptime slice views (its window of the backing array), or null for any other value. An array
+    /// is not taken: a string literal's counts its NUL, which the slice a zig string coerces to does not.</summary>
+    private static IReadOnlyList<ComptimeValue>? ComptimeSequence(ComptimeValue? v) => v switch
+    {
+        CtSlice s when s.Offset >= 0 && s.Offset + s.Length <= s.Backing.Elems.Length
+            => (IReadOnlyList<ComptimeValue>)new System.ArraySegment<ComptimeValue>(s.Backing.Elems, (int)s.Offset, (int)s.Length),
+        _ => null,
+    };
+
+    /// <summary>A string literal as the comptime byte array it denotes (its NUL included, as its C type counts it).</summary>
+    private static CtArray StringBytes(LitStr ls)
+    {
+        var bytes = DotCC.EmitHelpers.StringByteValues(ls.Segments);
+        var count = ls.Type.Unqualified is CType.Array { Count: { } n } && n > bytes.Count ? n : bytes.Count + 1;
+        var elems = new ComptimeValue[count];
+        for (var k = 0; k < count; k++) { elems[k] = new CtInt(k < bytes.Count ? bytes[k] : 0, CType.UChar); }
+        return new CtArray(elems, CType.UChar, new CType.Array(CType.UChar, count));
     }
 
     /// <summary>The zero comptime value of a type — for an <c>undefined</c> / default-initialized
@@ -200,6 +630,19 @@ internal sealed partial class IrModule
             if (p.Name == "_Bool") { return new CtBool(false); }
             return p.Integer ? new CtInt(System.Int128.Zero, t) : new CtFloat(0.0, t);
         }
+        // `{}`, the void value (a `context: anytype` passed `{}` to std.mem.sortUnstable).
+        if (u is CType.VoidType) { return CtVoid.Value; }
+        // The runtime `std.mem.Alignment` carrier: its byte units, zero as a default-constructed C# value is (task #108).
+        if (u is CType.Named { Name: "Alignment" }) { return new CtInt(System.Int128.Zero, t); }
+        // A bare enum literal (task #113): its value is its type's name.
+        if (u is CType.EnumLiteral enumLiteral) { return new CtEnumLiteral(enumLiteral.Name); }
+        // An enum tag zeroes to its first value; an optional / pointer to null; a slice to the empty one.
+        if (u is CType.Enum) { return new CtInt(System.Int128.Zero, t); }
+        if (u is CType.Optional or CType.Pointer) { return new CtNull(t); }
+        if (u is CType.Slice { Element: var se })
+        {
+            return new CtSlice(new CtArray(System.Array.Empty<ComptimeValue>(), se, new CType.Array(se, 0)), 0, 0, t);
+        }
         if (u is CType.Named named && StructFields.TryGetValue(named.Name, out var fields))
         {
             var map = new Dictionary<string, ComptimeValue>(System.StringComparer.Ordinal);
@@ -210,6 +653,21 @@ internal sealed partial class IrModule
                 map[f.Name] = fv;
             }
             return new CtStruct(map, named);
+        }
+        // The zig front end's `void` as data (`[N]void`, std.StaticStringMap(void)'s values, task #114): the runtime's
+        // empty `Unit`, which no struct registry holds, is the void value.
+        if (u is CType.Named { Name: "Unit" }) { return CtVoid.Value; }
+        // A tuple (std.meta.stringToEnum's `var kvs_array: [n]struct { []const u8, T } = undefined;`, task #116): a struct keyed
+        // by position, the shape a tuple literal evaluates to.
+        if (u is CType.Tuple tuple)
+        {
+            var positional = new Dictionary<string, ComptimeValue>(tuple.Elements.Count);
+            for (var k = 0; k < tuple.Elements.Count; k++)
+            {
+                if (ZeroValue(tuple.Elements[k]) is not { } elementZero) { return null; }
+                positional[k.ToString(CultureInfo.InvariantCulture)] = elementZero;
+            }
+            return new CtStruct(positional, t);
         }
         if (u is CType.Array arr && arr.Count is int ac)
         {
@@ -234,6 +692,13 @@ internal sealed partial class IrModule
         if (i.Value >= System.Int128.Zero)
         {
             long? fast = i.Value <= (System.Int128)long.MaxValue ? (long)i.Value : null;
+            // A narrow UNSIGNED value (`u16` from std.atomic.cacheLineForCpu): C#'s only unsigned literal is a
+            // `uint`, which does not narrow implicitly, so it is an int literal cast to the type.
+            if (i.Type.Unqualified is CType.Prim { Integer: true, Signed: false, Bytes: < 4 } && fast is { } small)
+            {
+                var intLit = new LitInt(i.Value.ToString(CultureInfo.InvariantCulture), small) { Type = CType.Int };
+                return new Cast(i.Type, intLit) { Type = i.Type };
+            }
             return new LitInt(i.Value.ToString(CultureInfo.InvariantCulture), fast) { Type = i.Type };
         }
         // Int128.MinValue has no in-range positive magnitude — splice it as a signed-decimal literal.
@@ -267,11 +732,21 @@ internal sealed partial class IrModule
             case LitInt i:
                 // `Value` is the fast path (fits long); past long the magnitude lives in
                 // the decimal `Digits` (a u128-range / i128 literal) — parse it into 128 bits.
-                if (i.Value is { } lv) { return new CtInt(lv, i.Type); }
+                // An unsigned 64-bit literal may carry its bit pattern (`0xFFFF_FFFF_FFFF_FFFF` is -1 as a long): its value
+                // is the unsigned reading.
+                if (i.Value is { } lv)
+                {
+                    return new CtInt(lv < 0 && i.Type.Unqualified is CType.Prim { Integer: true, Signed: false, Bytes: 8 }
+                        ? (System.Int128)unchecked((ulong)lv) : lv, i.Type);
+                }
                 return System.Int128.TryParse(i.Digits, NumberStyles.Integer, CultureInfo.InvariantCulture, out var big)
                     ? new CtInt(big, i.Type)
                     : null;
 
+            // `@inComptime()`: true inside an interpreted call or block; a lowering-time fold (no frame) sees the runtime
+            // `false`, so runtime code keeps its runtime branch.
+            case LitBool { InComptime: true } when _comptimeFrame is not null:
+                return new CtBool(true);
             case LitBool lb:
                 return new CtBool(lb.Value);
 
@@ -298,7 +773,8 @@ internal sealed partial class IrModule
                 // A `comptime EXPR` value. If the post-pass already resolved it, read the spliced
                 // literal; otherwise evaluate the inner inline (an array-size or other type position
                 // needs the value DURING lowering, before the post-pass runs).
-                return EvalComptime(cf.Resolved ?? cf.Inner);
+                // A LIVE reference to a comptime aggregate variable (E3) reads the current value instead.
+                return EvalComptime(cf.Live ? cf.Inner : cf.Resolved ?? cf.Inner);
 
             case Cast c:
                 return EvalCast(c);
@@ -306,8 +782,67 @@ internal sealed partial class IrModule
             case CondExpr q:
                 return EvalComptime(q.Cond) is { } cnd ? EvalComptime(Truthy(cnd) ? q.Then : q.Else) : null;
 
+            // A value switch (`switch (cpu.arch) { .x86_64, .aarch64 => 128, … }` in std.atomic.cacheLineForCpu).
+            case SwitchExpr se:
+            {
+                if (EvalComptime(se.Subject) is not CtInt subject) { return null; }
+                CExpr? chosen = null;
+                CExpr? fallback = null;
+                foreach (var arm in se.Arms)
+                {
+                    if (arm.Labels is null) { fallback ??= arm.Value; continue; }
+                    if (arm.Labels.Any(l => LabelMatches(l, subject.Value))) { chosen = arm.Value; break; }
+                }
+                return (chosen ?? fallback) is { } value ? EvalComptime(value) : null;
+            }
+
+            // A pointer to a comptime AGGREGATE is the aggregate itself (the comptime-engine segment E1): a
+            // CtStruct / CtArray is a mutable reference, so `&a` handed to a `self: *@This()` method and a
+            // store through it (`self.n += v`) mutate the caller's value in place, by-reference for free. A
+            // pointer to a SCALAR is still not a comptime value: the firewall holds for everything that
+            // would need a pointer variant.
+            // `&t[i]` / `&s.Ptr[i]`: a pointer to one element (a `for (&t, 0..) |*e, i|` capture), which the body
+            // then stores through (`e.* = v`).
+            case Unary { Op: UnOp.AddrOf, Operand: Index elemIx } pElem when ElementSlot(elemIx) is ({ } elemBacking, var elemAt):
+                return new CtElemPtr(elemBacking, elemAt, pElem.Type);
+            case Unary { Op: UnOp.AddrOf or UnOp.Deref } pu:
+            {
+                var pointee = EvalComptime(pu.Operand);
+                if (pu.Op == UnOp.Deref && pointee is CtElemPtr derefPtr)
+                {
+                    return derefPtr.Index >= 0 && derefPtr.Index < derefPtr.Backing.Elems.Length
+                        ? derefPtr.Backing.Elems[derefPtr.Index]
+                        : null;
+                }
+                return pointee is CtStruct or CtArray ? pointee : EvalUnary(pu);
+            }
+            // `i++` / `--i` (a lowered `for` loop's step): the compound assignment by one, yielding the old
+            // value (post) or the new one (pre).
+            case Unary { Op: UnOp.PreInc or UnOp.PreDec or UnOp.PostInc or UnOp.PostDec } step:
+            {
+                var before = EvalComptime(step.Operand);
+                var one = new LitInt("1", 1) { Type = CType.Int };
+                var op = step.Op is UnOp.PreInc or UnOp.PostInc ? BinOp.Add : BinOp.Sub;
+                var after = EvalComptimeAssign(new Assign(op, step.Operand, one) { Type = step.Operand.Type });
+                return step.Op is UnOp.PostInc or UnOp.PostDec ? before : after;
+            }
             case Unary u:
                 return EvalUnary(u);
+
+            // `s.Ptr + i` / `p - i`: an element pointer moves within its array.
+            case Binary { Op: BinOp.Add or BinOp.Sub, Left.Type: var plt } pb when plt?.Unqualified is CType.Pointer or CType.Array:
+            {
+                // An array operand (a string literal, `"abc" + 1`) decays to a pointer to its first element.
+                var leftPtr = EvalComptime(pb.Left) switch
+                {
+                    CtElemPtr ep => ep,
+                    CtArray arr => new CtElemPtr(arr, 0, new CType.Pointer(arr.Element)),
+                    _ => null,
+                };
+                if (leftPtr is not { } lp || EvalComptime(pb.Right) is not CtInt ptrStep) { return null; }
+                var moved = pb.Op == BinOp.Add ? lp.Index + (long)ptrStep.Value : lp.Index - (long)ptrStep.Value;
+                return new CtElemPtr(lp.Backing, moved, lp.Type);
+            }
 
             case Binary b:
                 return EvalBinary(b);
@@ -327,7 +862,9 @@ internal sealed partial class IrModule
                     var ct = v.Sym.Type.Unqualified;
                     return new CtInt(v.Sym.ConstValue, ct is CType.Prim or CType.Enum ? ct : CType.Int);
                 }
-                return _comptimeFrame is { } fr && fr.TryGetValue(v.Sym, out var bound) ? bound : null;
+                if (_comptimeFrame is { } fr && fr.TryGetValue(v.Sym, out var bound)) { return bound; }
+                if (ComptimeGlobals.TryGetValue(v.Sym, out var global)) { return global; }
+                return ConstGlobalInits.TryGetValue(v.Sym, out var constInit) ? EvalConstGlobal(v.Sym, constInit) : null;
 
             case Assign a:
                 return EvalComptimeAssign(a);
@@ -341,7 +878,35 @@ internal sealed partial class IrModule
             case StructInit si:
                 return EvalComptimeStructInit(si);
 
-            case Member mem when !mem.Arrow:
+            // `s.f`, and `p->f` through a pointer to a comptime struct (E1: the pointer is the struct).
+            case Member { Base.Type: var sbt, Field: "Ptr" or "Len" } sm when sbt?.Unqualified is CType.Slice:
+            {
+                if (EvalComptime(sm.Base) is not CtSlice slv) { return null; }
+                return sm.Field == "Len"
+                    ? new CtInt(slv.Length, CType.ULong)
+                    : new CtElemPtr(slv.Backing, slv.Offset, sm.Type);
+            }
+
+            case Member { Base.Type: var ebt, Field: "IsErr" or "Value" or "Code" } em when ebt?.Unqualified is CType.ErrorUnion:
+            {
+                if (EvalComptime(em.Base) is not { } eu) { return null; }
+                return em.Field switch
+                {
+                    "IsErr" => new CtBool(eu is CtError),
+                    "Code" => eu is CtError err ? new CtInt(err.Code, CType.ErrorSet) : new CtInt(0, CType.ErrorSet),
+                    _ => eu is CtError ? throw new ComptimeAbort("comptime: `.Value` of an error") : eu,
+                };
+            }
+
+            // An OPTIONAL's `.HasValue` / `.Value` (a lowered `orelse` / `if (opt) |x|`): a present optional
+            // is its payload, an absent one a CtNull (E3).
+            case Member { Base.Type: var obt, Field: "HasValue" or "Value" } om when obt?.Unqualified is CType.Optional:
+            {
+                if (EvalComptime(om.Base) is not { } ov) { return null; }
+                if (om.Field == "HasValue") { return new CtBool(ov is not CtNull); }
+                return ov is CtNull ? throw new ComptimeAbort("comptime: `.Value` of a null optional") : ov;
+            }
+            case Member mem:
             {
                 return EvalComptime(mem.Base) is CtStruct ms && ms.Fields.TryGetValue(mem.Field, out var mv)
                     ? mv : null;
@@ -362,9 +927,90 @@ internal sealed partial class IrModule
             // An array element read `t[i]` — the base is a comptime array, the index a comptime int.
             case Index ix:
             {
-                if (EvalComptime(ix.Base) is not CtArray arr || EvalComptime(ix.Idx) is not CtInt ixi) { return null; }
-                long n = (long)ixi.Value;
+                if (ElementSlot(ix) is not ({ } arr, var n)) { return null; }
                 return n >= 0 && n < arr.Elems.Length ? arr.Elems[n] : null;   // OOB → not foldable
+            }
+
+            // A string literal is its byte array; a slice is a window onto an array (std.fmt's format strings).
+            case LitStr ls:
+                return StringBytes(ls);
+
+            // `ZigMem.CopyForwards(dst, src)` / `CopyBackwards`: an array copy (`const final = result;`, `@memcpy`,
+            // `dst[a..b].* = src`) between comptime arrays, element by element. Anything else is not a comptime value.
+            case ZigMemCall { Method: "CopyForwards" or "CopyBackwards", Args: [var copyDst, var copySrc] }:
+            {
+                if (ComptimeArrayWindow(EvalComptime(copyDst)) is not var (dstElems, dstOffset, _)
+                    || EvalComptime(copySrc) is not CtSlice srcSlice)
+                {
+                    return null;
+                }
+                var copyCount = srcSlice.Length;
+                if (dstOffset + copyCount > dstElems.Length) { return null; }
+                var copied = new ComptimeValue[copyCount];
+                for (long k = 0; k < copyCount; k++) { copied[k] = CloneComptime(srcSlice.Backing.Elems[srcSlice.Offset + k]); }
+                for (long k = 0; k < copyCount; k++) { dstElems[dstOffset + k] = copied[k]; }
+                return CtVoid.Value;
+            }
+
+            // The curated `std.mem.eql` (std.Io.Writer.printValue's `const is_any = comptime std.mem.eql(u8, fmt, ANY);`,
+            // task #121): equal lengths and equal elements.
+            case ZigMemCall { Method: "Eql", Args: [var eqlLeft, var eqlRight] }:
+            {
+                if (ComptimeSequence(EvalComptime(eqlLeft)) is not { } xs || ComptimeSequence(EvalComptime(eqlRight)) is not { } ys)
+                {
+                    return null;
+                }
+                if (xs.Count != ys.Count) { return new CtBool(false); }
+                for (var k = 0; k < xs.Count; k++)
+                {
+                    if (xs[k] is not CtInt xi || ys[k] is not CtInt yi) { return null; }
+                    if (xi.Value != yi.Value) { return new CtBool(false); }
+                }
+                return new CtBool(true);
+            }
+
+            // A tuple literal (`.{ .{ "one", 1 }, .{ "two", 2 } }`, task #100): a struct keyed by position, the shape an
+            // overflow builtin's result and the splice already use.
+            case TupleNew tupleNew:
+            {
+                var fields = new Dictionary<string, ComptimeValue>(tupleNew.Elements.Count);
+                for (var k = 0; k < tupleNew.Elements.Count; k++)
+                {
+                    if (EvalComptime(tupleNew.Elements[k]) is not { } element) { return null; }
+                    fields[k.ToString(CultureInfo.InvariantCulture)] = element;
+                }
+                return new CtStruct(fields, tupleNew.TupleType);
+            }
+
+            // `r[1]` of a comptime tuple (an overflow builtin's result).
+            case TupleIndex ti:
+                return EvalComptime(ti.Tuple) is CtStruct tupleValue
+                       && tupleValue.Fields.TryGetValue(ti.Index.ToString(CultureInfo.InvariantCulture), out var tupleElem)
+                    ? tupleElem : null;
+
+            case SliceNew sliceNew:
+            {
+                var (backing, at) = EvalComptime(sliceNew.Ptr) switch
+                {
+                    CtArray a => (a, 0L),
+                    CtElemPtr ep => (ep.Backing, ep.Index),
+                    _ => ((CtArray?)null, 0L),
+                };
+                if (backing is null || EvalComptime(sliceNew.Len) is not CtInt sliceLen) { return null; }
+                return new CtSlice(backing, at, (long)sliceLen.Value, sliceNew.Type);
+            }
+
+            // A pinned static array with its elements (a comptime block's result spliced back, std.enums.valuesFromFields):
+            // the comptime array it was spliced from.
+            case PinnedArray { Elems: { } pinnedElems } pinned:
+            {
+                var values = new ComptimeValue[pinnedElems.Count];
+                for (var k = 0; k < values.Length; k++)
+                {
+                    if (EvalComptime(pinnedElems[k]) is not { } pv) { return null; }
+                    values[k] = RetypeTo(pv, pinned.Element);
+                }
+                return new CtArray(values, pinned.Element, new CType.Array(pinned.Element, values.Length));
             }
 
             // A `[N]T` by-value return (Increment A's node) is transparent at comptime — the heap
@@ -373,9 +1019,33 @@ internal sealed partial class IrModule
                 return EvalComptime(abr.Source);
 
             case DefaultLit dl:
-                return ZeroValue(dl.Type);
+                // A pointer's default is null (a labeled block's `T* __blkN = default;` result temp, before its break).
+                return dl.Type.Unqualified is CType.Optional or CType.Pointer ? new CtNull(dl.Type) : ZeroValue(dl.Type);
+
+            case NullPtr np:
+                return new CtNull(np.Type);
+
+            // Error unions (std.math.ceilPowerOfTwo … `catch unreachable` in std.simd): a success is its payload, a
+            // failure a CtError; `try` passes the error out of the call, `catch` takes the fallback on one.
+            case ErrUnionOk euOk:
+                return euOk.Payload is { } okPayload ? EvalComptime(okPayload) : CtVoid.Value;
+            case ErrUnionErr euErr:
+                return EvalComptime(euErr.Code) is CtInt code ? new CtError(code.Value) : null;
+            case ZigTry zt:
+            {
+                var tried = EvalComptime(zt.Inner);
+                if (tried is CtError) { throw new ComptimeReturn { Value = tried }; }
+                return tried;
+            }
+            case ZigCatch zc:
+                return EvalComptime(zc.Union) is { } caught ? caught is CtError ? EvalComptime(zc.Fallback) : caught : null;
+
+            // `a orelse b`: the payload, or the fallback when `a` is null (E3).
+            case NullCoalesce nc:
+                return EvalComptime(nc.Left) is { } left ? left is CtNull ? EvalComptime(nc.Right) : left : null;
 
             default:
+                ComptimeMiss ??= "a " + e.GetType().Name + " expression";
                 return null;
         }
     }
@@ -390,9 +1060,42 @@ internal sealed partial class IrModule
         {
             if (EvalComptime(fi.Value) is not { } v) { return null; }
             st.Fields[fi.Name] = RetypeTo(v, fi.FieldType);
+            st.Active = fi.Name;   // meaningful for a union payload: the variant written
         }
         return st;
     }
+
+    /// <summary>A comptime <c>memcpy(dst, src, bytes)</c> between two comptime arrays (or element pointers into
+    /// them): the elements are copied, each a deep copy, and the destination is returned as the call's value. Null
+    /// when either end is not a comptime array or the byte count does not divide into whole elements, so the
+    /// statement aborts the evaluation rather than being skipped.</summary>
+    private ComptimeValue? EvalComptimeMemcpy(CExpr dstArg, CExpr srcArg, CExpr bytesArg)
+    {
+        if (EvalComptime(bytesArg) is not CtInt { Value: var bytes } || bytes < 0) { return null; }
+        if (ComptimeArrayWindow(EvalComptime(dstArg)) is not var (dst, dstOffset, element)
+            || ComptimeArrayWindow(EvalComptime(srcArg)) is not var (src, srcOffset, _))
+        {
+            return null;
+        }
+        var size = element.SizeOf;
+        if (size <= 0 || bytes % size != 0) { return null; }
+        var count = (long)(bytes / size);
+        if (dstOffset + count > dst.Length || srcOffset + count > src.Length) { return null; }
+        var copied = new ComptimeValue[count];
+        for (long k = 0; k < count; k++) { copied[k] = CloneComptime(src[srcOffset + k]); }
+        for (long k = 0; k < count; k++) { dst[dstOffset + k] = copied[k]; }
+        return EvalComptime(dstArg);
+    }
+
+    /// <summary>The element storage an array-valued comptime operand denotes, with the starting index and the
+    /// element type: a whole array, an element pointer, or a slice. Null for anything else.</summary>
+    private static (ComptimeValue[] Elems, long Offset, CType Element)? ComptimeArrayWindow(ComptimeValue? v) => v switch
+    {
+        CtArray a => (a.Elems, 0, a.Element),
+        CtElemPtr p => (p.Backing.Elems, p.Index, p.Backing.Element),
+        CtSlice sl => (sl.Backing.Elems, sl.Offset, sl.Backing.Element),
+        _ => null,
+    };
 
     /// <summary>Fold a cast at comptime. An arithmetic target converts/re-types the
     /// value (int↔float, bool→int); a non-arithmetic target (a pointer cast) is
@@ -402,16 +1105,21 @@ internal sealed partial class IrModule
     private ComptimeValue? EvalCast(Cast c)
     {
         if (EvalComptime(c.Operand) is not { } v) { return null; }
+        if (v is CtNull) { return c.Target.Unqualified is CType.Optional or CType.Pointer ? new CtNull(c.Target) : null; }
         if (c.Target.Unqualified is not CType.Prim p) { return v; }
         if (p.Integer)
         {
-            return new CtInt(v switch
+            var raw = v switch
             {
                 CtInt i => i.Value,
                 CtBool b => b.Value ? System.Int128.One : System.Int128.Zero,
                 CtFloat f => (System.Int128)f.Value,
                 _ => System.Int128.Zero,
-            }, c.Target);
+            };
+            // A cast wraps to its type, as C's conversion does and as zig's `x +% 100` (lowered to `(byte)(x + 100)`) needs:
+            // `(u8)300` is 44, and `@intFromEnum` of a `u64` member held as -1 is 18446744073709551615 (task #171; comparisons
+            // over such consts had folded the wrong way). Not for plain `char`, which dotcc emits as a `byte`.
+            return new CtInt(p.Name != "char" ? WrapToWidth(raw, p) : raw, c.Target);
         }
         return new CtFloat(ToDouble(v), c.Target);
     }
@@ -431,7 +1139,8 @@ internal sealed partial class IrModule
             },
             UnOp.BitNot => v switch
             {
-                CtInt i => new CtInt(~i.Value, i.Type),
+                // `~@as(u64, 0)` is 2^64 - 1, not the 128-bit -1: complemented at the operand's own width.
+                CtInt i => new CtInt(i.Type.Unqualified is CType.Prim { Integer: true } ip ? WrapToWidth(~i.Value, ip) : ~i.Value, i.Type),
                 CtBool b => new CtInt(~(b.Value ? System.Int128.One : System.Int128.Zero), CType.Int),
                 _ => null,
             },
@@ -453,7 +1162,15 @@ internal sealed partial class IrModule
         }
 
         if (EvalComptime(b.Left) is not { } l || EvalComptime(b.Right) is not { } r) { return null; }
-        return CombineBin(b.Op, l, r);
+        var combined = CombineBin(b.Op, l, r);
+        // Arithmetic wraps at the width the expression is typed (task #171): zig's `a +% 2` over a `u32` is a `Binary` typed
+        // `uint` (no cast below 4 bytes' promotion), whose exact 128-bit sum had folded 0xFFFFFFFF +% 2 to 2^32 + 1, not 1.
+        // That is C's unsigned modulo and C#'s unchecked overflow too. A comptime_int (and plain `char`, emitted as a `byte`)
+        // stays exact.
+        return combined is CtInt { Value: var exact } && b.Type?.Unqualified is CType.Prim { Integer: true, IsComptimeInt: false } wrapAt
+               && wrapAt.Name is not ("char" or "_Bool")
+            ? new CtInt(WrapToWidth(exact, wrapAt), ((CtInt)combined).Type)
+            : combined;
     }
 
     /// <summary>Apply a non-logical binary operator to two already-evaluated comptime values.
@@ -490,14 +1207,23 @@ internal sealed partial class IrModule
             BinOp.Mul => new CtInt(unchecked(a * c), ty),
             BinOp.Div => c != System.Int128.Zero ? new CtInt(a / c, ty) : null,
             BinOp.Mod => c != System.Int128.Zero ? new CtInt(a % c, ty) : null,
-            BinOp.Shl => new CtInt(unchecked(a << (int)c), ty),
-            BinOp.Shr => new CtInt(a >> (int)c, ty),
+            // A count of 128 or more shifts every bit out (a comptime_int is unbounded; C#'s Int128 would mask the count to
+            // 7 bits, so `x >> 128` stayed `x` and std.math.log2's comptime loop never ended).
+            BinOp.Shl => new CtInt(c >= 128 ? System.Int128.Zero : unchecked(a << (int)c), ty),
+            // A right shift sees the left operand at its own width: an unsigned one is never sign-extended, so
+            // `~@as(u64, 0) >> 42` (std.bit_set's last_item_mask) keeps its 22 low bits, not 128 bits of ones.
+            BinOp.Shr => new CtInt(ShiftRightSaturating(TypeOf(l).Unqualified is CType.Prim { Integer: true } lp ? WrapToWidth(a, lp) : a, c), ty),
             BinOp.BitAnd => new CtInt(a & c, ty),
             BinOp.BitOr => new CtInt(a | c, ty),
             BinOp.BitXor => new CtInt(a ^ c, ty),
             _ => null,
         };
     }
+
+    /// <summary><paramref name="a"/> shifted right by <paramref name="count"/> at full width: a count of 128 or more leaves
+    /// only the sign (0 or -1), where C#'s shift would mask the count.</summary>
+    private static System.Int128 ShiftRightSaturating(System.Int128 a, System.Int128 count)
+        => count >= 128 ? (a < 0 ? System.Int128.NegativeOne : System.Int128.Zero) : a >> (int)count;
 
     private bool Compare(BinOp op, ComptimeValue l, ComptimeValue r)
     {
@@ -560,6 +1286,15 @@ internal sealed partial class IrModule
     /// <summary>A comptime <c>continue</c> — unwinds to the nearest enclosing comptime loop.</summary>
     private sealed class ComptimeContinue : System.Exception { }
 
+    /// <summary>A comptime <c>goto</c> — unwinds to the statement list that holds its label AFTER the
+    /// jump (a labeled value block's <c>break :blk v</c> lowers to one). A backward jump is not
+    /// evaluated.</summary>
+    private sealed class ComptimeGoto : System.Exception
+    {
+        public ComptimeGoto(string label) { Label = label; }
+        public string Label { get; }
+    }
+
     /// <summary>The body contains a construct the comptime interpreter does not evaluate (a goto,
     /// a switch, a pointer/aggregate op, a read of a non-frame symbol, …). Caught at the top-level
     /// entry, where it maps to "not a compile-time constant" — the caller decides if that position
@@ -577,17 +1312,169 @@ internal sealed partial class IrModule
     /// declared return type so the spliced literal carries the right carrier.</summary>
     private ComptimeValue? EvalComptimeCall(Call c)
     {
-        if (!_comptimeAllowCalls || c.CalleeSym is not { } cs) { return null; }
+        // `@addWithOverflow(a, b)` and friends (std.sort.pdq's `@subWithOverflow`): the wrapped result and the overflow
+        // bit, as the two-element tuple the runtime helper returns (a struct with fields "0" and "1").
+        if (c is { Callee: "ZigMath.AddWithOverflow" or "ZigMath.SubWithOverflow" or "ZigMath.MulWithOverflow", Args: [var ovA, var ovB] }
+            && c.Type.Unqualified is CType.Tuple { Elements: [var ovElem, var ovBit] }
+            && ovElem.Unqualified is CType.Prim { Integer: true } ovPrim)
+        {
+            if (EvalComptime(ovA) is not CtInt oa || EvalComptime(ovB) is not CtInt ob) { return null; }
+            var exactOv = c.Callee switch
+            {
+                "ZigMath.AddWithOverflow" => unchecked(oa.Value + ob.Value),
+                "ZigMath.SubWithOverflow" => unchecked(oa.Value - ob.Value),
+                _ => unchecked(oa.Value * ob.Value),
+            };
+            var wrappedOv = WrapToWidth(exactOv, ovPrim);
+            return new CtStruct(new Dictionary<string, ComptimeValue>(System.StringComparer.Ordinal)
+            {
+                ["0"] = new CtInt(wrappedOv, ovElem),
+                ["1"] = new CtInt(wrappedOv == exactOv ? 0 : 1, ovBit),
+            }, c.Type);
+        }
+        // The float math builtins over a comptime float (std.math.log10_int's `bit_size > … * @log2(10.0)`, task #171):
+        // System.Math is pure, so the value is the one the runtime call would compute.
+        if (c is { Callee: var mathCallee, Args: [var mathArg] } && mathCallee.StartsWith("System.Math.", System.StringComparison.Ordinal))
+        {
+            if (EvalComptime(mathArg) is not CtFloat mf) { return null; }
+            double? folded = mathCallee["System.Math.".Length..] switch
+            {
+                "Sqrt" => System.Math.Sqrt(mf.Value), "Sin" => System.Math.Sin(mf.Value), "Cos" => System.Math.Cos(mf.Value),
+                "Tan" => System.Math.Tan(mf.Value), "Exp" => System.Math.Exp(mf.Value), "Log" => System.Math.Log(mf.Value),
+                "Log2" => System.Math.Log2(mf.Value), "Log10" => System.Math.Log10(mf.Value),
+                "Floor" => System.Math.Floor(mf.Value), "Ceiling" => System.Math.Ceiling(mf.Value),
+                "Truncate" => System.Math.Truncate(mf.Value), "Abs" => System.Math.Abs(mf.Value),
+                _ => null,
+            };
+            return folded is { } fv ? new CtFloat(fv, mf.Type) : null;
+        }
+        // `memcpy(&s.arr, src, bytes)`: how a struct literal's array field is filled (Zig task #78), e.g. std.bit_set's
+        // `break :full .{ .masks = masks }` in a const's labeled block. Both ends are comptime arrays, copied by element.
+        if (c is { Callee: "memcpy", Args: [var dstArg, var srcArg, var bytesArg] })
+        {
+            return EvalComptimeMemcpy(dstArg, srcArg, bytesArg);
+        }
+        // The bit-count builtins over a value only known during the evaluation (`@popCount(self.used_args)`
+        // in std.fmt.ArgState): the runtime helpers they lower to, computed at the operand's width.
+        if (c is { Callee: "ZigMath.PopCount" or "ZigMath.Clz" or "ZigMath.Ctz", Args: [var bitArg] })
+        {
+            if (EvalComptime(bitArg) is not CtInt bi
+                || (bitArg.Type ?? bi.Type).Unqualified is not CType.Prim { Integer: true, Bytes: 1 or 2 or 4 or 8 } bp)
+            {
+                return null;
+            }
+            var width = bp.Bytes * 8;
+            var bits = unchecked((ulong)bi.Value) & (width == 64 ? ulong.MaxValue : (1UL << width) - 1);
+            var count = c.Callee switch
+            {
+                "ZigMath.PopCount" => System.Numerics.BitOperations.PopCount(bits),
+                "ZigMath.Clz" => bits == 0 ? width : System.Numerics.BitOperations.LeadingZeroCount(bits) - (64 - width),
+                _ => bits == 0 ? width : System.Numerics.BitOperations.TrailingZeroCount(bits),
+            };
+            return new CtInt(count, CType.Int);
+        }
+        // `@bitReverse` (std.hash.crc's comptime lookup table reflects its polynomial) and `@byteSwap`, at the width the
+        // call names (bit reverse) or the operand's carrier (byte swap).
+        if (c is { Callee: "ZigMath.BitReverse", Args: [var brArg, var brBitsArg] })
+        {
+            if (EvalComptime(brArg) is not CtInt bv || EvalComptime(brBitsArg) is not CtInt { Value: var brBits }
+                || brBits < 0 || brBits > 128)
+            {
+                return null;
+            }
+            var src = unchecked((System.UInt128)bv.Value);
+            System.UInt128 reversed = 0;
+            for (var k = 0; k < (int)brBits; k++)
+            {
+                reversed = (reversed << 1) | (src & 1);
+                src >>= 1;
+            }
+            return RetypeTo(new CtInt(unchecked((System.Int128)reversed), c.Type), c.Type);
+        }
+        if (c is { Callee: "ZigMath.ByteSwap", Args: [var bsArg] })
+        {
+            if (EvalComptime(bsArg) is not CtInt sv
+                || (bsArg.Type ?? sv.Type).Unqualified is not CType.Prim { Integer: true, Bytes: var bsBytes and (1 or 2 or 4 or 8) })
+            {
+                return null;
+            }
+            var swapped = System.Buffers.Binary.BinaryPrimitives.ReverseEndianness(unchecked((ulong)(long)sv.Value)) >> (64 - bsBytes * 8);
+            return RetypeTo(new CtInt(swapped, c.Type), c.Type);
+        }
+        // `@max` / `@min` and zig's integer division builtins over values known only during the evaluation
+        // (`@max(8, ceilPowerOfTwo(…))` in std.simd): the runtime helpers they lower to, over 128-bit integers.
+        if (c is { Callee: "ZigMath.Max" or "ZigMath.Min" or "ZigMath.DivTrunc" or "ZigMath.DivFloor" or "ZigMath.Rem" or "ZigMath.Mod",
+                   Args: [var lhsArg, var rhsArg] })
+        {
+            if (EvalComptime(lhsArg) is not CtInt l || EvalComptime(rhsArg) is not CtInt r) { return null; }
+            if (c.Callee is not ("ZigMath.Max" or "ZigMath.Min") && r.Value == 0) { throw new ComptimeAbort("comptime division by zero"); }
+            var result = c.Callee switch
+            {
+                "ZigMath.Max" => System.Int128.Max(l.Value, r.Value),
+                "ZigMath.Min" => System.Int128.Min(l.Value, r.Value),
+                "ZigMath.DivTrunc" => l.Value / r.Value,
+                "ZigMath.DivFloor" => l.Value / r.Value - ((l.Value % r.Value != 0) && ((l.Value < 0) != (r.Value < 0)) ? 1 : 0),
+                "ZigMath.Rem" => l.Value % r.Value,
+                _ => ((l.Value % r.Value) + r.Value) % r.Value,
+            };
+            return new CtInt(result, c.Type);
+        }
+        // The curated `std.mem.Alignment` carrier, modeled as its byte units (task #108, std.MultiArrayList's comptime
+        // `.big_align = mem.Alignment.fromByteUnits(big_align)`).
+        if (c.Callee is "Alignment.fromByteUnits" or "Alignment.ToByteUnits" or "Alignment.Forward" or "Alignment.Backward" or "Alignment.Check")
+        {
+            if (c.Args.Count == 0 || EvalComptime(c.Args[0]) is not CtInt a0) { return null; }
+            if (c.Callee == "Alignment.fromByteUnits")
+            {
+                if (a0.Value <= 0 || (a0.Value & (a0.Value - 1)) != 0) { throw new ComptimeAbort($"alignment {a0.Value} is not a power of two"); }
+                return new CtInt(a0.Value, c.Type);
+            }
+            if (c.Callee == "Alignment.ToByteUnits") { return new CtInt(a0.Value, c.Type); }
+            if (c.Args.Count != 2 || EvalComptime(c.Args[1]) is not CtInt addr) { return null; }
+            var mask = a0.Value - 1;
+            return c.Callee switch
+            {
+                "Alignment.Forward" => new CtInt((addr.Value + mask) & ~mask, c.Type),
+                "Alignment.Backward" => new CtInt(addr.Value & ~mask, c.Type),
+                _ => new CtBool((addr.Value & mask) == 0),
+            };
+        }
+        if (c.Callee == "__dotcc_unreachable")
+        {
+            throw new ComptimeAbort("`unreachable` (or a `@compileError` on a path the evaluation took)"
+                + (_comptimeCallStack.Count > 0 ? $" in '{string.Join("' called from '", _comptimeCallStack)}'" : ""));
+        }
+        if (!_comptimeAllowCalls || c.CalleeSym is not { } cs)
+        {
+            ComptimeMiss ??= $"a call to '{c.Callee}' (not a function the interpreter runs)";
+            return null;
+        }
         var fn = FindFuncDef(cs);
-        if (fn is null || fn.Variadic || fn.Params.Count != c.Args.Count) { return null; }
+        if (fn is null || fn.Variadic || fn.Params.Count != c.Args.Count)
+        {
+            ComptimeMiss ??= $"a call to '{cs.Name}' (no lowered body with {c.Args.Count} parameters)";
+            return null;
+        }
 
         var argVals = new ComptimeValue[c.Args.Count];
         for (int i = 0; i < c.Args.Count; i++)
         {
-            if (EvalComptime(c.Args[i]) is not { } av) { return null; }
+            if (EvalComptime(c.Args[i]) is not { } av)
+            {
+                ComptimeMiss ??= $"argument {i + 1} of a call to '{cs.Name}'";
+                return null;
+            }
             argVals[i] = av;
         }
 
+        // A runaway comptime recursion (`fn f(comptime y: comptime_int) … f(y - 2)` never reaching its base case) is zig's
+        // "evaluation exceeded 1000 backwards branches"; without a quota the interpreter's own stack overflowed, which ends
+        // the process.
+        if (_comptimeCallStack.Count >= MaxComptimeCallDepth || !System.Runtime.CompilerServices.RuntimeHelpers.TryEnsureSufficientExecutionStack())
+        {
+            throw new ComptimeAbort($"evaluation exceeded {MaxComptimeCallDepth} nested calls (zig: \"evaluation exceeded 1000 "
+                + $"backwards branches\") in '{cs.Name}'");
+        }
         var frame = new Dictionary<Symbol, ComptimeValue>();   // Symbol identity (reference) keys
         for (int i = 0; i < fn.Params.Count; i++)
         {
@@ -596,27 +1483,41 @@ internal sealed partial class IrModule
 
         var saved = _comptimeFrame;
         _comptimeFrame = frame;
+        _comptimeCallStack.Push(cs.Name);
         try
         {
             EvalComptimeStmt(fn.Body);
+            // A `void` function returns by falling off its end (`std.debug.assert`).
+            if (c.Type.Unqualified is CType.VoidType) { return CtVoid.Value; }
+            ComptimeMiss ??= $"the end of '{cs.Name}' (no return value)";
             return null;   // fell off the end with no `return` value — treat as non-constant
         }
         catch (ComptimeReturn r)
         {
+            if (r.Value is null && c.Type.Unqualified is CType.VoidType) { return CtVoid.Value; }   // a bare `return;`
             return r.Value is { } rv ? RetypeTo(rv, c.Type) : null;
         }
         finally
         {
             _comptimeFrame = saved;
+            _comptimeCallStack.Pop();
         }
     }
+
+    /// <summary>The functions the interpreter is inside, innermost first, for a diagnostic that names where an
+    /// evaluation stopped.</summary>
+    private readonly Stack<string> _comptimeCallStack = new();
+
+    /// <summary>How deep comptime calls may nest before the evaluation is abandoned, zig's default branch quota.</summary>
+    private const int MaxComptimeCallDepth = 1000;
 
     /// <summary>Symbol → <see cref="FuncDef"/> index over <see cref="Functions"/>, keyed by
     /// reference identity (<see cref="Symbol"/> is a plain class — the same instance is shared by
     /// the declaration and every call site, so the default comparer is exactly right). Built
-    /// lazily and re-synced by count — <see cref="Functions"/> is append-only (both front-ends
-    /// only <c>Add</c>), so a count mismatch is the complete invalidation signal. Replaces a
-    /// per-call linear scan of the function list.</summary>
+    /// lazily and re-synced by count — <see cref="Functions"/> is append-only while comptime folds can
+    /// run (both front-ends only <c>Add</c>; the one removal, of Zig's comptime-only instances, happens
+    /// after the last fold resolves), so a count mismatch is the complete invalidation signal. Replaces
+    /// a per-call linear scan of the function list.</summary>
     private readonly Dictionary<Symbol, FuncDef> _funcDefIndex = new();
 
     /// <summary>The lowered <see cref="FuncDef"/> for a callee symbol, by reference identity (the
@@ -629,12 +1530,30 @@ internal sealed partial class IrModule
             _funcDefIndex.Clear();
             foreach (var f in Functions) { _funcDefIndex[f.Sym] = f; }
         }
-        return _funcDefIndex.TryGetValue(sym, out var fn) ? fn : null;
+        if (_funcDefIndex.TryGetValue(sym, out var fn)) { return fn; }
+        // Not lowered yet: ask the front-end to lower it now (E2), then look again.
+        if (DemandFuncBody is { } demand && demand(sym))
+        {
+            _funcDefIndex.Clear();
+            foreach (var f in Functions) { _funcDefIndex[f.Sym] = f; }
+            return _funcDefIndex.TryGetValue(sym, out var demanded) ? demanded : null;
+        }
+        return null;
     }
 
     /// <summary>Re-type a comptime scalar to a target arithmetic type (so a parameter binding /
     /// return value carries the declared type, driving usual-arithmetic + the splice carrier).
     /// A bool target / non-arithmetic target leaves the value unchanged.</summary>
+    /// <summary><paramref name="value"/> wrapped to the width of the 1-, 2-, 4- or 8-byte integer <paramref name="p"/>
+    /// (sign-extended when it is signed). A <c>_Bool</c>, <c>comptime_int</c> or 128-bit carrier keeps the value.</summary>
+    private static System.Int128 WrapToWidth(System.Int128 value, CType.Prim p)
+    {
+        if (p.IsComptimeInt || p.Name == "_Bool" || p.Bytes is not (1 or 2 or 4 or 8)) { return value; }
+        var bits = p.Bytes * 8;
+        var low = value & ((System.Int128.One << bits) - 1);
+        return p.Signed && (low >> (bits - 1)) != 0 ? low - (System.Int128.One << bits) : low;
+    }
+
     private static ComptimeValue RetypeTo(ComptimeValue v, CType t)
     {
         if (t.Unqualified is not CType.Prim p) { return v; }
@@ -642,7 +1561,9 @@ internal sealed partial class IrModule
         {
             return v switch
             {
-                CtInt i => new CtInt(i.Value, t),
+                // The arithmetic runs in 128 bits, so a store to a fixed-width integer wraps to its width, as the
+                // runtime conversion does (std.hash.crc's non-reflected table: `crc = (crc << 1) ^ …` on a u32).
+                CtInt i => new CtInt(WrapToWidth(i.Value, p), t),
                 CtFloat f => new CtInt((System.Int128)f.Value, t),
                 _ => v,   // a bool stays a bool
             };
@@ -655,33 +1576,67 @@ internal sealed partial class IrModule
         };
     }
 
+    /// <summary>The array and absolute element index an <see cref="Index"/> names: the base is a comptime array, an
+    /// element pointer (<c>s.Ptr[i]</c>) or a slice, the index a comptime int. Null backing when either is not.</summary>
+    private (CtArray? Backing, long Index) ElementSlot(Index ix)
+    {
+        var (arr, start) = EvalComptime(ix.Base) switch
+        {
+            CtArray a => (a, 0L),
+            CtElemPtr ep => (ep.Backing, ep.Index),
+            CtSlice sl => (sl.Backing, sl.Offset),
+            _ => ((CtArray?)null, 0L),
+        };
+        return arr is not null && EvalComptime(ix.Idx) is CtInt i ? (arr, start + (long)i.Value) : (null, 0L);
+    }
+
+    /// <summary>Store <paramref name="rhs"/> (combined with the current element under <paramref name="compoundOp"/>)
+    /// into element <paramref name="at"/> of <paramref name="arr"/>, in place.</summary>
+    private ComptimeValue? StoreElement(CtArray arr, long at, BinOp? compoundOp, ComptimeValue rhs)
+    {
+        if (at < 0 || at >= arr.Elems.Length) { throw new ComptimeAbort("comptime array index out of bounds"); }
+        if (compoundOp is { } op)
+        {
+            if (CombineBin(op, arr.Elems[at], rhs) is not { } combined) { return null; }
+            rhs = combined;
+        }
+        var stored = RetypeTo(rhs, arr.Element);
+        arr.Elems[at] = stored;
+        return stored;
+    }
+
     /// <summary>Apply a comptime assignment (simple or compound) to a frame local or a struct field,
     /// returning the stored value. A local/param l-value (<c>x = v</c>) or a struct member
     /// (<c>c.field = v</c>, mutating the frame's struct value in place) is assignable at comptime;
     /// anything else aborts.</summary>
     private ComptimeValue? EvalComptimeAssign(Assign a)
     {
-        if (_comptimeFrame is null) { throw new ComptimeAbort("comptime assignment outside a call frame"); }
         if (EvalComptime(a.Value) is not { } rhs) { return null; }
 
         switch (a.Target)
         {
             // A local / parameter.
             case VarRef vr:
+            {
+                // A frame local, else a comptime variable that outlives the evaluation (E3).
+                var store = _comptimeFrame is { } fr && fr.ContainsKey(vr.Sym) ? fr
+                    : ComptimeGlobals.ContainsKey(vr.Sym) ? ComptimeGlobals
+                    : _comptimeFrame ?? throw new ComptimeAbort("comptime assignment outside a call frame");
                 if (a.CompoundOp is { } vop)
                 {
-                    if (!_comptimeFrame.TryGetValue(vr.Sym, out var vcur) || CombineBin(vop, vcur, rhs) is not { } vcomb)
+                    if (!store.TryGetValue(vr.Sym, out var vcur) || CombineBin(vop, vcur, rhs) is not { } vcomb)
                     {
                         return null;
                     }
                     rhs = vcomb;
                 }
-                return _comptimeFrame[vr.Sym] = RetypeTo(rhs, vr.Sym.Type);
+                return store[vr.Sym] = RetypeTo(rhs, vr.Sym.Type);
+            }
 
             // A struct field — `c.field = v`. EvalComptime(m.Base) returns the SAME CtStruct the
             // frame holds (by reference), so mutating its field map writes through to the local; a
             // nested `c.inner.field = v` likewise mutates the nested struct in place.
-            case Member m when !m.Arrow && EvalComptime(m.Base) is CtStruct st:
+            case Member m when EvalComptime(m.Base) is CtStruct st:
                 var ftype = StructFieldType(st.Type, m.Field);
                 if (a.CompoundOp is { } mop)
                 {
@@ -695,19 +1650,12 @@ internal sealed partial class IrModule
                 st.Fields[m.Field] = stored;
                 return stored;
 
-            // An array element — `t[i] = v` (mutates the frame's array value in place).
-            case Index ix when EvalComptime(ix.Base) is CtArray arr:
-                if (EvalComptime(ix.Idx) is not CtInt iidx) { return null; }
-                long ai = (long)iidx.Value;
-                if (ai < 0 || ai >= arr.Elems.Length) { throw new ComptimeAbort("comptime array index out of bounds"); }
-                if (a.CompoundOp is { } iop)
-                {
-                    if (CombineBin(iop, arr.Elems[ai], rhs) is not { } icomb) { return null; }
-                    rhs = icomb;
-                }
-                var istored = RetypeTo(rhs, arr.Element);
-                arr.Elems[ai] = istored;
-                return istored;
+            // An array element — `t[i] = v`, `s.Ptr[i] = v`, or `e.* = v` through an element pointer (mutates the
+            // frame's array value in place).
+            case Index ix when ElementSlot(ix) is ({ } arr, var ai):
+                return StoreElement(arr, ai, a.CompoundOp, rhs);
+            case Unary { Op: UnOp.Deref, Operand: var derefTarget } when EvalComptime(derefTarget) is CtElemPtr targetPtr:
+                return StoreElement(targetPtr.Backing, targetPtr.Index, a.CompoundOp, rhs);
 
             default:
                 throw new ComptimeAbort("comptime assignment target must be a local variable, struct field, or array element");
@@ -724,11 +1672,30 @@ internal sealed partial class IrModule
         switch (s)
         {
             case Block b:
-                foreach (var st in b.Stmts) { EvalComptimeStmt(st); }
+                EvalComptimeList(b.Stmts);
                 break;
 
             case Seq q:
-                foreach (var st in q.Stmts) { EvalComptimeStmt(st); }
+                EvalComptimeList(q.Stmts);
+                break;
+
+            case Goto g:
+                throw new ComptimeGoto(g.Label);
+
+            // A switch statement: run the matching section (or the default one); a `break` leaves the switch.
+            case Switch sw:
+            {
+                if (EvalComptime(sw.Subject) is not CtInt subject) { throw new ComptimeAbort("non-constant comptime switch subject"); }
+                var section = sw.Sections.FirstOrDefault(sec => sec.Labels.Any(l => l.CaseExpr is not null && LabelMatches(l, subject.Value)))
+                    ?? sw.Sections.FirstOrDefault(sec => sec.Labels.Any(l => l.CaseExpr is null));
+                if (section is null) { break; }
+                try { EvalComptimeList(section.Body); }
+                catch (ComptimeBreak) { }
+                break;
+            }
+
+            case Labeled l:
+                EvalComptimeStmt(l.Body);
                 break;
 
             case DeclStmt d:
@@ -737,7 +1704,7 @@ internal sealed partial class IrModule
                     if (decl.Init is not { } init) { continue; }   // uninitialized — bound on first store
                     _comptimeFrame![decl.Sym] = EvalComptime(init) is { } v
                         ? RetypeTo(v, decl.Sym.Type)
-                        : throw new ComptimeAbort("non-constant comptime local initializer");
+                        : throw new ComptimeAbort($"the initializer of the local '{decl.Sym.Name}' (a {init.GetType().Name})");
                 }
                 break;
 
@@ -781,7 +1748,24 @@ internal sealed partial class IrModule
             }
 
             case ExprStmt e:
-                EvalComptime(e.Expr);   // evaluated for its effect on the frame (assignments)
+                // Evaluated for its effect on the frame (assignments). An assignment of a value that is not known at
+                // compile time (a runtime `var` read in a const's initializer block) stops the evaluation; skipping it
+                // silently had left the target at its default. A memory copy the interpreter could not perform stops it
+                // for the same reason (it had left a struct's array field zeroed).
+                if (EvalComptime(e.Expr) is null)
+                {
+                    if (e.Expr is Assign) { throw new ComptimeAbort("an assignment of a value not known at compile time"); }
+                    if (e.Expr is Call { Callee: "memcpy" or "memmove" or "memset" } mem)
+                    {
+                        throw new ComptimeAbort($"a `{mem.Callee}` over values not known at compile time");
+                    }
+                    // Any other call or memory operation the interpreter could not run has an effect it cannot model:
+                    // skipping it had left an array copy (`const final = result;`) all zeros.
+                    if (e.Expr is Call or ZigMemCall)
+                    {
+                        throw new ComptimeAbort("a call whose effect is not known at compile time");
+                    }
+                }
                 break;
 
             case If i:
@@ -826,6 +1810,10 @@ internal sealed partial class IrModule
             case Return r:
                 throw new ComptimeReturn { Value = r.Value is { } rv ? EvalComptime(rv) : null };
 
+            // `return error.X;` through an errdefer boundary.
+            case ZigErrorThrow zet:
+                throw new ComptimeReturn { Value = EvalComptime(zet.Code) is CtInt thrown ? new CtError(thrown.Value) : null };
+
             case Break:
                 throw new ComptimeBreak();
 
@@ -834,6 +1822,37 @@ internal sealed partial class IrModule
 
             default:
                 throw new ComptimeAbort("comptime: unsupported statement " + s.GetType().Name);
+        }
+    }
+
+    /// <summary>True when a switch label (a value or an inclusive range) matches <paramref name="value"/>.</summary>
+    private bool LabelMatches(SwitchLabel label, System.Int128 value)
+    {
+        if (label.CaseExpr is not { } lo || EvalComptime(lo) is not CtInt low) { return false; }
+        if (label.HiExpr is null) { return low.Value == value; }
+        return EvalComptime(label.HiExpr) is CtInt high && value >= low.Value && value <= high.Value;
+    }
+
+    /// <summary>Run a statement list, resuming at a label later in THIS list when a <c>goto</c> from
+    /// inside it names one (a labeled value block's exit). Any other jump propagates.</summary>
+    private void EvalComptimeList(IReadOnlyList<CStmt> stmts)
+    {
+        for (var k = 0; k < stmts.Count; k++)
+        {
+            try
+            {
+                EvalComptimeStmt(stmts[k]);
+            }
+            catch (ComptimeGoto g)
+            {
+                var at = -1;
+                for (var j = k + 1; j < stmts.Count && at < 0; j++)
+                {
+                    if (stmts[j] is Labeled { Name: var name } && name == g.Label) { at = j; }
+                }
+                if (at < 0) { throw; }
+                k = at - 1;
+            }
         }
     }
 }
