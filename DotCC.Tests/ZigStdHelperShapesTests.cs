@@ -4157,6 +4157,68 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_switched_type_info_payload_binds_and_reifies_a_many_pointer()
+    {
+        var cs = EmitZig("""
+            fn Rev(comptime T: type) type {
+                const ptr = switch (@typeInfo(T)) {
+                    .pointer => |p| p,
+                    else => @compileError("expected a pointer"),
+                };
+                switch (ptr.size) {
+                    .slice => {},
+                    .one => if (@typeInfo(ptr.child) != .array) @compileError("expected an array"),
+                    .many, .c => @compileError("bad size"),
+                }
+                const Element = ptr.child;
+                const Pointer = @Pointer(.many, ptr.attrs, Element, null);
+                return struct {
+                    ptr: Pointer,
+                    index: usize,
+                    pub fn next(self: *@This()) ?Element {
+                        if (self.index == 0) return null;
+                        self.index -= 1;
+                        return self.ptr[self.index];
+                    }
+                };
+            }
+            fn rev(slice: anytype) Rev(@TypeOf(slice)) {
+                return .{ .ptr = slice.ptr, .index = slice.len };
+            }
+            pub fn main() u8 {
+                const s: []const u8 = "abc";
+                var it = rev(s);
+                var n: u8 = 0;
+                while (it.next()) |c| n = n * 3 + (c - 'a');
+                return n;
+            }
+            """);
+        // Task #147 (std.mem.ReverseIterator): `const ptr = switch (@typeInfo(T)) { .pointer => |p| p, … };` binds the
+        // payload, `switch (ptr.size)` folds with its else-less `if … @compileError` prong, and
+        // `@Pointer(.many, ptr.attrs, Element, null)` reifies the field type. zig returns 21.
+        cs.ShouldContain("return new Rev____const_unsigned_char { ptr = slice.Ptr, index = slice.Len };");
+        cs.ShouldContain("public byte* ptr;");
+    }
+
+    [Fact]
+    public void Ptr_and_len_read_through_a_pointer_to_an_array()
+    {
+        var cs = EmitZig("""
+            fn first(p: anytype) u8 {
+                const q = p.ptr;
+                return q[0] + q[2] + @as(u8, @intCast(p.len));
+            }
+            pub fn main() u8 {
+                var a = [_]u8{ 5, 6, 7 };
+                const b = [_]u8{ 10, 20, 30, 40 };
+                return first(&a) + first(&b);
+            }
+            """);
+        // Task #147: `p.ptr` of a `*[N]T` is the many-item pointer to its first element, `p.len` its count. zig returns 59.
+        cs.ShouldContain("byte* q = (byte*)p;");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

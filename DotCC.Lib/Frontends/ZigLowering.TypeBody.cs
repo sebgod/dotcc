@@ -133,6 +133,13 @@ internal sealed partial class ZigLowering
         {
             switch (stmt.Content)
             {
+                // `const ptr = switch (@typeInfo(T)) { .pointer => |ptr| ptr, else => @compileError(…) };`
+                // (std.mem.ReverseIterator, task #147): a switch that yields the active @typeInfo payload binds it, where
+                // any other switch below is a type alias.
+                case Zig.ConstDecl switchedInfoDecl when switchedInfoDecl.Arg3.Content is Zig.SwitchExpr or Zig.SwitchExprTrailing
+                                                        && TryEvalTypeInfo(switchedInfoDecl.Arg3, out var switchedInfo):
+                    _typeInfoBindings[Tok(switchedInfoDecl.Arg1)] = switchedInfo;
+                    break;
                 // `const Slice = if (alignment) |a| … else []T;` — a TYPE alias; `const bits = @typeInfo(T).int.bits;`
                 // — a comptime VALUE (std.math.Log2Int computes its result width from one). Which it is
                 // is decided by the RHS's shape (IsTypeBodyTypeRhs), before anything is lowered.
@@ -382,6 +389,19 @@ internal sealed partial class ZigLowering
                         CompileErrorBuiltin(Flatten(ce.Arg2));
                         return null;
                 }
+            }
+            // `.one => if (@typeInfo(ptr.child) != .array) @compileError("…"),` (std.mem.ReverseIterator, task #147): the
+            // condition folds, and only a taken `@compileError` has an effect.
+            if (prong.IfExpr is { } guarded)
+            {
+                var taken = TryFoldComptimeCondition(guarded.Arg4) ?? TryFoldTypeIfCondition(guarded.Arg4)
+                    ?? throw new IrUnsupportedException(
+                        $"type-returning generic '{fnName}': an `if` prong in a type body needs a comptime condition");
+                if (taken && guarded.Arg6.Content is Zig.BuiltinCall { Arg0: var guardTok } guardCall && Tok(guardTok) == "@compileError")
+                {
+                    CompileErrorBuiltin(Flatten(guardCall.Arg2));
+                }
+                return null;
             }
             throw new IrUnsupportedException(
                 $"type-returning generic '{fnName}': a `switch` statement prong in a type body must be a block, a "

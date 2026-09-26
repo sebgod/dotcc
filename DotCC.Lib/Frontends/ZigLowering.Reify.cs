@@ -74,6 +74,59 @@ internal sealed partial class ZigLowering
 
     // ---- @Int and the rest of the reification family ----------------------
 
+    /// <summary>The type <c>@Pointer(size, attrs, child, sentinel)</c> builds: <c>.one</c> / <c>.many</c> / <c>.c</c> a pointer and
+    /// <c>.slice</c> a slice, to <paramref name="b"/>'s child, const when the attributes say so. The sentinel is erased, as a
+    /// <c>[:0]T</c>'s is, and the alignment and address space have no C# counterpart.</summary>
+    private CType PointerBuiltinType(Zig.BuiltinCall b)
+    {
+        var args = Flatten(b.Arg2);
+        if (args.Count != 4)
+        {
+            throw new IrUnsupportedException($"zig `@Pointer` expects (size, attrs, child, sentinel); got {args.Count} argument(s)");
+        }
+        var size = EnumLitName(args[0])
+            ?? throw new IrUnsupportedException("zig `@Pointer`: the size must be a comptime-known `.one` / `.many` / `.slice` / `.c`");
+        var child = LowerType(args[2]);
+        var element = PointerAttrsConst(args[1]) ? child.WithQuals(TypeQual.Const) : child;
+        return size switch
+        {
+            "slice" => new CType.Slice(element),
+            "one" or "many" or "c" => new CType.Pointer(element),
+            _ => throw new IrUnsupportedException($"zig `@Pointer`: `.{size}` is not a pointer size"),
+        };
+    }
+
+    /// <summary>Whether a <c>@Pointer</c> attributes argument makes the pointer const: <c>info.attrs</c> of a
+    /// <c>@typeInfo(P).pointer</c> binding carries P's const-ness, an empty <c>.{}</c> none, and a literal its
+    /// <c>.@"const"</c> field.</summary>
+    private bool PointerAttrsConst(Item attrs)
+    {
+        if (attrs.Content is Zig.Field { Arg2: var attrsTok } attrsField && Tok(attrsTok) == "attrs"
+            && TryEvalTypeInfo(attrsField.Arg0, out var info))
+        {
+            return info.Type.Unqualified switch
+            {
+                CType.Pointer { Pointee: var pointee } => pointee.IsConst || pointee.Unqualified is CType.Array { Element.IsConst: true },
+                CType.Slice { Element: var sliceElement } => sliceElement.IsConst,
+                _ => throw new IrUnsupportedException($"zig `@Pointer`: `attrs` of a non-pointer `{info.Type.Describe()}`"),
+            };
+        }
+        if (attrs.Content is Zig.AnonStructInitEmpty) { return false; }
+        if (attrs.Content is Zig.AnonStructInit anon)
+        {
+            foreach (var fieldInit in Flatten(anon.Arg2))
+            {
+                if (fieldInit.Content is Zig.FieldInit fi && Tok(fi.Arg1) is "const" or "@\"const\"")
+                {
+                    return TryFoldComptimeCondition(fi.Arg3) ?? throw new IrUnsupportedException(
+                        "zig `@Pointer`: the `const` attribute must be comptime-known");
+                }
+            }
+            return false;
+        }
+        throw new IrUnsupportedException("zig `@Pointer`: attributes must be a `@typeInfo(P).pointer.attrs` or an attributes literal");
+    }
+
     /// <summary>Recognize and lower a builtin that CONSTRUCTS a type, for the type positions
     /// (<see cref="LowerType"/> and the type-alias RHS). <c>@Int</c> builds; every other member of the
     /// family is a loud cut naming what it would take. Returns false for a builtin that is not one of
@@ -87,6 +140,12 @@ internal sealed partial class ZigLowering
         {
             case "@Int":
                 type = IntBuiltinType(b);
+                return true;
+
+            // `@Pointer(.many, ptr.attrs, Element, sentinel)` (std.mem.ReverseIterator, task #147): its attributes are a
+            // `@typeInfo(P).pointer.attrs` or an attributes literal, so only `const` matters to dotcc's pointer and slice types.
+            case "@Pointer":
+                type = PointerBuiltinType(b);
                 return true;
 
             // The AGGREGATE constructors. Every one takes comptime aggregate arguments — a
@@ -105,7 +164,7 @@ internal sealed partial class ZigLowering
                 throw new IrUnsupportedException(
                     "zig `@Enum(…)` is modeled as a type-returning function's result (`fn E(…) type { return "
                     + "@Enum(…); }`), which names the enum after the instance; here it has no name to take");
-            case "@Union" or "@Pointer" or "@Fn" or "@Tuple":
+            case "@Union" or "@Fn" or "@Tuple":
                 throw new IrUnsupportedException(
                     $"zig `{name}(…)` reifies a type from comptime AGGREGATE arguments (field-name and "
                     + "field-type arrays, an attributes struct), which dotcc has no comptime-aggregate engine "

@@ -489,6 +489,25 @@ internal sealed partial class ZigLowering
                 return true;
             }
 
+            // `switch (@typeInfo(T)) { .pointer => |p| p, else => @compileError(…) }` (std.mem.ReverseIterator, task #147):
+            // the selected prong yields its own capture, the active payload, which is the same folded record. A selected
+            // `@compileError` prong fires as it lowers.
+            case Zig.SwitchExpr or Zig.SwitchExprTrailing:
+            {
+                var (swSubject, swProngs) = expr.Content is Zig.SwitchExpr se
+                    ? (se.Arg2, se.Arg5)
+                    : (((Zig.SwitchExprTrailing)expr.Content).Arg2, ((Zig.SwitchExprTrailing)expr.Content).Arg5);
+                if (!TryEvalTypeInfo(swSubject, out var switchedInfo)) { return false; }
+                if (SelectComptimeProng(swSubject, swProngs, out _) is not { Expr: { } yielded } chosen) { return false; }
+                if (chosen.CaptureName is { } capture && yielded.Content is Zig.Ident { Arg0: var yieldedTok } && Tok(yieldedTok) == capture)
+                {
+                    info = switchedInfo;
+                    return true;
+                }
+                if (yielded.Content is Zig.BuiltinCall { Arg0: var ceTok } && Tok(ceTok) == "@compileError") { LowerExpr(yielded); }
+                return false;
+            }
+
             // `<info>.int` — the payload of the ACTIVE union field. Yields the same folded record (the
             // payload and the union value describe one type), after checking the tag really is active.
             case Zig.Field f when TryEvalTypeInfo(f.Arg0, out var baseInfo):
@@ -717,8 +736,11 @@ internal sealed partial class ZigLowering
         // its own `CType.Slice`). `*T` / `[*]T` / `[*c]T` share one C pointer, so for those the size is the class
         // the source SPELLED (task #119: std.Random.init's `@typeInfo(Ptr).pointer.size == .one`), and where no
         // spelling gives one it stays the loud cut TryFoldTypeInfoValue raises (std.meta.Elem switches on it).
+        // A pointer to an ARRAY with no spelled class is `*[N]T` (`&arr`), `.one` (std.mem.reverseIterator(&arr), task #147).
         if (expr.Content is Zig.Field sz && Tok(sz.Arg2) == "size" && TryEvalTypeInfo(sz.Arg0, out var zInfo)
-            && zInfo.Tag == "pointer" && (zInfo.Type.Unqualified is CType.Slice ? "slice" : zInfo.PointerSize) is { } sizeClass)
+            && zInfo.Tag == "pointer"
+            && (zInfo.Type.Unqualified is CType.Slice ? "slice"
+                : zInfo.PointerSize ?? (zInfo.Type.Unqualified is CType.Pointer { Pointee.Unqualified: CType.Array } ? "one" : null)) is { } sizeClass)
         {
             tag = sizeClass;
             return true;

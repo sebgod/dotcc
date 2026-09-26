@@ -6962,6 +6962,17 @@ public sealed class ZigOracleTests
             "    const k = activeTag(W{ .big = 9 });\n" +
             "    return @intFromEnum(k) * 20 + @as(u8, @intFromEnum(t)) * 10 + @intFromEnum(activeTag(y)) + @as(u8, @intFromBool(t == .b));\n" +
             "}\n", 153, "" },
+        // Task #147: `.ptr` and `.len` through a pointer to an array (an anytype `&arr`).
+        new object[] { "ptr_len_through_array_pointer",
+            "fn first(p: anytype) u8 {\n" +
+            "    const q = p.ptr;\n" +
+            "    return q[0] + q[2] + @as(u8, @intCast(p.len));\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var a = [_]u8{ 5, 6, 7 };\n" +
+            "    const b = [_]u8{ 10, 20, 30, 40 };\n" +
+            "    return first(&a) + first(&b);\n" +
+            "}\n", 59, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -8246,6 +8257,62 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{x}\\n\", .{acc});\n" +
             "    return @truncate(acc ^ (acc >> 32) ^ (acc >> 16) ^ (acc >> 8));\n" +
             "}\n", 112);
+
+    // Task #147: std.mem.reverseIterator from real std over a pointer to an array (nextPtr) and a slice (next).
+    [Fact]
+    public void Dotcc_matches_zig_std_mem_reverse_iterator() =>
+        MatchesZigWithRealStd("mem_reverse_iterator",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var arr = [_]u8{ 1, 2, 3, 4 };\n" +
+            "    var it = std.mem.reverseIterator(&arr);\n" +
+            "    var acc: u8 = 0;\n" +
+            "    while (it.nextPtr()) |p| {\n" +
+            "        p.* += 1;\n" +
+            "        acc = acc *% 2 +% p.*;\n" +
+            "    }\n" +
+            "    var it2 = std.mem.reverseIterator(@as([]const u8, \"xyz\"));\n" +
+            "    const last = it2.next().?;\n" +
+            "    return acc +% arr[0] +% (last - 'x');\n" +
+            "}\n", 68);
+
+    // Task #147: std.mem.ReverseIterator's shape: a switched @typeInfo payload, a `ptr.size` switch and `@Pointer`.
+    // Local-only: `@Pointer` and `Type.Pointer.attrs` are 0.17-dev spellings CI's zig 0.16.0 may not have.
+    [Fact]
+    public void Dotcc_matches_zig_reverse_iterator_shape() =>
+        MatchesZigWithRealStd("reverse_iterator_shape",
+            "fn Rev(comptime T: type) type {\n" +
+            "    const ptr = switch (@typeInfo(T)) {\n" +
+            "        .pointer => |p| p,\n" +
+            "        else => @compileError(\"expected a pointer\"),\n" +
+            "    };\n" +
+            "    switch (ptr.size) {\n" +
+            "        .slice => {},\n" +
+            "        .one => if (@typeInfo(ptr.child) != .array) @compileError(\"expected an array\"),\n" +
+            "        .many, .c => @compileError(\"bad size\"),\n" +
+            "    }\n" +
+            "    const Element = ptr.child;\n" +
+            "    const Pointer = @Pointer(.many, ptr.attrs, Element, null);\n" +
+            "    return struct {\n" +
+            "        ptr: Pointer,\n" +
+            "        index: usize,\n" +
+            "        pub fn next(self: *@This()) ?Element {\n" +
+            "            if (self.index == 0) return null;\n" +
+            "            self.index -= 1;\n" +
+            "            return self.ptr[self.index];\n" +
+            "        }\n" +
+            "    };\n" +
+            "}\n" +
+            "fn rev(slice: anytype) Rev(@TypeOf(slice)) {\n" +
+            "    return .{ .ptr = slice.ptr, .index = slice.len };\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const s: []const u8 = \"abc\";\n" +
+            "    var it = rev(s);\n" +
+            "    var n: u8 = 0;\n" +
+            "    while (it.next()) |c| n = n * 3 + (c - 'a');\n" +
+            "    return n;\n" +
+            "}\n", 21);
 
     // Task #142: std.meta.activeTag and std.meta.Tag from real std.
     [Fact]

@@ -598,6 +598,14 @@ internal sealed partial class ZigLowering
                 {
                     return new LitInt(ptrArrLen.ToString(System.Globalization.CultureInfo.InvariantCulture), ptrArrLen) { Type = CType.ULong };
                 }
+                // `.ptr` through a pointer to an array (`slice.ptr` with `slice = &arr`, std.mem.reverseIterator, task #147): the
+                // many-item pointer to its first element, the same address.
+                if (fieldName == "ptr" && structExpr.Type.Unqualified is CType.Pointer { Pointee: var ptrPointee }
+                    && ptrPointee.Unqualified is CType.Array ptrArray)
+                {
+                    var firstElem = new CType.Pointer(ptrPointee.IsConst ? ptrArray.Element.WithQuals(TypeQual.Const) : ptrArray.Element);
+                    return new Cast(firstElem, structExpr) { Type = firstElem };
+                }
                 // Tagged-union payload access `u.variant` → `u.__payload.variant` (unchecked,
                 // like Zig's release-mode field access; the tag isn't a user-facing field).
                 if (TryContainerName(structExpr.Type, out var cname)
