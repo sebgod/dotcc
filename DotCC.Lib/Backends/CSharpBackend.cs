@@ -2570,13 +2570,18 @@ internal sealed class CSharpBackend
         if (pa.Elems is null)
         {
             var count = pa.Count is { } c ? Expr(c) : "0";
-            return pa.Element.Unqualified is CType.Pointer
+            // A pointer or function-pointer element can't be a type argument (CS0306);
+            // both are pointer-sized, so a zeroed nint block reinterprets cleanly.
+            return pa.Element.Unqualified is CType.Pointer or CType.Func
                 ? $"({elemCs}*)Libc.GlobalArrayZeroed<nint>({count})"
                 : $"Libc.GlobalArrayZeroed<{elemCs}>({count})";
         }
         if (pa.Element.Unqualified is CType.Func)
         {
-            return $"({elemCs}*)Libc.PinFnPtrArray(new {elemCs}[]{{ {string.Join(", ", pa.Elems.Select(Expr))} }})";
+            // The array interpreter zero-fills a short initializer with integer 0,
+            // which a delegate* slot can't take implicitly — spell it null.
+            var fns = pa.Elems.Select(e => e is LitInt { Value: 0 } ? "null" : Expr(e));
+            return $"({elemCs}*)Libc.PinFnPtrArray(new {elemCs}[]{{ {string.Join(", ", fns)} }})";
         }
         if (pa.Element.Unqualified is CType.Pointer)
         {
@@ -2935,8 +2940,11 @@ internal sealed class CSharpBackend
         // Id(Callee) for every normal function (the C# legalizer's Escape IS
         // EmitHelpers.Id), differing only for a static renamed out of the way of a
         // same-named external (BuildFuncDef). Falls back to the escaped raw name
-        // for libc builtins / fn-ptr-variable / unresolved callees.
-        var target = c.CalleeSym?.TargetName ?? DotCC.EmitHelpers.Id(c.Callee);
+        // for libc builtins / unresolved callees. A fn-ptr variable callee spells
+        // like any other reference to it (a static local's mangled field, a
+        // type-shadowed global's DotCcGlobals qualification).
+        var target = c.CalleeSym is { Kind: SymKind.Var or SymKind.Param } v ? GlobalName(v)
+            : c.CalleeSym?.TargetName ?? DotCC.EmitHelpers.Id(c.Callee);
         return $"{target}({string.Join(", ", a)})";
     }
 

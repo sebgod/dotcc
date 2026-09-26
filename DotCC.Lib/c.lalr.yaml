@@ -474,6 +474,7 @@ symbols:
   - U8STRING       # 189 char8_t string literal — u8"…"
   - U8CHAR         # 190 char8_t char constant — u8'x'
   - U8StringSeq    # 191 non-terminal: a run of adjacent u8"…" literals
+  - FnPtrTail      # 192 non-terminal: a raw fn-ptr declarator's `(params)` / `()` tail
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -614,6 +615,28 @@ productions:
       # and once aliased, `Name fn;` works through the TypeNameRewriter.
       - { lhs: Fn, rhs: ['typedef', Type, '(', '*', ID, ')', '(', ParamList, ')', ';'], action: typedefFnPtr }
       - { lhs: Fn, rhs: ['typedef', Type, '(', '*', ID, ')', '(', ')', ';'], action: typedefFnPtrNoArgs }
+      # The parameter tail of a raw (un-typedef'd) function-pointer declarator,
+      # shared by the file-scope, array, static-local and array-member forms
+      # below. `(void)` arrives as a one-Param ParamList, as everywhere else.
+      - { lhs: FnPtrTail, rhs: ['(', ParamList, ')'], action: fnPtrTail }
+      - { lhs: FnPtrTail, rhs: ['(', ')'],            action: fnPtrTailNoArgs }
+      # File-scope function-pointer variables — `[static|extern] Ret (*name)(params)
+      # [= E];` — and arrays of them — `Ret (*name[N])(params) [= {…}];` /
+      # `Ret (*name[])(params) = {…};` (callback / dispatch tables). Conflict-free:
+      # after `Type ( *` the abstract type form takes `)`, the fn-returning-fn-ptr
+      # FnSig takes `ID (`, and these take `ID )` or `ID [`. They lower exactly
+      # like the typedef'd spelling (`typedef Ret (*F)(params); F name…`).
+      - { lhs: Fn, rhs: [Type, '(', '*', ID, ')', FnPtrTail, ';'],                   action: globalFnPtr }
+      - { lhs: Fn, rhs: [Type, '(', '*', ID, ')', FnPtrTail, '=', E, ';'],           action: globalFnPtrInit }
+      - { lhs: Fn, rhs: ['static', Type, '(', '*', ID, ')', FnPtrTail, ';'],         action: globalStaticFnPtr }
+      - { lhs: Fn, rhs: ['static', Type, '(', '*', ID, ')', FnPtrTail, '=', E, ';'], action: globalStaticFnPtrInit }
+      - { lhs: Fn, rhs: ['extern', Type, '(', '*', ID, ')', FnPtrTail, ';'],         action: externFnPtr }
+      - { lhs: Fn, rhs: [Type, '(', '*', ID, ArrDims, ')', FnPtrTail, ';'],                                    action: globalFnPtrArr }
+      - { lhs: Fn, rhs: [Type, '(', '*', ID, ArrDims, ')', FnPtrTail, '=', '{', InitList, '}', ';'],            action: globalFnPtrArrInit }
+      - { lhs: Fn, rhs: [Type, '(', '*', ID, '[', ']', ')', FnPtrTail, '=', '{', InitList, '}', ';'],           action: globalFnPtrArrInitImplicit }
+      - { lhs: Fn, rhs: ['static', Type, '(', '*', ID, ArrDims, ')', FnPtrTail, ';'],                          action: globalStaticFnPtrArr }
+      - { lhs: Fn, rhs: ['static', Type, '(', '*', ID, ArrDims, ')', FnPtrTail, '=', '{', InitList, '}', ';'],  action: globalStaticFnPtrArrInit }
+      - { lhs: Fn, rhs: ['static', Type, '(', '*', ID, '[', ']', ')', FnPtrTail, '=', '{', InitList, '}', ';'], action: globalStaticFnPtrArrInitImplicit }
       # File-scope variable declarations: `int x;`, `int x = E;`, and
       # the multi-declarator forms `int a, b;` / `int a = 1, b = 2;`
       # / `int a, b = 5;` at top level. Real C needs these for globals
@@ -1013,6 +1036,14 @@ productions:
       # after the name (DeclItemList has no array suffix), exactly like the
       # file-scope pair `globalStaticDeclList` / `globalStaticArr*`.
       - { lhs: Stmt, rhs: ['static', Type, ID, ArrDims, ';'],                           action: stmtStaticArr }
+      # Block-scope `static` function pointers and arrays of them — the static-local
+      # counterparts of the file-scope globalStaticFnPtr* forms (same lowering:
+      # a mangled DotCcGlobals field / pinned array + an alias symbol).
+      - { lhs: Stmt, rhs: ['static', Type, '(', '*', ID, ')', FnPtrTail, ';'],         action: stmtStaticFnPtr }
+      - { lhs: Stmt, rhs: ['static', Type, '(', '*', ID, ')', FnPtrTail, '=', E, ';'], action: stmtStaticFnPtrInit }
+      - { lhs: Stmt, rhs: ['static', Type, '(', '*', ID, ArrDims, ')', FnPtrTail, ';'],                          action: stmtStaticFnPtrArr }
+      - { lhs: Stmt, rhs: ['static', Type, '(', '*', ID, ArrDims, ')', FnPtrTail, '=', '{', InitList, '}', ';'],  action: stmtStaticFnPtrArrInit }
+      - { lhs: Stmt, rhs: ['static', Type, '(', '*', ID, '[', ']', ')', FnPtrTail, '=', '{', InitList, '}', ';'], action: stmtStaticFnPtrArrInitImplicit }
       - { lhs: Stmt, rhs: ['static', Type, ID, ArrDims, '=', '{', InitList, '}', ';'],  action: stmtStaticArrInit }
       - { lhs: Stmt, rhs: ['static', Type, ID, '[', ']', '=', '{', InitList, '}', ';'], action: stmtStaticArrInitImplicit }
       - { lhs: Stmt, rhs: ['static', Type, ID, ArrDims, '=', StringSeq, ';'],           action: stmtStaticCharArrStrSized }
@@ -1117,6 +1148,9 @@ productions:
       # `delegate*` field via FnPtrType, like every other fn-ptr position.
       - { lhs: Member, rhs: [Type, '(', '*', ID, ')', '(', ParamList, ')', ';'], action: structFnPtrMember }
       - { lhs: Member, rhs: [Type, '(', '*', ID, ')', '(', ')', ';'],            action: structFnPtrMemberNoArgs }
+      # Array-of-function-pointers member `Ret (*name[N])(params);` (an ops table
+      # embedded in a struct). `[` after the name keeps it disjoint from the above.
+      - { lhs: Member, rhs: [Type, '(', '*', ID, ArrDims, ')', FnPtrTail, ';'],  action: structFnPtrArrMember }
       # Nested aggregate members. All four forms carry a MemberMark (epsilon)
       # right after the `{` to snapshot where the inner fields begin, so a
       # consumer can isolate them from the parent's. The NAMED-vs-anonymous split
@@ -1250,6 +1284,12 @@ productions:
       - { lhs: Decl, rhs: [Type, '(', '*', ID, ')', '(', ')'],                       action: declFnPtrNoArgs }
       - { lhs: Decl, rhs: [Type, '(', '*', ID, ')', '(', ParamList, ')', '=', E],    action: declFnPtrInit }
       - { lhs: Decl, rhs: [Type, '(', '*', ID, ')', '(', ')', '=', E],               action: declFnPtrNoArgsInit }
+      # Array of function pointers (block scope): `Ret (*name[N])(params) [= {…}]`
+      # and `Ret (*name[])(params) = {…}` — the `[` after the name keeps these
+      # disjoint from the scalar forms above. Lowers like the typedef'd spelling.
+      - { lhs: Decl, rhs: [Type, '(', '*', ID, ArrDims, ')', FnPtrTail],                           action: declFnPtrArr }
+      - { lhs: Decl, rhs: [Type, '(', '*', ID, ArrDims, ')', FnPtrTail, '=', '{', InitList, '}'],  action: declFnPtrArrInit }
+      - { lhs: Decl, rhs: [Type, '(', '*', ID, '[', ']', ')', FnPtrTail, '=', '{', InitList, '}'], action: declFnPtrArrInitImplicit }
       # Pointer-to-array declarator: `int (*p)[3] [= E];` — p is a pointer to an
       # array of 3 (e.g. a row pointer into a 2-D array). Same `( * ID )` shape as
       # the fn-ptr declarator but with `[dims]` instead of `(params)` after the
