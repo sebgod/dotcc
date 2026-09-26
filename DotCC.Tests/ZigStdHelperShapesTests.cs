@@ -4784,6 +4784,40 @@ public sealed class ZigStdHelperShapesTests
         cs.ShouldContain("System.Runtime.CompilerServices.Unsafe.BitCast<byte, Flags>((byte)(Flags_toInt(self) | Flags_toInt(other)))");
     }
 
+    [Theory]
+    [InlineData("a: i16, b: usize", "a + b", "'i16' and 'u64'")]
+    [InlineData("a: i16, b: u16", "a - b", "'i16' and 'u16'")]
+    [InlineData("a: u32, b: i32", "a * b", "'u32' and 'i32'")]
+    [InlineData("a: i16, b: usize", "a & b", "'i16' and 'u64'")]
+    public void Peer_arithmetic_of_signed_and_unsigned_runtime_integers_is_rejected(string parameters, string expression, string types)
+    {
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            $"fn f({parameters}) i64 {{\n    return @intCast({expression});\n}}\n" +
+            "pub fn main() u8 {\n    return @intCast(f(1, 2) & 0x7f);\n}\n"));
+        // Task #158: zig peer-resolves an arithmetic or bitwise operator's operands, and a signed and an unsigned runtime
+        // integer combine only when the signed type holds every unsigned value (zig: "incompatible types").
+        ex.Message.ShouldContain("zig: incompatible types: " + types);
+    }
+
+    [Fact]
+    public void Peer_arithmetic_of_a_wider_signed_integer_and_comparisons_of_mixed_signedness_are_allowed()
+    {
+        // Task #158: `i32 + u8` is an i32, `u8 + u16` a u16, and a comparison of mixed signedness is exact in zig. zig
+        // returns 247.
+        var cs = EmitZig(
+            "fn mix(a: i32, b: u8, c: u16, d: i16, e: usize) i64 {\n" +
+            "    const widened: i32 = a + b;\n" +
+            "    const unsigned_peer: u16 = b + c;\n" +
+            "    const lt: i64 = @intFromBool(d < c);\n" +
+            "    const eq: i64 = @intFromBool(a == e);\n" +
+            "    return widened + unsigned_peer + lt * 100 + eq * 1000 + (d - 3);\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return @intCast(mix(-5, 200, 7, 4, 99) & 0xff);\n" +
+            "}\n");
+        cs.ShouldContain("int widened = a + b;");
+    }
+
     [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {

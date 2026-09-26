@@ -2569,6 +2569,81 @@ internal sealed partial class ZigLowering
         return division;
     }
 
+    /// <summary>zig's peer type resolution for an arithmetic or bitwise operator (task #158): a signed and an unsigned
+    /// RUNTIME integer combine only when the signed type holds every value of the unsigned one, so <c>i32 + u8</c> is an
+    /// <c>i32</c> but <c>i16 + usize</c> and <c>i16 - u16</c> are "incompatible types". A comparison is not resolved
+    /// that way (zig compares mixed signedness exactly), nor is a shift; a comptime-known operand coerces to its peer.
+    /// Declared widths are read where the source spells them (a <c>u3</c> beside an <c>i8</c> is fine).</summary>
+    private void RejectIncompatiblePeerSignedness(BinOp op, Item l, Item r, CExpr left, CExpr right)
+    {
+        if (_comptimeDepth > 0 || op is not (BinOp.Add or BinOp.Sub or BinOp.Mul or BinOp.Div or BinOp.Mod
+                or BinOp.BitAnd or BinOp.BitOr or BinOp.BitXor)) { return; }
+        bool Known(CExpr e) => e is ComptimeFold || _ir.ConstEval(e) is not null;
+        if (Known(left) || Known(right)) { return; }
+        // Only operands whose zig integer type is CERTAIN count: a false rejection would break valid zig (std mixes
+        // signedness freely through casts), so anything this cannot pin down is let through, as before.
+        if (CertainZigInt(l) is not { } lt || CertainZigInt(r) is not { } rt || lt.Signed == rt.Signed) { return; }
+        var (signedBits, unsignedBits) = lt.Signed ? (lt.Bits, rt.Bits) : (rt.Bits, lt.Bits);
+        if (signedBits > unsignedBits) { return; }
+        static string Spell((bool Signed, int Bits) t) => (t.Signed ? "i" : "u") + t.Bits.ToString(CultureInfo.InvariantCulture);
+        throw new CompileException(
+            $"zig: incompatible types: '{Spell(lt)}' and '{Spell(rt)}' "
+            + "(a signed and an unsigned integer combine only when the signed type holds every unsigned value; cast one with @intCast / @as)");
+    }
+
+    /// <summary>The zig integer type (signedness and declared width) of a runtime operand when it is certain, else null
+    /// (<see cref="RejectIncompatiblePeerSignedness"/>): a parameter (its recorded declared width), an
+    /// array or slice element, an <c>@as(T, …)</c>, a 64-bit field read, or an operator over two operands of one such
+    /// type. A comptime-known value, a call and anything narrower whose declared width is not recorded give null.</summary>
+    private (bool Signed, int Bits)? CertainZigInt(Item it)
+    {
+        static CType.Prim? RuntimeInt(CType? t) =>
+            t?.Unqualified is CType.Prim { Integer: true, IsComptimeInt: false, Name: not "_Bool" } prim ? prim : null;
+        (bool, int)? Peer(Item a, Item b) => CertainZigInt(a) is { } x && CertainZigInt(b) is { } y && x == y ? x : null;
+        switch (it.Content)
+        {
+            case Zig.Grouped g: return CertainZigInt(g.Arg1);
+            case Zig.Add a: return Peer(a.Arg0, a.Arg2);
+            case Zig.Sub a: return Peer(a.Arg0, a.Arg2);
+            case Zig.Mul a: return Peer(a.Arg0, a.Arg2);
+            case Zig.AddWrap a: return Peer(a.Arg0, a.Arg2);
+            case Zig.SubWrap a: return Peer(a.Arg0, a.Arg2);
+            case Zig.MulWrap a: return Peer(a.Arg0, a.Arg2);
+            case Zig.BitAnd a: return Peer(a.Arg0, a.Arg2);
+            case Zig.BitOr a: return Peer(a.Arg0, a.Arg2);
+            case Zig.BitXor a: return Peer(a.Arg0, a.Arg2);
+            case Zig.Ident id:
+            {
+                // A PARAMETER's type is spelled; a local's may be inferred from an expression whose lowered type is C's
+                // (`const tz = @ctz(x);` is a zig `u4` but a C# `int`), so a local is not certain.
+                if (_symbols.Resolve(Tok(id.Arg0)) is not { Kind: SymKind.Param } s || s.IsConstexpr
+                    || _comptimeVars.ContainsKey(s) || RuntimeInt(s.Type) is not { } p) { return null; }
+                return (p.Signed, _valueBits.TryGetValue(s, out var bits) ? bits : p.Bytes * 8);
+            }
+            case Zig.Index ix:
+            {
+                CExpr read;
+                using (EnterThrowawayHoist()) { read = LowerExpr(it); }
+                if (read is ComptimeFold || _ir.ConstEval(read) is not null || RuntimeInt(read.Type) is not { } p) { return null; }
+                return (p.Signed, DeclaredElemBitsOfValue(ix.Arg0) ?? p.Bytes * 8);
+            }
+            case Zig.Field:
+            {
+                CExpr read;
+                using (EnterThrowawayHoist()) { read = LowerExpr(it); }
+                if (read is ComptimeFold || _ir.ConstEval(read) is not null || RuntimeInt(read.Type) is not { Bytes: 8 } p)
+                {
+                    return null;
+                }
+                return (p.Signed, 64);
+            }
+            case Zig.BuiltinCall b when Tok(b.Arg0) == "@as" && Flatten(b.Arg2) is [var asType, _]:
+                return RuntimeInt(LowerType(asType)) is { } asPrim ? (asPrim.Signed, DeclaredBitsOfTypeArg(asType) ?? asPrim.Bytes * 8) : null;
+            default:
+                return null;
+        }
+    }
+
     /// <summary>The check behind <see cref="RejectRuntimeSignedDivision"/>, for a binary or a compound <c>/=</c> /
     /// <c>%=</c>: the peer type is the typed operand's (a literal yields to its peer, as in zig).</summary>
     private void CheckZigDivision(BinOp op, CExpr left, CExpr right, CType? zigPeer = null)
@@ -2641,6 +2716,7 @@ internal sealed partial class ZigLowering
         // `IrBuilder.BinaryType`. (Zig fixed arrays are values and don't decay in arithmetic, so
         // only `CType.Pointer` participates; you slice an array before pointer-walking it.)
         RejectUnrepresentableComptimeOperand(op, l, r, left, right);
+        RejectIncompatiblePeerSignedness(op, l, r, left, right);
         if (TryFoldWideComptimeInt(op, l, r, left, right) is { } wide) { return wide; }
         var lPtr = left.Type.Unqualified is CType.Pointer;
         var rPtr = right.Type.Unqualified is CType.Pointer;

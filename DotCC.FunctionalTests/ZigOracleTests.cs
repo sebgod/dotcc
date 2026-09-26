@@ -7246,6 +7246,18 @@ public sealed class ZigOracleTests
             "    const raw: u16 = @bitCast(m);\n" +
             "    return f.toInt() +% @as(u8, @truncate(raw)) +% @as(u8, @intFromBool(f.d)) +% @as(u8, @truncate(raw >> 8)) +% @sizeOf(Flags) * 10 +% @sizeOf(Mixed) * 100;\n" +
             "}\n", 2, "" },
+        // Task #158: mixed-signedness operators zig allows: a wider signed peer, an unsigned peer, and comparisons.
+        new object[] { "mixed_signedness_allowed_peers",
+            "fn mix(a: i32, b: u8, c: u16, d: i16, e: usize) i64 {\n" +
+            "    const widened: i32 = a + b;\n" +
+            "    const unsigned_peer: u16 = b + c;\n" +
+            "    const lt: i64 = @intFromBool(d < c);\n" +
+            "    const eq: i64 = @intFromBool(a == e);\n" +
+            "    return widened + unsigned_peer + lt * 100 + eq * 1000 + (d - 3);\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return @intCast(mix(-5, 200, 7, 4, 99) & 0xff);\n" +
+            "}\n", 247, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
