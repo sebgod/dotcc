@@ -251,6 +251,10 @@ internal sealed partial class ZigLowering
     /// (<see cref="TryEvalComptimeIntBody"/>) → that value, a spliced literal.</summary>
     private readonly Dictionary<Symbol, CExpr> _comptimeIntValues = new();
 
+    /// <summary>Comptime-only instances taking a <c>comptime</c> integer as an ordinary parameter, which the interpreter
+    /// binds per call (task #171, see <see cref="ResolveGenericInstance"/>).</summary>
+    private readonly HashSet<Symbol> _interpretedInstances = new();
+
     /// <summary>Evaluate a <c>comptime_int</c> function's body NOW, with the instance's seeds live (the
     /// comptime-call engine's immediate path): <c>std.math.maxInt(usize)</c> as an enum member value
     /// (std.Io.Limit's <c>unlimited</c>) is needed during registration, before any deferred fold runs.
@@ -363,6 +367,9 @@ internal sealed partial class ZigLowering
         // Evaluated when it was instantiated (TryEvalComptimeIntBody): the value is known now, so a
         // position that needs it during lowering (an enum member, an array extent) can use it.
         if (owner._comptimeIntValues.TryGetValue(instance, out var known)) { return FitComptimeIntLiteral(known); }
+        // An instance taking an interpreted parameter (task #171) is only reached from a comptime-only body, and its
+        // argument exists only in that body's evaluation: the call stays one, run inside the caller's frame.
+        if (owner._interpretedInstances.Contains(instance)) { return call; }
         var fold = new ComptimeFold(call) { Type = call.Type };
         _pendingComptimeFolds.Add(fold);
         return fold;
@@ -462,6 +469,8 @@ internal sealed partial class ZigLowering
         // `comptime kvs_list: anytype` fed a tuple literal (std.StaticStringMap.initComptime, task #100): the tuple's comptime
         // value keys the instance by digest and the body reads it as a comptime aggregate, not a runtime slot.
         var comptimeTupleArgs = new Dictionary<string, (IrModule.ComptimeValue value, CType type)>(System.StringComparer.Ordinal);
+        // `comptime` integer params taken as ordinary ones (task #171): see the ComptimeValue case.
+        var interpretedParams = new HashSet<string>(System.StringComparer.Ordinal);
 
         // Phase 1 — resolve each comptime TYPE arg in the CALLER's environment (a type-arg spelled as an
         // alias resolves to its aliased type, so it keys the same instance as the underlying type), and
@@ -645,6 +654,18 @@ internal sealed partial class ZigLowering
                              ?? (_ir.EvalComptimeValue(argExpr) is IrModule.CtInt { Value: var bigArg } && bigArg >= long.MinValue && bigArg <= long.MaxValue
                                  ? (long)bigArg : null)) is not { } v)
                         {
+                            // A comptime-only callee reached from a comptime-only body with an argument only the evaluation
+                            // knows (std.math.log10's `return result * pow10(rest_exp);`, `rest_exp` read off comptime vars a
+                            // loop mutates, task #171): one instance takes the integer as an ordinary parameter, which the
+                            // interpreter binds per call. Neither body is ever emitted, so no runtime code sees the parameter.
+                            if (!g.ErrUnion && IsComptimeIntType(g.RetType) && valueParamType is CType.Prim { Integer: true }
+                                && argScope._currentFnSym is { } comptimeCaller && argScope.IsComptimeOnlyFn(comptimeCaller))
+                            {
+                                mangleTokens.Add("rt");
+                                interpretedParams.Add(g.Params[i].Name);
+                                runtimeArgItems.Add(argItems[i]);
+                                break;
+                            }
                             throw new IrUnsupportedException(
                                 $"call to generic '{templateSym.Name}'"
                                 + (argScope._currentFnName.Length > 0 ? $" (from '{argScope._currentFnName}')" : "")
@@ -737,7 +758,8 @@ internal sealed partial class ZigLowering
                         .Where(p => p.Kind is ParamKind.Runtime or ParamKind.AnyType && !comptimeIntArgs.ContainsKey(p.Name)
                                     && !typePointerArgs.Contains(p.Name)
                                     && !wideComptimeIntArgs.ContainsKey(p.Name)
-                                    && !comptimeTupleArgs.ContainsKey(p.Name))
+                                    && !comptimeTupleArgs.ContainsKey(p.Name)
+                                    || interpretedParams.Contains(p.Name))
                         .Select(p => (p.Name, p.Kind == ParamKind.AnyType ? _anytypeSeeds[p.Name] : LowerType(p.TypeAst)))
                         .ToList();
                     // A runtime `anytype` parameter named in the return type (std.fmt.bytesToHex's `[input.len * 2]u8`,
@@ -784,6 +806,7 @@ internal sealed partial class ZigLowering
                 if (comptimeOnly)
                 {
                     _comptimeOnlyFns.Add(instanceSym);
+                    if (interpretedParams.Count > 0) { _interpretedInstances.Add(instanceSym); }
                     if (TryEvalComptimeIntBody(g, valueSeeds, optionalSeeds) is { } value) { _comptimeIntValues[instanceSym] = value; }
                 }
                 _instantiations[mangled] = instanceSym;

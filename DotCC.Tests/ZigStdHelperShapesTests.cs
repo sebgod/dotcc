@@ -315,9 +315,10 @@ public sealed class ZigStdHelperShapesTests
             fn powi(comptime T: type, x: T, y: T) error{Overflow}!T {
                 if (y > 30) return error.Overflow;
                 var acc: T = if (@typeInfo(T).int.bits < 1) unreachable else 1;
+                const guard: T = if (y > 31) unreachable else 1;
                 var i: T = 0;
                 while (i < y) : (i += 1) acc *= x;
-                return acc;
+                return acc * guard;
             }
             fn pow(comptime T: type, x: T, y: T) T {
                 if (@typeInfo(T) == .int) {
@@ -333,8 +334,10 @@ public sealed class ZigStdHelperShapesTests
             }
             """);
         // zig never analyses the `@compileError` after the taken prong's return (task #66), and the
-        // `unreachable` arm leaves the ternary at the sink's type so the literal arm is cast.
+        // `unreachable` arm leaves the ternary at the sink's type so the literal arm is cast. A comptime-false condition
+        // (`@typeInfo(T).int.bits < 1`) keeps only the literal arm, as zig analyses no other (task #171).
         cs.ShouldContain("? throw new System.Diagnostics.UnreachableException(\"unreachable() reached\") : (uint)(1))");
+        cs.ShouldContain("uint acc = 1;");
     }
 
     [Fact]
@@ -1242,7 +1245,8 @@ public sealed class ZigStdHelperShapesTests
                 const small = true;
                 const tables = if (!small) &Small else &Full;
                 const t: u32 = use(u64, 3, tables) + use(u64, 1, &Small);
-                const a: u8 = 3;
+                var a: u8 = 3;
+                _ = &a;
                 const b: u8 = if (a != if (a > 2) @as(u8, 3) else 0) 7 else 9;
                 const c: Checked(4) = .{};
                 return @intCast(t + b + c.v);
@@ -5460,6 +5464,92 @@ public sealed class ZigStdHelperShapesTests
         cs.ShouldContain("byte* @out = stackalloc byte[6];");
         cs.ShouldContain("return ZigAlloc.CopyArrayResult<byte>(@out, 6);");
         cs.ShouldContain("return ZigAlloc.CopyArrayResult<byte>(__cl3, 0);");
+    }
+
+    [Fact]
+    public void A_comptime_float_comparison_short_circuits_an_and()
+    {
+        var cs = EmitZig("""
+            fn big(comptime y: comptime_int) comptime_int {
+                if (y > 30) @compileError("analysed an arm zig never reaches");
+                return y * 2;
+            }
+            fn digits(x: anytype) u8 {
+                const bits = @typeInfo(@TypeOf(x)).int.bits;
+                var n: u8 = 0;
+                inline for (0..3) |i| {
+                    if (bits > (1 << (3 - i)) * 5 * @log2(10.0) and x >= big((1 << (3 - i)) * 5)) n += 1 << i;
+                }
+                return n;
+            }
+            pub fn main() u8 {
+                var a: u32 = 70;
+                var b: u64 = 70;
+                var c: u64 = 7;
+                _ = .{ &a, &b, &c };
+                return digits(a) * 10 + digits(b) + digits(c) * 3;
+            }
+            """);
+        // Task #171 (std.math.log10_int's `bit_size > (1 << (11 - i)) * 5 * @log2(10.0) and val >= pow10(…)`): a comparison of
+        // comptime numbers, a float one included, settles at compile time, so a false left side leaves the right one
+        // unanalysed (`big(40)` would be a `@compileError`) and the dead iterations drop. zig returns 4.
+        cs.ShouldContain("x >= (System.Int128)20UL");
+        cs.ShouldNotContain("big__");
+    }
+
+    [Fact]
+    public void A_comptime_only_recursion_takes_an_evaluated_argument()
+    {
+        var cs = EmitZig("""
+            fn pow10(comptime y: comptime_int) comptime_int {
+                if (y == 0) return 1;
+
+                var squaring = 0;
+                var s = 1;
+
+                while (s <= y) : (s <<= 1) {
+                    squaring += 1;
+                }
+
+                squaring -= 1;
+
+                var result = 10;
+
+                for (0..squaring) |_| {
+                    result *= result;
+                }
+
+                const rest_exp = y - (1 << squaring);
+
+                return result * pow10(rest_exp);
+            }
+            pub fn main() u8 {
+                return @as(u8, pow10(2)) + @as(u8, pow10(0)) + @as(u8, pow10(1));
+            }
+            """);
+        // Task #171 (std.math.log10's `pow10`): `return result * pow10(rest_exp);` reads comptime vars a loop mutates, so the
+        // recursive instance takes `y` as an ordinary parameter the interpreter binds per call. zig returns 111.
+        cs.ShouldContain("return (byte)((byte)(System.Int128)100UL + (byte)(System.Int128)1UL + (byte)(System.Int128)10UL);");
+    }
+
+    [Fact]
+    public void A_runaway_comptime_recursion_is_rejected()
+    {
+        var ex = Should.Throw<CompileException>(() => EmitZig("""
+            fn f(comptime y: comptime_int) comptime_int {
+                if (y == 0) return 1;
+                var s = 1;
+                s += 1;
+                const r = y - s;
+                return 2 * f(r);
+            }
+            pub fn main() u8 {
+                return @as(u8, f(5));
+            }
+            """));
+        // Task #171: a recursion that never reaches its base case is zig's "evaluation exceeded 1000 backwards branches"; the
+        // interpreter's own stack had overflowed, which ends the process.
+        ex.Message.ShouldContain("evaluation exceeded 1000 nested calls");
     }
 
     [Fact]

@@ -1109,13 +1109,17 @@ internal sealed partial class IrModule
         if (c.Target.Unqualified is not CType.Prim p) { return v; }
         if (p.Integer)
         {
-            return new CtInt(v switch
+            var raw = v switch
             {
                 CtInt i => i.Value,
                 CtBool b => b.Value ? System.Int128.One : System.Int128.Zero,
                 CtFloat f => (System.Int128)f.Value,
                 _ => System.Int128.Zero,
-            }, c.Target);
+            };
+            // A cast wraps to its type, as C's conversion does and as zig's `x +% 100` (lowered to `(byte)(x + 100)`) needs:
+            // `(u8)300` is 44, and `@intFromEnum` of a `u64` member held as -1 is 18446744073709551615 (task #171; comparisons
+            // over such consts had folded the wrong way). Not for plain `char`, which dotcc emits as a `byte`.
+            return new CtInt(p.Name != "char" ? WrapToWidth(raw, p) : raw, c.Target);
         }
         return new CtFloat(ToDouble(v), c.Target);
     }
@@ -1158,7 +1162,15 @@ internal sealed partial class IrModule
         }
 
         if (EvalComptime(b.Left) is not { } l || EvalComptime(b.Right) is not { } r) { return null; }
-        return CombineBin(b.Op, l, r);
+        var combined = CombineBin(b.Op, l, r);
+        // Arithmetic wraps at the width the expression is typed (task #171): zig's `a +% 2` over a `u32` is a `Binary` typed
+        // `uint` (no cast below 4 bytes' promotion), whose exact 128-bit sum had folded 0xFFFFFFFF +% 2 to 2^32 + 1, not 1.
+        // That is C's unsigned modulo and C#'s unchecked overflow too. A comptime_int (and plain `char`, emitted as a `byte`)
+        // stays exact.
+        return combined is CtInt { Value: var exact } && b.Type?.Unqualified is CType.Prim { Integer: true, IsComptimeInt: false } wrapAt
+               && wrapAt.Name is not ("char" or "_Bool")
+            ? new CtInt(WrapToWidth(exact, wrapAt), ((CtInt)combined).Type)
+            : combined;
     }
 
     /// <summary>Apply a non-logical binary operator to two already-evaluated comptime values.
@@ -1320,6 +1332,22 @@ internal sealed partial class IrModule
                 ["1"] = new CtInt(wrappedOv == exactOv ? 0 : 1, ovBit),
             }, c.Type);
         }
+        // The float math builtins over a comptime float (std.math.log10_int's `bit_size > … * @log2(10.0)`, task #171):
+        // System.Math is pure, so the value is the one the runtime call would compute.
+        if (c is { Callee: var mathCallee, Args: [var mathArg] } && mathCallee.StartsWith("System.Math.", System.StringComparison.Ordinal))
+        {
+            if (EvalComptime(mathArg) is not CtFloat mf) { return null; }
+            double? folded = mathCallee["System.Math.".Length..] switch
+            {
+                "Sqrt" => System.Math.Sqrt(mf.Value), "Sin" => System.Math.Sin(mf.Value), "Cos" => System.Math.Cos(mf.Value),
+                "Tan" => System.Math.Tan(mf.Value), "Exp" => System.Math.Exp(mf.Value), "Log" => System.Math.Log(mf.Value),
+                "Log2" => System.Math.Log2(mf.Value), "Log10" => System.Math.Log10(mf.Value),
+                "Floor" => System.Math.Floor(mf.Value), "Ceiling" => System.Math.Ceiling(mf.Value),
+                "Truncate" => System.Math.Truncate(mf.Value), "Abs" => System.Math.Abs(mf.Value),
+                _ => null,
+            };
+            return folded is { } fv ? new CtFloat(fv, mf.Type) : null;
+        }
         // `memcpy(&s.arr, src, bytes)`: how a struct literal's array field is filled (Zig task #78), e.g. std.bit_set's
         // `break :full .{ .masks = masks }` in a const's labeled block. Both ends are comptime arrays, copied by element.
         if (c is { Callee: "memcpy", Args: [var dstArg, var srcArg, var bytesArg] })
@@ -1439,6 +1467,14 @@ internal sealed partial class IrModule
             argVals[i] = av;
         }
 
+        // A runaway comptime recursion (`fn f(comptime y: comptime_int) … f(y - 2)` never reaching its base case) is zig's
+        // "evaluation exceeded 1000 backwards branches"; without a quota the interpreter's own stack overflowed, which ends
+        // the process.
+        if (_comptimeCallStack.Count >= MaxComptimeCallDepth || !System.Runtime.CompilerServices.RuntimeHelpers.TryEnsureSufficientExecutionStack())
+        {
+            throw new ComptimeAbort($"evaluation exceeded {MaxComptimeCallDepth} nested calls (zig: \"evaluation exceeded 1000 "
+                + $"backwards branches\") in '{cs.Name}'");
+        }
         var frame = new Dictionary<Symbol, ComptimeValue>();   // Symbol identity (reference) keys
         for (int i = 0; i < fn.Params.Count; i++)
         {
@@ -1471,6 +1507,9 @@ internal sealed partial class IrModule
     /// <summary>The functions the interpreter is inside, innermost first, for a diagnostic that names where an
     /// evaluation stopped.</summary>
     private readonly Stack<string> _comptimeCallStack = new();
+
+    /// <summary>How deep comptime calls may nest before the evaluation is abandoned, zig's default branch quota.</summary>
+    private const int MaxComptimeCallDepth = 1000;
 
     /// <summary>Symbol → <see cref="FuncDef"/> index over <see cref="Functions"/>, keyed by
     /// reference identity (<see cref="Symbol"/> is a plain class — the same instance is shared by

@@ -7584,6 +7584,125 @@ public sealed class ZigOracleTests
             "    const none = doubled([_]u8{});\n" +
             "    return two[3] * 10 + three[5] + @as(u8, @intCast(three.len + none.len));\n" +
             "}\n", 91, "" },
+        // Task #171: comptime comparisons that settle an `and` (a float one included), comptime-only recursion over an evaluated
+        // argument, untyped comptime vars (read by a const, divided, wider than 32 bits), and wrapping consts compared.
+        new object[] { "comptime_float_compare_short_circuit",
+            "fn big(comptime y: comptime_int) comptime_int {\n" +
+            "    if (y > 30) @compileError(\"analysed an arm zig never reaches\");\n" +
+            "    return y * 2;\n" +
+            "}\n" +
+            "fn digits(x: anytype) u8 {\n" +
+            "    const bits = @typeInfo(@TypeOf(x)).int.bits;\n" +
+            "    var n: u8 = 0;\n" +
+            "    inline for (0..3) |i| {\n" +
+            "        if (bits > (1 << (3 - i)) * 5 * @log2(10.0) and x >= big((1 << (3 - i)) * 5)) n += 1 << i;\n" +
+            "    }\n" +
+            "    return n;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var a: u32 = 70;\n" +
+            "    var b: u64 = 70;\n" +
+            "    var c: u64 = 7;\n" +
+            "    _ = .{ &a, &b, &c };\n" +
+            "    return digits(a) * 10 + digits(b) + digits(c) * 3;\n" +
+            "}\n", 4, "" },
+        new object[] { "comptime_pow10_recursion",
+            "fn pow10(comptime y: comptime_int) comptime_int {\n" +
+            "    if (y == 0) return 1;\n" +
+            "\n" +
+            "    var squaring = 0;\n" +
+            "    var s = 1;\n" +
+            "\n" +
+            "    while (s <= y) : (s <<= 1) {\n" +
+            "        squaring += 1;\n" +
+            "    }\n" +
+            "\n" +
+            "    squaring -= 1;\n" +
+            "\n" +
+            "    var result = 10;\n" +
+            "\n" +
+            "    for (0..squaring) |_| {\n" +
+            "        result *= result;\n" +
+            "    }\n" +
+            "\n" +
+            "    const rest_exp = y - (1 << squaring);\n" +
+            "\n" +
+            "    return result * pow10(rest_exp);\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return @as(u8, pow10(2)) + @as(u8, pow10(0)) + @as(u8, pow10(1));\n" +
+            "}\n", 111, "" },
+        new object[] { "comptime_var_read_by_a_const",
+            "fn f(comptime y: comptime_int) comptime_int {\n" +
+            "    if (y <= 0) return 1;\n" +
+            "    var s = 1;\n" +
+            "    s += 1;\n" +
+            "    const r = y - s;\n" +
+            "    return 2 * f(r);\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return @as(u8, f(5));\n" +
+            "}\n", 8, "" },
+        new object[] { "comptime_int_var_division",
+            "fn f(comptime y: comptime_int) comptime_int {\n" +
+            "    if (y <= 0) return 1;\n" +
+            "    var s = 1;\n" +
+            "    while (s <= y) : (s <<= 1) {}\n" +
+            "    const r = y - s / 2;\n" +
+            "    return 2 * f(r);\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return @as(u8, f(5));\n" +
+            "}\n", 4, "" },
+        new object[] { "comptime_int_var_is_wide",
+            "fn sq(comptime n: comptime_int) comptime_int {\n" +
+            "    var result = 10;\n" +
+            "    for (0..n) |_| {\n" +
+            "        result *= result;\n" +
+            "    }\n" +
+            "    return result;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return @intCast(sq(4) / 10_000_000_000_000_000 + sq(5) % 1000 + 7);\n" +
+            "}\n", 8, "" },
+        new object[] { "wrapping_const_compare",
+            "pub fn main() u8 {\n" +
+            "    const x: u8 = 200;\n" +
+            "    const y = x +% 100;\n" +
+            "    const z: u8 = 250;\n" +
+            "    const w = z *% 3;\n" +
+            "    const v: i8 = -128;\n" +
+            "    const u = v -% 1;\n" +
+            "    var n: u8 = 0;\n" +
+            "    if (y > 100) n += 1;\n" +
+            "    if (w < 20) n += 2;\n" +
+            "    if (u > 0) n += 4;\n" +
+            "    if (y == 44) n += 8;\n" +
+            "    if (@as(u16, x) + 100 > 255) n += 16;\n" +
+            "    return n;\n" +
+            "}\n", 28, "" },
+        new object[] { "wrapping_const_compare_wide",
+            "pub fn main() u8 {\n" +
+            "    const a: u32 = 0xFFFF_FFFF;\n" +
+            "    const b = a +% 2;\n" +
+            "    const c: u64 = 0xFFFF_FFFF_FFFF_FFFF;\n" +
+            "    const d = c +% 3;\n" +
+            "    const g: i32 = 0x7FFF_FFFF;\n" +
+            "    const h = g +% 1;\n" +
+            "    const k: u3 = 7;\n" +
+            "    const m = k +% 2;\n" +
+            "    const p: i64 = 0x7FFF_FFFF_FFFF_FFFF;\n" +
+            "    const q = p *% 2;\n" +
+            "    var n: u8 = 0;\n" +
+            "    if (b == 1) n += 1;\n" +
+            "    if (d == 2) n += 2;\n" +
+            "    if (h < 0) n += 4;\n" +
+            "    if (m == 1) n += 8;\n" +
+            "    if (q == -2) n += 16;\n" +
+            "    if (b > 3) n += 32;\n" +
+            "    if (d > 3) n += 64;\n" +
+            "    return n;\n" +
+            "}\n", 31, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -9069,6 +9188,27 @@ public sealed class ZigOracleTests
             "    const none = std.fmt.bytesToHex([_]u8{}, .lower);\n" +
             "    return up[1] +% up[5] +% low[0] -% low[3] +% @as(u8, @intCast(up.len * 10 + low.len + none.len));\n" +
             "}\n", 201);
+
+    // Task #171: std.math.log10_int from real std, over a u32 and (its pow10 past 2^31) a u128 and a u64.
+    [Fact]
+    public void Dotcc_matches_zig_std_math_log10_int() =>
+        MatchesZigWithRealStd("math_log10_int",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    return @as(u8, std.math.log10_int(@as(u32, 12345))) * 10 + std.math.log2_int(u16, 300);\n" +
+            "}\n", 48);
+
+    [Fact]
+    public void Dotcc_matches_zig_std_math_log10_int_wide() =>
+        MatchesZigWithRealStd("math_log10_int_wide",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var x: u128 = 1;\n" +
+            "    for (0..25) |_| x *= 10;\n" +
+            "    var y: u64 = 12345678901234567;\n" +
+            "    _ = &y;\n" +
+            "    return @as(u8, std.math.log10_int(x)) * 2 + std.math.log10_int(y);\n" +
+            "}\n", 66);
 
     // Task #148: std.math.rotr / rotl from real std over a `@Vector(4, u32)` (Blake3's SIMD rounds rotate this way).
     [Fact]

@@ -1058,6 +1058,14 @@ internal sealed partial class ZigLowering
         // `const t = x > 2;` is a zig `bool`, though the IR types a comparison as C's `int` (task #81): `{}` prints it
         // `true`, and `@TypeOf(t)` is `bool`.
         var type = declared ?? (IsZigBoolValue(init) ? CType.Bool : init.Type) ?? CType.Int;
+        // `var result = 10;` in a comptime-only function (std.math.log10's `pow10`, task #171) is zig's comptime_int, which
+        // only such a body may hold in a `var`: an `int` carrier wrapped `result *= result` at 32 bits (10^16 read back as
+        // 1874919424), a silent miscompile of every power the interpreter built past 2^31.
+        if (declared is null && !isConst && type.Unqualified is CType.Prim { Integer: true, IsComptimeInt: false }
+            && IsComptimeUntypedNumeric(initExpr) && _currentFnSym is { } ctFn && IsComptimeOnlyFn(ctFn))
+        {
+            type = CType.ComptimeInt;
+        }
         // `var b = a;` of an array local: zig arrays are VALUES, so `b` is a copy, not a second name for `a`'s
         // storage (the C# rep of an array local is its element pointer, which a plain decl would share).
         if (declared is null && type.Unqualified is CType.Array { Count: { } untypedCount } untypedArr && IsArrayLvalue(init))
@@ -2483,6 +2491,13 @@ internal sealed partial class ZigLowering
         {
             return stringCompared;
         }
+        // A comparison of comptime NUMBERS (std.math.log10_int's `bit_size > (1 << (11 - i)) * 5 * @log2(10.0)`, task #171):
+        // zig settles it at compile time and never analyses what it guards (there, `pow10` of a 10240-digit power).
+        if (cur.Content is Zig.CmpEq or Zig.CmpNe or Zig.CmpLt or Zig.CmpGt or Zig.CmpLe or Zig.CmpGe
+            && TryFoldComptimeNumberCompare(cur) is { } numbersCompared)
+        {
+            return numbersCompared;
+        }
         if (cur.Content is Zig.TrueLit) { return true; }
         if (cur.Content is Zig.FalseLit) { return false; }
         // A question about a comptime AGGREGATE (`cpu.has(.x86, .avx2)` over a `comptime cpu: std.Target.Cpu`
@@ -2493,6 +2508,51 @@ internal sealed partial class ZigLowering
         }
         return TryFoldImportedComptimeValue(cur, out var v) && v is LitBool { Value: var b } ? b : null;
     }
+
+    /// <summary>A comparison whose operands are both side-effect-free numeric shapes (<see cref="IsPureNumericShape"/>), settled
+    /// by the interpreter over their lowering (discarded), or null. Outside a call frame the interpreter reads no runtime
+    /// variable, so an operand that is one (or anything else it cannot evaluate) leaves the comparison unsettled; the
+    /// shape gate keeps the throwaway lowering from declaring or instantiating anything.</summary>
+    private bool? TryFoldComptimeNumberCompare(Item comparison)
+    {
+        var (left, right) = comparison.Content switch
+        {
+            Zig.CmpEq c => (c.Arg0, c.Arg2), Zig.CmpNe c => (c.Arg0, c.Arg2), Zig.CmpLt c => (c.Arg0, c.Arg2),
+            Zig.CmpGt c => (c.Arg0, c.Arg2), Zig.CmpLe c => (c.Arg0, c.Arg2), Zig.CmpGe c => (c.Arg0, c.Arg2),
+            _ => (comparison, comparison),
+        };
+        if (!IsPureNumericShape(left) || !IsPureNumericShape(right)) { return null; }
+        CExpr lowered;
+        try
+        {
+            using (EnterThrowawayHoist()) { lowered = LowerExpr(comparison); }
+        }
+        catch (IrUnsupportedException) { return null; }
+        return _ir.EvalComptimeValue(lowered) is IrModule.CtBool { Value: var answer } ? answer : null;
+    }
+
+    /// <summary>Is <paramref name="e"/> built only from literals, names, field reads (<c>@typeInfo(T).int.bits</c>, <c>x.len</c>),
+    /// arithmetic, and the pure numeric builtins? Such an expression lowers without side effects on the lowering state (no
+    /// call is instantiated, no block declares a name).</summary>
+    private static bool IsPureNumericShape(Item e) => e.Content switch
+    {
+        Zig.IntLit or Zig.FloatLit or Zig.CharLit or Zig.Ident => true,
+        Zig.Grouped g => IsPureNumericShape(g.Arg1),
+        Zig.PreNeg p => IsPureNumericShape(p.Arg1),
+        Zig.PreBitNot p => IsPureNumericShape(p.Arg1),
+        Zig.Field f => IsPureNumericShape(f.Arg0),
+        Zig.Add a => IsPureNumericShape(a.Arg0) && IsPureNumericShape(a.Arg2),
+        Zig.Sub a => IsPureNumericShape(a.Arg0) && IsPureNumericShape(a.Arg2),
+        Zig.Mul a => IsPureNumericShape(a.Arg0) && IsPureNumericShape(a.Arg2),
+        Zig.DivOp a => IsPureNumericShape(a.Arg0) && IsPureNumericShape(a.Arg2),
+        Zig.ModOp a => IsPureNumericShape(a.Arg0) && IsPureNumericShape(a.Arg2),
+        Zig.Shl a => IsPureNumericShape(a.Arg0) && IsPureNumericShape(a.Arg2),
+        Zig.Shr a => IsPureNumericShape(a.Arg0) && IsPureNumericShape(a.Arg2),
+        Zig.BuiltinCall { Arg0: var bTok, Arg2: var bArgs } => Tok(bTok) is "@log2" or "@log10" or "@log" or "@sqrt" or "@exp"
+                or "@floor" or "@ceil" or "@trunc" or "@typeInfo" or "@bitSizeOf" or "@sizeOf" or "@TypeOf"
+            && Flatten(bArgs).All(IsPureNumericShape),
+        _ => false,
+    };
 
     /// <summary>An <c>==</c> / <c>!=</c> with an operand read off a comptime STRING (a byte <c>fmt[i]</c> or its <c>.len</c>) and
     /// the other a constant (task #121), or null when either side is not settled at compile time.</summary>
