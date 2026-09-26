@@ -2642,7 +2642,10 @@ internal sealed partial class ZigLowering
             BindFoldedCapture(capName, copt.Value, copt.Inner);
             // The payload's declared width rides the capture (`if (comptime std.math.cast(usize, v)) |x|`: 64 bits),
             // so an `anytype` it is passed to can answer `@typeInfo(@TypeOf(x)).int.bits`.
-            if (capName != "_" && _symbols.Resolve(capName) is { } foldedCap && DeclaredBitsOfArgument(condItem) is { } capBits)
+            // A `field_attrs` entry's `defaultValue(T)` (task #162) is a `T`: its receiver has no runtime value to lower.
+            if (capName != "_" && _symbols.Resolve(capName) is { } foldedCap
+                && (DefaultValueCall(condItem) is var (_, defaultType) ? DeclaredBitsOfTypeArg(defaultType) : DeclaredBitsOfArgument(condItem))
+                   is { } capBits)
             {
                 RecordValueBits(foldedCap, capBits, null);
             }
@@ -2847,6 +2850,9 @@ internal sealed partial class ZigLowering
         info = default;
         var cur = condItem;
         while (cur.Content is Zig.Grouped g) { cur = g.Arg1; }
+        // `f_attr.defaultValue(f_type)` over a comptime `field_attrs` entry (std.mem.zeroInit, task #162): checked before a
+        // call is lowered below, since the receiver has no runtime value.
+        if (TryFieldAttrDefaultValue(cur, out info)) { return true; }
         // `if (comptime f()) |x|`: a comptime OPTIONAL value (the comptime engine's E2 runs the call now,
         // lowering its body on demand), so `x` is a comptime integer and the branch folds.
         // A call returning `?comptime_int` (`if (std.simd.suggestVectorLength(T)) |block_len|` in std.mem) is
@@ -3354,6 +3360,14 @@ internal sealed partial class ZigLowering
         {
             if (lhsItem.Content is Zig.Ident lhs && Tok(lhs.Arg0) == "_")
             {
+                // `_ = attr;` / `_ = T;` over a comptime-only binding (a `field_attrs` entry or a type an `inline for` capture
+                // bound, task #162): there is no runtime value to evaluate.
+                if (rhsItem.Content is Zig.Ident discardedName && Tok(discardedName.Arg0) is var discardedText
+                    && _symbols.Resolve(discardedText) is null
+                    && (_comptimeAttrs.ContainsKey(discardedText) || _typeAliases.ContainsKey(discardedText)))
+                {
+                    return new Seq(new List<CStmt>());
+                }
                 // `_ = a catch {};` / `_ = a orelse break;` — the value is DISCARDED, so the
                 // fallback arm needs no payload (a void block is fine here, as in zig).
                 if (IsControlFlowFallback(rhsItem, out var dL, out var dC, out var dCap, out var dArm))

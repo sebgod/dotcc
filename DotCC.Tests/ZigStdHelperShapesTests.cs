@@ -5133,6 +5133,77 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_field_attrs_default_value_folds_to_the_default_or_null()
+    {
+        var cs = EmitZig("""
+            const P = struct { a: u8, b: u32 = 5, c: [3]u8 };
+            fn f(comptime T: type) u32 {
+                var n: u32 = 0;
+                const info = @typeInfo(T).@"struct";
+                inline for (info.field_names, info.field_types, info.field_attrs, 0..) |name, ft, attr, i| {
+                    _ = name;
+                    if (attr.@"comptime") continue;
+                    if (attr.defaultValue(ft)) |v| {
+                        n += v * 10;
+                    } else {
+                        n += i;
+                    }
+                }
+                return n;
+            }
+            pub fn main() u8 {
+                return @intCast(f(P));
+            }
+            """);
+        // Task #162 (std.mem.zeroInit's `else if (f_attr.defaultValue(f_type)) |val|`): over a comptime `field_attrs` entry
+        // the optional folds, to the field's declared default (`b: u32 = 5`) or to null, so only the taken arm lowers.
+        // zig returns 52.
+        cs.ShouldContain("n += 5u * (uint)(10);");
+        cs.ShouldContain("n += (uint)(2);");
+    }
+
+    [Fact]
+    public void A_discard_of_a_comptime_capture_emits_nothing()
+    {
+        var cs = EmitZig("""
+            const P = struct { a: u8, b: u32 = 5, c: [3]u8 };
+            fn f(comptime T: type) u32 {
+                var n: u32 = 0;
+                const info = @typeInfo(T).@"struct";
+                inline for (info.field_names, info.field_types, info.field_attrs, 0..) |name, ft, attr, i| {
+                    _ = name;
+                    _ = attr;
+                    _ = ft;
+                    n += i;
+                }
+                return n;
+            }
+            pub fn main() u8 {
+                return @intCast(f(P));
+            }
+            """);
+        // Task #162: `_ = attr;` over a `field_attrs` capture (and `_ = T;` over a type capture) has no runtime value to
+        // evaluate; it had been an unresolved identifier. zig returns 3.
+        cs.ShouldContain("n += (uint)(2);");
+    }
+
+    [Fact]
+    public void Std_mem_zeroes_of_an_array_is_a_zeroed_array()
+    {
+        var cs = EmitZig("""
+            const std = @import("std");
+            pub fn main() u8 {
+                var a = std.mem.zeroes([2][3]u8);
+                a[1][2] = 4;
+                return a[0][0] + a[1][2];
+            }
+            """);
+        // Task #162 (std.mem.zeroInit zeroes a `[3]u8` field with `std.mem.zeroes(@TypeOf(@field(value, f_name)))`): an array
+        // type is its elements zeroed, one flat run for a nested array, not a `default` null pointer. zig returns 4.
+        cs.ShouldContain("stackalloc byte[]{ default(byte), default(byte), default(byte), default(byte), default(byte), default(byte) }");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

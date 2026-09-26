@@ -3167,15 +3167,15 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Rejects_std_mem_zeroes_of_an_array_type()
+    public void Rejects_std_mem_zeroes_of_a_slice_type()
     {
-        // An array `zeroes` would need a zeroed array VALUE; arrays lower to a pointer, so `default`
-        // is a null pointer — a clear cut, not a silent wrong value.
+        // An array's `zeroes` is a zeroed array value (task #162); a slice's would be a null slice, which is not
+        // modeled, so it stays a clear cut rather than a silent wrong value.
         var ex = Should.Throw<CompileException>(() => EmitZig(
             "const std = @import(\"std\");\n" +
-            "pub fn main() u8 { const z = std.mem.zeroes([4]u8); return z[0]; }\n"));
+            "pub fn main() u8 { const z = std.mem.zeroes([]const u8); return @intCast(z.len); }\n"));
         ex.Message.ShouldContain("zeroes");
-        ex.Message.ShouldContain("array");
+        ex.Message.ShouldContain("slice");
     }
 
     [Fact]

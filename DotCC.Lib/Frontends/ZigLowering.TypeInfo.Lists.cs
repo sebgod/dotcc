@@ -44,7 +44,7 @@ internal sealed partial class ZigLowering
     /// <summary>One <c>std.builtin.Type.Struct.FieldAttributes</c> of a <c>field_attrs</c> list (task #108): the field's
     /// explicit alignment (null when unspelled, as zig's <c>?usize</c>), and whether it has a default value. dotcc has
     /// no <c>comptime</c> fields, so <c>.@"comptime"</c> is false.</summary>
-    private sealed record ZigFieldAttr(long? Align, bool HasDefault);
+    private sealed record ZigFieldAttr(long? Align, bool HasDefault, string? Struct = null, string? Field = null);
 
     /// <summary>Each name bound to a folded member list (<c>const names = @typeInfo(T).@"struct"
     /// .field_names;</c>). No runtime decl is emitted, exactly as for
@@ -266,7 +266,7 @@ internal sealed partial class ZigLowering
                 ?? throw new IrUnsupportedException(
                     $"the alignment of '{structName}.{fieldName}' is not a comptime-known integer");
         }
-        return new ZigFieldAttr(align, a.HasDefault);
+        return new ZigFieldAttr(align, a.HasDefault, structName, fieldName);
     }
 
     /// <summary>A member of one <c>field_attrs</c> entry, folded while lowering (task #108): <c>.@"align"</c> is a
@@ -287,6 +287,51 @@ internal sealed partial class ZigLowering
             _ => throw new IrUnsupportedException($"std.builtin.Type.Struct.FieldAttributes has no member '{member}'"),
         };
     }
+
+    /// <summary><c>attrs.defaultValue(FieldType)</c> on a comptime <c>field_attrs</c> entry (std.mem.zeroInit's
+    /// <c>else if (f_attr.defaultValue(f_type)) |val|</c>, task #162): a comptime OPTIONAL, null for a field with no default
+    /// and otherwise the default the struct declares, lowered in the module that declares it. False when
+    /// <paramref name="call"/> is not such a call. An integer default is what a folded optional carries; any other default
+    /// is a loud cut.</summary>
+    private bool TryFieldAttrDefaultValue(Item call, out (bool HasValue, long Value, CType Inner) info)
+    {
+        info = default;
+        if (DefaultValueCall(call) is not var (callee, fieldTypeItem)) { return false; }
+        ZigFieldAttr? attr = null;
+        if (callee.Arg0.Content is Zig.Ident aid && _symbols.Resolve(Tok(aid.Arg0)) is null
+            && _comptimeAttrs.TryGetValue(Tok(aid.Arg0), out var bound))
+        {
+            attr = bound;
+        }
+        else if (callee.Arg0.Content is Zig.Index aix && TryFoldTypeInfoList(aix.Arg0, out var attrList) && attrList.Attrs is { } attrs)
+        {
+            attr = attrs[ComptimeListIndex(attrList, aix.Arg2)];
+        }
+        if (attr is null) { return false; }
+        var fieldType = LowerType(fieldTypeItem);
+        if (!attr.HasDefault)
+        {
+            info = (false, 0, fieldType);
+            return true;
+        }
+        if (attr.Struct is { } structName && attr.Field is { } fieldName
+            && _shared.StructFieldAttrs.TryGetValue((structName, fieldName), out var source)
+            && source.Owner._structFieldDefaults.TryGetValue((structName, fieldName), out var defaultItem)
+            && _ir.ConstEval(source.Owner.LowerFieldDefault(structName, fieldType, defaultItem)) is { } v)
+        {
+            info = (true, v, fieldType);
+            return true;
+        }
+        throw new IrUnsupportedException(
+            "zig `field_attrs[i].defaultValue(T)` of a field whose default is not a comptime integer is not modeled yet");
+    }
+
+    /// <summary>The receiver and the <c>FieldType</c> argument of a <c>receiver.defaultValue(FieldType)</c> call, or null.</summary>
+    private static (Zig.Field Callee, Item FieldType)? DefaultValueCall(Item call)
+        => call.Content is Zig.CallArgs { Arg0.Content: Zig.Field { Arg2: var methodTok } callee } dv
+           && Tok(methodTok) == "defaultValue" && Flatten(dv.Arg2) is [var fieldTypeItem]
+            ? (callee, fieldTypeItem)
+            : null;
 
     /// <summary>Fold a use of a comptime member list: its <c>.len</c> (by a wide margin the commonest
     /// reflection operation in real std) or a comptime INDEX into it. Returns false when the

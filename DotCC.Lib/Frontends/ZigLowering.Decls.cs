@@ -2229,10 +2229,20 @@ internal sealed partial class ZigLowering
                     throw new IrUnsupportedException($"zig `std.mem.zeroes` expects (type); got {argItems.Count} argument(s)");
                 }
                 var zt = LowerType(argItems[0]);
+                // An ARRAY (std.mem.zeroInit's `std.mem.zeroes(@TypeOf(@field(value, f_name)))` over a `[3]u8` field, task
+                // #162) is its elements zeroed, one flat run as a multi-dimensional array is laid out: the array value
+                // `@splat(0)` builds, which a `default` (a null pointer) is not.
+                if (zt.Unqualified is CType.Array { Count: int } zeroArray && FlatElementCount(zeroArray) is var zeroCount and <= 4096)
+                {
+                    var zeroElement = zeroArray.Element;
+                    while (zeroElement.Unqualified is CType.Array innerRow) { zeroElement = innerRow.Element; }
+                    return new StackArray(zeroElement,
+                        Enumerable.Repeat<CExpr>(new DefaultLit { Type = zeroElement }, zeroCount).ToList()) { Type = zeroArray };
+                }
                 if (zt.Unqualified is CType.Array or CType.Slice)
                 {
                     throw new IrUnsupportedException(
-                        "zig `std.mem.zeroes` of an array/slice type is not modeled yet (scalar and struct types are supported)");
+                        "zig `std.mem.zeroes` of a slice (or an array past 4096 elements) is not modeled yet");
                 }
                 return new DefaultLit { Type = zt };
             case "asBytes":

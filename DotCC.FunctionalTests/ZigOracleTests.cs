@@ -8850,6 +8850,42 @@ public sealed class ZigOracleTests
             "    return out[0] ^ out[31];\n" +
             "}\n", 8);
 
+    // Task #162: std.mem.zeroInit from real std (field_attrs, `defaultValue`, zeroes of an array field).
+    [Fact]
+    public void Dotcc_matches_zig_std_mem_zero_init() =>
+        MatchesZigWithRealStd("mem_zero_init",
+            "const std = @import(\"std\");\n" +
+            "const P = struct { a: u8, b: u32, c: [3]u8 };\n" +
+            "pub fn main() u8 {\n" +
+            "    var p = std.mem.zeroes(P);\n" +
+            "    p.c[1] = 4;\n" +
+            "    const q = std.mem.zeroInit(P, .{ .b = 7 });\n" +
+            "    return p.a + @as(u8, @intCast(q.b)) + p.c[1] * 2;\n" +
+            "}\n", 15);
+
+    // Task #162: `field_attrs[i].defaultValue(T)` folded per field (0.17's `@typeInfo` shape, so real-std only).
+    [Fact]
+    public void Dotcc_matches_zig_field_attrs_default_value() =>
+        MatchesZigWithRealStd("field_attrs_default_value",
+            "const P = struct { a: u8, b: u32 = 5, c: [3]u8 };\n" +
+            "fn f(comptime T: type) u32 {\n" +
+            "    var n: u32 = 0;\n" +
+            "    const info = @typeInfo(T).@\"struct\";\n" +
+            "    inline for (info.field_names, info.field_types, info.field_attrs, 0..) |name, ft, attr, i| {\n" +
+            "        _ = name;\n" +
+            "        if (attr.@\"comptime\") continue;\n" +
+            "        if (attr.defaultValue(ft)) |v| {\n" +
+            "            n += v * 10;\n" +
+            "        } else {\n" +
+            "            n += i;\n" +
+            "        }\n" +
+            "    }\n" +
+            "    return n;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return @intCast(f(P));\n" +
+            "}\n", 52);
+
     // Task #148: std.math.rotr / rotl from real std over a `@Vector(4, u32)` (Blake3's SIMD rounds rotate this way).
     [Fact]
     public void Dotcc_matches_zig_std_math_rotr_vector() =>
