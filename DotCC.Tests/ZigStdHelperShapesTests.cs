@@ -4103,6 +4103,60 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_unions_tag_type_is_its_tag_enum_and_the_union_coerces_to_it()
+    {
+        var cs = EmitZig("""
+            const U = union(enum) { a: u8, b: u16, c };
+            fn Tag(comptime T: type) type {
+                return switch (@typeInfo(T)) {
+                    .@"enum" => |info| info.tag_type,
+                    .@"union" => |info| info.tag_type orelse @compileError("no tag"),
+                    else => @compileError("bad"),
+                };
+            }
+            fn activeTag(u: anytype) Tag(@TypeOf(u)) {
+                return @as(Tag(@TypeOf(u)), u);
+            }
+            const Kind = enum(u8) { small = 3, big = 7 };
+            const W = union(Kind) { small: u8, big: u32 };
+            pub fn main() u8 {
+                const x: U = .{ .b = 5 };
+                const y: U = .c;
+                const t = activeTag(x);
+                const k = activeTag(W{ .big = 9 });
+                return @intFromEnum(k) * 20 + @as(u8, @intFromEnum(t)) * 10 + @intFromEnum(activeTag(y)) + @as(u8, @intFromBool(t == .b));
+            }
+            """);
+        // Task #142 (std.meta.Tag / activeTag): `@typeInfo(U).@"union".tag_type orelse @compileError(…)` in a type position
+        // is the tag enum (the synthesized `U_Tag`, or `Kind` for `union(Kind)`), and `@as(Tag(U), u)` reads the active
+        // tag. zig returns 153.
+        cs.ShouldContain("internal static unsafe U_Tag activeTag__U(U u)\n    {\n        return (U_Tag)u.__tag;");
+        cs.ShouldContain("Kind k = activeTag__W(new W { __tag = Kind.big, __payload = new W_Payload { big = 9 } });");
+    }
+
+    [Fact]
+    public void An_untagged_unions_tag_type_takes_the_orelse_fallback()
+    {
+        var ex = Should.Throw<CompileException>(() => EmitZig("""
+            const V = union { a: u8, b: u16 };
+            fn Tag(comptime T: type) type {
+                return switch (@typeInfo(T)) {
+                    .@"union" => |info| info.tag_type orelse @compileError("no tag"),
+                    else => @compileError("bad"),
+                };
+            }
+            pub fn main() u8 {
+                const t: Tag(V) = undefined;
+                _ = t;
+                return 0;
+            }
+            """));
+        // Task #142: an untagged union is a union to @typeInfo, with a null tag_type, so the fallback's @compileError fires
+        // (zig: "error: no tag").
+        ex.Message.ShouldContain("no tag");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

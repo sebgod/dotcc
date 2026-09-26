@@ -371,10 +371,15 @@ internal sealed partial class ZigLowering
                 type = _enumsWithSpelledTag.Contains(en.Name) ? en.Underlying : InferredTagCarrier(InferredTagBits(en));
                 return true;
             }
+            // A tagged union's tag_type is its tag enum (the synthesized `U_Tag`, or the `union(E)` enum), task #142.
+            if (tinfo.Type.Unqualified is CType.Named { Name: var unionName } && _unions.TryGetValue(unionName, out var unionInfo))
+            {
+                type = unionInfo.TagType;
+                return true;
+            }
             throw new IrUnsupportedException(
-                $"zig `@typeInfo({tinfo.Type.Describe()}).{tinfo.Tag}.tag_type`: dotcc models a tagged union's tag as a "
-                + "synthesized enum that is not addressable as a type yet — a plain `enum`'s tag_type is "
-                + "(road-to-zig-std S5c)");
+                $"zig `@typeInfo({tinfo.Type.Describe()}).{tinfo.Tag}.tag_type` is null: the union has no tag "
+                + "(`info.tag_type orelse …` takes its fallback)");
         }
         if (expr.Content is not Zig.Index ix || !TryFoldTypeInfoList(ix.Arg0, out var list)) { return false; }
         // A non-TYPE element is not an error here: this runs speculatively from the type-alias probe

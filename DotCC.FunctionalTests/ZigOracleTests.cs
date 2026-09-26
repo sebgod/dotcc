@@ -6940,6 +6940,28 @@ public sealed class ZigOracleTests
             "    for (buf) |x| sum += x;\n" +
             "    return @intCast((sum + w) % 256);\n" +
             "}\n", 142, "" },
+        // Task #142: std.meta.Tag / activeTag's shape: a union's tag_type through `orelse` in a type position, and `@as(Tag(U), u)`.
+        new object[] { "union_tag_type",
+            "const U = union(enum) { a: u8, b: u16, c };\n" +
+            "fn Tag(comptime T: type) type {\n" +
+            "    return switch (@typeInfo(T)) {\n" +
+            "        .@\"enum\" => |info| info.tag_type,\n" +
+            "        .@\"union\" => |info| info.tag_type orelse @compileError(\"no tag\"),\n" +
+            "        else => @compileError(\"bad\"),\n" +
+            "    };\n" +
+            "}\n" +
+            "fn activeTag(u: anytype) Tag(@TypeOf(u)) {\n" +
+            "    return @as(Tag(@TypeOf(u)), u);\n" +
+            "}\n" +
+            "const Kind = enum(u8) { small = 3, big = 7 };\n" +
+            "const W = union(Kind) { small: u8, big: u32 };\n" +
+            "pub fn main() u8 {\n" +
+            "    const x: U = .{ .b = 5 };\n" +
+            "    const y: U = .c;\n" +
+            "    const t = activeTag(x);\n" +
+            "    const k = activeTag(W{ .big = 9 });\n" +
+            "    return @intFromEnum(k) * 20 + @as(u8, @intFromEnum(t)) * 10 + @intFromEnum(activeTag(y)) + @as(u8, @intFromBool(t == .b));\n" +
+            "}\n", 153, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -8224,6 +8246,21 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{x}\\n\", .{acc});\n" +
             "    return @truncate(acc ^ (acc >> 32) ^ (acc >> 16) ^ (acc >> 8));\n" +
             "}\n", 112);
+
+    // Task #142: std.meta.activeTag and std.meta.Tag from real std.
+    [Fact]
+    public void Dotcc_matches_zig_std_meta_active_tag() =>
+        MatchesZigWithRealStd("meta_active_tag",
+            "const std = @import(\"std\");\n" +
+            "const U = union(enum) { a: u8, b: u16, c };\n" +
+            "pub fn main() u8 {\n" +
+            "    const x: U = .{ .b = 5 };\n" +
+            "    const y: U = .c;\n" +
+            "    const tx = std.meta.activeTag(x);\n" +
+            "    const T = std.meta.Tag(U);\n" +
+            "    const z: T = .a;\n" +
+            "    return @as(u8, @intFromEnum(tx)) * 10 + @intFromEnum(std.meta.activeTag(y)) + @intFromEnum(z) * 3;\n" +
+            "}\n", 12);
 
     // Task #144: std.unicode.utf8ToUtf16Le from real std, long enough to take the vectorized ASCII path.
     [Fact]

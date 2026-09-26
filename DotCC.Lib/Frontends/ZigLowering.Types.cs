@@ -747,6 +747,11 @@ internal sealed partial class ZigLowering
         // A type chosen by a comptime switch in any type position (a parameter's, as well as a field's): the selected
         // prong's type (task #73).
         Zig.SwitchExpr or Zig.SwitchExprTrailing => LowerSwitchType(type),
+        // `info.tag_type orelse @compileError("…")` (std.meta.Tag, task #142): an optional TYPE, else the fallback.
+        Zig.OrElse optType => LowerOrElseType(optType.Arg0, optType.Arg2),
+        // A `@compileError("…")` reached in a type position fires, as it does in a value position.
+        Zig.BuiltinCall { Arg0: var ceTok } when Tok(ceTok) == "@compileError" => throw new IrUnsupportedException(
+            "internal: `@compileError` in a type position did not fire: " + LowerExpr(type).GetType().Name),
         // A call in a type position that no case above could evaluate: name the callee and where it is
         // written, since "CallArgs" alone gave no way to find which of a std module's calls it was.
         Zig.CallArgs uca => throw UnevaluatedTypeCall(uca.Arg0),
@@ -1466,6 +1471,20 @@ internal sealed partial class ZigLowering
             ? (int)n
             : throw new IrUnsupportedException("a `[N]T` array size must be a constant integer expression"
                 + (_ir.ComptimeMiss is { } why ? $" (the interpreter stopped at {why})" : ""));
+    }
+
+    /// <summary>An optional type with a fallback, <c>opt orelse other</c> in a type position. The one optional type dotcc
+    /// models is a union's <c>@typeInfo(U).@"union".tag_type</c>, null for an untagged union: then the fallback lowers (so
+    /// its <c>@compileError</c> fires, as zig's does); otherwise the optional type itself.</summary>
+    private CType LowerOrElseType(Item optionalType, Item fallback)
+    {
+        if (optionalType.Content is Zig.Field { Arg2: var fieldTok } tagField && Tok(fieldTok) == "tag_type"
+            && TryEvalTypeInfo(tagField.Arg0, out var info)
+            && info.Type.Unqualified is CType.Named { Name: var unionName } && !_unions.ContainsKey(unionName))
+        {
+            return LowerType(fallback);
+        }
+        return LowerType(optionalType);
     }
 
     /// <summary>Decode a Zig integer literal — decimal, <c>0x</c>/<c>0o</c>/<c>0b</c> radix, with

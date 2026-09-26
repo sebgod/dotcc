@@ -1996,6 +1996,12 @@ internal sealed partial class ZigLowering
                 {
                     return loaded;
                 }
+                // A tagged union at its own tag enum's sink is its active tag (std.meta.activeTag's `@as(Tag(T), u)`, task #142).
+                if (sink?.Unqualified is CType.Enum tagSink && lowered.Type?.Unqualified is CType.Named { Name: var unionName }
+                    && _unions.TryGetValue(unionName, out var taggedUnion) && taggedUnion.TagType.Name == tagSink.Name)
+                {
+                    return new Member(lowered, taggedUnion.TagFieldName, false) { Type = taggedUnion.TagType };
+                }
                 // A slice at a `*[N]T` / `*const [N]T` sink (std.hash.Wyhash's `self.round(input[i..][0..48])`, std.mem.readInt's
                 // `data[0..4]`): zig coerces a comptime-length slice to a pointer to its array, which is its data pointer.
                 if (sink?.Unqualified is CType.Pointer { Pointee: var arrayPointee } arrayPtrSink

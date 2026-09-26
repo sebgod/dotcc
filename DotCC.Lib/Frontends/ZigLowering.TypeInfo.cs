@@ -417,6 +417,9 @@ internal sealed partial class ZigLowering
         // A named aggregate is a struct unless it was registered as a `union(enum)`; the tuple /
         // curated-runtime types (ArrayList, Allocator) are structs in zig too.
         CType.Named n when _unions.ContainsKey(n.Name) => "union",
+        // An untagged `union { … }` is an overlay struct in the IR, but a union to @typeInfo (its tag_type is null,
+        // task #142).
+        CType.Named n when _ir.StructIsUnion.GetValueOrDefault(n.Name) => "union",
         CType.Named or CType.Tuple or CType.ZigList or CType.Allocator => "struct",
         _ => throw new IrUnsupportedException(
             $"zig `@typeInfo`: no `std.builtin.Type` tag is modeled for {type.Describe()} (road-to-zig-std S5)"),
