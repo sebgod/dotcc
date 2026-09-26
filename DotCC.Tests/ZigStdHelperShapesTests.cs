@@ -3191,6 +3191,30 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void Std_mem_slice_to_stops_at_the_end_value()
+    {
+        var cs = EmitZig("""
+            const std = @import("std");
+            pub fn main() u8 {
+                var buf = [_]u8{ 7, 8, 0, 9 };
+                const head = std.mem.sliceTo(&buf, 0);
+                head[0] = 1;
+                const sl: []const u8 = &[_]u8{ 3, 4, 5 };
+                const tail = std.mem.sliceTo(sl, 5);
+                const z: [*:0]const u8 = "hey";
+                const m = std.mem.sliceTo(z, 0);
+                return @intCast(head.len * 100 + buf[0] * 10 + tail.len + m.len * 3);
+            }
+            """);
+        // Task #127: std.mem.sliceTo, curated like asBytes (its return type is reified through `@Pointer`): an array pointer
+        // keeps its mutability, a slice is scanned within its length, a many-item pointer up to the `end` it is terminated
+        // by. zig returns 221.
+        cs.ShouldContain("Slice<byte> head = ZigMem.SliceTo<byte>(");
+        cs.ShouldContain("ConstSlice<byte> tail = ZigMem.SliceTo<byte>(sl, 5);");
+        cs.ShouldContain("ConstSlice<byte> m = ZigMem.SliceToSentinel<byte>(z, 0);");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

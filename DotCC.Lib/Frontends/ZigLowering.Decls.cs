@@ -2186,10 +2186,51 @@ internal sealed partial class ZigLowering
                 var bvPtr = new Cast(bvTarget, bvData) { Type = bvTarget };
                 return methodName == "bytesAsValue" ? bvPtr : new Unary(UnOp.Deref, bvPtr) { Type = bvType };
             }
+            case "sliceTo":
+            {
+                // std.mem.sliceTo(ptr, end) — the elements before the first `end` (task #127). Curated for asBytes' reason: the
+                // source's return type, `SliceTo(T, end)`, is reified through `@Pointer(.slice, attrs, Elem, sentinel)`.
+                // A slice, an array pointer or a string literal is scanned within its length; a many-item or C pointer
+                // is scanned unbounded, `end` being its sentinel. Constness is kept (a `[]T` in, a `[]T` out). The result's
+                // own sentinel (zig keeps `end` as one when the input had it) is erased, as dotcc erases sentinels.
+                if (argItems.Count != 2)
+                {
+                    throw new IrUnsupportedException($"zig `std.mem.sliceTo` expects (ptr, end); got {argItems.Count} argument(s)");
+                }
+                var stPtr = LowerExpr(argItems[0]);
+                if (stPtr.Type.Unqualified is CType.Array { Element: var stArrElem })
+                {
+                    // A string literal (zig's `*const [N:0]u8`) or an array reached through `&`: viewed as a slice.
+                    stPtr = CoerceToSlice(stPtr, new CType.Slice(argItems[0].Content is Zig.StrLit ? stArrElem.WithQuals(TypeQual.Const) : stArrElem));
+                }
+                else if (stPtr.Type.Unqualified is CType.Pointer { Pointee.Unqualified: CType.Array { Element: var stPtrArrElem } } stArrPtr)
+                {
+                    stPtr = CoerceToSlice(new Unary(UnOp.Deref, stPtr) { Type = stArrPtr.Pointee }, new CType.Slice(stPtrArrElem));
+                }
+                switch (stPtr.Type.Unqualified)
+                {
+                    case CType.Slice { Element: var stElem }:
+                    {
+                        var stEnd = LowerExprSink(argItems[1], stElem.Unqualified);
+                        return new ZigMemCall("SliceTo", stElem.Unqualified, new List<CExpr> { stPtr, stEnd }) { Type = new CType.Slice(stElem) };
+                    }
+                    case CType.Pointer { Pointee: var stPointee } when stPointee.Unqualified is not CType.VoidType:
+                    {
+                        var stEnd = LowerExprSink(argItems[1], stPointee.Unqualified);
+                        return new ZigMemCall("SliceToSentinel", stPointee.Unqualified, new List<CExpr> { stPtr, stEnd })
+                        {
+                            Type = new CType.Slice(stPointee.Unqualified.WithQuals(TypeQual.Const)),
+                        };
+                    }
+                    default:
+                        throw new IrUnsupportedException(
+                            $"zig `std.mem.sliceTo` expects a pointer to an array, a many-item pointer or a slice, got {stPtr.Type.Describe()}");
+                }
+            }
             default:
                 throw new IrUnsupportedException(
                     $"zig `std.mem.{methodName}` is not modeled yet (supported: eql, copyForwards, span, zeroes, asBytes, sliceAsBytes, "
-                    + "bytesAsValue, bytesToValue)");
+                    + "bytesAsValue, bytesToValue, sliceTo)");
         }
     }
 

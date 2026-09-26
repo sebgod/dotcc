@@ -7865,6 +7865,22 @@ public sealed class ZigOracleTests
             "    return @truncate(acc ^ (acc >> 32) ^ (acc >> 16) ^ (acc >> 8));\n" +
             "}\n", 112);
 
+    // Task #127: std.mem.sliceTo over a mutable array pointer, a const slice and a sentinel many-item pointer.
+    [Fact]
+    public void Dotcc_matches_zig_std_slice_to() =>
+        MatchesZigWithRealStd("slice_to",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var buf = [_]u8{ 7, 8, 0, 9 };\n" +
+            "    const head = std.mem.sliceTo(&buf, 0);\n" +
+            "    head[0] = 1;\n" +
+            "    const sl: []const u8 = &[_]u8{ 3, 4, 5 };\n" +
+            "    const tail = std.mem.sliceTo(sl, 5);\n" +
+            "    const z: [*:0]const u8 = \"hey\";\n" +
+            "    const m = std.mem.sliceTo(z, 0);\n" +
+            "    return @intCast(head.len * 100 + buf[0] * 10 + tail.len + m.len * 3);\n" +
+            "}\n", 221);
+
     // Task #132: real std `{d}` of a range-for capture, of `i * i` and of `x + 1` (printIntAny asks each width).
     [Fact]
     public void Dotcc_matches_zig_std_fmt_computed_ints() =>
