@@ -1015,8 +1015,17 @@ internal sealed partial class ZigLowering
                 {
                     CType.Array { Count: { } sourceCount } sourceArr => (long)sourceCount * RowFlatCount(sourceArr) * sourceArr.FlatElement.SizeOf,
                     CType.Prim { Integer: true, IsComptimeInt: false } or CType.Prim { Integer: false } => source.Type.Unqualified.SizeOf,
+                    // `@bitCast(secret[56..72].*)` (XxHash3's `flip`, task #178): a slice with comptime-known bounds, zig's array.
+                    CType.Slice { Element: var sliceElem } when source is SliceNew { Len: var sliceLen } && _ir.ConstEval(sliceLen) is { } knownLen
+                        => knownLen * sliceElem.Unqualified.SizeOf,
+                    CType.Vector { Element: var laneType, Count: var laneCount } => (long)laneCount * laneType.Unqualified.SizeOf,
                     _ => null,
                 };
+                if (sourceBytes is null)
+                {
+                    throw new IrUnsupportedException(
+                        $"zig `@bitCast` into the array local '{Tok(nameTok)}' from a {source.Type.Describe()} is not supported yet");
+                }
                 if (sourceBytes is not { } knownSource || knownSource != destBytes || destBytes <= 0)
                 {
                     throw new CompileException(
@@ -1028,8 +1037,8 @@ internal sealed partial class ZigLowering
                 {
                     new ArrayDecl(bitSym, arr.FlatElement, new LitInt(flatCount.ToString(CultureInfo.InvariantCulture), flatCount) { Type = CType.Int }, null),
                 };
-                CExpr sourceBytesPtr = source;
-                if (source.Type.Unqualified is CType.Prim)
+                CExpr sourceBytesPtr = source is SliceNew { Ptr: var slicePtr } ? slicePtr : source;
+                if (source.Type.Unqualified is CType.Prim or CType.Vector)
                 {
                     var scalarTemp = _symbols.Declare(new Symbol
                     {
@@ -1349,6 +1358,22 @@ internal sealed partial class ZigLowering
     {
         _pendingSwitchValueLabel = label;
         return LowerSwitchStmt(subjectItem, prongsItem);
+    }
+
+    /// <summary>A labeled value-block in a sub-expression (std.hash.XxHash3.final's `acc.digest(len, last_block: { … })`, a call
+    /// argument, task #178): its statements run in the statement's hoist, before the expression, and fill a result temp the
+    /// position reads. Refused past an earlier side-effecting operand of the same statement, whose order it would change.</summary>
+    private CExpr HoistLabeledValue(Item labeled, CType? sink)
+    {
+        var buf = RequireHoistable("labeled value-block");
+        Symbol? result = null;
+        var stmt = LowerLabeledValue(labeled, sink, temp => { result = temp; return new Seq(new List<CStmt>()); });
+        if (result is not { } resultTemp)
+        {
+            throw new IrUnsupportedException("internal: a labeled value-block produced no result temp");
+        }
+        buf.Add(stmt);
+        return new VarRef(resultTemp) { Type = resultTemp.Type };
     }
 
     /// <summary>The core of <see cref="LowerLabeledValueBlock"/>: <paramref name="lowerBody"/> lowers the body while the
@@ -3325,14 +3350,23 @@ internal sealed partial class ZigLowering
         if (!_staticContainerConsts.TryGetValue((container, name), out var sym))
         {
             var value = LowerContainerConst(container, name, typeItem, rhs);
-            if (value.Type.Unqualified is not CType.Named || !IsStaticInitializer(value)) { return null; }
+            // An ARRAY const of literal elements too (std.hash.XxHash3's `const secret = &default_secret;` over a
+            // `[192]u8`, task #178): inlined at each read, `&` of it had been a temp's address (`byte**`, a bad emit).
+            if (value.Type.Unqualified is not (CType.Named or CType.Array) || !IsStaticInitializer(value)) { return null; }
             sym = _symbols.Declare(new Symbol
             {
                 Name = $"{container}__{name}__static", Kind = SymKind.Var, Type = value.Type, Storage = Storage.Static, IsGlobal = true,
             });
             _ir.Globals.Add(new GlobalVar(sym, value));
             sym.AddressTaken = true;
+            // The interpreter reads a static array through its value, so a comptime block over `&empty_vals` still evaluates.
+            if (value.Type.Unqualified is CType.Array && _ir.EvalComptimeValue(value) is { } arrayValue) { _ir.ComptimeGlobals[sym] = arrayValue; }
             _staticContainerConsts[(container, name)] = sym;
+        }
+        // A static array renders as its element pointer, which is already the pointer to the array (as `&arr` of a local is).
+        if (sym.Type.Unqualified is CType.Array)
+        {
+            return new VarRef(sym) { Type = new CType.Pointer(sym.Type.WithQuals(TypeQual.Const)) };
         }
         return new Unary(UnOp.AddrOf, new VarRef(sym) { Type = sym.Type, IsLValue = true }) { Type = new CType.Pointer(sym.Type) };
     }
@@ -3379,6 +3413,7 @@ internal sealed partial class ZigLowering
         Paren p => IsStaticInitializer(p.Inner),
         ComptimeFold { Resolved: { } r } => IsStaticInitializer(r),
         StructInit si => si.Members.All(m => IsStaticInitializer(m.Value)),
+        StackArray sa => sa.Elems.All(IsStaticInitializer),
         _ => false,
     };
 

@@ -1372,6 +1372,8 @@ internal sealed partial class ZigLowering
         Member m => IsPureRowPointer(m.Base),
         Cast c => IsPureRowPointer(c.Operand),
         Binary b => IsPureRowPointer(b.Left) && IsPureRowPointer(b.Right),
+        // A chained slice (`input[input.len - 4 ..][0..4]`, std.hash.XxHash3's hash8): the inner slice is built from pure parts.
+        SliceNew sn => IsPureRowPointer(sn.Ptr) && IsPureRowPointer(sn.Len),
         _ => false,
     };
 
@@ -1412,7 +1414,9 @@ internal sealed partial class ZigLowering
                 // per element, so only a pure one, and the length must be the row's.
                 if (row is SliceNew { Ptr: var rowPtr, Len: var rowLen, Element: var rowElem }
                     && _ir.ConstEval(rowLen) == rowCount && IsPureRowPointer(rowPtr)
-                    && rowElem.Unqualified.Equals(arr.FlatElement.Unqualified))
+                    && (rowElem.Unqualified.Equals(arr.FlatElement.Unqualified)
+                        // A string literal's bytes are C `char`, a `u8` row's `unsigned char`: both are a C# `byte`.
+                        || rowElem.Unqualified is CType.Prim { Integer: true, Bytes: 1 } && arr.FlatElement.Unqualified is CType.Prim { Integer: true, Bytes: 1 }))
                 {
                     for (var k = 0; k < rowCount; k++)
                     {
@@ -1423,7 +1427,8 @@ internal sealed partial class ZigLowering
                 if (row is not (VarRef or Member or DotCC.Ir.Index))
                 {
                     throw new IrUnsupportedException(
-                        "zig multi-dimensional array literal: a row must be a literal `.{ … }` or name an array (a local, field or element)");
+                        "zig multi-dimensional array literal: a row must be a literal `.{ … }` or name an array (a local, field or element)"
+                        + (row is SliceNew rowSlice ? $"; this row is a slice copy whose pointer is a {rowSlice.Ptr.GetType().Name}" : $"; this row is a {row.GetType().Name}"));
                 }
                 for (var k = 0; k < rowCount; k++)
                 {
@@ -1479,6 +1484,9 @@ internal sealed partial class ZigLowering
         if (t.Unqualified is CType.Named { Name: VTableTypeName }) { return BuildAllocatorVTableLiteral(fieldInitItems); }
         // An array TYPE named through an alias (std.crypto.sha2's `const Iv32 = [8]u32;` then `Iv32{ 0x6A09E667, … }`).
         if (t.Unqualified is CType.Array { Count: not null } aliasedArray) { return BuildArrayInit(fieldInitItems, aliasedArray); }
+        // A VECTOR type named through an alias (std.hash.XxHash3's `const Block = @Vector(8, u64);` then `Block{ … }`, task #178):
+        // one lane per positional element, as `.{ … }` at a vector sink.
+        if (t.Unqualified is CType.Vector aliasedVector) { return LowerVectorLiteral(fieldInitItems, aliasedVector); }
         if (t.Unqualified is not CType.Named named)
         {
             throw new IrUnsupportedException(
@@ -1869,6 +1877,8 @@ internal sealed partial class ZigLowering
     /// <c>return</c>, an assignment target, a switch case value, a struct-literal field.</summary>
     private CExpr LowerExprSink(Item expr, CType? sink)
     {
+        // A labeled value-block in a hoistable sub-expression, result-located at the sink (task #178, see HoistLabeledValue).
+        if (_hoist is not null && expr.Content is Zig.LabeledBlock or Zig.LabeledSwitch) { return HoistLabeledValue(expr, sink); }
         var lowered = LowerExprSinkCore(expr, sink);
         // A value of zig's enum-literal type (task #113) meeting an enum: `sorted_vals[i] = kv.@"1"` with `kv` an element
         // of `.{ "if", .kw_if }`. The member rides in the type, so the coercion is static whatever carried the value.
@@ -2688,6 +2698,21 @@ internal sealed partial class ZigLowering
                 return LowerReduce(bargs);
             case "@select":
                 return LowerSelect(bargs, sink);
+            case "@shuffle":
+                return LowerShuffle(bargs);
+            // `@prefetch(ptr, .{})` (std.hash.XxHash3's accumulate, task #179): a cache hint with no observable effect, so it
+            // lowers to nothing. Its pointer is lowered (so an error in it still surfaces) and must be pure, so nothing is dropped.
+            case "@prefetch":
+            {
+                if (bargs.Count != 2) { throw new IrUnsupportedException($"zig `@prefetch` expects (ptr, options); got {bargs.Count} argument(s)"); }
+                CExpr prefetched;
+                using (EnterThrowawayHoist()) { prefetched = LowerExpr(bargs[0]); }
+                if (!IsPureRowPointer(prefetched))
+                {
+                    throw new IrUnsupportedException("zig `@prefetch` of a pointer with side effects is not supported yet (bind it to a `const` first)");
+                }
+                return new DefaultLit { Type = CType.Void };
+            }
             case "@Int" or "@Struct" or "@Union" or "@Enum" or "@Pointer" or "@Fn" or "@Tuple" or "@Vector":
                 // The reification family builds a TYPE. In a value position the useful thing to say is
                 // which position it belongs in; the family's own cuts live in TryLowerReifyBuiltin.

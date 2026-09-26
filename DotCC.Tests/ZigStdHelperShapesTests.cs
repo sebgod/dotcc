@@ -5709,6 +5709,131 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_labeled_block_as_a_call_argument_is_hoisted()
+    {
+        var cs = EmitZig("""
+            const Acc = struct {
+                total: u32,
+                fn digest(self: *const Acc, len: u32, last: *const [4]u8) u32 {
+                    return self.total + len * 10 + last[0] + last[3];
+                }
+            };
+            fn pick(buf: []const u8, copy: *[4]u8, n: usize) *const [4]u8 {
+                _ = copy;
+                return buf[n..][0..4];
+            }
+            pub fn main() u8 {
+                var buf: [8]u8 = undefined;
+                for (&buf, 0..) |*p, i| p.* = @intCast(i + 1);
+                var copy: [4]u8 = undefined;
+                const acc = Acc{ .total = 3 };
+                var buffered: usize = 6;
+                _ = &buffered;
+                const r = acc.digest(2, last: {
+                    if (buffered >= 4) {
+                        break :last pick(&buf, &copy, buffered - 4);
+                    } else {
+                        @memcpy(copy[0..4], buf[0..4]);
+                        break :last &copy;
+                    }
+                });
+                return @intCast(r);
+            }
+            """);
+        // Task #178 (std.hash.XxHash3.final's `acc.digest(len, last_block: { … break :last_block p; })`): a labeled value-block
+        // in a sub-expression runs in the statement's hoist and fills a result temp the argument reads. zig returns 32.
+        cs.ShouldContain("byte* __blk0 = default(byte*);");
+        cs.ShouldContain("goto __blk0_end;");
+    }
+
+    [Fact]
+    public void The_address_of_a_container_array_const_is_static_storage()
+    {
+        var cs = EmitZig("""
+            const Tab = struct {
+                const table: [4]u8 = .{ 3, 5, 7, 11 };
+                fn get() *const [4]u8 {
+                    return &table;
+                }
+                fn sum(t: *const [4]u8) u8 {
+                    return t[0] + t[1] + t[2] + t[3];
+                }
+                fn run() u8 {
+                    const p = &table;
+                    return sum(p) + get()[3];
+                }
+            };
+            pub fn main() u8 {
+                return Tab.run() + Tab.get()[1];
+            }
+            """);
+        // Task #178 (XxHash3's `const secret = &default_secret;` over a `[192]u8`): an array const of literal elements gets
+        // static storage, so `&` of it outlives the frame (it is returned here); it had been a temp's address. zig returns 42.
+        cs.ShouldContain("public static unsafe byte* Tab__table__static = Libc.GlobalArrayFrom<byte>(new byte[]{ 3, 5, 7, 11 });");
+        cs.ShouldContain("return Tab__table__static;");
+    }
+
+    [Fact]
+    public void Shuffle_builds_lanes_from_a_comptime_mask()
+    {
+        var cs = EmitZig("""
+            const V = @Vector(4, u32);
+            pub fn main() u8 {
+                var a = V{ 1, 2, 3, 4 };
+                var b = V{ 10, 20, 30, 40 };
+                _ = .{ &a, &b };
+                const s = @shuffle(u32, a, b, [_]i32{ 3, -1, 0, -4 });
+                const t = @shuffle(u32, a, undefined, [_]i32{ 1, 0, 3, 2 });
+                var buf: [8]u8 = .{ 1, 2, 3, 4, 5, 6, 7, 8 };
+                @prefetch(@as([*]const u8, &buf) + 2, .{});
+                return @truncate(s[0] * 1000 + s[1] * 100 + s[2] * 10 + s[3] + t[0] + t[3]);
+            }
+            """);
+        // Task #179 (XxHash3's round and accumulate): lane i of `@shuffle(E, a, b, mask)` is a[m] or b[~m]; `@prefetch` is a
+        // hint with no observable effect. zig returns 191.
+        cs.ShouldContain("Create((uint)ZigVec.Get(a, 3), (uint)ZigVec.Get(b, 0), (uint)ZigVec.Get(a, 0), (uint)ZigVec.Get(b, 3));");
+        cs.ShouldContain("return (byte)(ZigVec.Get(s, 0) * (uint)(1000)");
+    }
+
+    [Fact]
+    public void A_shuffle_mask_out_of_range_is_rejected()
+    {
+        var ex = Should.Throw<CompileException>(() => EmitZig("""
+            const V = @Vector(4, u32);
+            pub fn main() u8 {
+                var a = V{ 1, 2, 3, 4 };
+                _ = &a;
+                const s = @shuffle(u32, a, undefined, [_]i32{ 4, 0, 1, 2 });
+                return @truncate(s[0]);
+            }
+            """));
+        // Task #179: zig's "mask element at index '0' selects out-of-bounds index".
+        ex.Message.ShouldContain("is out of range of its operand");
+    }
+
+    [Fact]
+    public void A_typed_vector_literal_names_the_vector_through_its_alias()
+    {
+        var cs = EmitZig("""
+            const V = @Vector(4, u32);
+            fn flip(secret: *const [16]u8) u32 {
+                const f: [2]u32 = @bitCast(secret[4..12].*);
+                return f[0] ^ f[1];
+            }
+            pub fn main() u8 {
+                const v = V{ 1, 2, 3, 4 };
+                const w = v * V{ 5, 6, 7, 8 };
+                var s: [16]u8 = undefined;
+                for (&s, 0..) |*p, i| p.* = @intCast(i * 3);
+                return @truncate(@reduce(.Add, w) +% flip(&s));
+            }
+            """);
+        // Task #178 (XxHash3's `Block{ … }` with `const Block = @Vector(8, u64);`): one lane per positional element; and
+        // `@bitCast(secret[4..12].*)` into an array local copies the comptime-bounds slice's bytes. zig returns 90.
+        cs.ShouldContain("System.Runtime.Intrinsics.Vector128<uint> v = System.Runtime.Intrinsics.Vector128.Create((uint)1, (uint)2, (uint)3, (uint)4);");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

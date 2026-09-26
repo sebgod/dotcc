@@ -7783,6 +7783,89 @@ public sealed class ZigOracleTests
             "    const noinline_count: u8 = 1;\n" +
             "    return add(s.get(), s.twice()) + E.b.code() + sub(9, 4) + noinline_count;\n" +
             "}\n", 23, "" },
+        // Tasks #178 / #179 (std.hash.XxHash3): a labeled block as a call argument, `&` of a container array const, 2-D rows
+        // copied out of chained slices of a string, a typed vector literal with a slice-deref `@bitCast`, `@shuffle` / `@prefetch`.
+        new object[] { "labeled_block_argument",
+            "const Acc = struct {\n" +
+            "    total: u32,\n" +
+            "    fn digest(self: *const Acc, len: u32, last: *const [4]u8) u32 {\n" +
+            "        return self.total + len * 10 + last[0] + last[3];\n" +
+            "    }\n" +
+            "};\n" +
+            "fn pick(buf: []const u8, copy: *[4]u8, n: usize) *const [4]u8 {\n" +
+            "    _ = copy;\n" +
+            "    return buf[n..][0..4];\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var buf: [8]u8 = undefined;\n" +
+            "    for (&buf, 0..) |*p, i| p.* = @intCast(i + 1);\n" +
+            "    var copy: [4]u8 = undefined;\n" +
+            "    const acc = Acc{ .total = 3 };\n" +
+            "    var buffered: usize = 6;\n" +
+            "    _ = &buffered;\n" +
+            "    const r = acc.digest(2, last: {\n" +
+            "        if (buffered >= 4) {\n" +
+            "            break :last pick(&buf, &copy, buffered - 4);\n" +
+            "        } else {\n" +
+            "            @memcpy(copy[0..4], buf[0..4]);\n" +
+            "            break :last &copy;\n" +
+            "        }\n" +
+            "    });\n" +
+            "    return @intCast(r);\n" +
+            "}\n", 32, "" },
+        new object[] { "static_container_array_address",
+            "const Tab = struct {\n" +
+            "    const table: [4]u8 = .{ 3, 5, 7, 11 };\n" +
+            "    fn get() *const [4]u8 {\n" +
+            "        return &table;\n" +
+            "    }\n" +
+            "    fn sum(t: *const [4]u8) u8 {\n" +
+            "        return t[0] + t[1] + t[2] + t[3];\n" +
+            "    }\n" +
+            "    fn run() u8 {\n" +
+            "        const p = &table;\n" +
+            "        return sum(p) + get()[3];\n" +
+            "    }\n" +
+            "};\n" +
+            "pub fn main() u8 {\n" +
+            "    return Tab.run() + Tab.get()[1];\n" +
+            "}\n", 42, "" },
+        new object[] { "chained_slice_rows_bit_cast",
+            "fn h8(input: anytype) u64 {\n" +
+            "    const blk: [2]u32 = @bitCast([_][4]u8{\n" +
+            "        input[0..4].*,\n" +
+            "        input[input.len - 4 ..][0..4].*,\n" +
+            "    });\n" +
+            "    return @as(u64, blk[0]) +% blk[1];\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return @truncate(h8(\"hello world\"));\n" +
+            "}\n", 215, "" },
+        new object[] { "typed_vector_literal",
+            "const V = @Vector(4, u32);\n" +
+            "fn flip(secret: *const [16]u8) u32 {\n" +
+            "    const f: [2]u32 = @bitCast(secret[4..12].*);\n" +
+            "    return f[0] ^ f[1];\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const v = V{ 1, 2, 3, 4 };\n" +
+            "    const w = v * V{ 5, 6, 7, 8 };\n" +
+            "    var s: [16]u8 = undefined;\n" +
+            "    for (&s, 0..) |*p, i| p.* = @intCast(i * 3);\n" +
+            "    return @truncate(@reduce(.Add, w) +% flip(&s));\n" +
+            "}\n", 90, "" },
+        new object[] { "shuffle_prefetch",
+            "const V = @Vector(4, u32);\n" +
+            "pub fn main() u8 {\n" +
+            "    var a = V{ 1, 2, 3, 4 };\n" +
+            "    var b = V{ 10, 20, 30, 40 };\n" +
+            "    _ = .{ &a, &b };\n" +
+            "    const s = @shuffle(u32, a, b, [_]i32{ 3, -1, 0, -4 });\n" +
+            "    const t = @shuffle(u32, a, undefined, [_]i32{ 1, 0, 3, 2 });\n" +
+            "    var buf: [8]u8 = .{ 1, 2, 3, 4, 5, 6, 7, 8 };\n" +
+            "    @prefetch(@as([*]const u8, &buf) + 2, .{});\n" +
+            "    return @truncate(s[0] * 1000 + s[1] * 100 + s[2] * 10 + s[3] + t[0] + t[3]);\n" +
+            "}\n", 191, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -9289,6 +9372,19 @@ public sealed class ZigOracleTests
             "    _ = &y;\n" +
             "    return @as(u8, std.math.log10_int(x)) * 2 + std.math.log10_int(y);\n" +
             "}\n", 66);
+
+    // Tasks #174 to #179: std.hash.XxHash3.hash from real std over every short-input path (0 to 240 bytes, comptime lengths).
+    [Fact]
+    public void Dotcc_matches_zig_std_hash_xxhash3() =>
+        MatchesZigWithRealStd("hash_xxhash3",
+            "const std = @import(\"std\");\n" +
+            "const H = std.hash.XxHash3;\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = H.hash(0, \"hello world\") ^ H.hash(7, \"a\") ^ H.hash(1, \"abcdef\");\n" +
+            "    const b = H.hash(2, \"0123456789abc\") ^ H.hash(3, \"ahovcjqxelszgnubipwdkryfmtahovcjqxelszgnubipwdkryfmtahovcjqxelszgnubipwdkryfmtahovcjqxelszgnubipwdkr\");\n" +
+            "    const c = H.hash(4, \"ALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUF\");\n" +
+            "    return @truncate((a ^ b ^ c) >> 5);\n" +
+            "}\n", 34);
 
     // Task #148: std.math.rotr / rotl from real std over a `@Vector(4, u32)` (Blake3's SIMD rounds rotate this way).
     [Fact]

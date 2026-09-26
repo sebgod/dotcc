@@ -261,6 +261,8 @@ internal sealed partial class ZigLowering
             // binary sub-operand) — it produces a value via statements, which a C# expression can't
             // host, so it's supported only as a full `=` / `return` / assignment RHS (intercepted in
             // DeclOf / LowerReturn / StmtAssign before reaching here). A clear deferred error.
+            case Zig.LabeledBlock or Zig.LabeledSwitch when _hoist is not null:
+                return HoistLabeledValue(expr, null);
             case Zig.LabeledBlock or Zig.LabeledSwitch:
                 throw new IrUnsupportedException(
                     $"a labeled value-block (`{Tok(expr.Content is Zig.LabeledBlock lbl ? lbl.Arg0 : ((Zig.LabeledSwitch)expr.Content).Arg0)}: {{ … }}`) is supported only as a full initializer, " +
@@ -2982,8 +2984,33 @@ internal sealed partial class ZigLowering
         // An arbitrary-width unsigned operand (`u3`, std.math.rotl's `1 +% ~ar` with `ar: Log2Int(u8)`) wraps at ITS width,
         // not its carrier's: 1 +% 6 is 7 in a u3 (task #97; it had been computed in C#'s int).
         if ((DeclaredBitsOfValue(l) ?? DeclaredBitsOfValue(r)) is { } bits) { inner = MaskToBits(inner, t, bits); }
-        return t.SizeOf < 4 ? new Cast(t, inner) { Type = t } : inner;
+        CExpr wrapped = t.SizeOf < 4 ? new Cast(t, inner) { Type = t } : inner;
+        // Both operands LITERALS (std.hash.XxHash3's `input.len *% XxHash64.prime_1` over a comptime length, task #179): the
+        // interpreter wraps at the type's width, so the result is a literal. Left as C# arithmetic, a constant product that
+        // overflows is CS0220 even in an unchecked program (C# checks constant expressions at compile time). Only a literal
+        // tree: a variable is no C# constant, and a call must still run (the interpreter would run it now, dropping its effects).
+        if (IsLiteralTree(wrapped) && _ir.EvalComptimeValue(wrapped) is IrModule.CtInt { Value: var folded } && folded >= 0 && folded <= ulong.MaxValue)
+        {
+            var foldedLit = new LitInt(folded.ToString(CultureInfo.InvariantCulture), folded <= long.MaxValue ? (long)folded : null)
+            {
+                Type = t.SizeOf < 4 ? CType.Int : t,
+            };
+            // A sub-`int` carrier (`@as(u3, 5) *% 3` in a byte) takes an `int` literal under a cast: a `7u` would not narrow.
+            return t.SizeOf < 4 ? new Cast(t, foldedLit) { Type = t } : foldedLit;
+        }
+        return wrapped;
     }
+
+    /// <summary>Is <paramref name="e"/> built only from literals, casts and arithmetic over them, a C# constant expression?</summary>
+    private static bool IsLiteralTree(CExpr e) => e switch
+    {
+        LitInt => true,
+        Paren p => IsLiteralTree(p.Inner),
+        Cast c => IsLiteralTree(c.Operand),
+        Unary u => u.Op is UnOp.Neg or UnOp.BitNot or UnOp.Plus && IsLiteralTree(u.Operand),
+        Binary b => IsLiteralTree(b.Left) && IsLiteralTree(b.Right),
+        _ => false,
+    };
 
     /// <summary><paramref name="value"/> reduced to its low <paramref name="bits"/> bits, for an unsigned
     /// <paramref name="carrier"/> wider than that declared width (dotcc carries a <c>u3</c> in a byte); unchanged

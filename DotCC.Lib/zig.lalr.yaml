@@ -1427,6 +1427,10 @@ productions:
       - { lhs: Arg, rhs: [SwitchExpr] }
       # And an if-EXPRESSION (std.Io.Writer.printValue's `w.writeAll(if (i < n) ", " else " }")`).
       - { lhs: Arg, rhs: [IfExpr] }
+      # And a labeled value-block (std.hash.XxHash3.final's `acc.digest(len, last_block: { … break :last_block p; })`,
+      # task #178). `IDENT ':'` starts it where an Expr's IDENT would reduce to a Primary; no Primary is ever followed by
+      # ':' (the invariant LabeledBlock already relies on as a RhsExpr), so the ':' lookahead decides.
+      - { lhs: Arg, rhs: [LabeledBlock] }
       # An inline container TYPE as an argument (`@as(struct { a: u8 }, .{ .a = 4 })`, `@as(enum { x, y }, .y)`,
       # `@as(union(enum) { … }, …)`, task #110), reusing AType's inline actions. `enum` / `union` are not in
       # FIRST(Expr); `struct {…}` shares its prefix with the closure idiom `struct {…}.f`, which continues with

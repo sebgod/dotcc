@@ -272,6 +272,49 @@ internal sealed partial class ZigLowering
         return new Call("ZigVec.Select", new List<CExpr> { mask, a, b }) { Type = vector };
     }
 
+    /// <summary><c>@shuffle(E, a, b, mask)</c> (std.hash.XxHash3's <c>@shuffle(u64, data, undefined, [_]i32{ 1, 0, 3, 2, … })</c>,
+    /// task #179): lane i of the result is <c>a[m]</c> for a non-negative mask element m and <c>b[~m]</c> for a negative one, the
+    /// mask comptime-known. An operand no lane reads may be <c>undefined</c>; one read by several lanes is evaluated once.</summary>
+    private CExpr LowerShuffle(IReadOnlyList<Item> args)
+    {
+        if (args.Count != 4) { throw new IrUnsupportedException($"zig `@shuffle` expects (E, a, b, mask); got {args.Count}"); }
+        var element = LowerType(args[0]);
+        CExpr maskValue;
+        using (EnterThrowawayHoist()) { maskValue = LowerExpr(args[3]); }
+        if (_ir.EvalComptimeValue(maskValue) is not IrModule.CtArray { Elems: var maskElems }
+            || maskElems.Any(e => e is not IrModule.CtInt))
+        {
+            throw new IrUnsupportedException("zig `@shuffle` needs a comptime-known integer mask");
+        }
+        var mask = maskElems.Select(e => (long)((IrModule.CtInt)e).Value).ToList();
+        CExpr? Operand(Item item, bool read)
+        {
+            if (!read) { return null; }
+            if (item.Content is Zig.UndefinedLit) { throw new IrUnsupportedException("zig `@shuffle`: a lane reads an `undefined` operand"); }
+            var lowered = LowerExpr(item);
+            if (lowered.Type.Unqualified is not CType.Vector) { throw new IrUnsupportedException($"zig `@shuffle` needs vector operands; got {lowered.Type.Describe()}"); }
+            if (lowered is VarRef) { return lowered; }
+            var temp = _symbols.Declare(new Symbol { Name = "__shuf" + _anfTempCounter++, Kind = SymKind.Var, Type = lowered.Type });
+            RequireHoistable("@shuffle").Add(new DeclStmt(new List<LocalDecl> { new(temp, lowered) }));
+            return new VarRef(temp) { Type = temp.Type };
+        }
+        var a = Operand(args[1], mask.Any(m => m >= 0));
+        var b = Operand(args[2], mask.Any(m => m < 0));
+        var lanes = new List<CExpr>(mask.Count);
+        foreach (var m in mask)
+        {
+            var (source, index) = m >= 0 ? (a, m) : (b, ~m);
+            if (source is not { Type.Unqualified: CType.Vector sourceVector } || index >= sourceVector.Count)
+            {
+                throw new CompileException($"zig: `@shuffle` mask element {m} is out of range of its operand");
+            }
+            var lane = VectorLane(source, new LitInt(index.ToString(System.Globalization.CultureInfo.InvariantCulture), index) { Type = CType.Int }, sourceVector);
+            lanes.Add(new Cast(element, lane) { Type = element });
+        }
+        var result = new CType.Vector(element, mask.Count);
+        return new Call(VectorClass(result) + ".Create", lanes) { Type = result };
+    }
+
     /// <summary><c>v[i]</c>: one lane of a numeric vector, or one bit of a bool vector's mask.</summary>
     private static CExpr VectorLane(CExpr vector, CExpr index, CType.Vector type) => type.IsMask
         ? new Call("ZigVec.Bit", new List<CExpr> { vector, index }) { Type = CType.Bool }
