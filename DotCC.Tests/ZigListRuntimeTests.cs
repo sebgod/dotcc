@@ -22,23 +22,31 @@ public sealed class ZigListRuntimeTests
     private const ushort Oom = 7;
 
     [Fact]
-    public unsafe void Empty_default_appends_and_grows_across_the_doubling_boundary()
+    public unsafe void Empty_default_appends_and_grows_like_zig()
     {
         var list = default(ZigList<int>);   // zig `.empty`
         list.Len.ShouldBe(0UL);
         list.Cap.ShouldBe(0UL);
         (list.Ptr == null).ShouldBeTrue();
 
+        // zig's growCapacity(n) = n +| (n / 2 + cache_line / @sizeOf(T)), cache_line 128 on x86_64 and aarch64 (task #145):
+        // the first append reserves 1 + 32 = 33 ints, the 34th grows to 34 + 17 + 32 = 83.
         var a = ZigAlloc.CHeap();
-        for (var i = 0; i < 10; i++)        // 10 > the initial capacity of 8 → one regrow
+        for (var i = 0; i < 10; i++)
         {
             list.Append(a, i * 2, Oom).IsErr.ShouldBeFalse();
         }
         list.Len.ShouldBe(10UL);
-        list.Cap.ShouldBe(16UL);
+        list.Cap.ShouldBe(33UL);
+        for (var i = 10; i < 34; i++)
+        {
+            list.Append(a, i * 2, Oom).IsErr.ShouldBeFalse();
+        }
+        list.Cap.ShouldBe(83UL);
         list.Items[0].ShouldBe(0);
         list.Items[9].ShouldBe(18);
-        list.Items.Len.ShouldBe(10UL);
+        list.Items[33].ShouldBe(66);
+        list.Items.Len.ShouldBe(34UL);
 
         list.Deinit(a);
         list.Cap.ShouldBe(0UL);
@@ -83,20 +91,23 @@ public sealed class ZigListRuntimeTests
     [Fact]
     public unsafe void Exhausted_fixed_buffer_allocator_surfaces_out_of_memory()
     {
-        byte* buf = stackalloc byte[64];
-        var fba = FixedBufferAllocator.Init(buf, 64);
+        byte* buf = stackalloc byte[512];
+        var fba = FixedBufferAllocator.Init(buf, 512);
         var a = ZigAlloc.FbaAllocator(&fba);
 
         var list = default(ZigList<long>);
-        // 8 longs = 64 bytes — the first grow (cap 8) consumes the whole buffer.
-        for (var i = 0; i < 8; i++)
+        // zig's growth (task #145): the first append reserves 1 + 128/8 = 17 longs (136 bytes); the 18th grows to
+        // 18 + 9 + 16 = 43 longs (344 bytes), which the FBA remaps IN PLACE as its last allocation.
+        for (var i = 0; i < 43; i++)
         {
             list.Append(a, i, Oom).IsErr.ShouldBeFalse();
         }
-        // The 9th append needs a regrow to 16 longs = 128 bytes — deterministic OOM.
-        var r = list.Append(a, 8, Oom);
+        list.Cap.ShouldBe(43UL);
+        // The 44th needs 44 + 22 + 16 = 82 longs (656 bytes): neither a remap nor a fresh block fits — deterministic OOM.
+        var r = list.Append(a, 43, Oom);
         r.IsErr.ShouldBeTrue();
         r.Code.ShouldBe(Oom);
-        list.Len.ShouldBe(8UL);            // the failed append left the list intact
+        list.Len.ShouldBe(43UL);           // the failed append left the list intact
+        list.Items[42].ShouldBe(42L);
     }
 }

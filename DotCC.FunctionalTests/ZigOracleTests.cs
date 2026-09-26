@@ -8258,6 +8258,55 @@ public sealed class ZigOracleTests
             "    return @truncate(acc ^ (acc >> 32) ^ (acc >> 16) ^ (acc >> 8));\n" +
             "}\n", 112);
 
+    // Task #145: a FixedBufferAllocator runs out at zig's point (the first append of a u32 into 96 bytes).
+    [Fact]
+    public void Dotcc_matches_zig_std_array_list_fba_oom() =>
+        MatchesZigWithRealStd("array_list_fba_oom",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var buf: [96]u8 = undefined;\n" +
+            "    var fba = std.heap.FixedBufferAllocator.init(&buf);\n" +
+            "    const gpa = fba.allocator();\n" +
+            "    var l: std.ArrayList(u32) = .empty;\n" +
+            "    l.append(gpa, 1) catch return 1;\n" +
+            "    const small = [_]u32{ 2, 3 };\n" +
+            "    l.insertSlice(gpa, 0, &small) catch return 2;\n" +
+            "    const big = [_]u32{ 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7 };\n" +
+            "    l.insertSlice(gpa, 1, &big) catch |e| {\n" +
+            "        if (e == error.OutOfMemory) return @intCast(40 + l.items.len + l.items[0]);\n" +
+            "        return 3;\n" +
+            "    };\n" +
+            "    return 4;\n" +
+            "}\n", 1);
+
+    // Task #145: std.ArrayList capacities (append, appendSlice, insertSlice, ensureTotalCapacity, ensureUnusedCapacity) == zig.
+    [Fact]
+    public void Dotcc_matches_zig_std_array_list_capacity() =>
+        MatchesZigWithRealStd("array_list_capacity",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() !u8 {\n" +
+            "    var buf: [8192]u8 = undefined;\n" +
+            "    var fba = std.heap.FixedBufferAllocator.init(&buf);\n" +
+            "    const gpa = fba.allocator();\n" +
+            "    var a: std.ArrayList(u32) = .empty;\n" +
+            "    try a.append(gpa, 1);\n" +
+            "    const c1 = a.capacity;\n" +
+            "    for (0..40) |i| try a.append(gpa, @intCast(i));\n" +
+            "    const c2 = a.capacity;\n" +
+            "    var b: std.ArrayList(u8) = .empty;\n" +
+            "    try b.appendSlice(gpa, \"hello\");\n" +
+            "    const c3 = b.capacity;\n" +
+            "    try b.insertSlice(gpa, 2, \"abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz\");\n" +
+            "    const c4 = b.capacity;\n" +
+            "    var c: std.ArrayList(u64) = .empty;\n" +
+            "    try c.ensureTotalCapacity(gpa, 3);\n" +
+            "    const c5 = c.capacity;\n" +
+            "    try c.ensureUnusedCapacity(gpa, 40);\n" +
+            "    const c6 = c.capacity;\n" +
+            "    std.debug.print(\"{d} {d} {d} {d} {d} {d}\\n\", .{ c1, c2, c3, c4, c5, c6 });\n" +
+            "    return @intCast((c1 + c2 + c3 + c4 + c5 + c6) % 256);\n" +
+            "}\n", 171);
+
     // Task #147: std.mem.reverseIterator from real std over a pointer to an array (nextPtr) and a slice (next).
     [Fact]
     public void Dotcc_matches_zig_std_mem_reverse_iterator() =>
