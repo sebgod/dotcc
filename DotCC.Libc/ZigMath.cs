@@ -210,6 +210,27 @@ public static class ZigMath
         return T.ReadLittleEndian(buf, isUnsigned: !T.IsNegative(T.AllBitsSet));
     }
 
+    /// <summary><c>@byteSwap(v)</c> of a 128-bit vector: each lane's bytes reversed (std.mem.nativeToLittle over a
+    /// <c>@Vector</c>, task #144).</summary>
+    public static System.Runtime.Intrinsics.Vector128<T> ByteSwap<T>(System.Runtime.Intrinsics.Vector128<T> v)
+        where T : unmanaged, System.Numerics.IBinaryInteger<T>
+    {
+        System.Span<T> lanes = stackalloc T[System.Runtime.Intrinsics.Vector128<T>.Count];
+        System.Runtime.Intrinsics.Vector128.CopyTo(v, lanes);
+        for (var i = 0; i < lanes.Length; i++) { lanes[i] = ByteSwap(lanes[i]); }
+        return System.Runtime.Intrinsics.Vector128.Create<T>(lanes);
+    }
+
+    /// <summary><c>@byteSwap(v)</c> of a 256-bit vector: each lane's bytes reversed.</summary>
+    public static System.Runtime.Intrinsics.Vector256<T> ByteSwap<T>(System.Runtime.Intrinsics.Vector256<T> v)
+        where T : unmanaged, System.Numerics.IBinaryInteger<T>
+    {
+        System.Span<T> lanes = stackalloc T[System.Runtime.Intrinsics.Vector256<T>.Count];
+        System.Runtime.Intrinsics.Vector256.CopyTo(v, lanes);
+        for (var i = 0; i < lanes.Length; i++) { lanes[i] = ByteSwap(lanes[i]); }
+        return System.Runtime.Intrinsics.Vector256.Create<T>(lanes);
+    }
+
     /// <summary><c>@bitReverse(x)</c> — reverse the low <paramref name="bits"/> bits of <typeparamref name="T"/> (the
     /// operand's declared width, so a <c>u3</c> held in a byte reverses three bits, as zig does). A signed result is
     /// the reversed bit pattern read at the carrier's width.</summary>

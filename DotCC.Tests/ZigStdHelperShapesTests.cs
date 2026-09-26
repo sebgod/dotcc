@@ -4077,6 +4077,32 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void Vectors_store_through_an_array_view_and_widen_their_lanes()
+    {
+        var cs = EmitZig("""
+            fn total(v: @Vector(8, u16)) u16 {
+                return @reduce(.Add, v);
+            }
+            pub fn main() u8 {
+                var buf = [_]u16{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+                const small: @Vector(8, u8) = .{ 1, 2, 3, 4, 5, 6, 7, 250 };
+                const v: @Vector(8, u16) = .{ 10, 20, 30, 40, 1, 1, 1, 1 };
+                buf[2..][0..8].* = v;
+                buf[10..][0..2].* = .{ 7, 9 };
+                const w = total(small);
+                var sum: u16 = 0;
+                for (buf) |x| sum += x;
+                return @intCast((sum + w) % 256);
+            }
+            """);
+        // Task #144 (std.unicode.utf8ToUtf16LeImpl): `dest[i..][0..N].* = v;` stores the vector's lanes, `.{ a, b }` into
+        // such a view lowers at the viewed array type, and a `@Vector(8, u8)` widens to the `@Vector(8, u16)` parameter.
+        // zig returns 142.
+        cs.ShouldContain("ZigVec.Store(v, new Slice<ushort>(new Slice<ushort>(buf + 2, 12UL - (ulong)2).Ptr + 0, unchecked((ulong)(8 - 0))).Ptr);");
+        cs.ShouldContain("ushort w = total(ZigVec.Widen128(small, (ushort)0));");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

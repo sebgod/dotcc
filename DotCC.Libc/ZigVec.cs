@@ -32,6 +32,86 @@ public static class ZigVec
     public static unsafe System.Runtime.Intrinsics.Vector512<T> Load512<T>(T* p) where T : unmanaged
         => System.Runtime.Intrinsics.Vector512.Load(p);
 
+    // ---- stores: `dest[i..][0..N].* = v;` -------------------------------------------------------------
+
+    /// <summary>Store a 64-bit vector's lanes to <paramref name="p"/>.</summary>
+    public static unsafe void Store<T>(System.Runtime.Intrinsics.Vector64<T> v, T* p) where T : unmanaged
+        => System.Runtime.Intrinsics.Vector64.Store(v, p);
+
+    /// <summary>Store a 128-bit vector's lanes to <paramref name="p"/>.</summary>
+    public static unsafe void Store<T>(System.Runtime.Intrinsics.Vector128<T> v, T* p) where T : unmanaged
+        => System.Runtime.Intrinsics.Vector128.Store(v, p);
+
+    /// <summary>Store a 256-bit vector's lanes to <paramref name="p"/>.</summary>
+    public static unsafe void Store<T>(System.Runtime.Intrinsics.Vector256<T> v, T* p) where T : unmanaged
+        => System.Runtime.Intrinsics.Vector256.Store(v, p);
+
+    /// <summary>Store a 512-bit vector's lanes to <paramref name="p"/>.</summary>
+    public static unsafe void Store<T>(System.Runtime.Intrinsics.Vector512<T> v, T* p) where T : unmanaged
+        => System.Runtime.Intrinsics.Vector512.Store(v, p);
+
+    // ---- widening: a narrower-lane vector at a wider-lane vector sink ---------------------------------
+
+    /// <summary>Widen each lane of a 64-bit vector to <typeparamref name="TTo"/> in a 128-bit one (the lane
+    /// count is kept; <paramref name="witness"/> only names the target lane type).</summary>
+    public static System.Runtime.Intrinsics.Vector128<TTo> Widen128<TFrom, TTo>(System.Runtime.Intrinsics.Vector64<TFrom> v, TTo witness)
+        where TFrom : unmanaged, System.Numerics.IBinaryInteger<TFrom> where TTo : unmanaged, System.Numerics.IBinaryInteger<TTo>
+    {
+        System.Span<TTo> lanes = stackalloc TTo[System.Runtime.Intrinsics.Vector128<TTo>.Count];
+        for (var i = 0; i < System.Runtime.Intrinsics.Vector64<TFrom>.Count; i++) { lanes[i] = TTo.CreateTruncating(v[i]); }
+        return System.Runtime.Intrinsics.Vector128.Create<TTo>(lanes);
+    }
+
+    /// <summary>Widen each lane of a 64-bit vector to <typeparamref name="TTo"/> in a 256-bit one (the lane
+    /// count is kept; <paramref name="witness"/> only names the target lane type).</summary>
+    public static System.Runtime.Intrinsics.Vector256<TTo> Widen256<TFrom, TTo>(System.Runtime.Intrinsics.Vector64<TFrom> v, TTo witness)
+        where TFrom : unmanaged, System.Numerics.IBinaryInteger<TFrom> where TTo : unmanaged, System.Numerics.IBinaryInteger<TTo>
+    {
+        System.Span<TTo> lanes = stackalloc TTo[System.Runtime.Intrinsics.Vector256<TTo>.Count];
+        for (var i = 0; i < System.Runtime.Intrinsics.Vector64<TFrom>.Count; i++) { lanes[i] = TTo.CreateTruncating(v[i]); }
+        return System.Runtime.Intrinsics.Vector256.Create<TTo>(lanes);
+    }
+
+    /// <summary>Widen each lane of a 128-bit vector to <typeparamref name="TTo"/> in a 256-bit one (the lane
+    /// count is kept; <paramref name="witness"/> only names the target lane type).</summary>
+    public static System.Runtime.Intrinsics.Vector256<TTo> Widen256<TFrom, TTo>(System.Runtime.Intrinsics.Vector128<TFrom> v, TTo witness)
+        where TFrom : unmanaged, System.Numerics.IBinaryInteger<TFrom> where TTo : unmanaged, System.Numerics.IBinaryInteger<TTo>
+    {
+        System.Span<TTo> lanes = stackalloc TTo[System.Runtime.Intrinsics.Vector256<TTo>.Count];
+        for (var i = 0; i < System.Runtime.Intrinsics.Vector128<TFrom>.Count; i++) { lanes[i] = TTo.CreateTruncating(v[i]); }
+        return System.Runtime.Intrinsics.Vector256.Create<TTo>(lanes);
+    }
+
+    /// <summary>Widen each lane of a 64-bit vector to <typeparamref name="TTo"/> in a 512-bit one (the lane
+    /// count is kept; <paramref name="witness"/> only names the target lane type).</summary>
+    public static System.Runtime.Intrinsics.Vector512<TTo> Widen512<TFrom, TTo>(System.Runtime.Intrinsics.Vector64<TFrom> v, TTo witness)
+        where TFrom : unmanaged, System.Numerics.IBinaryInteger<TFrom> where TTo : unmanaged, System.Numerics.IBinaryInteger<TTo>
+    {
+        System.Span<TTo> lanes = stackalloc TTo[System.Runtime.Intrinsics.Vector512<TTo>.Count];
+        for (var i = 0; i < System.Runtime.Intrinsics.Vector64<TFrom>.Count; i++) { lanes[i] = TTo.CreateTruncating(v[i]); }
+        return System.Runtime.Intrinsics.Vector512.Create<TTo>(lanes);
+    }
+
+    /// <summary>Widen each lane of a 128-bit vector to <typeparamref name="TTo"/> in a 512-bit one (the lane
+    /// count is kept; <paramref name="witness"/> only names the target lane type).</summary>
+    public static System.Runtime.Intrinsics.Vector512<TTo> Widen512<TFrom, TTo>(System.Runtime.Intrinsics.Vector128<TFrom> v, TTo witness)
+        where TFrom : unmanaged, System.Numerics.IBinaryInteger<TFrom> where TTo : unmanaged, System.Numerics.IBinaryInteger<TTo>
+    {
+        System.Span<TTo> lanes = stackalloc TTo[System.Runtime.Intrinsics.Vector512<TTo>.Count];
+        for (var i = 0; i < System.Runtime.Intrinsics.Vector128<TFrom>.Count; i++) { lanes[i] = TTo.CreateTruncating(v[i]); }
+        return System.Runtime.Intrinsics.Vector512.Create<TTo>(lanes);
+    }
+
+    /// <summary>Widen each lane of a 256-bit vector to <typeparamref name="TTo"/> in a 512-bit one (the lane
+    /// count is kept; <paramref name="witness"/> only names the target lane type).</summary>
+    public static System.Runtime.Intrinsics.Vector512<TTo> Widen512<TFrom, TTo>(System.Runtime.Intrinsics.Vector256<TFrom> v, TTo witness)
+        where TFrom : unmanaged, System.Numerics.IBinaryInteger<TFrom> where TTo : unmanaged, System.Numerics.IBinaryInteger<TTo>
+    {
+        System.Span<TTo> lanes = stackalloc TTo[System.Runtime.Intrinsics.Vector512<TTo>.Count];
+        for (var i = 0; i < System.Runtime.Intrinsics.Vector256<TFrom>.Count; i++) { lanes[i] = TTo.CreateTruncating(v[i]); }
+        return System.Runtime.Intrinsics.Vector512.Create<TTo>(lanes);
+    }
+
     // ---- comparisons to a lane mask -------------------------------------------------------------------
 
     /// <summary>Lane-wise <c>a == b</c> as a lane mask.</summary>

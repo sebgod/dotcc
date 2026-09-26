@@ -917,6 +917,18 @@ internal sealed partial class ZigLowering
             {
                 var ptype = declared ?? payload.Type ?? CType.Int;
                 var psym = _symbols.Declare(new Symbol { Name = Tok(nameTok), Kind = SymKind.Var, Type = ptype });
+                // A `const` bound to a compile-time-known payload is itself comptime-known (`const chunk_len =
+                // std.simd.suggestVectorLength(u16) orelse break :vectorized;` sizes a `@Vector`, task #144).
+                if (isConst && payload is LitInt { Value: { } knownValue })
+                {
+                    // A comptime_int payload reads back as a plain `long`, not its 128-bit carrier, so `ptr + chunk_len` types.
+                    var readType = declared is null && ptype.Unqualified is CType.Prim { Integer: true } payloadPrim
+                                   && (payloadPrim.IsComptimeInt || payloadPrim.Bytes == 16)
+                        ? CType.Long
+                        : ptype;
+                    _comptimeVars[psym] = (knownValue, readType);
+                    return new Seq(new List<CStmt>());
+                }
                 return new DeclStmt(new List<LocalDecl> { new(psym, payload) });
             });
         }
@@ -3338,7 +3350,23 @@ internal sealed partial class ZigLowering
             if (lhsItem.Content is Zig.Deref { Arg0: var viewedItem } && IsSliceOperand(viewedItem))
             {
                 var copyDest = LowerMemSlice(viewedItem, wantConst: false, out var copyElem);
-                var copySrc = LowerMemSlice(rhsItem, wantConst: true, out _);
+                // An anonymous list (`… [0..2].* = .{ high, low };` in std.unicode) is the array the slice views, so it lowers
+                // at that array type when the view's length is known.
+                var copyValue = rhsItem.Content is Zig.AnonStructInit && copyDest is SliceNew { Len: var viewLen }
+                                && _ir.ConstEval(viewLen) is { } viewCount and >= 0 and <= int.MaxValue
+                    ? LowerExprSink(rhsItem, new CType.Array(copyElem, (int)viewCount))
+                    : LowerExpr(rhsItem);
+                // A `@Vector` stored into the array the slice views (std.unicode.utf8ToUtf16LeImpl's
+                // `utf16le[dest_index..][0..chunk_len].* = utf16_chunk;`, task #144) writes its lanes there.
+                if (copyValue.Type.Unqualified is CType.Vector)
+                {
+                    var destPtr = new Member(copyDest, "Ptr", false) { Type = new CType.Pointer(copyElem) };
+                    return new ExprStmt(new Call("ZigVec.Store", new List<CExpr> { copyValue, destPtr }) { Type = CType.Void });
+                }
+                var copySrcElem = SliceElementOf(copyValue).Unqualified;
+                var copySrc = copyValue.Type.Unqualified is CType.Slice
+                    ? copyValue
+                    : CoerceToSlice(copyValue, new CType.Slice(copySrcElem.WithQuals(TypeQual.Const)));
                 return new ExprStmt(new ZigMemCall("CopyForwards", copyElem, new List<CExpr> { copyDest, copySrc }) { Type = CType.Void });
             }
             // `buffer.* = @bitCast(value)` with `buffer: *[N]u8` (std.mem.writeInt): the value's BYTES stored into the array
@@ -5299,6 +5327,13 @@ internal sealed partial class ZigLowering
     private CStmt LowerControlFlowFallback(Item lhsItem, bool isCatch, string? capture, Item arm, Func<CExpr, CStmt>? bind)
     {
         var lhs = LowerExpr(lhsItem);
+        // An optional dotcc already folded to its compile-time VALUE (std.unicode's `std.simd.suggestVectorLength(u16) orelse
+        // break :vectorized`, task #144): with no none path, the fallback never runs and the payload is that value.
+        if (!isCatch && lhs.Type.Unqualified is not (CType.Optional or CType.Pointer) && ComptimeIntValue(lhs) is { } knownPayload)
+        {
+            var payloadLit = new LitInt(knownPayload.ToString(CultureInfo.InvariantCulture), knownPayload) { Type = lhs.Type };
+            return bind is null ? new Seq(new List<CStmt>()) : bind(payloadLit);
+        }
         var pre = new List<CStmt>();
         CExpr lhsRef;
         if (lhs is VarRef) { lhsRef = lhs; }

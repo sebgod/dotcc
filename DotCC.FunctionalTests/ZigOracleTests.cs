@@ -6924,6 +6924,22 @@ public sealed class ZigOracleTests
             "pub fn main() u8 {\n" +
             "    return @intCast(bitsFor(-1, 1) * 10 + bitsFor(0, 9) + bitsFor(0, 0) * 100);\n" +
             "}\n", 24, "" },
+        // Task #144: a vector stored through an array view, an anonymous list into one, and u8 lanes widening to u16.
+        new object[] { "vector_store_and_widen",
+            "fn total(v: @Vector(8, u16)) u16 {\n" +
+            "    return @reduce(.Add, v);\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var buf = [_]u16{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };\n" +
+            "    const small: @Vector(8, u8) = .{ 1, 2, 3, 4, 5, 6, 7, 250 };\n" +
+            "    const v: @Vector(8, u16) = .{ 10, 20, 30, 40, 1, 1, 1, 1 };\n" +
+            "    buf[2..][0..8].* = v;\n" +
+            "    buf[10..][0..2].* = .{ 7, 9 };\n" +
+            "    const w = total(small);\n" +
+            "    var sum: u16 = 0;\n" +
+            "    for (buf) |x| sum += x;\n" +
+            "    return @intCast((sum + w) % 256);\n" +
+            "}\n", 142, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -8208,6 +8224,19 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{x}\\n\", .{acc});\n" +
             "    return @truncate(acc ^ (acc >> 32) ^ (acc >> 16) ^ (acc >> 8));\n" +
             "}\n", 112);
+
+    // Task #144: std.unicode.utf8ToUtf16Le from real std, long enough to take the vectorized ASCII path.
+    [Fact]
+    public void Dotcc_matches_zig_std_utf8_to_utf16le() =>
+        MatchesZigWithRealStd("utf8_to_utf16le",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() !u8 {\n" +
+            "    var out: [40]u16 = undefined;\n" +
+            "    const n = try std.unicode.utf8ToUtf16Le(&out, \"ASCII run long enough for a vector h\\u{e9}!\");\n" +
+            "    var sum: u32 = 0;\n" +
+            "    for (out[0..n]) |u| sum +%= u;\n" +
+            "    return @intCast(n + sum % 100);\n" +
+            "}\n", 95);
 
     // Task #143: std.math.sign from real std over i32, i8, u16 and f64.
     [Fact]

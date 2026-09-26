@@ -117,6 +117,16 @@ internal sealed partial class ZigLowering
     /// slice[i..][0..N].*;</c>): the vector loaded from its first element.</summary>
     private CExpr? TryCoerceToVector(CExpr value, CType.Vector vector)
     {
+        // A vector of narrower integer lanes widens lane by lane (std.unicode's `@Vector(16, u8)` chunk passed where a
+        // `@Vector(16, u16)` is expected, task #144): zig coerces when every value fits, as for a scalar.
+        if (!vector.IsMask && value.Type.Unqualified is CType.Vector { IsMask: false } source && source.Count == vector.Count
+            && source.Element.Unqualified is CType.Prim { Integer: true } from && vector.Element.Unqualified is CType.Prim { Integer: true } to
+            && to.Bytes > from.Bytes && (to.Signed || !from.Signed))
+        {
+            var witness = new Cast(vector.Element, IntLit(0)) { Type = vector.Element };
+            return new Call("ZigVec.Widen" + vector.Bits.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                new List<CExpr> { value, witness }) { Type = vector };
+        }
         if (vector.IsMask || value.Type.Unqualified is CType.Vector) { return null; }
         CExpr? first = value.Type.Unqualified switch
         {
