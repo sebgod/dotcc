@@ -3461,6 +3461,42 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void Comptime_print_is_formatted_by_zigs_rules_while_lowering()
+    {
+        var cs = EmitZig("""
+            const std = @import("std");
+            const digest_len = 384;
+
+            pub fn main() u8 {
+                const a = std.fmt.comptimePrint("[{d:5}|{d:5}|{x:0>4}|{d:*^7}]", .{ @as(i32, 5), 5, @as(u8, 10), -12 });
+                const b = std.fmt.comptimePrint("SHA-512/{d}{s:^5}{}", .{ digest_len, "ab", true });
+                const c = std.fmt.comptimePrint("{[n]d:.2}{{}}", .{ .n = 7 });
+                return @intCast(a.len + b.len + c.len);
+            }
+            """);
+        // Task #128 (std.fmt.comptimePrint: its `*const [count(fmt, args):0]u8` return type needs the formatter run at compile
+        // time before the call can bind): formatted while lowering, into the literal a spelled string lowers to. A signed
+        // typed int shows `+` under a width, a comptime_int does not; alignment defaults right; a precision is ignored.
+        cs.ShouldContain("Libc.L(\"[   +5|    5|000a|**-12**]\\0\"u8)");
+        cs.ShouldContain("Libc.L(\"SHA-512/384 ab  true\\0\"u8)");
+        cs.ShouldContain("Libc.L(\"7{}\\0\"u8)");
+    }
+
+    [Theory]
+    [InlineData("var x: u8 = 3;\n    _ = &x;\n    const s = std.fmt.comptimePrint(\"{d}\", .{x});", "argument 0 is not a comptime-known")]
+    [InlineData("const s = std.fmt.comptimePrint(\"{d} {d}\", .{5});", "too few arguments")]
+    [InlineData("const s = std.fmt.comptimePrint(\"{d}\", .{ 5, 6 });", "unused argument 1 in '{d}'")]
+    [InlineData("const s = std.fmt.comptimePrint(\"{}\", .{\"ab\"});", "cannot format a string with `{}`")]
+    [InlineData("const s = std.fmt.comptimePrint(\"{d:\\xc3\\xa9>4}\", .{1});", "found a non-ASCII fill")]
+    public void Comptime_print_refuses_what_zig_refuses(string decl, string message)
+    {
+        // Task #128: zig's own errors are "unable to resolve comptime value", "too few arguments", "unused argument in
+        // '{d}'", "cannot format slice without a specifier" and "expected . or }, found 'é'".
+        Should.Throw<CompileException>(() => EmitZig("const std = @import(\"std\");\npub fn main() u8 {\n    " + decl
+            + "\n    return @intCast(s.len);\n}\n")).Message.ShouldContain(message);
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

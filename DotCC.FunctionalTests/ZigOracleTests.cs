@@ -8038,6 +8038,51 @@ public sealed class ZigOracleTests
             "    return @truncate(acc ^ (acc >> 32) ^ (acc >> 16) ^ (acc >> 8));\n" +
             "}\n", 112);
 
+    // Task #128: std.fmt.comptimePrint over ints, bools and strings, widths, fills, alignments, bases, positional and named
+    // arguments; the exit code hashes every formatted byte.
+    [Fact]
+    public void Dotcc_matches_zig_std_fmt_comptime_print() =>
+        MatchesZigWithRealStd("fmt_comptime_print",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "const digest_len = 384;\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    const lines = [_][]const u8{\n" +
+            "        std.fmt.comptimePrint(\"[{d:5}]\", .{@as(i32, 5)}),\n" +
+            "        std.fmt.comptimePrint(\"[{d:5}]\", .{@as(i32, -5)}),\n" +
+            "        std.fmt.comptimePrint(\"[{d:5}]\", .{5}),\n" +
+            "        std.fmt.comptimePrint(\"[{:5}]\", .{@as(u8, 5)}),\n" +
+            "        std.fmt.comptimePrint(\"[{s:5}]\", .{\"ab\"}),\n" +
+            "        std.fmt.comptimePrint(\"[{s:<5}]\", .{\"ab\"}),\n" +
+            "        std.fmt.comptimePrint(\"[{s:^5}]\", .{\"ab\"}),\n" +
+            "        std.fmt.comptimePrint(\"[{d:0>4}]\", .{7}),\n" +
+            "        std.fmt.comptimePrint(\"[{d:*^7}]\", .{-12}),\n" +
+            "        std.fmt.comptimePrint(\"[{x}|{X}|{b}|{o}]\", .{ 255, 255, 5, 8 }),\n" +
+            "        std.fmt.comptimePrint(\"[{x}]\", .{@as(i8, -1)}),\n" +
+            "        std.fmt.comptimePrint(\"[{c}{c}]\", .{ 'h', 105 }),\n" +
+            "        std.fmt.comptimePrint(\"[{}|{any}]\", .{ true, false }),\n" +
+            "        std.fmt.comptimePrint(\"[{1s}{0s}{1s}]\", .{ \"a\", \"b\" }),\n" +
+            "        std.fmt.comptimePrint(\"[{u}]\", .{@as(u21, 0xe9)}),\n" +
+            "        std.fmt.comptimePrint(\"{{x}}\", .{}),\n" +
+            "        std.fmt.comptimePrint(\"[{}]\", .{-3}),\n" +
+            "        std.fmt.comptimePrint(\"[{d}]\", .{0xFFFF_FFFF_FFFF_FFFF_FF}),\n" +
+            "        std.fmt.comptimePrint(\"[{x:0>4}]\", .{@as(u8, 10)}),\n" +
+            "        std.fmt.comptimePrint(\"[{s:5}]\", .{\"\\xc3\\xa9\"}),\n" +
+            "        std.fmt.comptimePrint(\"SHA-512/{d}\", .{digest_len}),\n" +
+            "        std.fmt.comptimePrint(\"tab\\there\\n\", .{}),\n" +
+            "        std.fmt.comptimePrint(\"[{[a]d:.2}|{[b]s:>3}]\", .{ .a = 5, .b = \"q\" }),\n" +
+            "    };\n" +
+            "    // A rolling hash over every formatted byte, so any divergence changes the exit code.\n" +
+            "    var h: u32 = 0;\n" +
+            "    for (lines) |l| {\n" +
+            "        std.debug.print(\"{s}\\n\", .{l});\n" +
+            "        for (l) |c| h = h *% 31 +% c;\n" +
+            "        h = h *% 31 +% 10;\n" +
+            "    }\n" +
+            "    return @truncate(h ^ (h >> 8) ^ (h >> 16) ^ (h >> 24));\n" +
+            "}\n", 149);
+
     // Task #130: std.DynamicBitSet from real std (initEmpty, set, toggle, unset, resize both ways, findFirstSet, count).
     [Fact]
     public void Dotcc_matches_zig_std_dynamic_bit_set() =>

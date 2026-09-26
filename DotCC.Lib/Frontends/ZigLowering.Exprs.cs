@@ -1636,6 +1636,13 @@ internal sealed partial class ZigLowering
             return LowerStdMemCall(methodName, argItems);
         }
 
+        // --- `std.fmt.comptimePrint` (task #128): formatted while lowering, over comptime-known arguments. zig types the
+        // result by running the formatter at compile time, which the source signature needs before the call can bind.
+        if (methodName == "comptimePrint" && TryResolveStdPath(fld.Arg0, out var stdFmt) && stdFmt == "std.fmt")
+        {
+            return LowerComptimePrint(argItems);
+        }
+
         // --- curated `std.debug.print` (wall-plan W6) --- the biggest remaining std idiom. Like the
         // std.mem helpers it's a curated path, not a general std model; only `print` is modeled.
         if (TryResolveStdPath(fld.Arg0, out var stdDbg) && stdDbg == "std.debug" && TakesCuratedStdCall(stdDbg, methodName))
