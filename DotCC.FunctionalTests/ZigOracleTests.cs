@@ -7295,6 +7295,26 @@ public sealed class ZigOracleTests
             "    }\n" +
             "    return @intCast(t % 256 + data[0]);\n" +
             "}\n", 71, "" },
+        // Task #160: a reified container const `f(comptime_int, …) catch unreachable` sizing an array parameter.
+        new object[] { "comptime_int_catch_container_const",
+            "const E = error{DivisionByZero};\n" +
+            "fn divCeil(comptime T: type, a: T, b: T) E!T {\n" +
+            "    if (b == 0) return error.DivisionByZero;\n" +
+            "    return @divFloor(a + b - 1, b);\n" +
+            "}\n" +
+            "fn H(comptime seed: u8, digest_bits: comptime_int) type {\n" +
+            "    return struct {\n" +
+            "        pub const digest_length = divCeil(comptime_int, digest_bits, 8) catch unreachable;\n" +
+            "        pub fn hash(out: *[digest_length]u8) void {\n" +
+            "            for (out, 0..) |*b, i| b.* = @intCast(i + seed);\n" +
+            "        }\n" +
+            "    };\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var out: [H(3, 40).digest_length]u8 = undefined;\n" +
+            "    H(3, 40).hash(&out);\n" +
+            "    return out[4] + @as(u8, H(3, 40).digest_length);\n" +
+            "}\n", 12, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -8660,6 +8680,17 @@ public sealed class ZigOracleTests
             "    std.crypto.auth.siphash.SipHash64(2, 4).create(&out, \"abc\", &key);\n" +
             "    return out[0] ^ out[7];\n" +
             "}\n", 149);
+
+    // Task #160: std.crypto.hash.sha2.Sha512 from real std.
+    [Fact]
+    public void Dotcc_matches_zig_std_crypto_sha512() =>
+        MatchesZigWithRealStd("crypto_sha512",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var out: [64]u8 = undefined;\n" +
+            "    std.crypto.hash.sha2.Sha512.hash(\"abc\", &out, .{});\n" +
+            "    return out[0] ^ out[63];\n" +
+            "}\n", 66);
 
     // Task #148: std.math.rotr / rotl from real std over a `@Vector(4, u32)` (Blake3's SIMD rounds rotate this way).
     [Fact]

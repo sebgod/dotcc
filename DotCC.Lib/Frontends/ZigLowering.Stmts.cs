@@ -5205,6 +5205,15 @@ internal sealed partial class ZigLowering
     private (List<CStmt> Pre, CExpr Value) LowerCatchValue(Item unionItem, string? capName, Item fallbackItem)
     {
         var union = LowerExpr(unionItem);
+        // A `comptime_int` has no runtime form, so a union carrying one (std.crypto.sha2's `pub const digest_length =
+        // std.math.divCeil(comptime_int, digest_bits, 8) catch unreachable;`, task #160) is a compile-time value: evaluated
+        // now, it takes the `comptime` path below, as `comptime f() catch unreachable` does.
+        if (union is not ComptimeFold { Resolved: not null }
+            && union.Type.Unqualified is CType.ErrorUnion { Payload.Unqualified: CType.Prim { IsComptimeInt: true } }
+            && _ir.ResolveComptimeFold(union is ComptimeFold pending ? pending.Inner : union) is { } comptimeIntUnion)
+        {
+            union = new ComptimeFold(union is ComptimeFold inner ? inner.Inner : union) { Type = union.Type, Resolved = comptimeIntUnion };
+        }
         // `comptime f() catch unreachable` (std.Random.int's `comptime std.math.divCeil(u16, bits, 8) catch unreachable`,
         // task #117): zig's `comptime` takes the whole expression, so it is one compile-time value. dotcc's `comptime` binds
         // tighter, but its fold already evaluated the call: a success is the payload, and the fallback never runs.

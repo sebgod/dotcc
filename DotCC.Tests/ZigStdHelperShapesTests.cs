@@ -4874,6 +4874,36 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_catch_over_a_comptime_int_error_union_is_folded_at_compile_time()
+    {
+        var cs = EmitZig("""
+            const E = error{DivisionByZero};
+            fn divCeil(comptime T: type, a: T, b: T) E!T {
+                if (b == 0) return error.DivisionByZero;
+                return @divFloor(a + b - 1, b);
+            }
+            fn H(comptime seed: u8, digest_bits: comptime_int) type {
+                return struct {
+                    pub const digest_length = divCeil(comptime_int, digest_bits, 8) catch unreachable;
+                    pub fn hash(out: *[digest_length]u8) void {
+                        for (out, 0..) |*b, i| b.* = @intCast(i + seed);
+                    }
+                };
+            }
+            pub fn main() u8 {
+                var out: [H(3, 40).digest_length]u8 = undefined;
+                H(3, 40).hash(&out);
+                return out[4] + @as(u8, H(3, 40).digest_length);
+            }
+            """);
+        // Task #160 (std.crypto.sha2's `pub const digest_length = std.math.divCeil(comptime_int, digest_bits, 8) catch
+        // unreachable;`): a `comptime_int` has no runtime form, so the union is evaluated while lowering and the const is
+        // the literal 5, which sizes the parameter's and the local's arrays. zig returns 12.
+        cs.ShouldContain("byte* @out = stackalloc byte[5];");
+        cs.ShouldNotContain("Catch(");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""
