@@ -5334,6 +5334,28 @@ internal sealed partial class ZigLowering
             var payloadLit = new LitInt(knownPayload.ToString(CultureInfo.InvariantCulture), knownPayload) { Type = lhs.Type };
             return bind is null ? new Seq(new List<CStmt>()) : bind(payloadLit);
         }
+        // A compile-time-known OPTIONAL (a call returning `?comptime_int`, which zig evaluates at compile time: `const n =
+        // pick(T) orelse break :blk;`, task #149): a value binds as the payload, and null takes a jump arm NOW. The jump ends
+        // the block, whose rest zig never analyses (LowerStmtsWithDefers stops after a terminator), so a `@Vector(n, u8)`
+        // past it is never lowered.
+        var knownOptional = lhs switch
+        {
+            ComptimeFold { Resolved: { } resolved } when lhs.Type.Unqualified is CType.Optional => resolved,
+            DefaultLit when lhs.Type.Unqualified is CType.Optional && ReturnsOptionalComptimeInt(lhsItem) => lhs,
+            _ => null,
+        };
+        if (!isCatch && knownOptional is not null && lhs.Type.Unqualified is CType.Optional { Inner: var knownInner })
+        {
+            if (knownOptional is DefaultLit && arm.Content is not (Zig.FbSwitch or Zig.FbLabeled) && !ArmCanFallThrough(arm))
+            {
+                return LowerFallbackArm(arm);
+            }
+            if (knownOptional is not DefaultLit && ComptimeIntValue(knownOptional) is { } knownValue)
+            {
+                var payloadLit = new LitInt(knownValue.ToString(CultureInfo.InvariantCulture), knownValue) { Type = knownInner };
+                return bind is null ? new Seq(new List<CStmt>()) : bind(payloadLit);
+            }
+        }
         var pre = new List<CStmt>();
         CExpr lhsRef;
         if (lhs is VarRef) { lhsRef = lhs; }

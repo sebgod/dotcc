@@ -819,7 +819,8 @@ internal sealed partial class ZigLowering
                 // A comptime-only `?comptime_int` call (`std.simd.suggestVectorLength(u8) orelse 0`) may already be its
                 // folded value: a payload literal, or `null` as a default.
                 var foldedOptional = left is ComptimeFold { Resolved: { } fk } ? fk : left;
-                if (left.Type.Unqualified is not CType.Optional and not CType.Pointer
+                // The null is a `DefaultLit` of the optional type (a user `?comptime_int` function, task #149).
+                if ((left.Type.Unqualified is not CType.Optional and not CType.Pointer || foldedOptional is DefaultLit)
                     && foldedOptional is LitInt or DefaultLit or Cast { Operand: LitInt }
                     && ReturnsOptionalComptimeInt(o.Arg0.Content is Zig.PreComptime lpc ? lpc.Arg1 : o.Arg0))
                 {

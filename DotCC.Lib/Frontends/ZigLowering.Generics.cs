@@ -262,6 +262,19 @@ internal sealed partial class ZigLowering
                         _comptimeVars[_symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = vt })] = (v, vt);
                         break;
                     }
+                    // A `?comptime_int` result (`return if (@sizeOf(T) == 2) 8 else null;`, task #149) is lowered at its
+                    // optional type, so `null` is the optional's none; the folded value is then the payload literal, or a
+                    // null `DefaultLit`, as a folded std.simd.suggestVectorLength call is. The payload reads back as a plain
+                    // `long` (ConstEval's range), not the 128-bit comptime_int carrier.
+                    case Zig.StmtReturn r when g.RetType.Content is Zig.TyOptional:
+                    {
+                        var optionalInt = new CType.Optional(CType.Int128);
+                        if (_ir.ResolveComptimeFold(LowerExprSink(r.Arg1, optionalInt)) is not { } folded) { return null; }
+                        if (folded is DefaultLit) { return new DefaultLit { Type = optionalInt }; }
+                        return _ir.ConstEval(folded) is { } payload
+                            ? new LitInt(payload.ToString(CultureInfo.InvariantCulture), payload) { Type = CType.Long }
+                            : null;
+                    }
                     case Zig.StmtReturn r:
                         return _ir.ResolveComptimeFold(LowerExprSink(r.Arg1, CType.Int128));
                     default:

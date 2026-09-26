@@ -141,29 +141,53 @@ public static class ZigVec
         => ~Eq(a, b) & Full(System.Runtime.Intrinsics.Vector512<T>.Count);
 
     /// <summary>Lane-wise <c>a &lt; b</c> as a lane mask.</summary>
+    public static ulong Lt<T>(System.Runtime.Intrinsics.Vector64<T> a, System.Runtime.Intrinsics.Vector64<T> b)
+        => System.Runtime.Intrinsics.Vector64.ExtractMostSignificantBits(System.Runtime.Intrinsics.Vector64.LessThan(a, b));
+    /// <summary>Lane-wise <c>a &lt; b</c> as a lane mask.</summary>
     public static ulong Lt<T>(System.Runtime.Intrinsics.Vector128<T> a, System.Runtime.Intrinsics.Vector128<T> b)
         => System.Runtime.Intrinsics.Vector128.ExtractMostSignificantBits(System.Runtime.Intrinsics.Vector128.LessThan(a, b));
     /// <summary>Lane-wise <c>a &lt; b</c> as a lane mask.</summary>
     public static ulong Lt<T>(System.Runtime.Intrinsics.Vector256<T> a, System.Runtime.Intrinsics.Vector256<T> b)
         => System.Runtime.Intrinsics.Vector256.ExtractMostSignificantBits(System.Runtime.Intrinsics.Vector256.LessThan(a, b));
+    /// <summary>Lane-wise <c>a &lt; b</c> as a lane mask.</summary>
+    public static ulong Lt<T>(System.Runtime.Intrinsics.Vector512<T> a, System.Runtime.Intrinsics.Vector512<T> b)
+        => System.Runtime.Intrinsics.Vector512.ExtractMostSignificantBits(System.Runtime.Intrinsics.Vector512.LessThan(a, b));
+    /// <summary>Lane-wise <c>a &gt; b</c> as a lane mask.</summary>
+    public static ulong Gt<T>(System.Runtime.Intrinsics.Vector64<T> a, System.Runtime.Intrinsics.Vector64<T> b)
+        => System.Runtime.Intrinsics.Vector64.ExtractMostSignificantBits(System.Runtime.Intrinsics.Vector64.GreaterThan(a, b));
     /// <summary>Lane-wise <c>a &gt; b</c> as a lane mask.</summary>
     public static ulong Gt<T>(System.Runtime.Intrinsics.Vector128<T> a, System.Runtime.Intrinsics.Vector128<T> b)
         => System.Runtime.Intrinsics.Vector128.ExtractMostSignificantBits(System.Runtime.Intrinsics.Vector128.GreaterThan(a, b));
     /// <summary>Lane-wise <c>a &gt; b</c> as a lane mask.</summary>
     public static ulong Gt<T>(System.Runtime.Intrinsics.Vector256<T> a, System.Runtime.Intrinsics.Vector256<T> b)
         => System.Runtime.Intrinsics.Vector256.ExtractMostSignificantBits(System.Runtime.Intrinsics.Vector256.GreaterThan(a, b));
+    /// <summary>Lane-wise <c>a &gt; b</c> as a lane mask.</summary>
+    public static ulong Gt<T>(System.Runtime.Intrinsics.Vector512<T> a, System.Runtime.Intrinsics.Vector512<T> b)
+        => System.Runtime.Intrinsics.Vector512.ExtractMostSignificantBits(System.Runtime.Intrinsics.Vector512.GreaterThan(a, b));
+    /// <summary>Lane-wise <c>a &lt;= b</c> as a lane mask.</summary>
+    public static ulong Le<T>(System.Runtime.Intrinsics.Vector64<T> a, System.Runtime.Intrinsics.Vector64<T> b)
+        => System.Runtime.Intrinsics.Vector64.ExtractMostSignificantBits(System.Runtime.Intrinsics.Vector64.LessThanOrEqual(a, b));
     /// <summary>Lane-wise <c>a &lt;= b</c> as a lane mask.</summary>
     public static ulong Le<T>(System.Runtime.Intrinsics.Vector128<T> a, System.Runtime.Intrinsics.Vector128<T> b)
         => System.Runtime.Intrinsics.Vector128.ExtractMostSignificantBits(System.Runtime.Intrinsics.Vector128.LessThanOrEqual(a, b));
     /// <summary>Lane-wise <c>a &lt;= b</c> as a lane mask.</summary>
     public static ulong Le<T>(System.Runtime.Intrinsics.Vector256<T> a, System.Runtime.Intrinsics.Vector256<T> b)
         => System.Runtime.Intrinsics.Vector256.ExtractMostSignificantBits(System.Runtime.Intrinsics.Vector256.LessThanOrEqual(a, b));
+    /// <summary>Lane-wise <c>a &lt;= b</c> as a lane mask.</summary>
+    public static ulong Le<T>(System.Runtime.Intrinsics.Vector512<T> a, System.Runtime.Intrinsics.Vector512<T> b)
+        => System.Runtime.Intrinsics.Vector512.ExtractMostSignificantBits(System.Runtime.Intrinsics.Vector512.LessThanOrEqual(a, b));
+    /// <summary>Lane-wise <c>a &gt;= b</c> as a lane mask.</summary>
+    public static ulong Ge<T>(System.Runtime.Intrinsics.Vector64<T> a, System.Runtime.Intrinsics.Vector64<T> b)
+        => System.Runtime.Intrinsics.Vector64.ExtractMostSignificantBits(System.Runtime.Intrinsics.Vector64.GreaterThanOrEqual(a, b));
     /// <summary>Lane-wise <c>a &gt;= b</c> as a lane mask.</summary>
     public static ulong Ge<T>(System.Runtime.Intrinsics.Vector128<T> a, System.Runtime.Intrinsics.Vector128<T> b)
         => System.Runtime.Intrinsics.Vector128.ExtractMostSignificantBits(System.Runtime.Intrinsics.Vector128.GreaterThanOrEqual(a, b));
     /// <summary>Lane-wise <c>a &gt;= b</c> as a lane mask.</summary>
     public static ulong Ge<T>(System.Runtime.Intrinsics.Vector256<T> a, System.Runtime.Intrinsics.Vector256<T> b)
         => System.Runtime.Intrinsics.Vector256.ExtractMostSignificantBits(System.Runtime.Intrinsics.Vector256.GreaterThanOrEqual(a, b));
+    /// <summary>Lane-wise <c>a &gt;= b</c> as a lane mask.</summary>
+    public static ulong Ge<T>(System.Runtime.Intrinsics.Vector512<T> a, System.Runtime.Intrinsics.Vector512<T> b)
+        => System.Runtime.Intrinsics.Vector512.ExtractMostSignificantBits(System.Runtime.Intrinsics.Vector512.GreaterThanOrEqual(a, b));
 
     /// <summary>The mask with the low <paramref name="lanes"/> bits set: every lane true.</summary>
     public static ulong Full(int lanes) => lanes >= 64 ? ulong.MaxValue : (1UL << lanes) - 1;
@@ -171,10 +195,21 @@ public static class ZigVec
     // ---- reductions (`@reduce(op, v)`) ----------------------------------------------------------------
 
     /// <summary><c>@reduce(.Add, v)</c>: the lanes' wrapping sum.</summary>
+    public static T ReduceAdd<T>(System.Runtime.Intrinsics.Vector64<T> v) => System.Runtime.Intrinsics.Vector64.Sum(v);
+    /// <summary><c>@reduce(.Add, v)</c>: the lanes' wrapping sum.</summary>
     public static T ReduceAdd<T>(System.Runtime.Intrinsics.Vector128<T> v) => System.Runtime.Intrinsics.Vector128.Sum(v);
     /// <summary><c>@reduce(.Add, v)</c>: the lanes' wrapping sum.</summary>
     public static T ReduceAdd<T>(System.Runtime.Intrinsics.Vector256<T> v) => System.Runtime.Intrinsics.Vector256.Sum(v);
+    /// <summary><c>@reduce(.Add, v)</c>: the lanes' wrapping sum.</summary>
+    public static T ReduceAdd<T>(System.Runtime.Intrinsics.Vector512<T> v) => System.Runtime.Intrinsics.Vector512.Sum(v);
 
+    /// <summary><c>@reduce(.Min, v)</c>.</summary>
+    public static T ReduceMin<T>(System.Runtime.Intrinsics.Vector64<T> v) where T : System.Numerics.INumber<T>
+    {
+        var r = v[0];
+        for (var i = 1; i < System.Runtime.Intrinsics.Vector64<T>.Count; i++) { r = T.Min(r, v[i]); }
+        return r;
+    }
     /// <summary><c>@reduce(.Min, v)</c>.</summary>
     public static T ReduceMin<T>(System.Runtime.Intrinsics.Vector128<T> v) where T : System.Numerics.INumber<T>
     {
@@ -189,7 +224,21 @@ public static class ZigVec
         for (var i = 1; i < System.Runtime.Intrinsics.Vector256<T>.Count; i++) { r = T.Min(r, v[i]); }
         return r;
     }
+    /// <summary><c>@reduce(.Min, v)</c>.</summary>
+    public static T ReduceMin<T>(System.Runtime.Intrinsics.Vector512<T> v) where T : System.Numerics.INumber<T>
+    {
+        var r = v[0];
+        for (var i = 1; i < System.Runtime.Intrinsics.Vector512<T>.Count; i++) { r = T.Min(r, v[i]); }
+        return r;
+    }
 
+    /// <summary><c>@reduce(.Max, v)</c>.</summary>
+    public static T ReduceMax<T>(System.Runtime.Intrinsics.Vector64<T> v) where T : System.Numerics.INumber<T>
+    {
+        var r = v[0];
+        for (var i = 1; i < System.Runtime.Intrinsics.Vector64<T>.Count; i++) { r = T.Max(r, v[i]); }
+        return r;
+    }
     /// <summary><c>@reduce(.Max, v)</c>.</summary>
     public static T ReduceMax<T>(System.Runtime.Intrinsics.Vector128<T> v) where T : System.Numerics.INumber<T>
     {
@@ -202,6 +251,13 @@ public static class ZigVec
     {
         var r = v[0];
         for (var i = 1; i < System.Runtime.Intrinsics.Vector256<T>.Count; i++) { r = T.Max(r, v[i]); }
+        return r;
+    }
+    /// <summary><c>@reduce(.Max, v)</c>.</summary>
+    public static T ReduceMax<T>(System.Runtime.Intrinsics.Vector512<T> v) where T : System.Numerics.INumber<T>
+    {
+        var r = v[0];
+        for (var i = 1; i < System.Runtime.Intrinsics.Vector512<T>.Count; i++) { r = T.Max(r, v[i]); }
         return r;
     }
 
@@ -229,17 +285,48 @@ public static class ZigVec
         return r;
     }
 
+    /// <summary><c>@select(T, mask, a, b)</c> for 64-bit vectors.</summary>
+    public static System.Runtime.Intrinsics.Vector64<T> Select<T>(ulong mask, System.Runtime.Intrinsics.Vector64<T> a, System.Runtime.Intrinsics.Vector64<T> b)
+    {
+        var r = b;
+        for (var i = 0; i < System.Runtime.Intrinsics.Vector64<T>.Count; i++)
+        {
+            if (((mask >> i) & 1) != 0) { r = WithLane(r, i, a[i]); }
+        }
+        return r;
+    }
+    /// <summary><c>@select(T, mask, a, b)</c> for 512-bit vectors.</summary>
+    public static System.Runtime.Intrinsics.Vector512<T> Select<T>(ulong mask, System.Runtime.Intrinsics.Vector512<T> a, System.Runtime.Intrinsics.Vector512<T> b)
+    {
+        var r = b;
+        for (var i = 0; i < System.Runtime.Intrinsics.Vector512<T>.Count; i++)
+        {
+            if (((mask >> i) & 1) != 0) { r = WithLane(r, i, a[i]); }
+        }
+        return r;
+    }
+
+    /// <summary>Replace one lane of a 64-bit vector.</summary>
+    private static System.Runtime.Intrinsics.Vector64<T> WithLane<T>(System.Runtime.Intrinsics.Vector64<T> v, int i, T x)
+        => System.Runtime.Intrinsics.Vector64.WithElement(v, i, x);
     /// <summary>Replace one lane of a 128-bit vector.</summary>
     private static System.Runtime.Intrinsics.Vector128<T> WithLane<T>(System.Runtime.Intrinsics.Vector128<T> v, int i, T x)
         => System.Runtime.Intrinsics.Vector128.WithElement(v, i, x);
     /// <summary>Replace one lane of a 256-bit vector.</summary>
     private static System.Runtime.Intrinsics.Vector256<T> WithLane<T>(System.Runtime.Intrinsics.Vector256<T> v, int i, T x)
         => System.Runtime.Intrinsics.Vector256.WithElement(v, i, x);
+    /// <summary>Replace one lane of a 512-bit vector.</summary>
+    private static System.Runtime.Intrinsics.Vector512<T> WithLane<T>(System.Runtime.Intrinsics.Vector512<T> v, int i, T x)
+        => System.Runtime.Intrinsics.Vector512.WithElement(v, i, x);
 
+    /// <summary><c>v[i]</c>: one lane.</summary>
+    public static T Get<T>(System.Runtime.Intrinsics.Vector64<T> v, ulong i) => v[(int)i];
     /// <summary><c>v[i]</c>: one lane.</summary>
     public static T Get<T>(System.Runtime.Intrinsics.Vector128<T> v, ulong i) => v[(int)i];
     /// <summary><c>v[i]</c>: one lane.</summary>
     public static T Get<T>(System.Runtime.Intrinsics.Vector256<T> v, ulong i) => v[(int)i];
+    /// <summary><c>v[i]</c>: one lane.</summary>
+    public static T Get<T>(System.Runtime.Intrinsics.Vector512<T> v, ulong i) => v[(int)i];
 
     /// <summary><c>m[i]</c> of a bool vector: bit <c>i</c> of the lane mask.</summary>
     public static bool Bit(ulong mask, ulong i) => ((mask >> (int)i) & 1) != 0;

@@ -6992,6 +6992,40 @@ public sealed class ZigOracleTests
             "    const w = v + @as(V, @splat(1));\n" +
             "    return @truncate(r[0] >> 24 ^ r[3] ^ w[1] >> 24 ^ r[7]);\n" +
             "}\n", 159, "" },
+        // Task #149: a user function returning `?comptime_int` folds at compile time; its null takes `orelse break :blk` then.
+        new object[] { "comptime_optional_int_orelse_break",
+            "fn pick(comptime T: type) ?comptime_int {\n" +
+            "    return if (@sizeOf(T) == 2) 8 else null;\n" +
+            "}\n" +
+            "fn lanes(comptime T: type) usize {\n" +
+            "    blk: {\n" +
+            "        const n = pick(T) orelse break :blk;\n" +
+            "        const V = @Vector(n, u8);\n" +
+            "        const v: V = @splat(3);\n" +
+            "        return n + @reduce(.Add, v);\n" +
+            "    }\n" +
+            "    return 1;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return @intCast(lanes(u16) + lanes(u32) * 100);\n" +
+            "}\n", 132, "" },
+        // Task #149: `@select`, relational masks and `@reduce` over 64-bit and 512-bit vectors.
+        new object[] { "vector_widths_select_reduce",
+            "pub fn main() u8 {\n" +
+            "    const a: @Vector(8, u8) = .{ 9, 2, 7, 4, 5, 6, 1, 8 };\n" +
+            "    const b: @Vector(8, u8) = @splat(5);\n" +
+            "    const lt = a < b;\n" +
+            "    const pick = @select(u8, lt, a, b);\n" +
+            "    const mn = @reduce(.Min, a);\n" +
+            "    const mx = @reduce(.Max, pick);\n" +
+            "    const c: @Vector(16, u32) = .{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };\n" +
+            "    const d: @Vector(16, u32) = @splat(8);\n" +
+            "    const ge = c >= d;\n" +
+            "    const sel = @select(u32, ge, c, d);\n" +
+            "    const s = @reduce(.Add, sel);\n" +
+            "    const top = @reduce(.Max, c) - @reduce(.Min, c);\n" +
+            "    return mn + mx * 3 + @as(u8, @intCast(s % 50)) + @as(u8, @intCast(top)) + a[3] + @as(u8, @intCast(c[15]));\n" +
+            "}\n", 65, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

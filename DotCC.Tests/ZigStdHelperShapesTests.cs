@@ -4030,7 +4030,7 @@ public sealed class ZigStdHelperShapesTests
             File.WriteAllText(main, "const m = @import(\"m.zig\");\npub fn main() u8 {\n    return @intCast(m.f());\n}\n");
             var cs = Compiler.EmitCSharp(new[] { main });
             cs.ShouldContain("byte* a = stackalloc byte[8];");
-            cs.ShouldContain("return 8UL + (ulong)(8);");
+            cs.ShouldContain("return 8UL + (ulong)(8L);");
         }
         finally { Directory.Delete(dir, recursive: true); }
     }
@@ -4280,6 +4280,80 @@ public sealed class ZigStdHelperShapesTests
         // Task #148: a scalar's shift amount is a `Log2Int(T)` integer, not a vector, so a `@splat` has no vector to fill
         // (zig: "expected array or vector type, found 'u5'").
         ex.Message.ShouldContain("a `@splat` shift amount needs a vector to shift");
+    }
+
+    [Fact]
+    public void A_comptime_optional_int_function_folds_and_its_null_takes_the_orelse_jump()
+    {
+        var cs = EmitZig("""
+            fn pick(comptime T: type) ?comptime_int {
+                return if (@sizeOf(T) == 2) 8 else null;
+            }
+            fn lanes(comptime T: type) usize {
+                blk: {
+                    const n = pick(T) orelse break :blk;
+                    const V = @Vector(n, u8);
+                    const v: V = @splat(3);
+                    return n + @reduce(.Add, v);
+                }
+                return 1;
+            }
+            pub fn main() u8 {
+                return @intCast(lanes(u16) + lanes(u32) * 100);
+            }
+            """);
+        // Task #149: a call returning `?comptime_int` is evaluated at compile time. `pick(u16)` is 8, so `n` is comptime-known
+        // and sizes `@Vector(n, u8)`; `pick(u32)` is null, so `orelse break :blk` jumps NOW and the block's rest, whose
+        // `@Vector(n, u8)` has no `n`, is never lowered. zig returns 132.
+        cs.ShouldContain("System.Runtime.Intrinsics.Vector64<byte> v = System.Runtime.Intrinsics.Vector64.Create((byte)3);\n            return (ulong)(8L + ZigVec.ReduceAdd(v));");
+        cs.ShouldContain("internal static unsafe ulong lanes__u32()\n    {\n        {\n            goto __blk1_brk;\n        }\n        __blk1_brk:");
+    }
+
+    [Fact]
+    public void A_comptime_optional_int_function_takes_a_value_fallback_when_null()
+    {
+        var cs = EmitZig("""
+            fn pick(comptime T: type) ?comptime_int {
+                return if (@sizeOf(T) == 2) 8 else null;
+            }
+            pub fn main() u8 {
+                const a = pick(u16) orelse 0;
+                const b = pick(u32) orelse 5;
+                return a * 10 + b;
+            }
+            """);
+        // Task #149: `pick(u16) orelse 0` is the payload 8 and `pick(u32) orelse 5` the fallback, both at compile time, with no
+        // runtime optional. zig returns 85.
+        cs.ShouldContain("long a = 8L;");
+        cs.ShouldContain("int b = 5;");
+        cs.ShouldNotContain("pick__");
+    }
+
+    [Fact]
+    public void Vector_comparisons_select_and_reductions_cover_64_and_512_bit_vectors()
+    {
+        var cs = EmitZig("""
+            pub fn main() u8 {
+                const a: @Vector(8, u8) = .{ 9, 2, 7, 4, 5, 6, 1, 8 };
+                const b: @Vector(8, u8) = @splat(5);
+                const lt = a < b;
+                const pick = @select(u8, lt, a, b);
+                const mn = @reduce(.Min, a);
+                const mx = @reduce(.Max, pick);
+                const c: @Vector(16, u32) = .{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
+                const d: @Vector(16, u32) = @splat(8);
+                const ge = c >= d;
+                const sel = @select(u32, ge, c, d);
+                const s = @reduce(.Add, sel);
+                const top = @reduce(.Max, c) - @reduce(.Min, c);
+                return mn + mx * 3 + @as(u8, @intCast(s % 50)) + @as(u8, @intCast(top)) + a[3] + @as(u8, @intCast(c[15]));
+            }
+            """);
+        // Task #149: a `@Vector(8, u8)` is a Vector64 and a `@Vector(16, u32)` a Vector512; the runtime's comparisons,
+        // `@select`, `@reduce` and lane reads have an overload for every width. zig returns 65.
+        cs.ShouldContain("System.Runtime.Intrinsics.Vector64<byte> pick = ZigVec.Select(lt, a, b);");
+        cs.ShouldContain("System.Runtime.Intrinsics.Vector512<uint> sel = ZigVec.Select(ge, c, d);");
+        cs.ShouldContain("uint top = ZigVec.ReduceMax(c) - ZigVec.ReduceMin(c);");
     }
 
     [Fact]
