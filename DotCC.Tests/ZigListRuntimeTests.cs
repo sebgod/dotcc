@@ -110,4 +110,28 @@ public sealed class ZigListRuntimeTests
         list.Len.ShouldBe(43UL);           // the failed append left the list intact
         list.Items[42].ShouldBe(42L);
     }
+
+    [Fact]
+    public unsafe void AppendNTimes_fills_and_ReplaceRange_moves_the_tail()
+    {
+        var list = default(ZigList<int>);
+        var a = ZigAlloc.CHeap();
+        list.AppendNTimes(a, 5, 4, Oom).IsErr.ShouldBeFalse();
+        list.Len.ShouldBe(4UL);
+        list.Cap.ShouldBe(38UL);            // task #172: grown as zig's resize does, growCapacity(4) = 4 + 4 / 2 + 32
+
+        int* longer = stackalloc int[3] { 1, 2, 3 };
+        list.ReplaceRange(a, 1, 2, new ConstSlice<int>(longer, 3), Oom).IsErr.ShouldBeFalse();
+        list.Len.ShouldBe(5UL);             // [5, 1, 2, 3, 5]
+        (list.Items[0], list.Items[1], list.Items[3], list.Items[4]).ShouldBe((5, 1, 3, 5));
+
+        list.ReplaceRangeAssumeCapacity(0, 4, new ConstSlice<int>(longer, 1));
+        list.Len.ShouldBe(2UL);             // [1, 5]
+        (list.Items[0], list.Items[1]).ShouldBe((1, 5));
+
+        list.AppendNTimesAssumeCapacity(9, 2);
+        list.Items[3].ShouldBe(9);
+        Should.Throw<System.InvalidOperationException>(() => list.AppendNTimesAssumeCapacity(9, 100));
+        list.Deinit(a);
+    }
 }

@@ -2180,6 +2180,35 @@ internal sealed partial class ZigLowering
                 return new ZigListCall(recv, "InsertSlice", new List<CExpr> { a, at, s, OomLit() })
                 { Type = new CType.ErrorUnion(CType.Void) };
             }
+            // task #172: `appendNTimes` fills, `replaceRange` swaps a range for a slice (growing, or asserting capacity).
+            case "appendNTimes" or "appendNTimesAssumeCapacity":
+            {
+                var assume = methodName == "appendNTimesAssumeCapacity";
+                RequireListArgs(methodName, argItems, assume ? 2 : 3, assume ? "(value, n)" : "(alloc, value, n)");
+                var nArgs = new List<CExpr>();
+                if (!assume) { nArgs.Add(LowerListAllocatorArg(methodName, argItems[0])); }
+                nArgs.Add(LowerExprSink(argItems[assume ? 0 : 1], elem));
+                nArgs.Add(LowerExprSink(argItems[assume ? 1 : 2], CType.ULong));
+                if (!assume) { nArgs.Add(OomLit()); }
+                return new ZigListCall(recv, assume ? "AppendNTimesAssumeCapacity" : "AppendNTimes", nArgs)
+                { Type = assume ? CType.Void : new CType.ErrorUnion(CType.Void) };
+            }
+            case "replaceRange" or "replaceRangeAssumeCapacity":
+            {
+                var assume = methodName == "replaceRangeAssumeCapacity";
+                RequireListArgs(methodName, argItems, assume ? 3 : 4, assume ? "(start, len, new_items)" : "(alloc, start, len, new_items)");
+                var rArgs = new List<CExpr>();
+                if (!assume) { rArgs.Add(LowerListAllocatorArg(methodName, argItems[0])); }
+                var first = assume ? 0 : 1;
+                rArgs.Add(LowerExprSink(argItems[first], CType.ULong));
+                rArgs.Add(LowerExprSink(argItems[first + 1], CType.ULong));
+                var replaceSliceType = new CType.Slice(elem);
+                var replaceArg = LowerExprSink(argItems[first + 2], replaceSliceType);
+                rArgs.Add(replaceArg.Type?.Unqualified is CType.Slice ? replaceArg : CoerceToSlice(replaceArg, replaceSliceType));
+                if (!assume) { rArgs.Add(OomLit()); }
+                return new ZigListCall(recv, assume ? "ReplaceRangeAssumeCapacity" : "ReplaceRange", rArgs)
+                { Type = assume ? CType.Void : new CType.ErrorUnion(CType.Void) };
+            }
             case "orderedRemove" or "swapRemove":
             {
                 RequireListArgs(methodName, argItems, 1, "(index)");
@@ -2215,7 +2244,7 @@ internal sealed partial class ZigLowering
             }
             default:
                 throw new IrUnsupportedException(
-                    $"zig std.ArrayList has no modeled member '{methodName}' (curated: append, appendSlice, insert, insertSlice, pop, "
+                    $"zig std.ArrayList has no modeled member '{methodName}' (curated: append, appendSlice, appendNTimes, insert, insertSlice, replaceRange, pop, "
                     + "orderedRemove, swapRemove, getLast, ensureTotalCapacity, ensureUnusedCapacity, "
                     + "appendAssumeCapacity, shrinkRetainingCapacity, deinit, clearRetainingCapacity, items, capacity)");
         }

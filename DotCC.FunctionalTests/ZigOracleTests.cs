@@ -9002,6 +9002,45 @@ public sealed class ZigOracleTests
             "    return out[0] ^ out[31];\n" +
             "}\n", 5);
 
+    // Task #172: std.ArrayList appendNTimes / replaceRange (and the AssumeCapacity forms), and appendNTimes running out of a
+    // FixedBufferAllocator at zig's point.
+    [Fact]
+    public void Dotcc_matches_zig_std_array_list_append_n_times_replace_range() =>
+        MatchesZigWithRealStd("array_list_append_n_times",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() !u8 {\n" +
+            "    var buf: [256]u8 = undefined;\n" +
+            "    var fba = std.heap.FixedBufferAllocator.init(&buf);\n" +
+            "    const gpa = fba.allocator();\n" +
+            "    var l: std.ArrayList(u8) = .empty;\n" +
+            "    defer l.deinit(gpa);\n" +
+            "    try l.appendNTimes(gpa, 7, 3);\n" +
+            "    try l.insertSlice(gpa, 1, &.{ 1, 2 });\n" +
+            "    l.replaceRangeAssumeCapacity(0, 1, &.{9});\n" +
+            "    try l.replaceRange(gpa, 2, 2, &.{ 4, 5, 6 });\n" +
+            "    try l.ensureUnusedCapacity(gpa, 2);\n" +
+            "    l.appendNTimesAssumeCapacity(3, 2);\n" +
+            "    try l.replaceRange(gpa, 1, 3, &.{});\n" +
+            "    return l.items[0] + l.items[1] * 10 + l.items[4] * 3 + @as(u8, @intCast(l.items.len));\n" +
+            "}\n", 83);
+
+    [Fact]
+    public void Dotcc_matches_zig_std_array_list_append_n_times_oom() =>
+        MatchesZigWithRealStd("array_list_append_n_times_oom",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var buf: [256]u8 = undefined;\n" +
+            "    var fba = std.heap.FixedBufferAllocator.init(&buf);\n" +
+            "    const gpa = fba.allocator();\n" +
+            "    var l: std.ArrayList(u32) = .empty;\n" +
+            "    l.appendNTimes(gpa, 5, 4) catch return 1;\n" +
+            "    l.appendNTimes(gpa, 6, 40) catch |e| {\n" +
+            "        if (e == error.OutOfMemory) return @intCast(40 + l.items.len + l.items[3]);\n" +
+            "        return 2;\n" +
+            "    };\n" +
+            "    return 3;\n" +
+            "}\n", 49);
+
     // Task #148: std.math.rotr / rotl from real std over a `@Vector(4, u32)` (Blake3's SIMD rounds rotate this way).
     [Fact]
     public void Dotcc_matches_zig_std_math_rotr_vector() =>

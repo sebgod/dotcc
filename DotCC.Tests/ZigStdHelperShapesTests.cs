@@ -5405,6 +5405,35 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void Curated_array_list_append_n_times_and_replace_range()
+    {
+        var cs = EmitZig("""
+            const std = @import("std");
+            pub fn main() !u8 {
+                var buf: [256]u8 = undefined;
+                var fba = std.heap.FixedBufferAllocator.init(&buf);
+                const gpa = fba.allocator();
+                var l: std.ArrayList(u8) = .empty;
+                defer l.deinit(gpa);
+                try l.appendNTimes(gpa, 7, 3);
+                try l.insertSlice(gpa, 1, &.{ 1, 2 });
+                l.replaceRangeAssumeCapacity(0, 1, &.{9});
+                try l.replaceRange(gpa, 2, 2, &.{ 4, 5, 6 });
+                try l.ensureUnusedCapacity(gpa, 2);
+                l.appendNTimesAssumeCapacity(3, 2);
+                try l.replaceRange(gpa, 1, 3, &.{});
+                return l.items[0] + l.items[1] * 10 + l.items[4] * 3 + @as(u8, @intCast(l.items.len));
+            }
+            """);
+        // Task #172: `appendNTimes` / `replaceRange` (and their AssumeCapacity forms) map onto the runtime ZigList, the
+        // replacement slice coerced as insertSlice's is (`&.{}` an empty one). zig returns 83.
+        cs.ShouldContain("_ = ErrUnion.Try(l.AppendNTimes(ZigAlloc.FbaAllocator(&fba), 7, 3, 1));");
+        cs.ShouldContain("l.ReplaceRangeAssumeCapacity(0, 1, new Slice<byte>(__cl1, 1UL));");
+        cs.ShouldContain("_ = ErrUnion.Try(l.ReplaceRange(ZigAlloc.FbaAllocator(&fba), 2, 2, new Slice<byte>(__cl2, 3UL), 1));");
+        cs.ShouldContain("l.AppendNTimesAssumeCapacity(3, 2);");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

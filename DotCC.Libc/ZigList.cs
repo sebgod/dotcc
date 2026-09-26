@@ -203,6 +203,51 @@ public struct ZigList<T> where T : unmanaged
         return removed;
     }
 
+    /// <summary>zig <c>list.appendNTimes(alloc, value, n)</c> — append <paramref name="n"/> copies of
+    /// <paramref name="value"/>. Grows as zig's <c>resize</c> does (<c>ensureTotalCapacity</c> of the new length).</summary>
+    public unsafe ErrUnion<Unit> AppendNTimes(Allocator a, T value, ulong n, ushort oom)
+    {
+        if (ulong.MaxValue - Len < n) { return ErrUnion<Unit>.Err(oom); }
+        var ok = EnsureCap(a, Len + n, oom);
+        if (ok.IsErr) { return ok; }
+        AppendNTimesAssumeCapacity(value, n);
+        return ErrUnion<Unit>.Ok(default);
+    }
+
+    /// <summary>zig <c>list.appendNTimesAssumeCapacity(value, n)</c> — the same without growing; the capacity must hold them.</summary>
+    public unsafe void AppendNTimesAssumeCapacity(T value, ulong n)
+    {
+        if (Cap - Len < n) { throw new System.InvalidOperationException("zig ArrayList.appendNTimesAssumeCapacity: capacity exceeded"); }
+        var p = (T*)_ptr + Len;
+        for (ulong k = 0; k < n; k++) { p[k] = value; }
+        Len += n;
+    }
+
+    /// <summary>zig <c>list.replaceRange(alloc, start, len, new_items)</c> — replace the <paramref name="len"/> elements
+    /// at <paramref name="start"/> by <paramref name="newItems"/>, growing to the new length first when it is longer.</summary>
+    public unsafe ErrUnion<Unit> ReplaceRange(Allocator a, ulong start, ulong len, ConstSlice<T> newItems, ushort oom)
+    {
+        var ok = EnsureCap(a, Len - len + newItems.Len, oom);
+        if (ok.IsErr) { return ok; }
+        ReplaceRangeAssumeCapacity(start, len, newItems);
+        return ErrUnion<Unit>.Ok(default);
+    }
+
+    /// <summary>zig <c>list.replaceRangeAssumeCapacity(start, len, new_items)</c> — the tail after the replaced range moves
+    /// to follow <paramref name="newItems"/>, and the length changes by their difference; the capacity must hold it.</summary>
+    public unsafe void ReplaceRangeAssumeCapacity(ulong start, ulong len, ConstSlice<T> newItems)
+    {
+        if (start + len > Len) { throw new System.IndexOutOfRangeException("zig ArrayList.replaceRange: range out of bounds"); }
+        ulong newLen = Len - len + newItems.Len;
+        if (newLen > Cap) { throw new System.InvalidOperationException("zig ArrayList.replaceRangeAssumeCapacity: capacity exceeded"); }
+        var p = (T*)_ptr;
+        long tailBytes = (long)((Len - start - len) * (ulong)sizeof(T));
+        if (tailBytes != 0) { System.Buffer.MemoryCopy(p + start + len, p + start + newItems.Len, tailBytes, tailBytes); }
+        long newBytes = (long)(newItems.Len * (ulong)sizeof(T));
+        if (newBytes != 0) { System.Buffer.MemoryCopy(newItems.Ptr, p + start, newBytes, newBytes); }
+        Len = newLen;
+    }
+
     /// <summary>zig <c>list.swapRemove(i)</c> — remove and return element <paramref name="i"/>, moving the last one into its place.</summary>
     public unsafe T SwapRemove(ulong i)
     {
