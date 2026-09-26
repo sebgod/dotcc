@@ -661,6 +661,12 @@ internal sealed partial class ZigLowering
     private StructField PackedAwareField(string name, Item typeAst, AggregateLayout layout)
     {
         var type = LowerType(typeAst);
+        // A `bool` is ONE bit of a packed struct (std.crypto.blake3's `Flags = packed struct(u8) { chunk_start: bool, … }`,
+        // task #156), as C's `_Bool b : 1` is: a whole CBool field made the struct 8 bytes and its `@bitCast` to u8 throw.
+        if (layout == AggregateLayout.Packed && type.Unqualified is CType.Prim { Name: "_Bool" })
+        {
+            return new StructField(name, type, 1);
+        }
         if (layout == AggregateLayout.Packed && type.Unqualified is CType.Prim { Integer: true, Name: not "_Bool", Bytes: var bytes }
             && DeclaredBitsOfTypeArg(typeAst) is { } bits && bits < bytes * 8)
         {
@@ -2559,6 +2565,14 @@ internal sealed partial class ZigLowering
                     var bit = settledBool ? 1 : 0;
                     return new LitInt(bit.ToString(System.Globalization.CultureInfo.InvariantCulture), bit) { Type = CType.Int };
                 }
+                // A runtime helper's result is a C# `bool` (the curated std.mem.eql's `ZigMem.Eql`), which has no cast to
+                // `int` as CBool has: pick 1 or 0 instead (`@intFromBool(std.mem.eql(u8, &a, &b))`, task #156's Blake3 check).
+                if (boolOperand is ZigMemCall)
+                {
+                    var one = new LitInt("1", 1) { Type = CType.Int };
+                    var zero = new LitInt("0", 0) { Type = CType.Int };
+                    return new CondExpr(boolOperand, one, zero) { Type = CType.Int };
+                }
                 return new Cast(CType.Int, boolOperand) { Type = CType.Int };
             case "@sizeOf":
                 // `@sizeOf(T)` — the byte size as `usize`. Reuses the C `sizeof` IR (folded for a
@@ -3298,6 +3312,15 @@ internal sealed partial class ZigLowering
             && operand.Type.Unqualified is CType.Prim { Bytes: 16 })
         {
             operand = new Cast(enumBase, operand) { Type = enumBase };
+        }
+        // `@bitCast(self.toInt() | other.toInt())` (std.crypto.blake3's Flags.with, task #156): zig's operand is the `u8`
+        // its operands are, but the IR widens a narrow integer operation to C's `int`. zig requires equal sizes, so an
+        // integer operand wider than the destination is that promotion, narrowed back to the destination's size.
+        if (name == "@bitCast" && operand.Type.Unqualified is CType.Prim { Integer: true } bitOperand
+            && _ir.SizeOfConst(sink) is { } sinkBytes && sinkBytes < bitOperand.Bytes)
+        {
+            var narrow = sinkBytes switch { 1 => CType.UChar, 2 => CType.UShort, 4 => CType.UInt, _ => (CType?)null };
+            if (narrow is not null) { operand = new Cast(narrow, operand) { Type = narrow }; }
         }
         return name == "@bitCast"
             ? new BitCast(sink, operand) { Type = sink }

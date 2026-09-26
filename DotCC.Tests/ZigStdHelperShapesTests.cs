@@ -4741,6 +4741,50 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_packed_structs_bool_fields_are_one_bit_each()
+    {
+        var cs = EmitZig("""
+            const Flags = packed struct(u8) {
+                a: bool = false,
+                b: bool = false,
+                c: bool = false,
+                d: bool = false,
+                e: bool = false,
+                f: bool = false,
+                g: bool = false,
+                h: bool = false,
+                fn toInt(self: Flags) u8 {
+                    return @bitCast(self);
+                }
+                fn with(self: Flags, other: Flags) Flags {
+                    return @bitCast(self.toInt() | other.toInt());
+                }
+            };
+            const Mixed = packed struct(u16) {
+                lo: u3,
+                on: bool,
+                mid: u4,
+                off: bool,
+                hi: u7,
+            };
+            pub fn main() u8 {
+                var f = Flags{ .b = true };
+                f = f.with(.{ .d = true, .h = true });
+                f.a = true;
+                var m = Mixed{ .lo = 5, .on = true, .mid = 9, .off = false, .hi = 3 };
+                m.off = true;
+                const raw: u16 = @bitCast(m);
+                return f.toInt() +% @as(u8, @truncate(raw)) +% @as(u8, @intFromBool(f.d)) +% @as(u8, @truncate(raw >> 8)) +% @sizeOf(Flags) * 10 +% @sizeOf(Mixed) * 100;
+            }
+            """);
+        // Task #156 (std.crypto.blake3's `Flags = packed struct(u8) { chunk_start: bool, … }`): a packed `bool` is a 1-bit
+        // field, so the struct is one byte (`@sizeOf` 1, and 2 for the u16 one) and `@bitCast` to u8 no longer throws; the
+        // `u8 | u8` operand C# widens to int is narrowed back to the destination's size. zig returns 2.
+        cs.ShouldContain("private byte __bf0;\n    public CBool a { get => (CBool)(((uint)(__bf0 >> 0) & 1u));");
+        cs.ShouldContain("System.Runtime.CompilerServices.Unsafe.BitCast<byte, Flags>((byte)(Flags_toInt(self) | Flags_toInt(other)))");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

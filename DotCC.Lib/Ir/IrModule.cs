@@ -115,9 +115,24 @@ internal sealed partial class IrModule
         var isUnion = StructIsUnion.GetValueOrDefault(name);
         var packed = PackedStructs.Contains(name);   // byte-packed: no inter-field padding, align 1
         int align = 1, size = 0, off = 0;
+        // Consecutive bit-fields share a storage unit of their type's size while they fit, as the C# backend packs them
+        // (CSharpBackend.PackBitFieldRun): zig's `packed struct(u8) { a: bool, … }` is ONE byte (task #156), not one per
+        // field, and so is C's `unsigned a : 3, b : 5;` unit.
+        int unitBytes = -1, unitUsed = 0;
         foreach (var f in fields)
         {
             var (fs, fa) = Layout(f.Type);
+            if (!isUnion && f.BitWidth is { } width)
+            {
+                if (width == 0) { unitBytes = -1; continue; }   // a zero-width field closes the unit
+                if (unitBytes == fs && unitUsed + width <= fs * 8) { unitUsed += width; continue; }
+                unitBytes = fs;
+                unitUsed = width;
+            }
+            else
+            {
+                unitBytes = -1;
+            }
             if (packed) { fa = 1; }
             if (fa > align) { align = fa; }
             if (isUnion) { if (fs > size) { size = fs; } }

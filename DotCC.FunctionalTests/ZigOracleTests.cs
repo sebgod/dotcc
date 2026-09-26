@@ -7212,6 +7212,40 @@ public sealed class ZigOracleTests
             "    const v = lanes(4, 1);\n" +
             "    return @truncate(m[0][1] + m[1][0] * 10 + m[3][2] + v[0] + v[1] + v[3]);\n" +
             "}\n", 152, "" },
+        // Task #156: packed structs of bool fields (one bit each), mixed with narrow integers; @bitCast both ways and @sizeOf.
+        new object[] { "packed_struct_bool_bits",
+            "const Flags = packed struct(u8) {\n" +
+            "    a: bool = false,\n" +
+            "    b: bool = false,\n" +
+            "    c: bool = false,\n" +
+            "    d: bool = false,\n" +
+            "    e: bool = false,\n" +
+            "    f: bool = false,\n" +
+            "    g: bool = false,\n" +
+            "    h: bool = false,\n" +
+            "    fn toInt(self: Flags) u8 {\n" +
+            "        return @bitCast(self);\n" +
+            "    }\n" +
+            "    fn with(self: Flags, other: Flags) Flags {\n" +
+            "        return @bitCast(self.toInt() | other.toInt());\n" +
+            "    }\n" +
+            "};\n" +
+            "const Mixed = packed struct(u16) {\n" +
+            "    lo: u3,\n" +
+            "    on: bool,\n" +
+            "    mid: u4,\n" +
+            "    off: bool,\n" +
+            "    hi: u7,\n" +
+            "};\n" +
+            "pub fn main() u8 {\n" +
+            "    var f = Flags{ .b = true };\n" +
+            "    f = f.with(.{ .d = true, .h = true });\n" +
+            "    f.a = true;\n" +
+            "    var m = Mixed{ .lo = 5, .on = true, .mid = 9, .off = false, .hi = 3 };\n" +
+            "    m.off = true;\n" +
+            "    const raw: u16 = @bitCast(m);\n" +
+            "    return f.toInt() +% @as(u8, @truncate(raw)) +% @as(u8, @intFromBool(f.d)) +% @as(u8, @truncate(raw >> 8)) +% @sizeOf(Flags) * 10 +% @sizeOf(Mixed) * 100;\n" +
+            "}\n", 2, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -8545,6 +8579,26 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{d} {d} {d} {d} {d} {d}\\n\", .{ c1, c2, c3, c4, c5, c6 });\n" +
             "    return @intCast((c1 + c2 + c3 + c4 + c5 + c6) % 256);\n" +
             "}\n", 171);
+
+    // Tasks #140, #148, #151..#156: std.crypto.hash.Blake3 from real std (its SIMD rounds over `@Vector(16, u32)`, the
+    // `?[32]u8` key, `[][8]u32` / `[][*]const u8` slices, lane stores and the packed Flags): plain, keyed and incremental.
+    [Fact]
+    public void Dotcc_matches_zig_std_crypto_blake3() =>
+        MatchesZigWithRealStd("crypto_blake3",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var out: [32]u8 = undefined;\n" +
+            "    std.crypto.hash.Blake3.hash(\"abc\", &out, .{});\n" +
+            "    var keyed: [32]u8 = undefined;\n" +
+            "    const key: [32]u8 = @splat(7);\n" +
+            "    std.crypto.hash.Blake3.hash(\"abc\", &keyed, .{ .key = key });\n" +
+            "    var h = std.crypto.hash.Blake3.init(.{});\n" +
+            "    h.update(\"ab\");\n" +
+            "    h.update(\"c\");\n" +
+            "    var inc: [32]u8 = undefined;\n" +
+            "    h.final(&inc);\n" +
+            "    return out[0] ^ out[31] ^ keyed[5] ^ @as(u8, @intFromBool(std.mem.eql(u8, &out, &inc)));\n" +
+            "}\n", 255);
 
     // Task #148: std.math.rotr / rotl from real std over a `@Vector(4, u32)` (Blake3's SIMD rounds rotate this way).
     [Fact]
