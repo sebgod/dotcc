@@ -4658,6 +4658,39 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void An_undefined_multi_dimensional_local_and_a_row_assignment_use_the_flat_run()
+    {
+        var cs = EmitZig("""
+            const Stack = struct {
+                rows: [4][3]u8 = undefined,
+                len: usize = 0,
+                fn push(self: *Stack, r: [3]u8) void {
+                    self.rows[self.len] = r;
+                    self.len += 1;
+                }
+            };
+            pub fn main() u8 {
+                var t: [2][3]u8 = undefined;
+                for (0..2) |i| {
+                    for (0..3) |j| t[i][j] = @intCast(i * 10 + j);
+                }
+                var s = Stack{};
+                s.push(.{ 1, 2, 3 });
+                s.push(t[1]);
+                t[0] = s.rows[0];
+                t[0][0] = 99;
+                return s.rows[1][2] + t[0][1] + s.rows[0][0] + t[0][0] / 3;
+            }
+            """);
+        // Task #154 (std.crypto.blake3's `var temp: [n][16]u32 = undefined;` and `self.cv_stack[len] = new_cv;`): an
+        // `undefined` `[2][3]u8` is 6 zeroed bytes (it was 2 row pointers), and assigning a whole row copies its elements
+        // (it assigned to the row's address). zig returns 48.
+        cs.ShouldContain("byte* t = stackalloc byte[6];");
+        cs.ShouldContain("ZigMem.CopyForwards<byte>(new Slice<byte>(self->rows + self->len * 3, 3UL), new ConstSlice<byte>(r, 3UL));");
+        cs.ShouldContain("ZigMem.CopyForwards<byte>(new Slice<byte>(t + 0 * 3, 3UL), new ConstSlice<byte>(s.rows + 0 * 3, 3UL));");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

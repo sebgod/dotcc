@@ -979,10 +979,12 @@ internal sealed partial class ZigLowering
             var sentVal = sentinel ? SentinelArrayValue(typeItem) : 0;
             if (initExpr.Content is Zig.UndefinedLit)
             {
-                var n = (arr.Count ?? 0) + (sentinel ? 1 : 0);
+                // A multi-dimensional array (`var temp: [n][16]u32 = undefined;` in std.crypto.blake3, task #154) is one
+                // flat run of the innermost element, as its literal and its subscripts are.
+                var n = (arr.Count ?? 0) * RowFlatCount(arr) + (sentinel ? 1 : 0);
                 var sym = _symbols.Declare(new Symbol { Name = Tok(nameTok), Kind = SymKind.Var, Type = arr });
                 var count = new LitInt(n.ToString(CultureInfo.InvariantCulture), n) { Type = CType.Int };
-                var decl = new ArrayDecl(sym, arr.Element, count, null);   // C# zero-fills the stackalloc
+                var decl = new ArrayDecl(sym, arr.FlatElement, count, null);   // C# zero-fills the stackalloc
                 if (sentinel && sentVal != 0)
                 {
                     // Zero-fill left the trailing slot at 0; write the actual non-zero sentinel there.
@@ -3398,8 +3400,9 @@ internal sealed partial class ZigLowering
             }
             var target = LowerExpr(lhsItem);
             // `d = a;` between arrays: an element copy (the C# rep is the element pointer, so a plain assignment
-            // would alias the storage). `d = undefined;` changes nothing.
-            if (target.Type.Unqualified is CType.Array { Count: { } assignCount } assignArr && target is VarRef or Member)
+            // would alias the storage). `d = undefined;` changes nothing. A ROW of a multi-dimensional array
+            // (`self.cv_stack[self.cv_stack_len] = new_cv;` in std.crypto.blake3, task #154) is such a target too.
+            if (target.Type.Unqualified is CType.Array { Count: { } assignCount } assignArr && target is VarRef or Member or DotCC.Ir.Index)
             {
                 var assigned = LowerExprSink(rhsItem, assignArr);
                 if (assigned is DefaultLit) { return new Seq(new List<CStmt>()); }

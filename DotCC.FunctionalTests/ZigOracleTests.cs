@@ -7166,6 +7166,28 @@ public sealed class ZigOracleTests
             "    swapFirst(&refs);\n" +
             "    return @intCast(total(sl, 3) + total(sl[0..1], 2) + x * 10 + y + sl.len);\n" +
             "}\n", 92, "" },
+        // Task #154: an `undefined` 2-D local filled in a loop, whole-row assignment into a struct field and back.
+        new object[] { "multi_dimensional_undefined_and_row_assign",
+            "const Stack = struct {\n" +
+            "    rows: [4][3]u8 = undefined,\n" +
+            "    len: usize = 0,\n" +
+            "    fn push(self: *Stack, r: [3]u8) void {\n" +
+            "        self.rows[self.len] = r;\n" +
+            "        self.len += 1;\n" +
+            "    }\n" +
+            "};\n" +
+            "pub fn main() u8 {\n" +
+            "    var t: [2][3]u8 = undefined;\n" +
+            "    for (0..2) |i| {\n" +
+            "        for (0..3) |j| t[i][j] = @intCast(i * 10 + j);\n" +
+            "    }\n" +
+            "    var s = Stack{};\n" +
+            "    s.push(.{ 1, 2, 3 });\n" +
+            "    s.push(t[1]);\n" +
+            "    t[0] = s.rows[0];\n" +
+            "    t[0][0] = 99;\n" +
+            "    return s.rows[1][2] + t[0][1] + s.rows[0][0] + t[0][0] / 3;\n" +
+            "}\n", 48, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
