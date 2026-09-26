@@ -4540,6 +4540,86 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_multi_dimensional_literal_is_one_flat_run()
+    {
+        var cs = EmitZig("""
+            pub fn main() u8 {
+                var g: [2][3]u8 = .{ .{ 1, 2, 3 }, .{ 4, 5, 6 } };
+                g[1][0] += 10;
+                const h = [2][2]u8{ .{ 7, 8 }, .{ 9, 1 } };
+                return g[1][0] + g[0][2] + h[1][0];
+            }
+            """);
+        // Task #152: `.{ .{ 1, 2, 3 }, .{ 4, 5, 6 } }` at a `[2][3]u8` is laid out as the array is indexed (`g[1][0]` is
+        // `(g + 1 * 3)[0]`), one flat run; it lowered to an array of row pointers before, which did not build. zig returns 26.
+        cs.ShouldContain("byte* g = stackalloc byte[]{ 1, 2, 3, 4, 5, 6 };");
+    }
+
+    [Fact]
+    public void A_slice_of_arrays_views_rows_of_a_flat_run()
+    {
+        var cs = EmitZig("""
+            fn sumRows(rows: []const [3]u8) u32 {
+                var s: u32 = 0;
+                for (rows) |r| s += r[0] + r[1] * 2 + r[2] * 3;
+                return s;
+            }
+            fn bump(rows: [][3]u8) void {
+                for (rows) |*r| r[1] += 1;
+                rows[0][2] = 9;
+            }
+            pub fn main() u8 {
+                var grid: [4][3]u8 = .{ .{ 1, 2, 3 }, .{ 4, 5, 6 }, .{ 7, 8, 9 }, .{ 0, 0, 1 } };
+                const mid = grid[1..3];
+                bump(mid);
+                const row: [3]u8 = mid[1];
+                const n = mid.len;
+                return @intCast(sumRows(&grid) % 200 + row[1] + n + grid[1][2]);
+            }
+            """);
+        // Task #152 (std.crypto.blake3's `cvs: [][8]u32`): a `[][3]u8` is a slice of the flat element whose `.len` counts
+        // rows; slicing `grid[1..3]` advances whole rows, and a `|*r|` capture is the row pointer. zig returns 132.
+        cs.ShouldContain("internal static unsafe uint sumRows(ConstSlice<byte> rows)");
+        cs.ShouldContain("Slice<byte> mid = new Slice<byte>(grid + 1 * 3, unchecked((ulong)(3 - 1)));");
+        cs.ShouldContain("byte* r = rows.Ptr + __i * 3;\n            r[1] += (byte)(1);");
+    }
+
+    [Fact]
+    public void A_three_dimensional_array_splices_named_rows_and_copies_a_plane()
+    {
+        var cs = EmitZig("""
+            const S = struct { r: [2]u8 };
+            pub fn main() u8 {
+                const s = S{ .r = .{ 7, 8 } };
+                var cube: [2][2][2]u8 = .{ .{ .{ 1, 2 }, .{ 3, 4 } }, .{ s.r, .{ 5, 6 } } };
+                cube[1][0][1] += 1;
+                const plane = cube[1];
+                return cube[1][0][1] * 10 + cube[0][1][0] + plane[1][1] + s.r[1];
+            }
+            """);
+        // Task #152: a row naming an array (`s.r`) is spliced in as reads of its elements, and `const plane = cube[1];`
+        // copies the plane's whole flat run (4 bytes, not 2 row pointers). zig returns 107.
+        cs.ShouldContain("byte* cube = stackalloc byte[]{ 1, 2, 3, 4, s.r[0], s.r[1], 5, 6 };");
+        cs.ShouldContain("byte* plane = stackalloc byte[4];");
+    }
+
+    [Fact]
+    public void A_multi_dimensional_literal_row_from_a_call_is_not_supported_yet()
+    {
+        var ex = Should.Throw<CompileException>(() => EmitZig("""
+            fn mk() [3]u8 {
+                return .{ 1, 2, 3 };
+            }
+            pub fn main() u8 {
+                const g = [2][3]u8{ mk(), .{ 4, 5, 6 } };
+                return g[0][1] + g[1][2];
+            }
+            """));
+        // Task #152: a row that is neither a literal nor a named array is not spliced in yet. zig returns 8.
+        ex.Message.ShouldContain("a row must be a literal `.{ … }` or name an array");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

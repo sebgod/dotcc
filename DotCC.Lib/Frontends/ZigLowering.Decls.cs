@@ -1376,6 +1376,29 @@ internal sealed partial class ZigLowering
         }
         var elems = LowerArrayElems(posItems, arr.Element);
         var arrType = arr.Count is null ? new CType.Array(arr.Element, posItems.Count) : arr;
+        // A multi-dimensional literal (`.{ .{ 1, 2, 3 }, .{ 4, 5, 6 } }` at a `[2][3]u8`, task #152) is one flat run of the
+        // innermost element, as the array is laid out and indexed (`g[1][0]` is `(g + 1 * 3)[0]`): each row literal, itself
+        // already flat, is spliced in. A row of array pointers was what it lowered to before, which did not build.
+        // A row NAMING an array (`.{ row, .{ 4, 5, 6 } }`) is spliced in as reads of its flat elements, a copy by value.
+        if (arr.Element.Unqualified is CType.Array rowType)
+        {
+            var flat = new List<CExpr>();
+            var rowCount = FlatElementCount(rowType);
+            foreach (var row in elems)
+            {
+                if (row is StackArray literalRow) { flat.AddRange(literalRow.Elems); continue; }
+                if (row is not (VarRef or Member or DotCC.Ir.Index))
+                {
+                    throw new IrUnsupportedException(
+                        "zig multi-dimensional array literal: a row must be a literal `.{ … }` or name an array (a local, field or element)");
+                }
+                for (var k = 0; k < rowCount; k++)
+                {
+                    flat.Add(new DotCC.Ir.Index(row, new LitInt(k.ToString(CultureInfo.InvariantCulture), k) { Type = CType.Int }) { Type = arr.FlatElement });
+                }
+            }
+            return new StackArray(arr.FlatElement, flat) { Type = arrType };
+        }
         return new StackArray(arr.Element, elems) { Type = arrType };
     }
 
@@ -2400,6 +2423,12 @@ internal sealed partial class ZigLowering
             $"expected a slice, array, or `&array` operand, got {e.Type.Describe()}"),
     };
 
+    /// <summary>The number of innermost elements in one <paramref name="array"/> (a row of a multi-dimensional array),
+    /// which needs every dimension comptime-known.</summary>
+    private static int FlatElementCount(CType.Array array)
+        => (array.Count ?? throw new IrUnsupportedException($"zig `{array.Describe()}`: a row of a slice or array needs a comptime-known length"))
+           * (array.Element.Unqualified is CType.Array inner ? FlatElementCount(inner) : 1);
+
     /// <summary>A length literal (<c>usize</c>).</summary>
     private static LitInt ZigLen(int n) => new(n.ToString(CultureInfo.InvariantCulture), n) { Type = CType.ULong };
 
@@ -2441,7 +2470,12 @@ internal sealed partial class ZigLowering
             default:
                 throw new IrUnsupportedException($"cannot slice a {baseExpr.Type.Describe()} (need a slice, pointer, or array)");
         }
-        var ptr = new Binary(BinOp.Add, basePtr, lo) { Type = new CType.Pointer(element) };
+        // A slice of ARRAYS (`grid[1..3]` of a `[4][3]u8`, task #152) views rows of one flat run: `lo` rows are
+        // `lo * N` elements past the base (N the row's flat element count); the length still counts rows.
+        var loOffset = element.Unqualified is CType.Array rowArray
+            ? new Binary(BinOp.Mul, lo, new LitInt(FlatElementCount(rowArray).ToString(CultureInfo.InvariantCulture), FlatElementCount(rowArray)) { Type = CType.Int }) { Type = lo.Type }
+            : lo;
+        var ptr = new Binary(BinOp.Add, basePtr, loOffset) { Type = new CType.Pointer(element) };
         CExpr len;
         if (hi is not null)
         {

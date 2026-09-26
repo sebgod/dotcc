@@ -61,6 +61,9 @@ internal sealed class CSharpTarget : ITarget
         // A Zig slice `[]T` → the runtime `Slice<T>` fat-pointer value type; `[]const T`
         // (a const-qualified element) → `ConstSlice<T>`. The element is rendered unqualified
         // (the const lives in the slice type's identity, not a C# `const`).
+        // A slice of ARRAYS (`[][8]u32`, task #152) views rows of one flat run, so it is a slice of the innermost
+        // element (a pointer is no C# type argument); `.Len` still counts rows, and `s[i]` is `s.Ptr + i * N`.
+        CType.Slice { Element.Unqualified: CType.Array rows } s => (s.Element.IsConst ? "ConstSlice<" : "Slice<") + RenderType(rows.FlatElement.Unqualified) + ">",
         CType.Slice s => (s.Element.IsConst ? "ConstSlice<" : "Slice<") + RenderType(s.Element.Unqualified) + ">",
         // A Zig `std.mem.Allocator` → the runtime `Allocator` fat-pointer value type
         // (Milestone F). The concrete `FixedBufferAllocator` is a `CType.Named` (renders its name).

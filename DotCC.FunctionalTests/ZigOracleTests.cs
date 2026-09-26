@@ -7102,6 +7102,43 @@ public sealed class ZigOracleTests
             "    sel[1] = 7;\n" +
             "    return fallback[0] * 10 + w[1] + got[0] + sel[1];\n" +
             "}\n", 58, "" },
+        // Task #152: a multi-dimensional array literal, element update and indexing.
+        new object[] { "multi_dimensional_array_literal",
+            "pub fn main() u8 {\n" +
+            "    var g: [2][3]u8 = .{ .{ 1, 2, 3 }, .{ 4, 5, 6 } };\n" +
+            "    g[1][0] += 10;\n" +
+            "    const h = [2][2]u8{ .{ 7, 8 }, .{ 9, 1 } };\n" +
+            "    return g[1][0] + g[0][2] + h[1][0];\n" +
+            "}\n", 26, "" },
+        // Task #152: slices of arrays: `&grid` and `grid[1..3]` as `[][3]u8`, value and pointer row captures, `.len`.
+        new object[] { "slice_of_arrays",
+            "fn sumRows(rows: []const [3]u8) u32 {\n" +
+            "    var s: u32 = 0;\n" +
+            "    for (rows) |r| s += r[0] + r[1] * 2 + r[2] * 3;\n" +
+            "    return s;\n" +
+            "}\n" +
+            "fn bump(rows: [][3]u8) void {\n" +
+            "    for (rows) |*r| r[1] += 1;\n" +
+            "    rows[0][2] = 9;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var grid: [4][3]u8 = .{ .{ 1, 2, 3 }, .{ 4, 5, 6 }, .{ 7, 8, 9 }, .{ 0, 0, 1 } };\n" +
+            "    const mid = grid[1..3];\n" +
+            "    bump(mid);\n" +
+            "    const row: [3]u8 = mid[1];\n" +
+            "    const n = mid.len;\n" +
+            "    return @intCast(sumRows(&grid) % 200 + row[1] + n + grid[1][2]);\n" +
+            "}\n", 132, "" },
+        // Task #152: a three-dimensional array with a spliced named row and a copied plane.
+        new object[] { "three_dimensional_array",
+            "const S = struct { r: [2]u8 };\n" +
+            "pub fn main() u8 {\n" +
+            "    const s = S{ .r = .{ 7, 8 } };\n" +
+            "    var cube: [2][2][2]u8 = .{ .{ .{ 1, 2 }, .{ 3, 4 } }, .{ s.r, .{ 5, 6 } } };\n" +
+            "    cube[1][0][1] += 1;\n" +
+            "    const plane = cube[1];\n" +
+            "    return cube[1][0][1] * 10 + cube[0][1][0] + plane[1][1] + s.r[1];\n" +
+            "}\n", 107, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

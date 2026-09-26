@@ -1641,7 +1641,9 @@ internal sealed class CSharpBackend
             case SliceNew sn:
             {
                 var name = sn.Const ? "ConstSlice" : "Slice";
-                return ($"new {name}<{Cs(sn.Element.Unqualified)}>({Expr(sn.Ptr)}, {Coerced(sn.Len, CType.ULong)})", PPrimary);
+                // A slice of arrays is a slice of the flat element (see CSharpTarget, task #152).
+                var snElement = sn.Element.Unqualified is CType.Array snRows ? snRows.FlatElement.Unqualified : sn.Element.Unqualified;
+                return ($"new {name}<{Cs(snElement)}>({Expr(sn.Ptr)}, {Coerced(sn.Len, CType.ULong)})", PPrimary);
             }
             // A Zig allocator `a.alloc(T, n)` (Milestone F). Receiver null → the DEVIRTUALIZED
             // C-heap default: a direct `ZigAlloc.AllocCHeap<T>(n, oom)` (→ Libc.malloc, no vtable).
@@ -2158,6 +2160,9 @@ internal sealed class CSharpBackend
             // &fn where fn is a function already decays to `&fn` in the VarRef
             // case — don't emit a second `&`.
             case UnOp.AddrOf when u.Operand is VarRef { Sym.Kind: SymKind.Func }: return Render(u.Operand);
+            // The address of a ROW of a multi-dimensional array (`for (rows) |*r|` over a `[][3]u8`, task #152): a pointer to
+            // an array is the array's own flat element pointer, which the row subscript (`base + i * N`) already is.
+            case UnOp.AddrOf when u.Operand is Index { Type.Unqualified: CType.Array }: return Render(u.Operand);
             // &global — a file-scope global / static local lowers to a C# static
             // field, which is a MOVEABLE variable (`&field` is CS0212). Take its
             // address via Unsafe.AsPointer: dotcc's globals are unmanaged value

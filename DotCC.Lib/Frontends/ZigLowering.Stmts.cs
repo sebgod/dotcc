@@ -424,20 +424,28 @@ internal sealed partial class ZigLowering
     /// into it.</summary>
     private static CStmt ArrayValueCopyDecl(Symbol sym, CType.Array arr, long count, CExpr source)
     {
-        var countLit = new LitInt(count.ToString(CultureInfo.InvariantCulture), count) { Type = CType.Int };
+        // A multi-dimensional array (`const plane = cube[1];` of a `[2][2][2]u8`, task #152) is one flat run: its storage
+        // and its copy count the innermost elements.
+        var flatCount = count * RowFlatCount(arr);
+        var countLit = new LitInt(flatCount.ToString(CultureInfo.InvariantCulture), flatCount) { Type = CType.Int };
         var target = new VarRef(sym) { Type = arr, IsLValue = true };
         return new Seq(new List<CStmt>
         {
-            new ArrayDecl(sym, arr.Element, countLit, null),
+            new ArrayDecl(sym, arr.FlatElement, countLit, null),
             new ExprStmt(ArrayElementCopy(target, source, arr, count)),
         });
     }
 
+    /// <summary>The innermost elements per outer element of <paramref name="arr"/>: 1 for a plain array, the row's flat
+    /// count for a multi-dimensional one.</summary>
+    private static long RowFlatCount(CType.Array arr) => arr.Element.Unqualified is CType.Array row ? FlatElementCount(row) : 1;
+
     /// <summary><paramref name="count"/> elements of <paramref name="source"/> copied into <paramref name="target"/>
-    /// (both arrays, rendered as their element pointers).</summary>
+    /// (both arrays, rendered as their element pointers; a multi-dimensional one copies its flat run).</summary>
     private static CExpr ArrayElementCopy(CExpr target, CExpr source, CType.Array arr, long count)
     {
-        var elem = arr.Element.Unqualified;
+        var elem = arr.FlatElement.Unqualified;
+        count *= RowFlatCount(arr);
         var len = new LitInt(count.ToString(CultureInfo.InvariantCulture), count) { Type = CType.ULong };
         return new ZigMemCall("CopyForwards", elem, new List<CExpr>
         {
