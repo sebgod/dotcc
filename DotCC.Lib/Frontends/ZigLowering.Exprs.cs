@@ -2082,6 +2082,18 @@ internal sealed partial class ZigLowering
                 return new ZigListCall(recv, "Insert", new List<CExpr> { a, at, item, OomLit() })
                 { Type = new CType.ErrorUnion(CType.Void) };
             }
+            case "insertSlice":
+            {
+                // task #138: the tail moves up by `slice.len`; the slice coerces as appendSlice's does.
+                RequireListArgs(methodName, argItems, 3, "(alloc, index, slice)");
+                var a = LowerListAllocatorArg(methodName, argItems[0]);
+                var at = LowerExprSink(argItems[1], CType.ULong);
+                var sliceType = new CType.Slice(elem);
+                var sliceArg = LowerExprSink(argItems[2], sliceType);
+                var s = sliceArg.Type?.Unqualified is CType.Slice ? sliceArg : CoerceToSlice(sliceArg, sliceType);
+                return new ZigListCall(recv, "InsertSlice", new List<CExpr> { a, at, s, OomLit() })
+                { Type = new CType.ErrorUnion(CType.Void) };
+            }
             case "orderedRemove" or "swapRemove":
             {
                 RequireListArgs(methodName, argItems, 1, "(index)");
@@ -2117,7 +2129,7 @@ internal sealed partial class ZigLowering
             }
             default:
                 throw new IrUnsupportedException(
-                    $"zig std.ArrayList has no modeled member '{methodName}' (curated: append, appendSlice, insert, pop, "
+                    $"zig std.ArrayList has no modeled member '{methodName}' (curated: append, appendSlice, insert, insertSlice, pop, "
                     + "orderedRemove, swapRemove, getLast, ensureTotalCapacity, ensureUnusedCapacity, "
                     + "appendAssumeCapacity, shrinkRetainingCapacity, deinit, clearRetainingCapacity, items, capacity)");
         }

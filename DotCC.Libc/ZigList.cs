@@ -120,6 +120,22 @@ public struct ZigList<T> where T : unmanaged
         return ErrUnion<Unit>.Ok(default);
     }
 
+    /// <summary>zig <c>list.insertSlice(alloc, i, s)</c> — insert every element of <paramref name="s"/> at
+    /// <paramref name="i"/>, shifting the tail up by <c>s.len</c>. Like zig, the slice must not alias the list.</summary>
+    public unsafe ErrUnion<Unit> InsertSlice(Allocator a, ulong i, ConstSlice<T> s, ushort oom)
+    {
+        if (i > Len) { throw new System.IndexOutOfRangeException("zig ArrayList.insertSlice: index out of bounds"); }
+        var ok = EnsureCap(a, Len + s.Len, oom);
+        if (ok.IsErr) { return ok; }
+        var p = (T*)_ptr;
+        long tail = (long)((Len - i) * (ulong)sizeof(T));
+        System.Buffer.MemoryCopy(p + i, p + i + s.Len, tail, tail);
+        long bytes = (long)(s.Len * (ulong)sizeof(T));
+        System.Buffer.MemoryCopy(s.Ptr, p + i, bytes, bytes);
+        Len += s.Len;
+        return ErrUnion<Unit>.Ok(default);
+    }
+
     /// <summary>zig <c>list.orderedRemove(i)</c> — remove and return element <paramref name="i"/>, shifting the tail down.</summary>
     public unsafe T OrderedRemove(ulong i)
     {

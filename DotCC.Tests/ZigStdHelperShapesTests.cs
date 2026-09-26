@@ -3832,6 +3832,34 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void Curated_array_list_insert_slice_takes_an_index_and_a_slice()
+    {
+        var cs = EmitZig("""
+            const std = @import("std");
+            pub fn main() !u8 {
+                var buf: [256]u8 = undefined;
+                var fba = std.heap.FixedBufferAllocator.init(&buf);
+                const gpa = fba.allocator();
+                var l: std.ArrayList(u16) = .empty;
+                defer l.deinit(gpa);
+                try l.appendSlice(gpa, &.{ 1, 5 });
+                try l.insertSlice(gpa, 1, &.{ 2, 3, 4 });
+                try l.insertSlice(gpa, 0, &.{0});
+                try l.insertSlice(gpa, l.items.len, &.{ 6, 7 });
+                const more = [_]u16{ 8, 9 };
+                try l.insertSlice(gpa, 8, &more);
+                var acc: u16 = 0;
+                for (l.items) |v| acc = acc * 3 +% v;
+                return @truncate(acc +% @as(u16, @intCast(l.items.len)));
+            }
+            """);
+        // Task #138: `list.insertSlice(gpa, i, items)` maps onto the runtime ZigList, its slice argument coerced as
+        // appendSlice's is (an anonymous list literal's address, `&arr`). zig returns 175.
+        cs.ShouldContain("_ = ErrUnion.Try(l.InsertSlice(ZigAlloc.FbaAllocator(&fba), 1, new Slice<ushort>(__cl1, 3UL), 1));");
+        cs.ShouldContain("_ = ErrUnion.Try(l.InsertSlice(ZigAlloc.FbaAllocator(&fba), l.Items.Len, new Slice<ushort>(__cl3, 2UL), 1));");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

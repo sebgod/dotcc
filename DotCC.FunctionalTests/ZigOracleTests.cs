@@ -8183,6 +8183,28 @@ public sealed class ZigOracleTests
             "    return @intFromEnum(a) * 10 + @intFromEnum(b) + @as(u8, if (c == null) 100 else 0);\n" +
             "}\n", 157);
 
+    // Task #138: curated std.ArrayList insertSlice at the front, the middle and the end.
+    [Fact]
+    public void Dotcc_matches_zig_std_array_list_insert_slice() =>
+        MatchesZigWithRealStd("array_list_insert_slice",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() !u8 {\n" +
+            "    var buf: [256]u8 = undefined;\n" +
+            "    var fba = std.heap.FixedBufferAllocator.init(&buf);\n" +
+            "    const gpa = fba.allocator();\n" +
+            "    var l: std.ArrayList(u16) = .empty;\n" +
+            "    defer l.deinit(gpa);\n" +
+            "    try l.appendSlice(gpa, &.{ 1, 5 });\n" +
+            "    try l.insertSlice(gpa, 1, &.{ 2, 3, 4 });\n" +
+            "    try l.insertSlice(gpa, 0, &.{0});\n" +
+            "    try l.insertSlice(gpa, l.items.len, &.{ 6, 7 });\n" +
+            "    const more = [_]u16{ 8, 9 };\n" +
+            "    try l.insertSlice(gpa, 8, &more);\n" +
+            "    var acc: u16 = 0;\n" +
+            "    for (l.items) |v| acc = acc * 3 +% v;\n" +
+            "    return @truncate(acc +% @as(u16, @intCast(l.items.len)));\n" +
+            "}\n", 175);
+
     // Task #139: std.hash.Fnv1a_64 from real std.
     [Fact]
     public void Dotcc_matches_zig_std_fnv1a_64() =>
