@@ -384,8 +384,14 @@ internal sealed partial class IrBuilder
     /// the field takes that mangled name and an alias symbol is registered so
     /// in-function uses resolve to it; otherwise it's a file-scope name.</summary>
     private void BuildGlobalArr(Item typeItem, Item nameItem, Item? dimsItem, Item? initItem, string? csName)
+        => BuildGlobalArr(ResolveType(typeItem), nameItem, dimsItem, initItem, csName);
+
+    /// <summary><see cref="BuildGlobalArr(Item, Item, Item?, Item?, string?)"/> over an
+    /// already-resolved element type — the raw fn-ptr array declarator
+    /// (<c>Ret (*name[N])(params)</c>) computes its element type from the declarator,
+    /// not from a type item.</summary>
+    private void BuildGlobalArr(CType elem, Item nameItem, Item? dimsItem, Item? initItem, string? csName)
     {
-        var elem = ResolveType(typeItem);
         var name = Tok(nameItem);
         var dims = dimsItem is { } di ? TryConstDims(di) : null;
 
@@ -466,9 +472,12 @@ internal sealed partial class IrBuilder
     /// <summary>A block-scope <c>static T a[…]</c> — a pinned global field under a
     /// program-unique mangled name, with the statement itself emitting nothing.</summary>
     private CStmt BuildStaticLocalArr(Item typeItem, Item nameItem, Item? dimsItem, Item? initItem)
+        => BuildStaticLocalArr(ResolveType(typeItem), nameItem, dimsItem, initItem);
+
+    private CStmt BuildStaticLocalArr(CType elem, Item nameItem, Item? dimsItem, Item? initItem)
     {
         var csName = $"{_symbols.Escape(Tok(nameItem))}__s{_staticLocalSeq++}";
-        BuildGlobalArr(typeItem, nameItem, dimsItem, initItem, csName);
+        BuildGlobalArr(elem, nameItem, dimsItem, initItem, csName);
         return new DeclStmt(System.Array.Empty<LocalDecl>());
     }
 

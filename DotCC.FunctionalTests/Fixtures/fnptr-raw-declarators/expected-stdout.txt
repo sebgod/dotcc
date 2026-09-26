@@ -1,0 +1,16 @@
+hook is NULL
+hook(5) = -5, op(5) = 10, late(5) = 25
+hello from a void(*)(void)
+ops[0](7) = 14
+ops[1](7) = 49
+ops[2](7) = -7
+sparse[0] is set
+sparse[1] is NULL
+sparse[2] is NULL
+sparse[3] is NULL
+unset[1] is NULL
+apply_all(3) = 6
+counter() = 1
+counter() = 8
+counter() = 3
+math: 16 8
