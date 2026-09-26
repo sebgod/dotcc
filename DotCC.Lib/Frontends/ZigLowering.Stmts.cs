@@ -416,7 +416,9 @@ internal sealed partial class ZigLowering
 
     /// <summary>An array expression that NAMES existing storage (a local, a field, an element): read as a value it
     /// must be copied, since its C# rep is the storage's element pointer.</summary>
-    private static bool IsArrayLvalue(CExpr e) => e is VarRef or Member or DotCC.Ir.Index || e is Paren p && IsArrayLvalue(p.Inner);
+    /// <remarks>A conditional selects one of two arrays (an optional array's <c>x orelse fallback</c>, task #151): binding it
+    /// without a copy would alias whichever it picked, so it counts too (a fresh arm is merely copied once more).</remarks>
+    private static bool IsArrayLvalue(CExpr e) => e is VarRef or Member or DotCC.Ir.Index or CondExpr || e is Paren p && IsArrayLvalue(p.Inner);
 
     /// <summary>Declare <paramref name="sym"/> as a fresh <c>[N]T</c> local and copy <paramref name="source"/>'s elements
     /// into it.</summary>

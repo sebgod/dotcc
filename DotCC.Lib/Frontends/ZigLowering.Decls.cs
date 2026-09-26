@@ -1904,6 +1904,10 @@ internal sealed partial class ZigLowering
             // from a `?KV` function, task #100): the literal is the payload, as zig result-locates it through the optional.
             case Zig.AnonStructInit when sink?.Unqualified is CType.Optional { Inner.Unqualified: CType.Named optPayload }:
                 return LowerStructInit(expr, optPayload);
+            // `.{ 1, 2, 3 }` at an optional ARRAY sink (`?[3]u16`, task #151): the list is the array payload; the optional
+            // array's value type takes the array in by copying its elements.
+            case Zig.AnonStructInit when sink?.Unqualified is CType.Optional { Inner.Unqualified: CType.Array optArrayPayload }:
+                return LowerStructInit(expr, optArrayPayload);
             case Zig.AnonStructInit:
             case Zig.AnonStructInitEmpty:
                 return LowerStructInit(expr, sink);

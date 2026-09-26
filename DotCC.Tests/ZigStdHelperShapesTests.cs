@@ -4445,6 +4445,101 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void An_optional_array_is_a_value_type_with_a_nullable_surface()
+    {
+        var cs = EmitZig("""
+            const Options = struct { key: ?[4]u8 = null, n: u8 = 1 };
+            fn sum(o: Options) u8 {
+                var s: u8 = o.n;
+                if (o.key) |k| {
+                    for (k) |b| s +%= b;
+                }
+                return s;
+            }
+            pub fn main() u8 {
+                var local: ?[3]u16 = null;
+                var t: u16 = 0;
+                if (local == null) t += 100;
+                local = .{ 1, 2, 3 };
+                if (local) |arr| t += arr[2];
+                const a = sum(.{});
+                const b = sum(.{ .key = .{ 1, 2, 3, 4 }, .n = 5 });
+                return a + b + @as(u8, @intCast(t));
+            }
+            """);
+        // Task #151 (std.crypto.blake3's `Options.key: ?[key_length]u8 = null`): an array lowers to a pointer and `T*?` is
+        // no C# type, so `?[N]T` is a generated value type: the elements in a fixed buffer beside a has-value flag, with
+        // `HasValue`, `Value` (the element pointer), a copying conversion from `T*` (null is none) and `== null`. zig
+        // returns 119.
+        cs.ShouldContain("public ZigOptArray_byte_4 key;");
+        cs.ShouldContain("ZigOptArray_ushort_3 local = null;");
+        cs.ShouldContain("ushort* arr = local.Value;");
+        cs.ShouldContain("unsafe struct ZigOptArray_ushort_3\n{\n    public fixed ushort Buf[3];\n    public bool HasValue;");
+    }
+
+    [Fact]
+    public void An_optional_array_returns_unwraps_and_takes_an_orelse_fallback()
+    {
+        var cs = EmitZig("""
+            fn maybe(n: u8) ?[2]u32 {
+                if (n == 0) return null;
+                return .{ n, n * 2 };
+            }
+            fn first(o: ?[2]u32) u32 {
+                return if (o) |a| a[0] + a[1] else 7;
+            }
+            pub fn main() u8 {
+                const x = maybe(3);
+                const y = maybe(0);
+                var copy = x;
+                copy = .{ 100, 100 };
+                const z = x.?;
+                const flag: u32 = if (y != null) 1000 else 0;
+                const fallback = [2]u32{ 4, 5 };
+                const got = y orelse fallback;
+                return @intCast(first(x) + first(y) + z[1] + flag + (copy.?)[0] / 10 + got[0] * got[1]);
+            }
+            """);
+        // Task #151: `return null` / `return .{ … }` from a `?[2]u32` function, `x.?`, `y != null`, a value-form capture `if`,
+        // and `y orelse fallback` (C#'s `??` does not apply to the value type: a HasValue conditional, copied into `got`'s
+        // own storage as an array value is). zig returns 52.
+        cs.ShouldContain("ZigMem.CopyForwards<uint>(new Slice<uint>(got, 2UL), new ConstSlice<uint>((Cond.B(y.HasValue) ? y.Value : fallback), 2UL));");
+        cs.ShouldContain("ZigMem.CopyForwards<uint>(new Slice<uint>(z, 2UL), new ConstSlice<uint>(x.Value, 2UL));");
+    }
+
+    [Fact]
+    public void An_optional_array_of_structs_is_not_supported_yet()
+    {
+        var ex = Should.Throw<CompileException>(() => EmitZig("""
+            const S = struct { a: u8 };
+            pub fn main() u8 {
+                var o: ?[2]S = null;
+                o = .{ .{ .a = 1 }, .{ .a = 2 } };
+                return o.?[1].a;
+            }
+            """));
+        // Task #151: the elements live in a C# `fixed` buffer, which only primitives may fill. zig returns 2.
+        ex.Message.ShouldContain("zig optional array `?[2]S`: only an array of integers or floats is supported yet");
+    }
+
+    [Fact]
+    public void An_optional_array_orelse_over_a_call_is_not_supported_yet()
+    {
+        var ex = Should.Throw<CompileException>(() => EmitZig("""
+            fn maybe(n: u8) ?[2]u32 {
+                if (n == 0) return null;
+                return .{ n, n * 2 };
+            }
+            pub fn main() u8 {
+                const got = maybe(0) orelse [2]u32{ 4, 5 };
+                return @intCast(got[0] + got[1]);
+            }
+            """));
+        // Task #151: the conditional reads the optional twice, so its operand must be a plain name or field. zig returns 9.
+        ex.Message.ShouldContain("`orelse` on an optional array with a non-trivial left operand");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

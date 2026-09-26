@@ -40,6 +40,9 @@ internal sealed class CSharpTarget : ITarget
             + "<" + RenderType(v.Element) + ">",
         CType.ComplexType => "System.Numerics.Complex",
         CType.Float128Type => "Float128",
+        // A Zig optional ARRAY `?[N]T` (std.crypto.blake3's `Options.key: ?[key_length]u8`, task #151): an array lowers to
+        // a pointer and `T*?` is no C# type, so it is a generated value type with Nullable's surface (OptionalArrayTypesText).
+        CType.Optional { Inner.Unqualified: CType.Array optionalArray } => OptionalArrayName(optionalArray),
         // A Zig value optional `?T` → C# Nullable<T> (`T?`): null = none, `.?` = .Value,
         // `orelse` = `??`. (An optional POINTER `?*T` is a bare nullable `T*`, never this.)
         CType.Optional o => RenderType(o.Inner) + "?",
@@ -168,6 +171,66 @@ internal sealed class CSharpTarget : ITarget
         "long double" => "double",
         _ => throw new IrUnsupportedException("C# target has no spelling for primitive " + p.Name),
     };
+
+    /// <summary>The generated value types standing for zig optional arrays <c>?[N]T</c> (task #151), by name: the
+    /// element's C# spelling and the flat element count. Filled as types render; the backend emits one declaration per
+    /// entry once everything has rendered (<see cref="OptionalArrayTypesText"/>).</summary>
+    private readonly SortedDictionary<string, (string Element, int Count)> _optionalArrays = new(System.StringComparer.Ordinal);
+
+    /// <summary>The name of the value type standing for <c>?[N]T</c>, registering it for <see cref="OptionalArrayTypesText"/>.
+    /// Its elements are a <c>fixed</c> buffer, so the element must be a primitive C# allows there.</summary>
+    private string OptionalArrayName(CType.Array array)
+    {
+        var element = RenderType(array.FlatElement);
+        var spelled = "?[" + (array.Count?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "_") + "]" + array.Element.Describe();
+        if (!CSharpBackend.IsFixedBufferType(element))
+        {
+            throw new IrUnsupportedException(
+                $"zig optional array `{spelled}`: only an array of integers or floats is supported yet");
+        }
+        var count = FlatCount(array)
+            ?? throw new IrUnsupportedException($"zig optional array `{spelled}`: the array needs a comptime-known length");
+        var name = "ZigOptArray_" + element + "_" + count.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        _optionalArrays[name] = (element, count);
+        return name;
+    }
+
+    /// <summary>The flat element count of a (possibly nested) array, or null when a dimension is not comptime-known.</summary>
+    private static int? FlatCount(CType t) => t.Unqualified is CType.Array { Count: var n } a
+        ? n is int outer && FlatCount(a.Element) is int inner ? outer * inner : null
+        : 1;
+
+    /// <summary>One declaration per zig optional array type rendered so far (task #151): the elements inline in a
+    /// <c>fixed</c> buffer beside a has-value flag, behind the <c>HasValue</c> / <c>Value</c> surface the lowering reads
+    /// off a <c>Nullable</c>. <c>Value</c> is the element pointer (an array IS its element pointer here); a <c>T*</c>
+    /// converts in by copying the elements, a null one to none (so <c>x = null</c> and a <c>null</c> field default need no
+    /// rewrite); <c>x == null</c> tests for none, the only comparison zig allows an optional array.</summary>
+    internal string OptionalArrayTypesText()
+    {
+        var sb = new System.Text.StringBuilder();
+        foreach (var (name, (element, count)) in _optionalArrays)
+        {
+            var bytes = $"sizeof({element}) * {count}";
+            sb.Append("/// <summary>zig `?[").Append(count).Append(']').Append(element).Append("`: the elements inline beside a has-value flag.</summary>\n")
+              .Append("unsafe struct ").Append(name).Append("\n{\n")
+              .Append("    public fixed ").Append(element).Append(" Buf[").Append(count).Append("];\n")
+              .Append("    public bool HasValue;\n")
+              .Append("    public ").Append(element).Append("* Value => HasValue ? (").Append(element)
+              .Append("*)System.Runtime.CompilerServices.Unsafe.AsPointer(ref this) : throw new System.InvalidOperationException(\"attempt to use null value\");\n")
+              .Append("    public static implicit operator ").Append(name).Append('(').Append(element).Append("* p)\n    {\n")
+              .Append("        var r = default(").Append(name).Append(");\n")
+              .Append("        if (p == null) { return r; }\n")
+              .Append("        System.Buffer.MemoryCopy(p, r.Buf, ").Append(bytes).Append(", ").Append(bytes).Append(");\n")
+              .Append("        r.HasValue = true;\n        return r;\n    }\n")
+              .Append("    public static bool operator ==(").Append(name).Append(" a, ").Append(element)
+              .Append("* b) => b == null ? !a.HasValue : throw new System.InvalidOperationException(\"zig compares an optional array only with null\");\n")
+              .Append("    public static bool operator !=(").Append(name).Append(" a, ").Append(element).Append("* b) => !(a == b);\n")
+              .Append("    public override bool Equals(object o) => false;\n")
+              .Append("    public override int GetHashCode() => HasValue ? 1 : 0;\n")
+              .Append("}\n\n");
+        }
+        return sb.ToString();
+    }
 }
 
 /// <summary>The .NET / C# backend's identifier policy: escape C# keywords with

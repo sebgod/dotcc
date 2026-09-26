@@ -7049,6 +7049,59 @@ public sealed class ZigOracleTests
             "pub fn main() u8 {\n" +
             "    return Kind(*const u8).size + Kind([*]const u8).size * 3 + Kind([]const u8).size * 7 + kind(*u16) + kind([*]u16) * 2;\n" +
             "}\n", 78, "" },
+        // Task #151: `?[N]T` as a struct field with a null default, a local assigned null and a list, `== null` and a capture.
+        new object[] { "optional_array_field_and_local",
+            "const Options = struct { key: ?[4]u8 = null, n: u8 = 1 };\n" +
+            "fn sum(o: Options) u8 {\n" +
+            "    var s: u8 = o.n;\n" +
+            "    if (o.key) |k| {\n" +
+            "        for (k) |b| s +%= b;\n" +
+            "    }\n" +
+            "    return s;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var local: ?[3]u16 = null;\n" +
+            "    var t: u16 = 0;\n" +
+            "    if (local == null) t += 100;\n" +
+            "    local = .{ 1, 2, 3 };\n" +
+            "    if (local) |arr| t += arr[2];\n" +
+            "    const a = sum(.{});\n" +
+            "    const b = sum(.{ .key = .{ 1, 2, 3, 4 }, .n = 5 });\n" +
+            "    return a + b + @as(u8, @intCast(t));\n" +
+            "}\n", 119, "" },
+        // Task #151: `?[N]T` returned, passed, copied, unwrapped with `.?`, compared with null and given an `orelse` fallback.
+        new object[] { "optional_array_return_and_orelse",
+            "fn maybe(n: u8) ?[2]u32 {\n" +
+            "    if (n == 0) return null;\n" +
+            "    return .{ n, n * 2 };\n" +
+            "}\n" +
+            "fn first(o: ?[2]u32) u32 {\n" +
+            "    return if (o) |a| a[0] + a[1] else 7;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const x = maybe(3);\n" +
+            "    const y = maybe(0);\n" +
+            "    var copy = x;\n" +
+            "    copy = .{ 100, 100 };\n" +
+            "    const z = x.?;\n" +
+            "    const flag: u32 = if (y != null) 1000 else 0;\n" +
+            "    const fallback = [2]u32{ 4, 5 };\n" +
+            "    const got = y orelse fallback;\n" +
+            "    return @intCast(first(x) + first(y) + z[1] + flag + (copy.?)[0] / 10 + got[0] * got[1]);\n" +
+            "}\n", 52, "" },
+        // Task #151: `var got = y orelse fallback;` is a copy, so writing `got` leaves `fallback` alone (it aliased before).
+        new object[] { "optional_array_orelse_copies",
+            "pub fn main() u8 {\n" +
+            "    const y: ?[2]u8 = null;\n" +
+            "    const fallback = [2]u8{ 4, 5 };\n" +
+            "    var got = y orelse fallback;\n" +
+            "    got[0] = 9;\n" +
+            "    const w = [2]u8{ 1, 2 };\n" +
+            "    const c = true;\n" +
+            "    var sel = if (c) w else fallback;\n" +
+            "    sel[1] = 7;\n" +
+            "    return fallback[0] * 10 + w[1] + got[0] + sel[1];\n" +
+            "}\n", 58, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

@@ -838,6 +838,18 @@ internal sealed partial class ZigLowering
                 var right = left.Type.Unqualified is CType.Optional { Inner: var fallbackSink }
                     ? LowerExprSink(o.Arg2, fallbackSink)
                     : LowerExpr(o.Arg2);
+                // An optional ARRAY (task #151) is a generated value type, which C#'s `??` does not apply to: its payload
+                // (the element pointer) when it has one, else the fallback array.
+                if (left.Type.Unqualified is CType.Optional { Inner.Unqualified: CType.Array } optArray)
+                {
+                    if (!IsSimpleReeval(left))
+                    {
+                        throw new IrUnsupportedException(
+                            "zig `orelse` on an optional array with a non-trivial left operand not lowered yet (it would be double-evaluated)");
+                    }
+                    var hasValue = new Member(left, "HasValue", false) { Type = CType.Bool };
+                    return new CondExpr(hasValue, new Member(left, "Value", false) { Type = optArray.Inner }, right) { Type = optArray.Inner };
+                }
                 if (left.Type.Unqualified is CType.Optional opt)
                 {
                     return new NullCoalesce(left, right) { Type = opt.Inner };

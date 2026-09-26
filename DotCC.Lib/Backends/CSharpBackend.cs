@@ -39,7 +39,7 @@ internal sealed class CSharpBackend
     /// type-spelling map (<see cref="ITarget"/>, the seam a second target slots
     /// into). The statement / expression emitter in this class is still the
     /// C#-specific one.</summary>
-    private readonly ITarget _target = new CSharpTarget();
+    private readonly CSharpTarget _target = new();
 
     /// <summary>Project a neutral <see cref="CType"/> onto the target's type
     /// spelling — replaces the type model's old baked-in <c>CsType</c> property.</summary>
@@ -144,6 +144,8 @@ internal sealed class CSharpBackend
         var structs = new StringBuilder();
         foreach (var t in unit.Types) { structs.Append(cg.StructText(t)); }
         foreach (var en in unit.Enums) { structs.Append(cg.EnumText(en)); }
+        // The zig optional-array value types (task #151), last: every type above has rendered by now.
+        structs.Append(cg._target.OptionalArrayTypesText());
 
         // Zig test-mode manifest (empty for a normal build): each test's display name paired with the
         // emitted method name (TargetName — the same spelling `Func` above prints at line ~411), so the
@@ -405,7 +407,7 @@ internal sealed class CSharpBackend
     /// <summary>C# permits a <c>fixed</c> buffer only of these primitive element
     /// types — every other array member must go through an <c>[InlineArray]</c>
     /// wrapper instead.</summary>
-    private static bool IsFixedBufferType(string cs) => cs is
+    internal static bool IsFixedBufferType(string cs) => cs is
         "bool" or "byte" or "sbyte" or "short" or "ushort" or "int" or "uint"
         or "long" or "ulong" or "char" or "float" or "double";
 
