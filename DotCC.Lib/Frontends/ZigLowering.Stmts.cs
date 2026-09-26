@@ -1101,6 +1101,7 @@ internal sealed partial class ZigLowering
         {
             _ir.ComptimeGlobals[sym2] = new IrModule.CtBool(comptimeBool);
         }
+        if (typeItem is not null) { _annotatedLocals.Add(sym2); }
         RecordValueBits(sym2,
             typeItem is { } ti ? DeclaredBitsOfTypeArg(ti) : DeclaredBitsOfValue(initExpr) ?? DeclaredBitsOfLowered(init),
             typeItem is { } te ? ElemBitsOfTypeAst(te) : DeclaredElemBitsOfValue(initExpr));
@@ -3356,9 +3357,40 @@ internal sealed partial class ZigLowering
         var op => throw new IrUnsupportedException($"zig: assignment operator `{op}` in an if arm"),
     };
 
+    /// <summary>The locals declared with a type annotation (<c>var a: u8 = 0;</c>): their zig type is the spelled one, so
+    /// a store into one is a certain integer sink (task #167). An inferred local's lowered type may be C's, not zig's.</summary>
+    private readonly HashSet<Symbol> _annotatedLocals = new();
+
+    /// <summary>Reject a plain assignment that narrows a runtime integer (task #167): <c>a = x;</c> with <c>a: u8</c> and
+    /// <c>x: u16</c> is zig's "expected type 'u8', found 'u16'". The target's zig type must be certain: an annotated local,
+    /// a struct field or an array element (their lowered types are the spelled ones, a generic's carrier at worst, which
+    /// is never narrower).</summary>
+    private void RejectNarrowingStore(Item lhsItem, Item rhsItem)
+    {
+        CExpr target;
+        switch (lhsItem.Content)
+        {
+            case Zig.Ident id when _symbols.Resolve(Tok(id.Arg0)) is { } local && _annotatedLocals.Contains(local):
+                RejectIntegerNarrowing(rhsItem, local.Type, _valueBits.TryGetValue(local, out var localBits) ? localBits : null);
+                return;
+            case Zig.Field or Zig.Index:
+                using (EnterThrowawayHoist()) { target = LowerExpr(lhsItem); }
+                break;
+            default:
+                return;
+        }
+        var targetBits = target is Member { Base.Type: var objType, Field: var field }
+                         && (objType?.Unqualified is CType.Pointer { Pointee: var pointee } ? pointee.Unqualified : objType?.Unqualified) is CType.Named owner
+                         && _structFieldBits.TryGetValue((owner.Name, field), out var fieldBits)
+            ? fieldBits
+            : (int?)null;
+        RejectIntegerNarrowing(rhsItem, target.Type, targetBits);
+    }
+
     private CStmt LowerAssignStmt(Item lhsItem, Item rhsItem)
         => TryAssignComptimeVar(lhsItem, null, rhsItem) ?? RejectConstStore(lhsItem) ?? Hoisted(() =>
         {
+            RejectNarrowingStore(lhsItem, rhsItem);
             if (lhsItem.Content is Zig.Ident lhs && Tok(lhs.Arg0) == "_")
             {
                 // `_ = attr;` / `_ = T;` over a comptime-only binding (a `field_attrs` entry or a type an `inline for` capture

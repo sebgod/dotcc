@@ -7506,6 +7506,27 @@ public sealed class ZigOracleTests
             "    const s = sext(-3);\n" +
             "    return @intCast(widen(200) - 100 + @as(u16, @intCast(toSigned(7))) + @as(u16, @intCast(s + 10)) + bump(255) + mix(1, 2));\n" +
             "}\n", 117, "" },
+        // Task #167: integer coercions zig allows into an argument, a field, an element and a local, and `usize + u8`.
+        new object[] { "integer_widening_stores",
+            "const S = struct { w: u32, b: [2]u16 };\n" +
+            "fn take(x: u32) u32 {\n" +
+            "    return x;\n" +
+            "}\n" +
+            "fn count() usize {\n" +
+            "    return 5;\n" +
+            "}\n" +
+            "fn f(a: u8) u8 {\n" +
+            "    var s = S{ .w = 0, .b = .{ 0, 0 } };\n" +
+            "    s.w = a;\n" +
+            "    s.b[1] = a;\n" +
+            "    var l: u16 = 0;\n" +
+            "    l = a;\n" +
+            "    const n = count() + a;\n" +
+            "    return @intCast(take(a) + s.w + s.b[1] + l + n);\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return f(7);\n" +
+            "}\n", 40, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

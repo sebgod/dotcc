@@ -5279,6 +5279,48 @@ public sealed class ZigStdHelperShapesTests
         cs.ShouldContain("internal static unsafe short toSigned(byte x)");
     }
 
+    [Theory]
+    [InlineData("fn g(v: u8) u8 {\n    return v;\n}\nfn f(x: u16) u8 {\n    return g(x);\n}\n", "expected type 'u8', found 'u16'")]
+    [InlineData("fn f(x: u16) u8 {\n    var a: u8 = 0;\n    a = x;\n    return a;\n}\n", "expected type 'u8', found 'u16'")]
+    [InlineData("const S = struct { b: u8 };\nfn f(x: u16) u8 {\n    var s = S{ .b = 0 };\n    s.b = x;\n    return s.b;\n}\n", "expected type 'u8', found 'u16'")]
+    [InlineData("fn f(x: u16) u8 {\n    var a = [_]u8{ 0, 0 };\n    a[1] = x;\n    return a[1];\n}\n", "expected type 'u8', found 'u16'")]
+    [InlineData("fn count() usize {\n    return 5;\n}\nfn f(x: i16) i64 {\n    return x + count();\n}\n", "incompatible types: 'i16' and 'u64'")]
+    public void A_runtime_integer_narrowed_into_an_argument_or_store_is_rejected(string functions, string message)
+    {
+        var ex = Should.Throw<CompileException>(() => EmitZig(functions + "pub fn main() void {}\n"));
+        // Task #167: a call argument, an annotated local, a struct field and an array element are integer sinks too, and a
+        // call whose return type spells its width (`usize`) is a certain peer, so `i16 + count()` is zig's incompatible pair.
+        ex.Message.ShouldContain("zig: " + message);
+    }
+
+    [Fact]
+    public void A_runtime_integer_widened_into_an_argument_or_store_is_allowed()
+    {
+        var cs = EmitZig(
+            "const S = struct { w: u32, b: [2]u16 };\n" +
+            "fn take(x: u32) u32 {\n" +
+            "    return x;\n" +
+            "}\n" +
+            "fn count() usize {\n" +
+            "    return 5;\n" +
+            "}\n" +
+            "fn f(a: u8) u8 {\n" +
+            "    var s = S{ .w = 0, .b = .{ 0, 0 } };\n" +
+            "    s.w = a;\n" +
+            "    s.b[1] = a;\n" +
+            "    var l: u16 = 0;\n" +
+            "    l = a;\n" +
+            "    const n = count() + a;\n" +
+            "    return @intCast(take(a) + s.w + s.b[1] + l + n);\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return f(7);\n" +
+            "}\n");
+        // Task #167: a u8 into a u32 parameter, a u32 field, a u16 element and a u16 local, and `usize + u8`, all fit. zig
+        // returns 40.
+        cs.ShouldContain("internal static unsafe uint take(uint x)");
+    }
+
     [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {

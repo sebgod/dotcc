@@ -1550,6 +1550,15 @@ internal sealed partial class ZigLowering
         _ => false,
     };
 
+    /// <summary>The width runtime parameter <paramref name="index"/> of <paramref name="fn"/> spells (<c>u11</c>, <c>usize</c>),
+    /// or null where it names a type (a generic's <c>T</c>), whose lowered carrier then stands in, never narrower.</summary>
+    private int? SpelledParamBits(Symbol fn, int index)
+    {
+        if (!_fnParamInfos.TryGetValue(fn, out var infos)) { return null; }
+        var runtime = infos.Where(p => !p.IsComptime).ToList();
+        return index < runtime.Count ? DeclaredBitsFromSpelling(runtime[index].TypeAst) : null;
+    }
+
     private CExpr BuildCall(Symbol sym, IReadOnlyList<Item> argItems, CExpr? receiver)
     {
         RecordRuntimeCall(sym);
@@ -1566,6 +1575,8 @@ internal sealed partial class ZigLowering
         {
             var pIndex = i + paramOffset;
             var paramSink = pIndex < fn.Params.Count ? fn.Params[pIndex] : null;
+            // A runtime integer wider than the parameter is zig's "expected type" error (task #167).
+            RejectIntegerNarrowing(argItems[i], paramSink, SpelledParamBits(sym, pIndex));
             var arg = LowerExprSink(argItems[i], paramSink);
             // `utf8Decode2(bytes[0..2].*)` (std.unicode): the comptime-length slice stands for its array copy (see the
             // `.*` lowering), and an array parameter is its element pointer, so the slice passes its `.Ptr`. A
@@ -2653,6 +2664,17 @@ internal sealed partial class ZigLowering
                 }
                 return (p.Signed, 64);
             }
+            // A call whose return type spells its width (`std.mem.indexOfMax` returns a `usize`, task #167). A comptime-only
+            // call folds to its value, which zig coerces by value, so it is not certain.
+            case Zig.CallArgs or Zig.CallNoArgs:
+            {
+                CExpr called;
+                using (EnterThrowawayHoist()) { called = LowerExpr(it); }
+                return called is Call { CalleeSym: { } callee } && _fnReturnBits.TryGetValue(callee, out var returnBits)
+                       && RuntimeInt(called.Type) is { } rp
+                    ? (rp.Signed, returnBits)
+                    : null;
+            }
             case Zig.BuiltinCall b when Tok(b.Arg0) == "@as" && Flatten(b.Arg2) is [var asType, _]:
                 return RuntimeInt(LowerType(asType)) is { } asPrim ? (asPrim.Signed, DeclaredBitsOfTypeArg(asType) ?? asPrim.Bytes * 8) : null;
             default:
@@ -3151,7 +3173,7 @@ internal sealed partial class ZigLowering
     /// decides by the value) and the sink's, a plain integer whose width the caller passes where it is spelled.</summary>
     private void RejectIntegerNarrowing(Item valueItem, CType? sinkType, int? sinkBits)
     {
-        if (sinkType?.Unqualified is not CType.Prim { Integer: true, IsComptimeInt: false, Name: not "_Bool", Signed: var dstSigned, Bytes: var dstBytes }
+        if (sinkType?.Unqualified is not CType.Prim { Integer: true, IsComptimeInt: false, Name: not ("_Bool" or "char"), Signed: var dstSigned, Bytes: var dstBytes }
             || CertainZigInt(valueItem) is not var (srcSigned, srcBits))
         {
             return;
