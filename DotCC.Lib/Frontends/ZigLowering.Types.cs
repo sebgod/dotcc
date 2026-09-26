@@ -192,7 +192,8 @@ internal sealed partial class ZigLowering
         }
         // `const signedness = @typeInfo(ReturnType).int.signedness;` (std.mem.readVarInt, task #76) — a comptime enum
         // TAG, bound for a later `@Int(signedness, …)` / `==` / `switch`, and the decl dropped: it has no runtime value.
-        if (rhs.Content is Zig.Field { Arg2: var tagField } && Tok(tagField) is "signedness" or "layout"
+        // So is a pointer's `.size` where its class is known (`const s = @typeInfo(T).pointer.size;`, task #150).
+        if (rhs.Content is Zig.Field { Arg2: var tagField } && Tok(tagField) is "signedness" or "layout" or "size"
             && TryEvalComptimeTag(rhs, out var boundTag, out _))
         {
             _comptimeTagBindings[name] = boundTag;

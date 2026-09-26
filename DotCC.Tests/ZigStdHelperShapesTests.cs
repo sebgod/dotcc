@@ -4357,6 +4357,94 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_pointer_type_arguments_size_class_reaches_generic_bodies_and_keys_instances()
+    {
+        var cs = EmitZig("""
+            fn Kind(comptime T: type) type {
+                return struct {
+                    const size: u8 = switch (@typeInfo(T).pointer.size) {
+                        .one => 1,
+                        .many => 2,
+                        .slice => 3,
+                        .c => 4,
+                    };
+                };
+            }
+            fn kind(comptime T: type) u8 {
+                return switch (@typeInfo(T).pointer.size) {
+                    .one => 10,
+                    .many => 20,
+                    .slice => 30,
+                    .c => 40,
+                };
+            }
+            pub fn main() u8 {
+                return Kind(*const u8).size + Kind([*]const u8).size * 3 + Kind([]const u8).size * 7 + kind(*u16) + kind([*]u16) * 2;
+            }
+            """);
+        // Task #150: a `comptime T: type` pointer argument carries its spelled size class into the generic, so
+        // `@typeInfo(T).pointer.size` folds in a function body and in a reified struct's const; `*T` and `[*]T` lower to
+        // one C pointer yet key distinct instances. zig returns 78.
+        cs.ShouldContain("return (byte)(1 + 2 * 3 + 3 * 7 + kind__p_u16() + kind__p_u16_many() * 2);");
+        cs.ShouldContain("unsafe struct Kind__p_u8_many");
+    }
+
+    [Fact]
+    public void A_pointer_size_class_binds_as_a_comptime_const()
+    {
+        var cs = EmitZig("""
+            fn kind(comptime T: type) u8 {
+                const s = @typeInfo(T).pointer.size;
+                if (s == .many) return 20;
+                return 10;
+            }
+            pub fn main() u8 {
+                return kind(*u16) + kind([*]u16) * 2;
+            }
+            """);
+        // Task #150: `const s = @typeInfo(T).pointer.size;` binds the comptime tag (as `.signedness` does), so `s == .many`
+        // folds per instance. zig returns 50.
+        cs.ShouldContain("internal static unsafe byte kind__p_u16_many()\n    {\n        return 20;");
+    }
+
+    [Fact]
+    public void A_many_pointer_argument_takes_the_generics_own_compile_error()
+    {
+        var ex = Should.Throw<CompileException>(() => EmitZig("""
+            fn Rev(comptime T: type) type {
+                const ptr = switch (@typeInfo(T)) {
+                    .pointer => |p| p,
+                    else => @compileError("expected a pointer"),
+                };
+                switch (ptr.size) {
+                    .slice => {},
+                    .one => if (@typeInfo(ptr.child) != .array) @compileError("expected an array"),
+                    .many, .c => @compileError("bad size"),
+                }
+                const Element = ptr.child;
+                const Pointer = @Pointer(.many, ptr.attrs, Element, null);
+                return struct {
+                    ptr: Pointer,
+                    index: usize,
+                    pub fn next(self: *@This()) ?Element {
+                        if (self.index == 0) return null;
+                        self.index -= 1;
+                        return self.ptr[self.index];
+                    }
+                };
+            }
+            pub fn main() u8 {
+                var r: Rev([*]const u8) = undefined;
+                _ = &r;
+                return 0;
+            }
+            """));
+        // Task #150: `Rev([*]const u8)` sees `.many` and reaches std.mem.ReverseIterator's own `@compileError`, as zig
+        // does (zig: "error: bad size").
+        ex.Message.ShouldContain("bad size");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

@@ -5700,13 +5700,26 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Pointer_size_is_a_loud_cut_because_dotcc_collapses_pointer_kinds()
+    public void Pointer_size_is_a_loud_cut_where_no_spelling_gives_the_class()
     {
-        // `*T`, `[*]T` and `[*c]T` all lower to one C pointer, so the pointer SIZE class genuinely is
-        // not recoverable — cut rather than guessed at `.one`.
+        // `*T`, `[*]T` and `[*c]T` all lower to one C pointer, so where nothing SPELLED the class (a struct field read
+        // through `@TypeOf`) it is not recoverable: cut rather than guessed at `.one`. zig returns 98.
         var ex = Should.Throw<CompileException>(() => EmitZig(
-            "pub fn main() u8 { const s = @typeInfo(*u8).pointer.size; return if (s == .one) 42 else 0; }\n"));
+            "const H = struct { p: [*]const u8 };\n" +
+            "pub fn main() u8 {\n" +
+            "    const h = H{ .p = \"abc\" };\n" +
+            "    const s = @typeInfo(@TypeOf(h.p)).pointer.size;\n" +
+            "    return if (s == .many) h.p[1] else 0;\n" +
+            "}\n"));
         ex.Message.ShouldContain("pointer SIZE class");
+    }
+
+    [Fact]
+    public void Pointer_size_spelled_by_the_type_binds_as_a_comptime_tag()
+    {
+        // Task #150: `*u8` spells `.one`, so `const s = …pointer.size;` binds the tag and `s == .one` folds. zig returns 42.
+        var cs = EmitZig("pub fn main() u8 { const s = @typeInfo(*u8).pointer.size; return if (s == .one) 42 else 0; }\n");
+        cs.ShouldContain("return 42;");
     }
 
     [Fact]

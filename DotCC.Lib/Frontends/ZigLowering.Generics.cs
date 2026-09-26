@@ -447,8 +447,10 @@ internal sealed partial class ZigLowering
                 case ParamKind.ComptimeType:
                     // The declared width rides the seed: `f(u21)` and `f(u32)` resolve to the SAME
                     // CType, so without it they would key one instance and share one `bits` answer.
-                    typeSeeds.Add(new TypeSeed(g.Params[i].Name, argScope.LowerType(argItems[i]).Unqualified,
-                                               argScope.DeclaredBitsOfTypeArg(argItems[i])));
+                    // So does a pointer's spelled size class (task #150): `*T` and `[*]T` lower to one CType.
+                    var fnSeedType = argScope.LowerType(argItems[i]).Unqualified;
+                    typeSeeds.Add(new TypeSeed(g.Params[i].Name, fnSeedType, argScope.DeclaredBitsOfTypeArg(argItems[i]),
+                                               fnSeedType is CType.Pointer ? argScope.PointerSizeOfTypeArg(argItems[i]) : null));
                     break;
                 // An `anytype` bound to a `comptime_int` (`log2(pos_max)` in std.math.IntFittingRange) is comptime:
                 // zig instantiates per VALUE, and `@TypeOf(x)` is `comptime_int`, so it is a value seed here.
@@ -490,6 +492,13 @@ internal sealed partial class ZigLowering
                              _declaredIntBits.TryGetValue(name, out var pb) ? pb : (int?)null));
             _typeAliases[name] = type;
             SetDeclaredIntBits(name, bits);
+        }
+        // A pointer seed's size class too (task #150); a seed without one clears the name's, as the drain-time seeding does.
+        var ptrSizeShadows = new List<(string name, string? prev)>();
+        foreach (var seed in typeSeeds)
+        {
+            ptrSizeShadows.Add((seed.Name, _declaredPtrSize.GetValueOrDefault(seed.Name)));
+            SetDeclaredPtrSize(seed.Name, seed.PointerSize);
         }
         // Seed each inferred `anytype` type (shadow-saved) so a signature spelled `@TypeOf(param)` (a
         // return type or a later parameter) resolves through TypeOfBuiltin — the param is not yet an
@@ -786,6 +795,10 @@ internal sealed partial class ZigLowering
                 var (name, prev, prevBits) = typeShadows[i];
                 if (prev is { } p) { _typeAliases[name] = p; } else { _typeAliases.Remove(name); }
                 SetDeclaredIntBits(name, prevBits);
+            }
+            for (var i = ptrSizeShadows.Count - 1; i >= 0; i--)
+            {
+                SetDeclaredPtrSize(ptrSizeShadows[i].name, ptrSizeShadows[i].prev);
             }
             // Restore the `anytype` seeds (W5) — the instance BODY resolves each such param through its
             // in-scope symbol (declared with the inferred type in `runtimeParams`), so the seed is only
@@ -1176,6 +1189,12 @@ internal sealed partial class ZigLowering
     /// there — no existing instance name changes.</summary>
     private static string MangleTypeSeed(TypeSeed seed)
     {
+        // A many-item or C pointer is a different type from the single-item pointer it lowers alike to (task #150); a
+        // single-item or unspelled one keeps the plain name, so no existing instance name changes.
+        if (seed.Type.Unqualified is CType.Pointer && seed.PointerSize is "many" or "c")
+        {
+            return MangleType(seed.Type) + "_" + seed.PointerSize;
+        }
         if (seed.DeclaredBits is { } bits
             && seed.Type.Unqualified is CType.Prim { Integer: true, Name: not "_Bool" } p
             && bits != p.Bytes * 8)
@@ -1478,9 +1497,10 @@ internal sealed partial class ZigLowering
                 argScope._typeArgDepth++;
                 try
                 {
-                    typeSeeds.Add(new TypeSeed(info.Params[i].Name,
-                                               argScope.LowerType(argItems[i]).Unqualified,
-                                               argScope.DeclaredBitsOfTypeArg(argItems[i])));
+                    // A pointer argument's spelled size class rides too (task #150: `Rev([*]const u8)` is `.many` inside).
+                    var typeSeedType = argScope.LowerType(argItems[i]).Unqualified;
+                    typeSeeds.Add(new TypeSeed(info.Params[i].Name, typeSeedType, argScope.DeclaredBitsOfTypeArg(argItems[i]),
+                                               typeSeedType is CType.Pointer ? argScope.PointerSizeOfTypeArg(argItems[i]) : null));
                 }
                 finally
                 {
@@ -1504,6 +1524,13 @@ internal sealed partial class ZigLowering
                              _declaredIntBits.TryGetValue(name, out var pb) ? pb : (int?)null));
             _typeAliases[name] = type;
             SetDeclaredIntBits(name, bits);
+        }
+        // A pointer seed's size class too (task #150); a seed without one clears the name's, as the drain-time seeding does.
+        var ptrSizeShadows = new List<(string name, string? prev)>();
+        foreach (var seed in typeSeeds)
+        {
+            ptrSizeShadows.Add((seed.Name, _declaredPtrSize.GetValueOrDefault(seed.Name)));
+            SetDeclaredPtrSize(seed.Name, seed.PointerSize);
         }
         var paramTypeSeedCount = typeShadows.Count;   // the body's own type aliases append after these
         try
@@ -1830,6 +1857,10 @@ internal sealed partial class ZigLowering
                 var (name, prev, prevBits) = typeShadows[i];
                 if (prev is { } p) { _typeAliases[name] = p; } else { _typeAliases.Remove(name); }
                 SetDeclaredIntBits(name, prevBits);
+            }
+            for (var i = ptrSizeShadows.Count - 1; i >= 0; i--)
+            {
+                SetDeclaredPtrSize(ptrSizeShadows[i].name, ptrSizeShadows[i].prev);
             }
         }
     }

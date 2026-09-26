@@ -7026,6 +7026,29 @@ public sealed class ZigOracleTests
             "    const top = @reduce(.Max, c) - @reduce(.Min, c);\n" +
             "    return mn + mx * 3 + @as(u8, @intCast(s % 50)) + @as(u8, @intCast(top)) + a[3] + @as(u8, @intCast(c[15]));\n" +
             "}\n", 65, "" },
+        // Task #150: a pointer type argument's size class inside a generic function and a reified struct's const.
+        new object[] { "pointer_size_class_in_generics",
+            "fn Kind(comptime T: type) type {\n" +
+            "    return struct {\n" +
+            "        const size: u8 = switch (@typeInfo(T).pointer.size) {\n" +
+            "            .one => 1,\n" +
+            "            .many => 2,\n" +
+            "            .slice => 3,\n" +
+            "            .c => 4,\n" +
+            "        };\n" +
+            "    };\n" +
+            "}\n" +
+            "fn kind(comptime T: type) u8 {\n" +
+            "    return switch (@typeInfo(T).pointer.size) {\n" +
+            "        .one => 10,\n" +
+            "        .many => 20,\n" +
+            "        .slice => 30,\n" +
+            "        .c => 40,\n" +
+            "    };\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return Kind(*const u8).size + Kind([*]const u8).size * 3 + Kind([]const u8).size * 7 + kind(*u16) + kind([*]u16) * 2;\n" +
+            "}\n", 78, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
