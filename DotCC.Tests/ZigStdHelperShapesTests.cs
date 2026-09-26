@@ -3745,6 +3745,56 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void Bytes_as_slice_reads_an_array_pointer_or_a_slice_as_wider_elements()
+    {
+        var cs = EmitZig("""
+            const std = @import("std");
+            pub fn main() u8 {
+                var raw = [_]u8{ 1, 0, 2, 0, 3, 0, 4, 0 };
+                const words = std.mem.bytesAsSlice(u16, &raw);
+                words[1] = 7;
+                const view = std.mem.bytesAsSlice(u32, raw[0..]);
+                const b = [_]u8{ 1, 0, 2, 0, 3, 0 };
+                const s = std.mem.bytesAsSlice(u16, &b);
+                return @intCast(s.len * 10 + s[2] + raw[2] + view.len + (view[0] >> 16));
+            }
+            """);
+        // Task #137: std.mem.bytesAsSlice(T, bytes) is curated (its return type is reified through `@Pointer`); the
+        // length is `bytes.len / @sizeOf(T)`, and a slice built in place gives its own parts. zig returns 49.
+        cs.ShouldContain("Slice<ushort> words = new Slice<ushort>((ushort*)raw, 8UL / ((ulong)(sizeof(ushort))));");
+        cs.ShouldContain("Slice<uint> view = new Slice<uint>((uint*)(raw + 0), (8UL - (ulong)0) / ((ulong)(sizeof(uint))));");
+        cs.ShouldContain("ConstSlice<ushort> s = new ConstSlice<ushort>((ushort*)b, 6UL / ((ulong)(sizeof(ushort))));");
+    }
+
+    [Fact]
+    public void Byte_view_calls_evaluate_a_side_effecting_slice_once()
+    {
+        var cs = EmitZig("""
+            const std = @import("std");
+            var calls: u8 = 0;
+            var store = [_]u8{ 5, 0, 6, 0 };
+            var halves = [_]u16{ 0x0102, 0x0304 };
+            fn bytes() []u8 {
+                calls += 1;
+                return store[0..];
+            }
+            fn words() []u16 {
+                calls += 1;
+                return halves[0..];
+            }
+            pub fn main() u8 {
+                const w = std.mem.bytesAsSlice(u16, bytes());
+                const b = std.mem.sliceAsBytes(words());
+                return @intCast(w.len * 10 + w[1] + b.len + b[3] + calls * 20);
+            }
+            """);
+        // Task #137: a call as the slice operand of bytesAsSlice / sliceAsBytes is hoisted to a temp, so it runs once
+        // (sliceAsBytes read `.Ptr` and `.Len` off the call separately before). zig returns 73.
+        cs.ShouldContain("Slice<byte> __anf0 = bytes();\n        Slice<ushort> w = new Slice<ushort>((ushort*)__anf0.Ptr, __anf0.Len / ((ulong)(sizeof(ushort))));");
+        cs.ShouldContain("Slice<ushort> __anf1 = words();\n        Slice<byte> b = new Slice<byte>((byte*)__anf1.Ptr, __anf1.Len * ((ulong)(sizeof(ushort))));");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

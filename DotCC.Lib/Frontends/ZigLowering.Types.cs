@@ -921,7 +921,7 @@ internal sealed partial class ZigLowering
     private static readonly Dictionary<string, HashSet<string>> CuratedStdNamespaceFns = new(System.StringComparer.Ordinal)
     {
         ["std.mem"] = new(System.StringComparer.Ordinal)
-            { "eql", "copyForwards", "span", "zeroes", "asBytes", "sliceAsBytes", "bytesAsValue", "bytesToValue", "sliceTo" },
+            { "eql", "copyForwards", "span", "zeroes", "asBytes", "sliceAsBytes", "bytesAsValue", "bytesToValue", "bytesAsSlice", "sliceTo" },
         ["std.debug"] = new(System.StringComparer.Ordinal) { "print" },
         ["std.testing"] = new(System.StringComparer.Ordinal)
             { "expect", "expectEqual", "expectError", "expectEqualStrings", "expectEqualSlices" },

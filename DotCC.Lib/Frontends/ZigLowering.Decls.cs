@@ -2120,6 +2120,17 @@ internal sealed partial class ZigLowering
         return new SliceNew(value, lenLit, elem.Unqualified, elem.IsConst) { Type = sliceType };
     }
 
+    /// <summary>The data pointer and length of a slice value, each read once: a slice built in place (<c>raw[0..]</c>) gives
+    /// its own parts, a variable or field path is read twice harmlessly, and anything else (a call) is hoisted to a temp so
+    /// its side effects run once. <paramref name="what"/> names the construct in the error when it cannot hoist, and
+    /// <paramref name="impureBefore"/> is the side-effect watermark from before the slice was lowered.</summary>
+    private (CExpr Ptr, CExpr Len) SliceParts(CExpr slice, CType element, string what, bool impureBefore)
+    {
+        if (slice is SliceNew built) { return (built.Ptr, built.Len); }
+        if (!IsPurePath(slice)) { slice = HoistLowered($"zig `{what}` over a side-effecting slice", new List<CStmt>(), slice, impureBefore); }
+        return (new Member(slice, "Ptr", false) { Type = new CType.Pointer(element) }, new Member(slice, "Len", false) { Type = CType.ULong });
+    }
+
     /// <summary>Lower a curated <c>std.mem.&lt;name&gt;(…)</c> call (the byte-blit / compare cluster).
     /// <c>eql(T, a, b)</c> and <c>copyForwards(T, dest, source)</c> take an explicit element type as
     /// the first argument; the slice arguments coerce at a <c>[]T</c> / <c>[]const T</c> sink (so a
@@ -2216,17 +2227,15 @@ internal sealed partial class ZigLowering
                 {
                     throw new IrUnsupportedException($"zig `std.mem.sliceAsBytes` expects (slice); got {argItems.Count} argument(s)");
                 }
+                var sbImpure = _hoistImpureSeen;
                 var sbSlice = LowerExpr(argItems[0]);
                 if (sbSlice.Type.Unqualified is not CType.Slice { Element: var sbElemType })
                 {
                     throw new IrUnsupportedException($"zig `std.mem.sliceAsBytes` expects a slice, got {sbSlice.Type.Describe()}");
                 }
                 var sbByte = sbElemType.IsConst ? CType.UChar.WithQuals(TypeQual.Const) : CType.UChar;
-                var sbPtr = new Cast(new CType.Pointer(sbByte), new Member(sbSlice, "Ptr", false) { Type = new CType.Pointer(sbElemType) })
-                {
-                    Type = new CType.Pointer(sbByte),
-                };
-                CExpr sbLen = new Member(sbSlice, "Len", false) { Type = CType.ULong };
+                var (sbData, sbLen) = SliceParts(sbSlice, sbElemType, "std.mem.sliceAsBytes", sbImpure);
+                var sbPtr = new Cast(new CType.Pointer(sbByte), sbData) { Type = new CType.Pointer(sbByte) };
                 if (sbElemType.Unqualified.SizeOf != 1)
                 {
                     sbLen = new Binary(BinOp.Mul, sbLen, new SizeOfExpr(sbElemType.Unqualified) { Type = CType.ULong }) { Type = CType.ULong };
@@ -2263,6 +2272,43 @@ internal sealed partial class ZigLowering
                 var bvTarget = new CType.Pointer(bvConst ? bvType.WithQuals(TypeQual.Const) : bvType);
                 var bvPtr = new Cast(bvTarget, bvData) { Type = bvTarget };
                 return methodName == "bytesAsValue" ? bvPtr : new Unary(UnOp.Deref, bvPtr) { Type = bvType };
+            }
+            case "bytesAsSlice":
+            {
+                // std.mem.bytesAsSlice(T, bytes) — the bytes read as a `[]T` of `bytes.len / @sizeOf(T)` elements, const when
+                // the bytes are (task #137). Curated for asBytes' reason: its return type is `CopyPtrAttrs(B, .slice, T)`. The
+                // source divides with `@divExact`, which dotcc lowers unchecked everywhere; a zero-size T gives an empty slice.
+                if (argItems.Count != 2)
+                {
+                    throw new IrUnsupportedException($"zig `std.mem.bytesAsSlice` expects (type, bytes); got {argItems.Count} argument(s)");
+                }
+                var bsType = LowerType(argItems[0]);
+                var bsImpure = _hoistImpureSeen;
+                var bsBytes = LowerExpr(argItems[1]);
+                CExpr bsData, bsLen;
+                bool bsConst;
+                if (bsBytes.Type.Unqualified is CType.Slice { Element: var bsElem })
+                {
+                    (bsData, bsLen) = SliceParts(bsBytes, bsElem, "std.mem.bytesAsSlice", bsImpure);
+                    bsConst = bsElem.IsConst;
+                }
+                else if (bsBytes.Type.Unqualified is CType.Pointer { Pointee: var bsPointee }
+                    && bsPointee.Unqualified is CType.Array { Count: { } bsCount } bsArr)
+                {
+                    (bsData, bsLen) = (bsBytes, new LitInt(bsCount.ToString(CultureInfo.InvariantCulture), bsCount) { Type = CType.ULong });
+                    bsConst = bsPointee.IsConst || bsArr.Element.IsConst;
+                }
+                else
+                {
+                    throw new IrUnsupportedException(
+                        $"zig `std.mem.bytesAsSlice` expects a pointer to a byte array or a byte slice, got {bsBytes.Type.Describe()}");
+                }
+                var bsElemType = bsConst ? bsType.WithQuals(TypeQual.Const) : bsType;
+                var bsPtr = new Cast(new CType.Pointer(bsElemType), bsData) { Type = new CType.Pointer(bsElemType) };
+                CExpr bsCountExpr = _ir.SizeOfConst(bsType) is 0
+                    ? new LitInt("0", 0) { Type = CType.ULong }
+                    : new Binary(BinOp.Div, bsLen, new SizeOfExpr(bsType.Unqualified) { Type = CType.ULong }) { Type = CType.ULong };
+                return new SliceNew(bsPtr, bsCountExpr, bsType.Unqualified, bsConst) { Type = new CType.Slice(bsElemType) };
             }
             case "sliceTo":
             {

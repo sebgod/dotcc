@@ -8155,6 +8155,43 @@ public sealed class ZigOracleTests
             "    return @truncate(acc ^ (acc >> 32) ^ (acc >> 16) ^ (acc >> 8));\n" +
             "}\n", 112);
 
+    // Task #137: a call as the slice operand of bytesAsSlice / sliceAsBytes runs once.
+    [Fact]
+    public void Dotcc_matches_zig_std_byte_views_evaluate_once() =>
+        MatchesZigWithRealStd("byte_views_once",
+            "const std = @import(\"std\");\n" +
+            "var calls: u8 = 0;\n" +
+            "var store = [_]u8{ 5, 0, 6, 0 };\n" +
+            "var halves = [_]u16{ 0x0102, 0x0304 };\n" +
+            "fn bytes() []u8 {\n" +
+            "    calls += 1;\n" +
+            "    return store[0..];\n" +
+            "}\n" +
+            "fn words() []u16 {\n" +
+            "    calls += 1;\n" +
+            "    return halves[0..];\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const w = std.mem.bytesAsSlice(u16, bytes());\n" +
+            "    const b = std.mem.sliceAsBytes(words());\n" +
+            "    return @intCast(w.len * 10 + w[1] + b.len + b[3] + calls * 20);\n" +
+            "}\n", 73);
+
+    // Task #137: std.mem.bytesAsSlice over a pointer to a byte array and over a byte slice, written through.
+    [Fact]
+    public void Dotcc_matches_zig_std_bytes_as_slice() =>
+        MatchesZigWithRealStd("bytes_as_slice",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var raw = [_]u8{ 1, 0, 2, 0, 3, 0, 4, 0 };\n" +
+            "    const words = std.mem.bytesAsSlice(u16, &raw);\n" +
+            "    words[1] = 7;\n" +
+            "    const view = std.mem.bytesAsSlice(u32, raw[0..]);\n" +
+            "    const b = [_]u8{ 1, 0, 2, 0, 3, 0 };\n" +
+            "    const s = std.mem.bytesAsSlice(u16, &b);\n" +
+            "    return @intCast(s.len * 10 + s[2] + raw[2] + view.len + (view[0] >> 16));\n" +
+            "}\n", 49);
+
     // Task #135: std.StringArrayHashMapUnmanaged from real std (a stored u32 hash).
     [Fact]
     public void Dotcc_matches_zig_std_string_array_hash_map() =>

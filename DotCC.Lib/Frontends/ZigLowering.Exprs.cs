@@ -1396,7 +1396,7 @@ internal sealed partial class ZigLowering
         }
         // Inside std's own mem.zig a bare `asBytes(…)` / `sliceAsBytes(…)` (std.mem.indexOf's `sliceAsBytes(haystack)`)
         // is the curated lowering too, as `std.mem.asBytes(…)` from any other module is.
-        if (calleeItem.Content is Zig.Ident { Arg0: var curatedTok } && Tok(curatedTok) is "asBytes" or "sliceAsBytes" or "bytesAsValue" or "bytesToValue" or "sliceTo"
+        if (calleeItem.Content is Zig.Ident { Arg0: var curatedTok } && Tok(curatedTok) is "asBytes" or "sliceAsBytes" or "bytesAsValue" or "bytesToValue" or "bytesAsSlice" or "sliceTo"
             && IsStdModule("mem.zig"))
         {
             return LowerStdMemCall(Tok(curatedTok), argItems);
