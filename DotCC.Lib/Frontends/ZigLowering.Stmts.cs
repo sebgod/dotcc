@@ -322,6 +322,7 @@ internal sealed partial class ZigLowering
                 var start = LowerExpr(f.Arg2);
                 var end = LowerExpr(f.Arg4);
                 var iSym = _symbols.Declare(new Symbol { Name = Tok(f.Arg7), Kind = SymKind.Var, Type = CType.ULong });
+                RecordValueBits(iSym, 64, null);   // a usize (task #132: real std's `{d}` asks its width)
                 var iRef = new VarRef(iSym) { Type = CType.ULong, IsLValue = true };
                 var init = new DeclStmt(new List<LocalDecl> { new(iSym, start) });
                 var cond = new Binary(BinOp.Lt, iRef, new Cast(CType.ULong, end) { Type = CType.ULong }) { Type = CType.Int };
@@ -2034,6 +2035,7 @@ internal sealed partial class ZigLowering
                     Name = indexName, Kind = SymKind.Var, Type = CType.ULong,
                     IsConstexpr = _ir.ConstEval(at) is not null, ConstValue = _ir.ConstEval(at) ?? 0,
                 });
+                RecordValueBits(indexSym, 64, null);
                 copy.Add(new DeclStmt(new List<LocalDecl> { new(indexSym, at) }));
             }
             _inlineUnrollDepth++;
@@ -4158,6 +4160,7 @@ internal sealed partial class ZigLowering
         {
             var idxInit = new Binary(BinOp.Add, iRef, new Cast(CType.ULong, idx.start) { Type = CType.ULong }) { Type = CType.ULong };
             var idxSym = _symbols.Declare(new Symbol { Name = idx.name, Kind = SymKind.Var, Type = CType.ULong });
+            RecordValueBits(idxSym, 64, null);
             bodyStmts.Add(new DeclStmt(new List<LocalDecl> { new(idxSym, idxInit) }));
         }
         bodyStmts.Add(LowerStmt(bodyItem));

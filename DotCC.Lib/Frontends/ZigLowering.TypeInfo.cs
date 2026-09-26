@@ -235,11 +235,51 @@ internal sealed partial class ZigLowering
         Zig.BuiltinCall cb when Tok(cb.Arg0) is "@clz" or "@ctz" or "@popCount" && Flatten(cb.Arg2) is [var countArg]
                                 && DeclaredBitsOfValue(countArg) is { } countBits and > 0
             => 64 - System.Numerics.BitOperations.LeadingZeroCount((ulong)countBits),
+        // Arithmetic and bitwise operators take their operands' peer type (task #132, `{d}` of `x + 1` / `i * i`): equal
+        // declared widths, or one operand an integer literal adopting the other's. Operands of different widths stay
+        // unknown (zig widens to the larger only when the signedness allows it, which this does not track), so the
+        // question stays loud rather than guessed. A shift keeps its left operand's type.
+        Zig.Add a => PeerDeclaredBits(a.Arg0, a.Arg2),
+        Zig.Sub a => PeerDeclaredBits(a.Arg0, a.Arg2),
+        Zig.Mul a => PeerDeclaredBits(a.Arg0, a.Arg2),
+        Zig.AddWrap a => PeerDeclaredBits(a.Arg0, a.Arg2),
+        Zig.SubWrap a => PeerDeclaredBits(a.Arg0, a.Arg2),
+        Zig.MulWrap a => PeerDeclaredBits(a.Arg0, a.Arg2),
+        Zig.AddSat a => PeerDeclaredBits(a.Arg0, a.Arg2),
+        Zig.SubSat a => PeerDeclaredBits(a.Arg0, a.Arg2),
+        Zig.MulSat a => PeerDeclaredBits(a.Arg0, a.Arg2),
+        Zig.DivOp a => PeerDeclaredBits(a.Arg0, a.Arg2),
+        Zig.ModOp a => PeerDeclaredBits(a.Arg0, a.Arg2),
+        Zig.BitAnd a => PeerDeclaredBits(a.Arg0, a.Arg2),
+        Zig.BitXor a => PeerDeclaredBits(a.Arg0, a.Arg2),
+        Zig.BitOr a => PeerDeclaredBits(a.Arg0, a.Arg2),
+        Zig.Shl s => DeclaredBitsOfValue(s.Arg0),
+        Zig.Shr s => DeclaredBitsOfValue(s.Arg0),
         // Negation / complement / `try` keep their operand's type (zig has no C integer promotion).
         Zig.PreNeg n => DeclaredBitsOfValue(n.Arg1),
         Zig.PreBitNot n => DeclaredBitsOfValue(n.Arg1),
         Zig.PreTry t => DeclaredBitsOfValue(t.Arg1),
         _ => null,
+    };
+
+    /// <summary>The declared width of a binary arithmetic result from its operands' (see the operator cases of
+    /// <see cref="DeclaredBitsOfValue"/>): equal widths, or one operand an integer literal adopting the other's; else null.</summary>
+    private int? PeerDeclaredBits(Item lhs, Item rhs)
+    {
+        var l = DeclaredBitsOfValue(lhs);
+        var r = DeclaredBitsOfValue(rhs);
+        if (l is { } lb && r is { } rb) { return lb == rb ? lb : null; }
+        if (l is { } onlyL && IsIntegerLiteral(rhs)) { return onlyL; }
+        if (r is { } onlyR && IsIntegerLiteral(lhs)) { return onlyR; }
+        return null;
+    }
+
+    /// <summary>Is <paramref name="e"/> an integer literal (a <c>comptime_int</c> that adopts its peer's type)?</summary>
+    private static bool IsIntegerLiteral(Item e) => e.Content switch
+    {
+        Zig.Grouped g => IsIntegerLiteral(g.Arg1),
+        Zig.IntLit => true,
+        _ => false,
     };
 
     /// <summary>The declared width a LOWERED expression carries, for what the AST alone cannot resolve: a

@@ -6556,6 +6556,19 @@ public sealed class ZigOracleTests
             "    wide += 1;\n" +
             "    return arr[2] + arr[1] + b.get() + @as(u8, @intCast(wide % 7));\n" +
             "}\n", 50, "" },
+        // Task #132: the declared width of a range-for capture (usize) and of an arithmetic result (equal-width operands,
+        // or one an integer literal), read by `@typeInfo(@TypeOf(e)).int.bits`.
+        new object[] { "declared_width_of_captures_and_arithmetic",
+            "pub fn main() u8 {\n" +
+            "    var total: u8 = 0;\n" +
+            "    for (0..2) |i| total += @intCast(@typeInfo(@TypeOf(i * i)).int.bits);\n" +
+            "    const x: u32 = 7;\n" +
+            "    total += @typeInfo(@TypeOf(x + 1)).int.bits;\n" +
+            "    const y: u8 = 3;\n" +
+            "    total += @typeInfo(@TypeOf(y << 2)).int.bits;\n" +
+            "    total += @typeInfo(@TypeOf(y *% y)).int.bits;\n" +
+            "    return total;\n" +
+            "}\n", 176, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -7840,6 +7853,20 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{x}\\n\", .{acc});\n" +
             "    return @truncate(acc ^ (acc >> 32) ^ (acc >> 16) ^ (acc >> 8));\n" +
             "}\n", 112);
+
+    // Task #132: real std `{d}` of a range-for capture, of `i * i` and of `x + 1` (printIntAny asks each width).
+    [Fact]
+    public void Dotcc_matches_zig_std_fmt_computed_ints() =>
+        MatchesZigWithRealStd("fmt_computed_ints",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() !u8 {\n" +
+            "    var buf: [32]u8 = undefined;\n" +
+            "    var n: usize = 0;\n" +
+            "    for (0..12) |i| n += (try std.fmt.bufPrint(&buf, \"{d}:{d}\", .{ i, i * i })).len;\n" +
+            "    const x: u32 = 99999;\n" +
+            "    n += (try std.fmt.bufPrint(&buf, \"{d}\", .{x + 1})).len;\n" +
+            "    return @intCast(n);\n" +
+            "}\n", 54);
 
     // Task #63: a static call on std.ArrayList(T) other than the removed managed init goes to real std's
     // array_list.Aligned(T, null) (growCapacity, as std.Io.Writer.Allocating calls it).

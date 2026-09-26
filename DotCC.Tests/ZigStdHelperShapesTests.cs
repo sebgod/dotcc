@@ -3130,6 +3130,42 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_range_capture_and_an_arithmetic_result_carry_their_declared_width()
+    {
+        var cs = EmitZig("""
+            pub fn main() u8 {
+                var total: u8 = 0;
+                for (0..2) |i| total += @intCast(@typeInfo(@TypeOf(i * i)).int.bits);
+                const x: u32 = 7;
+                total += @typeInfo(@TypeOf(x + 1)).int.bits;
+                const y: u8 = 3;
+                total += @typeInfo(@TypeOf(y << 2)).int.bits;
+                total += @typeInfo(@TypeOf(y *% y)).int.bits;
+                return total;
+            }
+            """);
+        // Task #132 (real std's `{d}` of `i`, `i * i`, `x + 1`: printIntAny asks `@typeInfo(T).int.bits`): a `for (0..n)` capture
+        // is a usize; an arithmetic result takes its operands' width (equal widths, or one an integer literal); a shift keeps
+        // its left operand's. zig returns 176 (64 + 64 + 32 + 8 + 8).
+        cs.ShouldContain("total += (byte)64;");
+        cs.ShouldContain("total += (byte)(32);");
+        cs.ShouldContain("total += (byte)(8);");
+    }
+
+    [Fact]
+    public void Arithmetic_over_operands_of_different_widths_keeps_its_width_unknown()
+    {
+        // zig's peer type of `u32 + u8` is u32, but dotcc does not track signedness here, so it refuses rather than guesses.
+        Should.Throw<Exception>(() => EmitZig("""
+            pub fn main() u8 {
+                const x: u32 = 7;
+                const y: u8 = 3;
+                return @typeInfo(@TypeOf(x + y)).int.bits;
+            }
+            """)).Message.ShouldContain("the declared width is not known here");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""
