@@ -433,7 +433,11 @@ public static partial class Compiler
             using System.Net;
             using System.Net.Sockets;
             using static Libc;
-            using static DotCcGlobals;{{importsUsing}}
+            using static DotCcGlobals;
+            // A global initializer can name a user function (`&fn` in a C function
+            // table), and DotCcGlobals sits outside DotCcLib — surface DotCcLib by
+            // bare name, as the exe shell does with `using static DotCcProgram;`.
+            using static DotCcLib;{{importsUsing}}
 
             // ---- typedef'd `using` aliases (same as exe mode).
             {{usingAliases}}
