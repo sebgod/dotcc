@@ -5235,6 +5235,50 @@ public sealed class ZigStdHelperShapesTests
         cs.ShouldContain("stackalloc byte[]{ __anf1, __anf1, __anf1, __anf1 }");
     }
 
+    [Theory]
+    [InlineData("fn f(x: u16) u8 {\n    return x;\n}\n", "'u8', found 'u16'")]
+    [InlineData("fn f(x: u8, y: u16) u8 {\n    return x + y;\n}\n", "'u8', found 'u16'")]
+    [InlineData("fn f(x: u16) u8 {\n    const a: u8 = x;\n    return a;\n}\n", "'u8', found 'u16'")]
+    [InlineData("fn f(x: u16) !u8 {\n    return x;\n}\n", "'u8', found 'u16'")]
+    [InlineData("fn f(x: i8) u8 {\n    return x;\n}\n", "'u8', found 'i8'")]
+    [InlineData("fn f(x: u8) i8 {\n    return x;\n}\n", "'i8', found 'u8'")]
+    public void A_runtime_integer_narrowed_at_a_return_or_typed_declaration_is_rejected(string function, string types)
+    {
+        var ex = Should.Throw<CompileException>(() => EmitZig(function + "pub fn main() void {}\n"));
+        // Task #165: zig coerces an integer only into a type whose range holds the source's (dotcc had truncated
+        // silently): the same signedness at least as wide, or unsigned into a strictly wider signed type.
+        ex.Message.ShouldContain("zig: expected type " + types);
+    }
+
+    [Fact]
+    public void A_runtime_integer_widened_at_a_return_or_typed_declaration_is_allowed()
+    {
+        var cs = EmitZig(
+            "fn widen(x: u8) u16 {\n" +
+            "    return x;\n" +
+            "}\n" +
+            "fn toSigned(x: u8) i16 {\n" +
+            "    return x;\n" +
+            "}\n" +
+            "fn sext(x: i8) i32 {\n" +
+            "    return x;\n" +
+            "}\n" +
+            "fn bump(x: u8) u8 {\n" +
+            "    return x +% 1;\n" +
+            "}\n" +
+            "fn mix(a: u8, b: u16) u32 {\n" +
+            "    const w: u32 = a + b;\n" +
+            "    return w;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const s = sext(-3);\n" +
+            "    return @intCast(widen(200) - 100 + @as(u16, @intCast(toSigned(7))) + @as(u16, @intCast(s + 10)) + bump(255) + mix(1, 2));\n" +
+            "}\n");
+        // Task #165: u8 -> u16, u8 -> i16, i8 -> i32, a u8 wrap back into u8, and `u8 + u16` (a u16) into a u32 all fit.
+        // zig returns 117.
+        cs.ShouldContain("internal static unsafe short toSigned(byte x)");
+    }
+
     [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {

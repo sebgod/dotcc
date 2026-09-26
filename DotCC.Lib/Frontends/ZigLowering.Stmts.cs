@@ -897,6 +897,7 @@ internal sealed partial class ZigLowering
         // it as its sink, so resolve the annotation before lowering the initializer.
         var declared = typeItem is not null ? LowerType(typeItem) : null;
         RejectUnrepresentableInit(typeItem, declared, initExpr);
+        if (typeItem is not null) { RejectIntegerNarrowing(initExpr, declared, DeclaredBitsOfTypeArg(typeItem)); }
         // `const x = blk: { … break :blk v; };` — a labeled value-block initializer. Temp-fill it
         // (the declared type, if any, is the sink), then bind `x` to the result temp.
         if (IsLabeledValue(initExpr))
@@ -5072,6 +5073,10 @@ internal sealed partial class ZigLowering
 
     private CStmt LowerReturn(Item valueItem)
     {
+        // A runtime integer wider than the declared result is zig's "expected type" error (task #165).
+        RejectIntegerNarrowing(valueItem,
+            _currentFnRet is CType.ErrorUnion { Payload: var returnedPayload } ? returnedPayload : _currentFnRet,
+            _currentFnSym is { } returningFn && _fnReturnBits.TryGetValue(returningFn, out var returnBits) ? returnBits : null);
         // `return {};` — the void value is what a bare `return;` returns: nothing to spell in C#
         // (`default(void)` is not an expression). In a `!void` function it is the success value.
         if (valueItem.Content is Zig.VoidValue)

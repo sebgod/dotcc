@@ -2600,9 +2600,22 @@ internal sealed partial class ZigLowering
     /// type. A comptime-known value, a call and anything narrower whose declared width is not recorded give null.</summary>
     private (bool Signed, int Bits)? CertainZigInt(Item it)
     {
+        // Plain C `char` is no zig type (zig's `u8` / `i8` lower to `unsigned char` / `signed char`): it is a string literal's
+        // element, a zig `u8` whose C signedness would mislead (task #165).
         static CType.Prim? RuntimeInt(CType? t) =>
-            t?.Unqualified is CType.Prim { Integer: true, IsComptimeInt: false, Name: not "_Bool" } prim ? prim : null;
-        (bool, int)? Peer(Item a, Item b) => CertainZigInt(a) is { } x && CertainZigInt(b) is { } y && x == y ? x : null;
+            t?.Unqualified is CType.Prim { Integer: true, IsComptimeInt: false, Name: not ("_Bool" or "char") } prim ? prim : null;
+        // zig's peer type (task #165): an integer literal adopts the other operand's type; two operands of one signedness
+        // meet at the wider; a signed and an unsigned meet at the signed one when it holds every unsigned value (anything
+        // else is the "incompatible types" RejectIncompatiblePeerSignedness reports).
+        (bool, int)? Peer(Item a, Item b)
+        {
+            if (IsIntegerLiteral(b)) { return CertainZigInt(a); }
+            if (IsIntegerLiteral(a)) { return CertainZigInt(b); }
+            if (CertainZigInt(a) is not var (aSigned, aBits) || CertainZigInt(b) is not var (bSigned, bBits)) { return null; }
+            if (aSigned == bSigned) { return (aSigned, System.Math.Max(aBits, bBits)); }
+            var (signedBits, unsignedBits) = aSigned ? (aBits, bBits) : (bBits, aBits);
+            return signedBits > unsignedBits ? (true, signedBits) : null;
+        }
         switch (it.Content)
         {
             case Zig.Grouped g: return CertainZigInt(g.Arg1);
@@ -3127,6 +3140,28 @@ internal sealed partial class ZigLowering
         if (v < min || v > max)
         {
             throw new CompileException($"zig: type '{(signed ? "i" : "u")}{bits}' cannot represent integer value '{v}'");
+        }
+    }
+
+    /// <summary>Reject, as zig does, a RUNTIME integer coerced into a type that cannot hold all its values (task #165):
+    /// <c>fn f(x: u16) u8 { return x; }</c> and <c>const a: u8 = x;</c> are "expected type 'u8', found 'u16'", where dotcc
+    /// had truncated silently. zig coerces an integer only into a type whose range holds the source's: the same signedness
+    /// at least as wide, or an unsigned source into a strictly wider signed type. Checked only where both zig types are
+    /// certain: the value's (<see cref="CertainZigInt"/>, which gives none for a comptime-known value, whose coercion zig
+    /// decides by the value) and the sink's, a plain integer whose width the caller passes where it is spelled.</summary>
+    private void RejectIntegerNarrowing(Item valueItem, CType? sinkType, int? sinkBits)
+    {
+        if (sinkType?.Unqualified is not CType.Prim { Integer: true, IsComptimeInt: false, Name: not "_Bool", Signed: var dstSigned, Bytes: var dstBytes }
+            || CertainZigInt(valueItem) is not var (srcSigned, srcBits))
+        {
+            return;
+        }
+        var dstBits = sinkBits is { } sb and > 0 ? sb : dstBytes * 8;
+        var fits = srcSigned == dstSigned ? srcBits <= dstBits : !srcSigned && srcBits < dstBits;
+        if (!fits)
+        {
+            throw new CompileException(
+                $"zig: expected type '{(dstSigned ? "i" : "u")}{dstBits}', found '{(srcSigned ? "i" : "u")}{srcBits}'");
         }
     }
 

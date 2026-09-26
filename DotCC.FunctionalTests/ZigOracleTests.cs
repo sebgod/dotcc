@@ -7484,6 +7484,28 @@ public sealed class ZigOracleTests
             "    const s = sum(@splat(next()));\n" +
             "    return @intCast(a[0] + a[4] + local[0] + local[2] + s + calls);\n" +
             "}\n", 36, "" },
+        // Task #165: integer coercions zig allows at a return and a typed declaration (every one a widening).
+        new object[] { "integer_widening_coercions",
+            "fn widen(x: u8) u16 {\n" +
+            "    return x;\n" +
+            "}\n" +
+            "fn toSigned(x: u8) i16 {\n" +
+            "    return x;\n" +
+            "}\n" +
+            "fn sext(x: i8) i32 {\n" +
+            "    return x;\n" +
+            "}\n" +
+            "fn bump(x: u8) u8 {\n" +
+            "    return x +% 1;\n" +
+            "}\n" +
+            "fn mix(a: u8, b: u16) u32 {\n" +
+            "    const w: u32 = a + b;\n" +
+            "    return w;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const s = sext(-3);\n" +
+            "    return @intCast(widen(200) - 100 + @as(u16, @intCast(toSigned(7))) + @as(u16, @intCast(s + 10)) + bump(255) + mix(1, 2));\n" +
+            "}\n", 117, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
