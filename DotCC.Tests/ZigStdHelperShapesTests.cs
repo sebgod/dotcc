@@ -5369,6 +5369,42 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_concatenation_with_an_if_operand_distributes_into_the_arms()
+    {
+        var cs = EmitZig("""
+            fn pick(upper: bool) u8 {
+                const charset = "0123456789" ++ if (upper) "ABCDEF" else "abcdef";
+                return charset[12];
+            }
+            pub fn main() u8 {
+                const fixed = "ab" ++ if (true) "cd" else "ef";
+                return pick(false) - pick(true) + fixed[3];
+            }
+            """);
+        // Task #170 (std.fmt.bytesToHex's `"0123456789" ++ if (case == .upper) "ABCDEF" else "abcdef"`): as a whole right-hand
+        // side, `a ++ if (c) x else y` concatenates into each arm at compile time and a runtime condition picks one; a
+        // comptime one keeps only its arm. zig returns 132.
+        cs.ShouldContain("(Cond.B(upper) ? Libc.L(\"0123456789ABCDEF\\0\"u8) : Libc.L(\"0123456789abcdef\\0\"u8))");
+        cs.ShouldContain("byte* @fixed = Libc.L(\"abcd\\0\"u8);");
+    }
+
+    [Fact]
+    public void A_concatenation_with_if_arms_of_two_lengths_is_rejected()
+    {
+        var ex = Should.Throw<CompileException>(() => EmitZig("""
+            fn pick(upper: bool) u8 {
+                const s = "a" ++ if (upper) "b" else "de";
+                return s[1];
+            }
+            pub fn main() u8 {
+                return pick(false);
+            }
+            """));
+        // Task #170: arms of two lengths make the `if` a slice, which `++` cannot take at run time.
+        ex.Message.ShouldContain("zig: unable to resolve comptime value");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

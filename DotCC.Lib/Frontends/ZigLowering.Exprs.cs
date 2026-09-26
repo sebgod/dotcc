@@ -217,6 +217,27 @@ internal sealed partial class ZigLowering
                 var thenOperand = LowerExpr(io.Arg4);
                 return new CondExpr(LowerExpr(io.Arg2), thenOperand, LowerExpr(io.Arg6)) { Type = thenOperand.Type };
             }
+            // `a ++ if (c) x else y` as a whole right-hand side (std.fmt.bytesToHex's `"0123456789" ++ if (case == .upper)
+            // "ABCDEF" else "abcdef"`, task #170): the concatenation distributes into the arms, each a compile-time `++`,
+            // and the condition (a runtime one in bytesToHex) selects between the two results.
+            case Zig.ConcatIf ci when ci.Arg2.Content is Zig.ConcatIfOperand concatArms:
+            {
+                if (TryFoldComptimeCondition(concatArms.Arg2) is { } takenConcat)
+                {
+                    return LowerConcat(ci.Arg0, takenConcat ? concatArms.Arg4 : concatArms.Arg6);
+                }
+                var concatCond = LowerExpr(concatArms.Arg2);
+                var thenConcat = LowerConcat(ci.Arg0, concatArms.Arg4);
+                var elseConcat = LowerConcat(ci.Arg0, concatArms.Arg6);
+                // Arms of two lengths make the `if` a slice, whose runtime value `++` cannot take (zig: "slice being
+                // concatenated must be comptime-known"); one type (one length) is an array.
+                if (!thenConcat.Type.Unqualified.Equals(elseConcat.Type.Unqualified))
+                {
+                    throw new CompileException("zig: unable to resolve comptime value: slice being concatenated must be comptime-known "
+                        + "(the `if` arms of a `++` differ in length)");
+                }
+                return new CondExpr(concatCond, thenConcat, elseConcat) { Type = thenConcat.Type };
+            }
             case Zig.IfExprReturnThen ir:
                 return LowerIfReturnThen(ir.Arg2, ir.Arg5, ir.Arg7, null);
             // Value-position captured `if` — `if (opt) |x| thenE else elseE` (S4a). The payload binds

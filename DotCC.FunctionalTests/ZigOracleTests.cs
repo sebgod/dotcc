@@ -7557,6 +7557,16 @@ public sealed class ZigOracleTests
             "    @memset(scratch[0..H(32).len], 0);\n" +
             "    return tail[0] + @as(u8, @intCast(tail.len)) + scratch[0];\n" +
             "}\n", 9, "" },
+        // Task #170: `a ++ if (c) x else y` as a whole right-hand side, with a runtime and a comptime condition.
+        new object[] { "concat_if_operand",
+            "fn pick(upper: bool) u8 {\n" +
+            "    const charset = \"0123456789\" ++ if (upper) \"ABCDEF\" else \"abcdef\";\n" +
+            "    return charset[12];\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const fixed = \"ab\" ++ if (true) \"cd\" else \"ef\";\n" +
+            "    return pick(false) - pick(true) + fixed[3];\n" +
+            "}\n", 132, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

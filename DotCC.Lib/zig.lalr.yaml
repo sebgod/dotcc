@@ -294,6 +294,7 @@ symbols:
   - ForCaps        # 188 the captures of a multi-object `for`: `|x, *y, i, …|`, two or more
   - ForCap         # 189 one capture: `x` (a per-iteration copy) or `*x` (a pointer into the object)
   - VoidElem       # 190 `{}`, zig's void value, as a positional list element (`[3]void{ {}, {}, {} }`, task #114)
+  - ConcatIf       # 191 `if (c) a else b` as the right operand of a whole-RHS `++` (`"0123456789" ++ if (upper) "ABCDEF" else "abcdef"`, task #170)
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -969,6 +970,12 @@ productions:
       # of the operator cascade. `while`/`for` at statement start stay LoopStmt (a different context);
       # the value form is reached only after `=`/`return`/an init — like the if/switch expressions.
       - { lhs: RhsExpr, rhs: [LoopExpr] }
+      # `const charset = "0123456789" ++ if (case == .upper) "ABCDEF" else "abcdef";` (std.fmt.bytesToHex, task #170): an
+      # `if` as the right operand of `++`, only as a WHOLE right-hand side and with Prefix-level arms. zig's else arm is a
+      # full expression; here nothing may follow it, so `a ++ if (c) b else d ++ e` (zig: else `d ++ e`) is a parse
+      # error rather than a silent `(a ++ if …) ++ e`. No Mul starts with `if`, so after `Add ++` the `if` is a clean shift.
+      - { lhs: RhsExpr, rhs: [Add, '++', ConcatIf], action: concatIf }
+      - { lhs: ConcatIf, rhs: ['if', '(', Expr, ')', Prefix, 'else', Prefix], action: concatIfOperand }
 
   - derivation: none
     rules:
