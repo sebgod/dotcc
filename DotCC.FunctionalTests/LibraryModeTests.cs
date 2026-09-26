@@ -104,7 +104,39 @@ public sealed class LibraryModeTests
         }
     }
 
-    private static Assembly CompileLibrary(string csharpSource)
+    [Fact]
+    public void Lib_mode_global_initializer_can_name_a_library_function()
+    {
+        // A file-scope function-pointer table (a Python PyMethodDef array, Lua's
+        // luaL_Reg) is a DotCcGlobals initializer naming DotCcLib methods — it only
+        // binds if the library shell surfaces DotCcLib by bare name.
+        var tempC = Path.GetTempFileName() + ".c";
+        File.WriteAllText(tempC, """
+            static int twice(int x) { return 2 * x; }
+            static int square(int x) { return x * x; }
+            typedef int (*unop)(int);
+            static unop table[] = { twice, square };
+            int apply(int i, int v) { return table[i](v); }
+            """);
+        try
+        {
+            var program = Compiler.EmitCSharp(
+                new[] { tempC },
+                includeDirs: null,
+                defines: null,
+                emit: EmitMode.SharedLib);
+            var asm = CompileLibrary(program);
+            var apply = asm.GetType("DotCcLib", throwOnError: true)!
+                .GetMethod("apply", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)!;
+            apply.Invoke(null, new object[] { 1, 7 }).ShouldBe(49);
+        }
+        finally
+        {
+            File.Delete(tempC);
+        }
+    }
+
+    internal static Assembly CompileLibrary(string csharpSource)
     {
         var syntax = CSharpSyntaxTree.ParseText(csharpSource,
             new CSharpParseOptions(LanguageVersion.Preview));
