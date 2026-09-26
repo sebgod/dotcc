@@ -5255,7 +5255,9 @@ public sealed class ZigFrontendTests
             "pub fn main() u8 { const b = B.make(); return @intCast(b.len + 42); }\n");
         cs.ShouldContain("public fixed byte items[4];");   // the field is still inline storage
         cs.ShouldContain("new B { len = 0 }");             // …and is absent from the initializer
-        cs.ShouldNotContain("items = ");
+        // Checked on the user portion only — the spliced runtime may use `items` as a local.
+        var runtimeAt = cs.IndexOf("// ---- Embedded DotCC.Libc runtime", StringComparison.Ordinal);
+        (runtimeAt < 0 ? cs : cs[..runtimeAt]).ShouldNotContain("items = ");
     }
 
     [Fact]

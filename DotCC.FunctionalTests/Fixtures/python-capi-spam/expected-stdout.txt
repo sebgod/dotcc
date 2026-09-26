@@ -1,0 +1,66 @@
+spam.__doc__
+  => 'A small tour of the Python C-API.'
+spam.ANSWER
+  => 42
+spam.BACKEND
+  => 'dotcc'
+spam.error
+  => <class 'spam.error'>
+spam.nope
+  !! AttributeError: module 'spam' has no attribute 'nope'
+spam.add(2, 40)
+  => 42
+spam.add(True, -8)
+  => -7
+spam.add(1)
+  !! TypeError: add() takes exactly 2 arguments (1 given)
+spam.add('x', 1)
+  !! TypeError: 'str' object cannot be interpreted as an integer
+spam.add(1.5, 1)
+  !! TypeError: 'float' object cannot be interpreted as an integer
+spam.add(1, 2, x=3)
+  !! TypeError: add() takes no keyword arguments
+spam.divide(1, 8)
+  => 0.125
+spam.divide(10, 3)
+  => 3.3333333333333335
+spam.divide(1e300, 1e-10)
+  => inf
+spam.divide(1, 0)
+  !! ZeroDivisionError: division by zero
+spam.divide('a', 1)
+  !! TypeError: must be real number, not str
+spam.greet('dotcc')
+  => ['Hello, dotcc! (#1)']
+spam.greet('abi3', times=2, greeting='Hi')
+  => ['Hi, abi3! (#1)', 'Hi, abi3! (#2)']
+spam.greet("it's", 'Hey', 0)
+  => []
+spam.greet('x', times=-1)
+  !! ValueError: times must be >= 0, not -1
+spam.greet('x', colour='red')
+  !! TypeError: greet() got an unexpected keyword argument 'colour'
+spam.greet()
+  !! TypeError: greet() missing required argument 'name' (pos 1)
+spam.greet(42)
+  !! TypeError: greet() argument 1 must be str, not int
+spam.stats([3, 4.5, 10])
+  => {'count': 3, 'sum': 17.5, 'mean': 5.833333333333333}
+spam.stats((1, 2))
+  => {'count': 2, 'sum': 3.0, 'mean': 1.5}
+spam.stats([])
+  !! spam.error: stats() of an empty sequence
+spam.stats(42)
+  !! TypeError: expected a list or tuple, not int
+spam.stats(['a'])
+  !! TypeError: must be real number, not str
+spam.stats(1, 2)
+  !! TypeError: spam.stats() takes exactly one argument (2 given)
+spam.version()
+  => (1, 0, 'dotcc')
+spam.version(1)
+  !! TypeError: spam.version() takes no arguments (1 given)
+spam.swap('left', None)
+  => (None, 'left')
+spam.swap(1)
+  !! TypeError: swap expected 2 arguments, got 1

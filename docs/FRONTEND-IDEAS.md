@@ -198,7 +198,37 @@ hand-write `pyconfig.h` and skip configure's run-probes.)
 .NET host. Round-trips ⇒ the architecture is proven and we have the abi3-shim
 skeleton, *before* committing to the Python frontend.
 
-**Status:** idea. Highest near-term signal = the `spam` probe.
+**Status: the C-extension half is PROVEN — the `spam` probe is done.** dotcc now ships a
+synthetic Limited-API `<Python.h>` (CPython 3.13 abi3 surface) and a C# shim
+(`DotCC.Libc/PythonLib.cs`) implementing it over a managed handle-table object model with
+real reference counting — the "opaque handle" design above, as built. The
+`python-capi-spam` fixture (a docs-style `spam` module exercising every supported calling
+convention, `PyArg_ParseTuple[AndKeywords]`/`PyArg_UnpackTuple`, `Py_BuildValue`, a
+module exception + constants, driven by a C host through the C-API) prints a transcript
+**byte-identical to real CPython 3.13** — results *and* every exception message — and the
+opt-in CPython oracle (`DOTCC_RUN_CPYTHON_ORACLE=1`) rebuilds the same sources with gcc
+against `libpython3.13` to keep it that way. The managed half is proven too:
+`Libc.PyHost` imports the dotcc-compiled module from C# and calls it with .NET values
+(`PythonHostTests`, including a zero-leak refcount check). Full surface + limits:
+[`C-SUPPORT.md`](C-SUPPORT.md#pythonh--the-cpython-limited-api-abi3).
+
+Findings: the header had to be checked name-by-name against real `Py_LIMITED_API`
+headers (`PyUnicode_AsUTF8` and `PyObject_CallOneArg` are *not* 3.13-limited — easy to
+over-offer); the probe flushed out real dotcc gaps, fixed on the way (a `-shared` library
+couldn't name its own functions in a global initializer — i.e. any `PyMethodDef` table;
+raw function-pointer declarators at file scope / as arrays; zero-filled and
+uninitialized fn-ptr tables; calls through a static-local fn-ptr).
+
+**Next, in order:** (1) a real third-party abi3 C extension compiled from its sdist (the
+shim grows by what it needs — likely bytes, the iteration protocol, `PyType_FromSpec`
+heap types, `METH_FASTCALL`); (2) the shim on a real managed Python — the
+IronPython bridge (map its objects into the handle table) — for `import spam` from actual
+Python code; (3) only then the own-runtime-vs-IronPython decision. Note the doc's earlier
+abi3 examples (`cryptography`, `pydantic-core`) are **Rust**/PyO3, not C — reachable only
+via the Wasm front-end (#5); and most C extensions are Cython output, which targets the
+full API unless built in Cython 3's Limited-API mode. Runtime-generation cost: the shim is
+spliced into every emitted program like the rest of `DotCC.Libc` (≈2.1k lines); splicing
+per-header is a runtime-generator follow-up, not specific to Python.
 
 ---
 

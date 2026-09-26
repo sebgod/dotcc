@@ -1,0 +1,1 @@
+needs a real <Python.h> + libpython, not a plain C toolchain: the differential against real CPython is the opt-in CPython oracle (CPythonOracleTests, DOTCC_RUN_CPYTHON_ORACLE=1).
