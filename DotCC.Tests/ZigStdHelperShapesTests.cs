@@ -3239,6 +3239,30 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void Align_cast_passes_its_result_type_to_field_parent_ptr()
+    {
+        var cs = EmitZig("""
+            const P = struct { a: u32, b: u8 };
+
+            fn parentOf(b: *u8) *P {
+                const p: *P = @alignCast(@fieldParentPtr("b", b));
+                return p;
+            }
+
+            pub fn main() u8 {
+                var x = P{ .a = 5, .b = 7 };
+                const q = parentOf(&x.b);
+                q.a += 1;
+                return @intCast(x.a * 10 + q.b);
+            }
+            """);
+        // Task #129 (std.fmt.count through std.Io.Writer.Discarding: `const d: *Discarding = @alignCast(@fieldParentPtr("writer",
+        // w));`): `@alignCast` is the identity in dotcc, so the result type it is given is its operand's, which
+        // `@fieldParentPtr` needs to name the parent. zig returns 67.
+        cs.ShouldContain("P* p = (P*)((ulong)b - ");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

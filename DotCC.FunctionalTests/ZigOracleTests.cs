@@ -6598,6 +6598,21 @@ public sealed class ZigOracleTests
             "pub fn main() u8 {\n" +
             "    return firstAtLeast(9) * 100 + firstAtLeast(64) * 10 + firstAtLeast(128) % 7 + sizeOfTwo();\n" +
             "}\n", 149, "" },
+        // Task #129: `@alignCast(@fieldParentPtr("b", b))` at a `*P` result: the parent pointer, written through.
+        new object[] { "align_cast_field_parent_ptr",
+            "const P = struct { a: u32, b: u8 };\n" +
+            "\n" +
+            "fn parentOf(b: *u8) *P {\n" +
+            "    const p: *P = @alignCast(@fieldParentPtr(\"b\", b));\n" +
+            "    return p;\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    var x = P{ .a = 5, .b = 7 };\n" +
+            "    const q = parentOf(&x.b);\n" +
+            "    q.a += 1;\n" +
+            "    return @intCast(x.a * 10 + q.b);\n" +
+            "}\n", 67, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -7882,6 +7897,15 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{x}\\n\", .{acc});\n" +
             "    return @truncate(acc ^ (acc >> 32) ^ (acc >> 16) ^ (acc >> 8));\n" +
             "}\n", 112);
+
+    // Task #129: std.fmt.count from real std (std.Io.Writer.Discarding's `@alignCast(@fieldParentPtr("writer", w))`).
+    [Fact]
+    public void Dotcc_matches_zig_std_fmt_count() =>
+        MatchesZigWithRealStd("fmt_count",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    return @intCast(std.fmt.count(\"{d}-{s}\", .{ 12345, \"ab\" }) * 10 + std.fmt.count(\"{x}\", .{@as(u16, 4095)}));\n" +
+            "}\n", 83);
 
     // Task #131: std.enums.tagName from real std (`return inline for (field_names, field_values) … else null;`).
     [Fact]

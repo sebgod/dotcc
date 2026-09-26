@@ -2672,13 +2672,14 @@ internal sealed partial class ZigLowering
             case "@alignCast":
                 // `@alignCast(p)` only raises the pointee's alignment requirement — unobservable
                 // in dotcc's managed model — so it's the IDENTITY (the enclosing `@ptrCast` / sink
-                // does the real conversion). Needs no sink, and works nested in its idiomatic
-                // `@ptrCast(@alignCast(p))` (where it's reached via the sink-free LowerExpr).
+                // does the real conversion). Works nested in its idiomatic `@ptrCast(@alignCast(p))` (reached via the
+                // sink-free LowerExpr); a sink it has passes through to the operand, whose result type it is
+                // (`const d: *Discarding = @alignCast(@fieldParentPtr("writer", w));` in std.Io.Writer, task #129).
                 if (bargs.Count != 1)
                 {
                     throw new IrUnsupportedException($"zig `@alignCast` expects (value); got {bargs.Count} argument(s)");
                 }
-                return LowerExpr(bargs[0]);
+                return sink is null ? LowerExpr(bargs[0]) : LowerExprSink(bargs[0], sink);
             // `const a_bytes: []u8 = @ptrCast(a);` with `a: *T` (std.mem.swap): a single item viewed as a slice of
             // the sink's element type, `@sizeOf(T) / @sizeOf(elem)` elements long.
             case "@ptrCast" when sink?.Unqualified is CType.Slice castSlice && bargs.Count == 1
