@@ -274,25 +274,20 @@ internal sealed partial class IrBuilder
                 or C.GlobalStaticU32CharArrStr or C.GlobalStaticU32CharArrStrSized
                 or C.GlobalU8CharArrStr or C.GlobalU8CharArrStrSized
                 or C.GlobalStaticU8CharArrStr or C.GlobalStaticU8CharArrStrSized
-                or C.GlobalStaticStructInit
-                or C.GlobalFnPtr or C.GlobalFnPtrInit or C.GlobalStaticFnPtr or C.GlobalStaticFnPtrInit
+                or C.GlobalStaticStructInit or C.GlobalStructInit or C.GlobalEmptyInit or C.GlobalStaticEmptyInit
                 or C.GlobalFnPtrArr or C.GlobalFnPtrArrInit or C.GlobalFnPtrArrInitImplicit
                 or C.GlobalStaticFnPtrArr or C.GlobalStaticFnPtrArrInit
                 or C.GlobalStaticFnPtrArrInitImplicit when AlreadySeenTopLevel(fn):
                 break;
             case C.GlobalDeclList g: BuildGlobalDecls(g.Arg0, g.Arg1, Storage.Static); break;
-            // Raw (un-typedef'd) file-scope function pointers and arrays of them.
-            case C.GlobalFnPtr g: BuildGlobalFnPtr(g.Arg0, g.Arg3, g.Arg5, null, Storage.Static); break;
-            case C.GlobalFnPtrInit g: BuildGlobalFnPtr(g.Arg0, g.Arg3, g.Arg5, g.Arg7, Storage.Static); break;
-            case C.GlobalStaticFnPtr g: BuildGlobalFnPtr(g.Arg1, g.Arg4, g.Arg6, null, Storage.Static); break;
-            case C.GlobalStaticFnPtrInit g: BuildGlobalFnPtr(g.Arg1, g.Arg4, g.Arg6, g.Arg8, Storage.Static); break;
-            case C.ExternFnPtr g: BuildGlobalFnPtr(g.Arg1, g.Arg4, g.Arg6, null, Storage.Extern); break;
-            case C.GlobalFnPtrArr g: BuildGlobalArr(FnPtrTailType(g.Arg0, g.Arg6), g.Arg3, g.Arg4, null, null); break;
-            case C.GlobalFnPtrArrInit g: BuildGlobalArr(FnPtrTailType(g.Arg0, g.Arg6), g.Arg3, g.Arg4, g.Arg9, null); break;
-            case C.GlobalFnPtrArrInitImplicit g: BuildGlobalArr(FnPtrTailType(g.Arg0, g.Arg7), g.Arg3, null, g.Arg10, null); break;
-            case C.GlobalStaticFnPtrArr g: BuildGlobalArr(FnPtrTailType(g.Arg1, g.Arg7), g.Arg4, g.Arg5, null, null); break;
-            case C.GlobalStaticFnPtrArrInit g: BuildGlobalArr(FnPtrTailType(g.Arg1, g.Arg7), g.Arg4, g.Arg5, g.Arg10, null); break;
-            case C.GlobalStaticFnPtrArrInitImplicit g: BuildGlobalArr(FnPtrTailType(g.Arg1, g.Arg8), g.Arg4, null, g.Arg11, null); break;
+            // Raw (un-typedef'd) file-scope arrays of function pointers. (A scalar
+            // fn-ptr is a DeclItem of the globalDeclList forms above.)
+            case C.GlobalFnPtrArr g: { var a = FnPtrArrParts(g.Arg0, g.Arg1, g.Arg2); BuildGlobalArr(a.Elem, a.Name, a.Dims, null, null); break; }
+            case C.GlobalFnPtrArrInit g: { var a = FnPtrArrParts(g.Arg0, g.Arg1, g.Arg2); BuildGlobalArr(a.Elem, a.Name, a.Dims, g.Arg5, null); break; }
+            case C.GlobalFnPtrArrInitImplicit g: { var a = FnPtrArrParts(g.Arg0, g.Arg1, g.Arg2); BuildGlobalArr(a.Elem, a.Name, null, g.Arg5, null); break; }
+            case C.GlobalStaticFnPtrArr g: { var a = FnPtrArrParts(g.Arg1, g.Arg2, g.Arg3); BuildGlobalArr(a.Elem, a.Name, a.Dims, null, null); break; }
+            case C.GlobalStaticFnPtrArrInit g: { var a = FnPtrArrParts(g.Arg1, g.Arg2, g.Arg3); BuildGlobalArr(a.Elem, a.Name, a.Dims, g.Arg6, null); break; }
+            case C.GlobalStaticFnPtrArrInitImplicit g: { var a = FnPtrArrParts(g.Arg1, g.Arg2, g.Arg3); BuildGlobalArr(a.Elem, a.Name, null, g.Arg6, null); break; }
             case C.GlobalStaticDeclList g: BuildGlobalDecls(g.Arg1, g.Arg2, Storage.Static); break;
             // File-scope arrays — pinned global backing store (plain and `static`
             // lower identically; internal linkage is a no-op for a never-exported
@@ -333,6 +328,9 @@ internal sealed partial class IrBuilder
             case C.ExternArrIncomplete g: BuildExternArr(g.Arg1, g.Arg2, null); break;
             // `static T x = { … };` at file scope — a once-initialised struct/union field.
             case C.GlobalStaticStructInit g: BuildGlobalStructInit(g.Arg1, g.Arg2, g.Arg5); break;
+            case C.GlobalStructInit g: BuildGlobalStructInit(g.Arg0, g.Arg1, g.Arg4); break;
+            case C.GlobalEmptyInit g: Gate(2023, "empty initializer", g.Arg1); BuildGlobalEmptyInit(g.Arg0, g.Arg1); break;
+            case C.GlobalStaticEmptyInit g: Gate(2023, "empty initializer", g.Arg2); BuildGlobalEmptyInit(g.Arg1, g.Arg2); break;
             // `extern T x;` declares the name + type for resolution but emits no
             // field — the definition lives in another TU (dotcc whole-program model).
             case C.ExternVarDecl g: BuildGlobalDecls(g.Arg1, g.Arg2, Storage.Extern); break;
@@ -419,6 +417,7 @@ internal sealed partial class IrBuilder
                 _definedGlobalNames.Add(name); // a real definition — satisfies any extern decl
                 CExpr? gInit = null;
                 if (initItem is { } ii) { gInit = BuildExpr(ii); EnsureNotEmbed(gInit); CheckQualifierDiscard(gInit, sym.Type, SrcPos.From(ii), "initialization"); }
+                PropagateNativeCallConv(sym, gInit);
                 // A .NET [ThreadStatic] initializer runs on the FIRST thread only,
                 // so C's "every thread starts at the initial value" holds only for
                 // the zero/default value .NET gives every thread's slot anyway.
@@ -1051,20 +1050,14 @@ internal sealed partial class IrBuilder
                     Gate(1999, "flexible array member", m);
                     fields.Add(new StructField(Tok(sm.Arg1), new CType.Array(ResolveType(sm.Arg0), 1)));
                     break;
-                // `Ret (*name)(params);` — a function-pointer member. Same
-                // FnPtrType lowering as the typedef/param fn-ptr forms (codegen
-                // emits a `delegate*` field).
-                case C.StructFnPtrMember sm:
-                    fields.Add(new StructField(Tok(sm.Arg3), FnPtrType(sm.Arg0, sm.Arg6)));
-                    break;
-                case C.StructFnPtrMemberNoArgs sm:
-                    fields.Add(new StructField(Tok(sm.Arg3), FnPtrType(sm.Arg0, null)));
-                    break;
-                // `Ret (*name[N])(params);` — an array-of-fn-ptrs member.
+                // `Ret (*name[N])(params);` — an array-of-fn-ptrs member. (A scalar
+                // fn-ptr member is a DeclItem of structMemberList.)
                 case C.StructFnPtrArrMember sm:
                 {
-                    var dims = TryConstDims(sm.Arg4) ?? throw new IrUnsupportedException("non-constant struct array bound");
-                    fields.Add(new StructField(Tok(sm.Arg3), MakeArrayType(FnPtrTailType(sm.Arg0, sm.Arg6), dims)));
+                    var a = FnPtrArrParts(sm.Arg0, sm.Arg1, sm.Arg2);
+                    var dims = a.Dims is { } di ? TryConstDims(di) : null;
+                    fields.Add(new StructField(Tok(a.Name), MakeArrayType(a.Elem,
+                        dims ?? throw new IrUnsupportedException("non-constant struct array bound"))));
                     break;
                 }
                 // `T name : W;` — a bit-field. Codegen packs consecutive same-size
@@ -1151,51 +1144,82 @@ internal sealed partial class IrBuilder
     /// <see cref="CType.Func"/> (codegen lowers it to <c>delegate*&lt;params, Ret&gt;</c>).
     /// A lone <c>void</c> parameter list means no parameters.</summary>
     /// <summary>The fn-ptr type of a raw declarator <c>Ret (*name…)FnPtrTail</c>.</summary>
-    private CType.Func FnPtrTailType(Item retItem, Item tailItem) => tailItem.Content switch
+    private CType.Func FnPtrTailType(Item retItem, Item tailItem) => FnPtrTailType(ResolveType(retItem), tailItem);
+
+    /// <summary>The fn-ptr type of a raw declarator over an already-resolved return
+    /// type (a DeclItem's return type is the list's base / star-wrapped element).</summary>
+    private CType.Func FnPtrTailType(CType ret, Item tailItem) => tailItem.Content switch
     {
-        C.FnPtrTail t => FnPtrType(retItem, t.Arg1),
-        C.FnPtrTailNoArgs => FnPtrType(retItem, null),
+        C.FnPtrTail t => FnPtrType(ret, t.Arg1),
+        C.FnPtrTailNoArgs => FnPtrType(ret, null),
         _ => throw new IrUnsupportedException(TypeName(tailItem.Content)),
     };
 
-    /// <summary>File-scope <c>Ret (*name)(params) [= E];</c> (optionally <c>static</c> /
-    /// <c>extern</c>) — a <c>delegate*</c> field in <c>DotCcGlobals</c>, exactly like the
-    /// typedef'd spelling. An <c>extern</c> declaration registers the name only.</summary>
-    private void BuildGlobalFnPtr(Item retItem, Item nameItem, Item tailItem, Item? initItem, Storage storage)
+    /// <summary>Whether a <c>FnPtrQuals</c> run (the qualifiers after a declarator's
+    /// <c>*</c>) includes <c>const</c> — the pointer itself is then read-only.
+    /// <c>volatile</c> / <c>restrict</c> have no C# model and are accepted.</summary>
+    private static bool QualsHaveConst(Item quals) => quals.Content switch
     {
-        var type = FnPtrTailType(retItem, tailItem);
-        var init = initItem is { } ii ? BuildExpr(ii) : null;
-        // A dlsym-sourced initializer carries the native calling convention (see BuildFnPtrLocal).
-        if (init?.Type is CType.Func { IsNativeCallConv: true } && !type.IsNativeCallConv)
-        {
-            type = type with { IsNativeCallConv = true };
-        }
-        var name = Tok(nameItem);
-        var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = type, Storage = storage, IsGlobal = true });
-        if (storage == Storage.Extern) { return; }
-        _definedGlobalNames.Add(name);
-        Globals.Add(new GlobalVar(sym, init));
-    }
+        C.FnPtrQualConst or C.FnPtrQualsConst => true,
+        C.FnPtrQualVolatile or C.FnPtrQualRestrict => false,
+        C.FnPtrQualsVolatile q => QualsHaveConst(q.Arg0),
+        C.FnPtrQualsRestrict q => QualsHaveConst(q.Arg0),
+        _ => throw new IrUnsupportedException(TypeName(quals.Content)),
+    };
 
-    /// <summary>Block-scope <c>static Ret (*name)(params) [= E];</c> — a mangled
-    /// <c>DotCcGlobals</c> field + an alias symbol (see <see cref="BuildStmtStaticDecl"/>).</summary>
-    private CStmt BuildStaticLocalFnPtr(Item retItem, Item nameItem, Item tailItem, Item? initItem)
+    /// <summary>A <c>FnPtrName</c> — <c>(*name)</c> / <c>(*quals name)</c> — as the
+    /// fn-ptr type over <paramref name="ret"/> (const-qualified for <c>*const</c>).</summary>
+    private (string Name, CType Type) FnPtrDeclarator(CType ret, Item nameItem, Item tailItem)
     {
-        var name = Tok(nameItem);
-        var sym = new Symbol
+        CType type = FnPtrTailType(ret, tailItem);
+        return nameItem.Content switch
         {
-            Name = name, Kind = SymKind.Var, Type = FnPtrTailType(retItem, tailItem),
-            Storage = Storage.Static, IsGlobal = true,
-            TargetName = $"{_symbols.Escape(name)}__s{_staticLocalSeq++}",
+            C.FnPtrName n => (Tok(n.Arg2), type),
+            C.FnPtrNameQual n => (Tok(n.Arg3), QualsHaveConst(n.Arg2) ? type.WithQuals(TypeQual.Const) : type),
+            _ => throw new IrUnsupportedException(TypeName(nameItem.Content)),
         };
-        Globals.Add(new GlobalVar(sym, initItem is { } ii ? BuildExpr(ii) : null));
-        _symbols.DeclareAlias(sym);
-        return new DeclStmt(System.Array.Empty<LocalDecl>());
     }
 
-    private CType.Func FnPtrType(Item retItem, Item? paramListItem)
+    /// <summary>A fn-ptr array declarator (<c>FnPtrArr</c> / <c>FnPtrArrOpen</c>) over the
+    /// return type item and tail: its name, its dimensions (null for <c>[]</c>), and the
+    /// element type (const-qualified for <c>*const</c>).</summary>
+    private (Item Name, Item? Dims, CType Elem) FnPtrArrParts(Item retItem, Item arrItem, Item tailItem)
     {
-        var ret = ResolveType(retItem);
+        CType elem = FnPtrTailType(ResolveType(retItem), tailItem);
+        CType Q(Item quals) => QualsHaveConst(quals) ? elem.WithQuals(TypeQual.Const) : elem;
+        return arrItem.Content switch
+        {
+            C.FnPtrArr a => (a.Arg2, a.Arg3, elem),
+            C.FnPtrArrQual a => (a.Arg3, a.Arg4, Q(a.Arg2)),
+            C.FnPtrArrOpen a => (a.Arg2, null, elem),
+            C.FnPtrArrOpenQual a => (a.Arg3, null, Q(a.Arg2)),
+            _ => throw new IrUnsupportedException(TypeName(arrItem.Content)),
+        };
+    }
+
+    private ArrayDecl BuildFnPtrArrDecl(Item retItem, Item arrItem, Item tailItem, Item? initItem)
+    {
+        var a = FnPtrArrParts(retItem, arrItem, tailItem);
+        return BuildArrDecl(a.Elem, a.Name, a.Dims, initItem, implicitSize: a.Dims is null);
+    }
+
+    /// <summary>C's dlsym idiom — <c>int (*fn)(int) = (int(*)(int))dlsym(h, "add");</c>:
+    /// a native-convention initializer (<c>CType.Func.IsNativeCallConv</c>, set at the
+    /// cast of a dlsym call) makes the declared fn-ptr native too, so calls through it
+    /// use <c>delegate* unmanaged[Cdecl]</c>. Calls render unchanged — C# picks the calli
+    /// convention from the variable's type.</summary>
+    private static void PropagateNativeCallConv(Symbol sym, CExpr? init)
+    {
+        if (init?.Type is CType.Func { IsNativeCallConv: true } && sym.Type is CType.Func { IsNativeCallConv: false } f)
+        {
+            sym.Type = f with { IsNativeCallConv = true };
+        }
+    }
+
+    private CType.Func FnPtrType(Item retItem, Item? paramListItem) => FnPtrType(ResolveType(retItem), paramListItem);
+
+    private CType.Func FnPtrType(CType ret, Item? paramListItem)
+    {
         var ptypes = new List<CType>();
         var variadic = false;
         if (paramListItem is { } pl)
@@ -1666,11 +1690,9 @@ internal sealed partial class IrBuilder
             // Block-scope `static` arrays — pinned global storage under a mangled
             // name (same static storage duration as a file-scope array).
             case C.StmtStaticArr s: return BuildStaticLocalArr(s.Arg1, s.Arg2, s.Arg3, null) with { Pos = pos };
-            case C.StmtStaticFnPtr s: return BuildStaticLocalFnPtr(s.Arg1, s.Arg4, s.Arg6, null) with { Pos = pos };
-            case C.StmtStaticFnPtrInit s: return BuildStaticLocalFnPtr(s.Arg1, s.Arg4, s.Arg6, s.Arg8) with { Pos = pos };
-            case C.StmtStaticFnPtrArr s: return BuildStaticLocalArr(FnPtrTailType(s.Arg1, s.Arg7), s.Arg4, s.Arg5, null) with { Pos = pos };
-            case C.StmtStaticFnPtrArrInit s: return BuildStaticLocalArr(FnPtrTailType(s.Arg1, s.Arg7), s.Arg4, s.Arg5, s.Arg10) with { Pos = pos };
-            case C.StmtStaticFnPtrArrInitImplicit s: return BuildStaticLocalArr(FnPtrTailType(s.Arg1, s.Arg8), s.Arg4, null, s.Arg11) with { Pos = pos };
+            case C.StmtStaticFnPtrArr s: { var a = FnPtrArrParts(s.Arg1, s.Arg2, s.Arg3); return BuildStaticLocalArr(a.Elem, a.Name, a.Dims, null) with { Pos = pos }; }
+            case C.StmtStaticFnPtrArrInit s: { var a = FnPtrArrParts(s.Arg1, s.Arg2, s.Arg3); return BuildStaticLocalArr(a.Elem, a.Name, a.Dims, s.Arg6) with { Pos = pos }; }
+            case C.StmtStaticFnPtrArrInitImplicit s: { var a = FnPtrArrParts(s.Arg1, s.Arg2, s.Arg3); return BuildStaticLocalArr(a.Elem, a.Name, null, s.Arg6) with { Pos = pos }; }
             case C.StmtStaticArrInit s: return BuildStaticLocalArr(s.Arg1, s.Arg2, s.Arg3, s.Arg6) with { Pos = pos };
             case C.StmtStaticArrInitImplicit s: return BuildStaticLocalArr(s.Arg1, s.Arg2, null, s.Arg7) with { Pos = pos };
             // Block-scope `static char a[] = "…"` / sized — pinned global char array.
@@ -2083,8 +2105,6 @@ internal sealed partial class IrBuilder
         C.DeclU8CharArrStr d => BuildDeclCharArrStr(d.Arg0, d.Arg1, null, d.Arg5, wide: true),
         C.DeclU8CharArrStrSized d => BuildDeclCharArrStr(d.Arg0, d.Arg1, CharArrSize(d.Arg2), d.Arg4, wide: true),
         C.DeclStructInit d => BuildDeclStructInit(d),
-        // `T x = { .field = … };` — C99 designated struct/union initializer.
-        C.DeclStructDesignated d => BuildLocalInit(d.Arg1, ResolveType(d.Arg0), BuildStructDesignated(ResolveType(d.Arg0), d.Arg4)),
         // `T x = {};` — C23 empty initializer (zero value).
         C.DeclEmptyInit d => Gated(2023, "empty initializer", d.Arg1, BuildLocalInit(d.Arg1, ResolveType(d.Arg0), new DefaultLit { Type = ResolveType(d.Arg0) })),
         C.DeclArr d => BuildArrDecl(d.Arg0, d.Arg1, d.Arg2, null, implicitSize: false),
@@ -2094,15 +2114,11 @@ internal sealed partial class IrBuilder
         // Pointer-to-array `T (*p)[N]` [= init] — a row pointer (multi-dim machinery).
         C.DeclPtrToArr d => BuildPtrToArr(d.Arg0, d.Arg3, d.Arg5, null),
         C.DeclPtrToArrInit d => BuildPtrToArr(d.Arg0, d.Arg3, d.Arg5, d.Arg7),
-        // Local function-pointer variable: `Ret (*name)(params)` [= init].
-        C.DeclFnPtr d => BuildFnPtrLocal(d.Arg0, d.Arg3, d.Arg6, null),
-        C.DeclFnPtrNoArgs d => BuildFnPtrLocal(d.Arg0, d.Arg3, null, null),
-        C.DeclFnPtrInit d => BuildFnPtrLocal(d.Arg0, d.Arg3, d.Arg6, d.Arg9),
-        C.DeclFnPtrNoArgsInit d => BuildFnPtrLocal(d.Arg0, d.Arg3, null, d.Arg8),
-        // Local array of function pointers: `Ret (*name[N])(params)` [= {…}].
-        C.DeclFnPtrArr d => BuildArrDecl(FnPtrTailType(d.Arg0, d.Arg6), d.Arg3, d.Arg4, null, implicitSize: false),
-        C.DeclFnPtrArrInit d => BuildArrDecl(FnPtrTailType(d.Arg0, d.Arg6), d.Arg3, d.Arg4, d.Arg9, implicitSize: false),
-        C.DeclFnPtrArrInitImplicit d => BuildArrDecl(FnPtrTailType(d.Arg0, d.Arg7), d.Arg3, null, d.Arg10, implicitSize: true),
+        // Local array of function pointers: `Ret (*name[N])(params)` [= {…}]. (A
+        // scalar fn-ptr local is a DeclItem.)
+        C.DeclFnPtrArr d => BuildFnPtrArrDecl(d.Arg0, d.Arg1, d.Arg2, null),
+        C.DeclFnPtrArrInit d => BuildFnPtrArrDecl(d.Arg0, d.Arg1, d.Arg2, d.Arg5),
+        C.DeclFnPtrArrInitImplicit d => BuildFnPtrArrDecl(d.Arg0, d.Arg1, d.Arg2, d.Arg5),
         _ => throw new IrUnsupportedException(TypeName(it.Content)),
     };
 
@@ -2136,10 +2152,23 @@ internal sealed partial class IrBuilder
             };
             CExpr? slInit = null;
             if (initItem is { } ii) { slInit = BuildExpr(ii); EnsureNotEmbed(slInit); CheckQualifierDiscard(slInit, sym.Type, SrcPos.From(ii), "initialization"); }
+            PropagateNativeCallConv(sym, slInit);
             Globals.Add(new GlobalVar(sym, slInit));
             _symbols.DeclareAlias(sym);
         });
         return new DeclStmt(System.Array.Empty<LocalDecl>());
+    }
+
+    /// <summary>File-scope <c>T x = {};</c> (C23) — a zero-initialized field.</summary>
+    private void BuildGlobalEmptyInit(Item typeItem, Item nameItem)
+    {
+        var type = ResolveType(typeItem);
+        var sym = _symbols.Declare(new Symbol
+        {
+            Name = Tok(nameItem), Kind = SymKind.Var, Type = type, Storage = Storage.Static, IsGlobal = true,
+        });
+        _definedGlobalNames.Add(sym.Name);
+        Globals.Add(new GlobalVar(sym, new DefaultLit { Type = type }));
     }
 
     /// <summary>File-scope <c>static T x = { … };</c> — a once-initialised
@@ -2171,23 +2200,6 @@ internal sealed partial class IrBuilder
         Globals.Add(new GlobalVar(sym, init));
         _symbols.DeclareAlias(sym);
         return new DeclStmt(System.Array.Empty<LocalDecl>());
-    }
-
-    private DeclStmt BuildFnPtrLocal(Item retItem, Item nameItem, Item? paramsItem, Item? initItem)
-    {
-        CType.Func type = FnPtrType(retItem, paramsItem);
-        var init = initItem is { } ii ? BuildExpr(ii) : null;
-        // Propagate a dlsym-sourced native calling-convention marker from the
-        // initializer onto the declared fn-ptr type, so the canonical idiom
-        //     int (*fn)(int) = (int(*)(int))dlsym(h, "add");  fn(5);
-        // calls `fn` through delegate* unmanaged[Cdecl]. Calls render unchanged —
-        // C# picks the calli convention from the variable's (now-native) type.
-        if (init?.Type is CType.Func { IsNativeCallConv: true } && !type.IsNativeCallConv)
-        {
-            type = type with { IsNativeCallConv = true };
-        }
-        var sym = _symbols.Declare(new Symbol { Name = Tok(nameItem), Kind = SymKind.Var, Type = type, Storage = Storage.Auto });
-        return new DeclStmt(new[] { new LocalDecl(sym, init) });
     }
 
     private CStmt BuildDecl(Item declItem)
@@ -2250,6 +2262,7 @@ internal sealed partial class IrBuilder
             });
             CExpr? sInit = null;
             if (initItem is { } ii) { sInit = BuildExpr(ii); EnsureNotEmbed(sInit); CheckQualifierDiscard(sInit, sym.Type, SrcPos.From(ii), "initialization"); }
+            PropagateNativeCallConv(sym, sInit);
             if (sym.IsConstexpr) { BindConstexpr(sym, sInit, SrcPos.From(typeItem)); }
             scalars.Add(new LocalDecl(sym, sInit));
         });
@@ -2302,6 +2315,8 @@ internal sealed partial class IrBuilder
                 case C.DeclItemTailPlain t: WalkTail(t.Arg0, stars); break;
                 case C.DeclItem di: add(Tok(di.Arg0), null, WrapPtr(element, stars)); break;
                 case C.DeclItemInit di: add(Tok(di.Arg0), di.Arg2, WrapPtr(element, stars)); break;
+                case C.DeclItemFnPtr fp: { var (n, t) = FnPtrDeclarator(WrapPtr(element, stars), fp.Arg0, fp.Arg1); add(n, null, t); break; }
+                case C.DeclItemFnPtrInit fp: { var (n, t) = FnPtrDeclarator(WrapPtr(element, stars), fp.Arg0, fp.Arg1); add(n, fp.Arg3, t); break; }
                 // `…, name[N]` — an array declarator in tail position. The type is
                 // an array OF the star-wrapped element (`int *a, *c[5];` → c is an
                 // array of int*); the consumer decides the lowering (local →
@@ -2321,6 +2336,9 @@ internal sealed partial class IrBuilder
                 case C.DeclItemListOne o: Walk(o.Arg0); break;
                 case C.DeclItem di: add(Tok(di.Arg0), null, baseType); break;
                 case C.DeclItemInit di: add(Tok(di.Arg0), di.Arg2, baseType); break;
+                // `Ret (*name)(params) [= E]` — the list's base type is the RETURN type.
+                case C.DeclItemFnPtr fp: { var (n, t) = FnPtrDeclarator(baseType, fp.Arg0, fp.Arg1); add(n, null, t); break; }
+                case C.DeclItemFnPtrInit fp: { var (n, t) = FnPtrDeclarator(baseType, fp.Arg0, fp.Arg1); add(n, fp.Arg3, t); break; }
                 case C.DeclItemTailPlain t: WalkTail(t.Arg0, 0); break;
                 case C.DeclItemTailPtr t: WalkTail(t.Arg1, 1); break;
                 case C.DeclItemTailArr: WalkTail(it, 0); break;
@@ -2601,7 +2619,6 @@ internal sealed partial class IrBuilder
             // C99/C23 compound literals — (T){…} struct/scalar, (T[]){…} array,
             // designated, and the C23 empty form.
             C.CompoundLit c => Gated(1999, "compound literals", c.Arg1, BuildCompoundLit(c.Arg1, c.Arg4)),
-            C.CompoundLitDesignated c => Gated(1999, "compound literals", c.Arg1, BuildCompoundLitDesignated(c.Arg1, c.Arg4)),
             C.CompoundLitEmpty c => Gated(2023, "empty initializer", c.Arg1, BuildCompoundLitEmpty(c.Arg1)),
             C.CompoundLitArr c => Gated(1999, "compound literals", c.Arg1, BuildArrayCompoundLit(c.Arg1, c.Arg2, c.Arg5)),
             C.CompoundLitArrImplicit c => Gated(1999, "compound literals", c.Arg1, BuildArrayCompoundLit(c.Arg1, null, c.Arg6)),

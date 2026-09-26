@@ -13,4 +13,6 @@ apply_all(3) = 6
 counter() = 1
 counter() = 8
 counter() = 3
-math: 16 8
+math: 16 8 -4 16 8
+first(4) 8 second(4) 16 plain 3 pinned(4) -4 ctable 9 6
+after(4) -4, count 1, returns_int(4) 8

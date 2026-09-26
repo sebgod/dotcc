@@ -1,0 +1,23 @@
+g_full: nums 1 2 3 4 | tag "hello" | pts (1,2) (3,4) | names a b c | ops 10 25 | grid 1 2 3 4 5 6 | last 99
+g_elided: nums 1 2 3 4 | tag "abc" | pts (5,6) (7,8) | names - - - | ops - - | grid 0 0 0 0 0 0 | last 0
+g_partial: nums 7 0 0 0 | tag "x" | pts (0,0) (0,0) | names - - - | ops - - | grid 0 0 0 0 0 0 | last 0
+g_designated: nums 0 0 5 0 | tag "des" | pts (9,8) (0,0) | names - - - | ops 25 - | grid 0 0 1 0 0 0 | last 42
+g_table[0]: nums 1 0 0 0 | tag "t0" | pts (0,0) (0,0) | names - - - | ops - - | grid 0 0 0 0 0 0 | last 0
+g_table[1]: nums 2 0 0 0 | tag "t1" | pts (0,0) (0,0) | names - - - | ops - - | grid 0 0 0 0 0 0 | last 0
+g_outer.inner: nums 9 9 0 0 | tag "in" | pts (5,5) (0,0) | names - - - | ops - - | grid 0 0 0 0 0 0 | last 0
+g_zero: nums 0 0 0 0 | tag "" | pts (0,0) (0,0) | names - - - | ops - - | grid 0 0 0 0 0 0 | last 0
+local: nums 4 3 2 1 | tag "chr" | pts (7,8) (9,10) | names x - z | ops 25 10 | grid 9 8 7 6 5 4 | last -1
+elided: nums 5 6 7 8 | tag "elide" | pts (1,2) (3,4) | names p q r | ops 10 25 | grid 1 2 3 4 5 6 | last 77
+braced_str: nums 0 0 0 0 | tag "brc" | pts (0,0) (0,0) | names - - - | ops - - | grid 0 0 0 0 0 0 | last 0
+arr[1]: nums 2 2 0 0 | tag "a1" | pts (0,0) (0,0) | names - - - | ops - - | grid 0 0 0 0 0 0 | last 5
+o.inner: nums 4 0 0 0 | tag "nest" | pts (0,0) (0,0) | names - - - | ops - - | grid 0 0 0 0 0 0 | last 8
+make(3): nums 0 0 0 0 | tag "" | pts (0,0) (0,0) | names - - - | ops - - | grid 0 0 0 0 0 0 | last 0
+make(3): nums 3 4 0 0 | tag "made" | pts (3,-3) (0,0) | names m - - | ops 10 - | grid 3 0 0 0 0 0 | last 30
+exact tag sixsi, sizeof tag 6
+g_word bytes 78 12, w value 1
+g_outer.id 7, o.id 3, compound pt (11,12)
+g_full.pts[1].y 40, g_zero.pts[0].x 123, g_zero.names[1] set
+counter() = 103
+counter() = 106
+counter() = 111
+sizeof(struct rec) 112

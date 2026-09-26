@@ -202,6 +202,15 @@ public sealed record OffsetOf(CType StructType, IReadOnlyList<string> Path, CTyp
 /// <see cref="StructInit"/>.</summary>
 public sealed record StructInit(IReadOnlyList<FieldInit> Members) : CExpr;
 
+/// <summary>The contents of an ARRAY-typed struct/union member inside a
+/// <see cref="StructInit"/> (<c>struct S s = {{1, 2}, 3};</c>'s <c>{1, 2}</c>): the
+/// leading flat elements in memory order (a multi-dimensional member flattens), each of
+/// <see cref="Element"/> type; the rest of the member zero-fills. Its
+/// <see cref="CExpr.Type"/> is the member's array type. An array member is inline
+/// storage the backend can't assign in an object initializer, so it renders through
+/// the struct's init helper rather than as a value of its own.</summary>
+public sealed record ArrayValue(CType Element, IReadOnlyList<CExpr> Elems) : CExpr;
+
 /// <summary>One member of a <see cref="StructInit"/>: the field name, its
 /// declared <see cref="FieldType"/> (so codegen coerces the value as C would at
 /// the store), and the value expression.</summary>
