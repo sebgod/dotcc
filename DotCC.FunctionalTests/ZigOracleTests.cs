@@ -7382,6 +7382,55 @@ public sealed class ZigOracleTests
             "    bump(&n);\n" +
             "    return buf[0] + buf[1] + buf[2] + buf[3] + @as(u8, @intCast(n));\n" +
             "}\n", 60, "" },
+        // Task #163: comptime value seeds keep their declared type as anytype arguments (width and signedness), and a type
+        // argument chosen by a switch over a comptime tag keeps its width (std.math.log2 over keccak's `f / 25`).
+        new object[] { "comptime_seed_anytype_types",
+            "fn bitsOf(x: anytype) u16 {\n" +
+            "    return @typeInfo(@TypeOf(x)).int.bits;\n" +
+            "}\n" +
+            "fn signOf(x: anytype) u8 {\n" +
+            "    return if (@typeInfo(@TypeOf(x)).int.signedness == .unsigned) 1 else 2;\n" +
+            "}\n" +
+            "fn K(comptime f: u11) type {\n" +
+            "    return struct {\n" +
+            "        pub const b = bitsOf(f / 25);\n" +
+            "        pub const r = f / 25;\n" +
+            "        pub const s = signOf(f / 25);\n" +
+            "    };\n" +
+            "}\n" +
+            "fn twice(comptime n: u5) u16 {\n" +
+            "    return bitsOf(n) * 2 + signOf(n);\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return @intCast(K(1600).b * 10 + K(1600).r % 10 + twice(3) + K(1600).s);\n" +
+            "}\n", 126, "" },
+        new object[] { "log2_over_a_seeded_u11",
+            "fn Log2Int(comptime T: type) type {\n" +
+            "    const bits: u16 = @typeInfo(T).int.bits;\n" +
+            "    const log2_bits = 16 - @clz(bits - 1);\n" +
+            "    return @Int(.unsigned, log2_bits);\n" +
+            "}\n" +
+            "fn log2Int(comptime T: type, x: T) Log2Int(T) {\n" +
+            "    return @intCast(@typeInfo(T).int.bits - 1 - @clz(x));\n" +
+            "}\n" +
+            "fn log2(x: anytype) @TypeOf(x) {\n" +
+            "    const T = @TypeOf(x);\n" +
+            "    return switch (@typeInfo(T)) {\n" +
+            "        .int => |int_info| log2Int(switch (int_info.signedness) {\n" +
+            "            .signed => @Int(.unsigned, int_info.bits -| 1),\n" +
+            "            .unsigned => T,\n" +
+            "        }, @intCast(x)),\n" +
+            "        else => @compileError(\"log2 of a non-integer\"),\n" +
+            "    };\n" +
+            "}\n" +
+            "fn K(comptime f: u11) type {\n" +
+            "    return struct {\n" +
+            "        pub const max_rounds = 12 + 2 * log2(f / 25);\n" +
+            "    };\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return K(1600).max_rounds;\n" +
+            "}\n", 24, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

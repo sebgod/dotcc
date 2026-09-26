@@ -271,7 +271,7 @@ internal sealed partial class ZigLowering
             case Zig.ReturnStructMember rsm:
             {
                 var method = ReifyClosureStruct(_currentFnName, rsm.Arg3, Tok(rsm.Arg6),
-                    System.Array.Empty<TypeSeed>(), System.Array.Empty<(string, long, CType)>(),
+                    System.Array.Empty<TypeSeed>(), System.Array.Empty<ValueSeed>(),
                     System.Array.Empty<(string, bool, long, CType)>());
                 return new Return(new VarRef(method) { Type = method.Type });
             }
@@ -708,7 +708,7 @@ internal sealed partial class ZigLowering
     private CStmt? TryLowerSelectedLocalStruct(string name, Item initExpr)
     {
         Item arm;
-        var extraSeeds = new List<(string name, long value, CType type)>();
+        var extraSeeds = new List<ValueSeed>();
         switch (initExpr.Content)
         {
             case Zig.IfExprTypeArms ta:
@@ -861,7 +861,7 @@ internal sealed partial class ZigLowering
         if (_closureSites.TryGetValue(site, out var known)) { return known; }
         var owner = $"{_currentFnName}__L{_closureSites.Count}";
         var sym = ReifyClosureStruct(owner, sme.Arg2, Tok(sme.Arg5),
-            System.Array.Empty<TypeSeed>(), System.Array.Empty<(string, long, CType)>(),
+            System.Array.Empty<TypeSeed>(), System.Array.Empty<ValueSeed>(),
             System.Array.Empty<(string, bool, long, CType)>());
         _closureSites[site] = sym;
         return sym;

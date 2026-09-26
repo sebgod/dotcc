@@ -5024,6 +5024,75 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_comptime_value_seed_keeps_its_declared_type_as_an_anytype_argument()
+    {
+        var cs = EmitZig("""
+            fn bitsOf(x: anytype) u16 {
+                return @typeInfo(@TypeOf(x)).int.bits;
+            }
+            fn signOf(x: anytype) u8 {
+                return if (@typeInfo(@TypeOf(x)).int.signedness == .unsigned) 1 else 2;
+            }
+            fn K(comptime f: u11) type {
+                return struct {
+                    pub const b = bitsOf(f / 25);
+                    pub const r = f / 25;
+                    pub const s = signOf(f / 25);
+                };
+            }
+            fn twice(comptime n: u5) u16 {
+                return bitsOf(n) * 2 + signOf(n);
+            }
+            pub fn main() u8 {
+                return @intCast(K(1600).b * 10 + K(1600).r % 10 + twice(3) + K(1600).s);
+            }
+            """);
+        // Task #163 (std.crypto.keccak_p's `12 + 2 * math.log2(f / 25)` over `comptime f: u11`): a value seed carries its
+        // declared width, and an anytype argument is zig's type, not C's promoted `int`: `f / 25` is a `u11` (unsigned,
+        // 11 bits) and a bare `comptime n: u5` a `u5`. zig returns 126.
+        cs.ShouldContain("internal static unsafe ushort bitsOf__u16w11(ushort x)");
+        cs.ShouldContain("internal static unsafe byte signOf__u8w5(byte x)");
+    }
+
+    [Fact]
+    public void A_type_argument_chosen_by_a_comptime_tag_switch_keeps_its_width()
+    {
+        var cs = EmitZig("""
+            fn Log2Int(comptime T: type) type {
+                const bits: u16 = @typeInfo(T).int.bits;
+                const log2_bits = 16 - @clz(bits - 1);
+                return @Int(.unsigned, log2_bits);
+            }
+            fn log2Int(comptime T: type, x: T) Log2Int(T) {
+                return @intCast(@typeInfo(T).int.bits - 1 - @clz(x));
+            }
+            fn log2(x: anytype) @TypeOf(x) {
+                const T = @TypeOf(x);
+                return switch (@typeInfo(T)) {
+                    .int => |int_info| log2Int(switch (int_info.signedness) {
+                        .signed => @Int(.unsigned, int_info.bits -| 1),
+                        .unsigned => T,
+                    }, @intCast(x)),
+                    else => @compileError("log2 of a non-integer"),
+                };
+            }
+            fn K(comptime f: u11) type {
+                return struct {
+                    pub const max_rounds = 12 + 2 * log2(f / 25);
+                };
+            }
+            pub fn main() u8 {
+                return K(1600).max_rounds;
+            }
+            """);
+        // Task #163 (std.math.log2's `log2_int(switch (int_info.signedness) { .signed => @Int(…), .unsigned => T }, …)`): the
+        // switch over a comptime tag selects its prong, whose width (`T`'s 11 bits) the type argument carries into
+        // `Log2Int(T)`. zig returns 24.
+        cs.ShouldContain("internal static unsafe ushort log2__u16w11(ushort x)");
+        cs.ShouldContain("internal static unsafe byte log2Int__u11(ushort x)");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

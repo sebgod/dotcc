@@ -84,11 +84,7 @@ internal sealed partial class ZigLowering
             // A pointer seed's size class (`Rev([*]const u8)` reads `.many`, task #150); a seed without one clears it.
             SetDeclaredPtrSize(seed.Name, seed.PointerSize);
         }
-        foreach (var (name, value, type) in seeds.Values)
-        {
-            var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = type });
-            _comptimeVars[sym] = (value, type);
-        }
+        foreach (var seed in seeds.Values) { DeclareValueSeed(seed); }
         foreach (var (name, hasValue, value, inner) in seeds.Optionals)
         {
             var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = new CType.Optional(inner) });

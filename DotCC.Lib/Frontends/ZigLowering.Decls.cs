@@ -414,7 +414,7 @@ internal sealed partial class ZigLowering
     /// draining is sequential, no per-instance frame stack is needed (see the class doc's scoping
     /// note).</summary>
     private void LowerFnBodyCore(Symbol funcSym, IReadOnlyList<(string name, CType type)> paramInfos, Item body,
-        IReadOnlyList<(string name, long value, CType type)>? comptimeSeeds,
+        IReadOnlyList<ValueSeed>? comptimeSeeds,
         IReadOnlyList<TypeSeed>? typeSeeds = null,
         IReadOnlyList<(string name, bool hasValue, long value, CType inner)>? optionalSeeds = null,
         IReadOnlyList<(string name, LitStr value)>? stringSeeds = null)
@@ -469,11 +469,7 @@ internal sealed partial class ZigLowering
         // the literal. (A runtime param and a comptime param never share a name in valid Zig.)
         if (comptimeSeeds is not null)
         {
-            foreach (var (name, value, type) in comptimeSeeds)
-            {
-                var seedSym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = type });
-                _comptimeVars[seedSym] = (value, type);
-            }
+            foreach (var seed in comptimeSeeds) { DeclareValueSeed(seed); }
         }
         // Seed comptime-OPTIONAL value parameters (road-to-zig-std S4b): a fresh in-scope `?T` symbol per
         // seed recorded in _comptimeOptionalVars, no runtime decl. A captured `if (x) |y| … else …` on one
@@ -687,7 +683,7 @@ internal sealed partial class ZigLowering
     /// deferred like a reified generic's (a body cannot lower inside the one being lowered) and carrying the
     /// enclosing generic instance's comptime seeds. A nested container member stays a loud cut.</summary>
     private CStmt LowerLocalStruct(string name, Item? membersItem, AggregateLayout layout,
-        IReadOnlyList<(string name, long value, CType type)>? extraValueSeeds = null)
+        IReadOnlyList<ValueSeed>? extraValueSeeds = null)
     {
         var (fields, methods, consts, containers) = membersItem is { } m
             ? SplitMembers(m)
@@ -718,8 +714,8 @@ internal sealed partial class ZigLowering
             IReadOnlyList<TypeSeed> typeSeeds = [.. inst?.TypeSeeds ?? System.Array.Empty<TypeSeed>(),
                                                  .. BodyAliasSeeds()];
             // A comptime-selected struct's capture (`|vec_size|`) is one more value seed of the struct's members.
-            IReadOnlyList<(string, long, CType)> valueSeeds = [.. inst?.ValueSeeds ?? System.Array.Empty<(string, long, CType)>(),
-                                                               .. extraValueSeeds ?? System.Array.Empty<(string, long, CType)>()];
+            IReadOnlyList<ValueSeed> valueSeeds = [.. inst?.ValueSeeds ?? System.Array.Empty<ValueSeed>(),
+                                                               .. extraValueSeeds ?? System.Array.Empty<ValueSeed>()];
             var optionalSeeds = inst?.OptionalSeeds ?? System.Array.Empty<(string, bool, long, CType)>();
             _reifiedSeeds[mangled] = (typeSeeds, valueSeeds, optionalSeeds);
             // The mangled name is the container a method's `@This()` / `Self` resolves to (the plain name is only

@@ -116,7 +116,10 @@ internal sealed partial class ZigLowering
         if (cur.Content is Zig.SwitchExpr or Zig.SwitchExprTrailing)
         {
             var (switchSubject, switchProngs) = cur.Content is Zig.SwitchExpr se ? (se.Arg2, se.Arg5) : (((Zig.SwitchExprTrailing)cur.Content).Arg2, ((Zig.SwitchExprTrailing)cur.Content).Arg5);
-            return TrySelectTypeProng(switchSubject, switchProngs) is { Expr: { } typeArm, CaptureName: null } ? DeclaredBitsOfTypeArg(typeArm) : null;
+            // Or over a comptime tag (std.math.log2's `switch (int_info.signedness) { .signed => @Int(…), .unsigned => T }`,
+            // task #163).
+            var typeProng = TrySelectTypeProng(switchSubject, switchProngs) ?? SelectComptimeProng(switchSubject, switchProngs, out _);
+            return typeProng is { Expr: { } typeArm, CaptureName: null } ? DeclaredBitsOfTypeArg(typeArm) : null;
         }
         // A comptime `if` choosing a type (`const DT = if (@bitSizeOf(T) <= 64) u64 else u128;`): the taken arm's width.
         if (cur.Content is Zig.IfExpr typeIf && TryFoldTypeIfCondition(typeIf.Arg2) is { } typeIfTaken)
@@ -284,6 +287,48 @@ internal sealed partial class ZigLowering
         if (l is { } onlyL && IsIntegerLiteral(rhs)) { return onlyL; }
         if (r is { } onlyR && IsIntegerLiteral(lhs)) { return onlyR; }
         return null;
+    }
+
+    /// <summary>zig's integer type of an ARITHMETIC value, read off the source as <see cref="DeclaredBitsOfValue"/> reads its
+    /// width: the operands' peer type (`f / 25` over a <c>comptime f: u11</c> is a <c>u11</c>, task #163), where the lowered
+    /// expression carries C's promoted <c>int</c>. An integer literal adopts its peer's type, a shift keeps its left
+    /// operand's, and operands of one type keep it; a named value is its symbol's type. Null for anything else, including
+    /// operands of two different types, so the lowered type stands.</summary>
+    private CType? PeerTypeOfValue(Item e)
+    {
+        return e.Content switch
+        {
+            Zig.Grouped g => PeerTypeOfValue(g.Arg1),
+            // A comptime seed's read folds to an `int` literal, though `comptime n: u5` is a `u5`.
+            Zig.Ident => Operand(e),
+            Zig.Shl s => Operand(s.Arg0),
+            Zig.Shr s => Operand(s.Arg0),
+            Zig.Add a => Peer(a.Arg0, a.Arg2),
+            Zig.Sub a => Peer(a.Arg0, a.Arg2),
+            Zig.Mul a => Peer(a.Arg0, a.Arg2),
+            Zig.AddWrap a => Peer(a.Arg0, a.Arg2),
+            Zig.SubWrap a => Peer(a.Arg0, a.Arg2),
+            Zig.MulWrap a => Peer(a.Arg0, a.Arg2),
+            Zig.AddSat a => Peer(a.Arg0, a.Arg2),
+            Zig.SubSat a => Peer(a.Arg0, a.Arg2),
+            Zig.MulSat a => Peer(a.Arg0, a.Arg2),
+            Zig.DivOp a => Peer(a.Arg0, a.Arg2),
+            Zig.ModOp a => Peer(a.Arg0, a.Arg2),
+            Zig.BitAnd a => Peer(a.Arg0, a.Arg2),
+            Zig.BitXor a => Peer(a.Arg0, a.Arg2),
+            Zig.BitOr a => Peer(a.Arg0, a.Arg2),
+            _ => null,
+        };
+
+        CType? Operand(Item o) => (o.Content is Zig.Ident ? null : PeerTypeOfValue(o))
+            ?? (o.Content is Zig.Ident id && _symbols.Resolve(Tok(id.Arg0)) is { Type.Unqualified: CType.Prim { Integer: true } t } ? t : null);
+
+        CType? Peer(Item l, Item r)
+        {
+            if (IsIntegerLiteral(r)) { return Operand(l); }
+            if (IsIntegerLiteral(l)) { return Operand(r); }
+            return Operand(l) is { } lt && Operand(r) is { } rt && lt.Equals(rt) ? lt : null;
+        }
     }
 
     /// <summary>Is <paramref name="e"/> an integer literal (a <c>comptime_int</c> that adopts its peer's type)?</summary>

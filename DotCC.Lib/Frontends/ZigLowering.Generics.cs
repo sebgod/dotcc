@@ -137,10 +137,39 @@ internal sealed partial class ZigLowering
         }
     }
 
+    /// <summary>One resolved comptime VALUE argument (<c>comptime f: u11</c> bound to 1600): the parameter name, its value,
+    /// its lowered type, and, when the parameter's type spelled an integer width, that declared width (task #163), which the
+    /// lowered type cannot carry for the reason <see cref="TypeSeed"/> gives. Converts from the (name, value, type) tuple most
+    /// sites build, where no width is known.</summary>
+    private readonly record struct ValueSeed(string Name, long Value, CType Type, int? DeclaredBits = null)
+    {
+        /// <summary>The name, value and type: the three parts most seed sites read.</summary>
+        public void Deconstruct(out string name, out long value, out CType type)
+        {
+            name = Name;
+            value = Value;
+            type = Type;
+        }
+
+        /// <summary>A seed with no declared width, from the tuple a site builds.</summary>
+        public static implicit operator ValueSeed((string Name, long Value, CType Type) seed) => new(seed.Name, seed.Value, seed.Type);
+    }
+
+    /// <summary>Declare a comptime VALUE seed in the current scope: a symbol whose reads fold to the value, carrying the seed's
+    /// declared width (<see cref="_valueBits"/>), so `math.log2(f / 25)` over a <c>comptime f: u11</c> instantiates for
+    /// <c>u11</c> as zig's does (task #163).</summary>
+    private Symbol DeclareValueSeed(ValueSeed seed)
+    {
+        var sym = _symbols.Declare(new Symbol { Name = seed.Name, Kind = SymKind.Var, Type = seed.Type });
+        _comptimeVars[sym] = (seed.Value, seed.Type);
+        RecordValueBits(sym, seed.DeclaredBits, null);
+        return sym;
+    }
+
     private sealed record PendingInstantiation(
         Symbol Instance,
         GenericFnInfo Generic,
-        IReadOnlyList<(string name, long value, CType type)> ValueSeeds,
+        IReadOnlyList<ValueSeed> ValueSeeds,
         IReadOnlyList<TypeSeed> TypeSeeds,
         IReadOnlyList<(string name, CType type)> RuntimeParams,
         IReadOnlyList<(string name, bool hasValue, long value, CType inner)> OptionalSeeds,
@@ -230,17 +259,14 @@ internal sealed partial class ZigLowering
     /// do. Anything else returns null and the call stays a deferred fold (V1), which fails loudly if it
     /// cannot fold either. Every binding made here is undone, so the caller's scope is untouched.</summary>
     private CExpr? TryEvalComptimeIntBody(GenericFnInfo g,
-        IReadOnlyList<(string name, long value, CType type)> valueSeeds,
+        IReadOnlyList<ValueSeed> valueSeeds,
         IReadOnlyList<(string name, bool hasValue, long value, CType inner)> optionalSeeds)
     {
         var bound = new List<(string Name, ZigTypeInfo? Info, CType? Alias, int? Bits, CExpr? Value)>();
         _symbols.EnterScope();
         try
         {
-            foreach (var (name, value, type) in valueSeeds)
-            {
-                _comptimeVars[_symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = type })] = (value, type);
-            }
+            foreach (var seed in valueSeeds) { DeclareValueSeed(seed); }
             foreach (var (name, hasValue, value, inner) in optionalSeeds)
             {
                 var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = new CType.Optional(inner) });
@@ -417,7 +443,7 @@ internal sealed partial class ZigLowering
         var vectorArraysBefore = _comptimeVectorArrays;
         var mangleTokens = new List<string>();
         var typeSeeds = new List<TypeSeed>();
-        var valueSeeds = new List<(string name, long value, CType type)>();
+        var valueSeeds = new List<ValueSeed>();
         var optionalSeeds = new List<(string name, bool hasValue, long value, CType inner)>();
         var stringSeeds = new List<(string name, LitStr value)>();
         var anytypeSeeds = new List<(string name, CType type)>();
@@ -628,7 +654,8 @@ internal sealed partial class ZigLowering
                         // A negative value can't spell a C# identifier segment, so encode the sign;
                         // long.MinValue has no positive `long`, so widen through Int128 for the magnitude.
                         mangleTokens.Add(v >= 0 ? v.ToString(inv) : "n" + (-(System.Int128)v).ToString(inv));
-                        valueSeeds.Add((g.Params[i].Name, v, LowerType(g.Params[i].TypeAst)));
+                        valueSeeds.Add(new ValueSeed(g.Params[i].Name, v, LowerType(g.Params[i].TypeAst),
+                            DeclaredBitsOfTypeArg(g.Params[i].TypeAst)));
                         break;
                     case ParamKind.AnyType when typePointerArgs.Contains(g.Params[i].Name):
                         mangleTokens.Add("tp" + MangleTypeSeed(typeSeeds.First(s => s.Name == g.Params[i].Name)));
@@ -694,10 +721,7 @@ internal sealed partial class ZigLowering
                 _symbols.EnterScope();
                 try
                 {
-                    foreach (var (name, value, type) in valueSeeds)
-                    {
-                        _comptimeVars[_symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = type })] = (value, type);
-                    }
+                    foreach (var seed in valueSeeds) { DeclareValueSeed(seed); }
                     foreach (var (name, hasValue, value, inner) in optionalSeeds)
                     {
                         var optSym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = new CType.Optional(inner) });
@@ -870,7 +894,9 @@ internal sealed partial class ZigLowering
     {
         using var _ = EnterThrowawayHoist();   // the inference lowering is discarded
         var lowered = LowerExpr(argItem);
-        var type = (lowered.Type
+        // An arithmetic argument is its operands' peer type (`f / 25` over a `comptime f: u11` is a `u11`, task #163), which C's
+        // promotion widened to `int` in the lowered expression.
+        var type = (PeerTypeOfValue(argItem) ?? lowered.Type
             ?? throw new IrUnsupportedException("zig `anytype` argument has no statically known type")).Unqualified;
         // A string literal is `*const [N:0]u8`: its logical length excludes the NUL its stored array carries, so
         // `input.len` in the callee is N (std.hash.XxHash32.hash(0, "hello") had read 6, silently, task #87).
@@ -1004,7 +1030,7 @@ internal sealed partial class ZigLowering
     /// loud cut: the idiom's struct is a namespace for its functions.</summary>
     private Symbol ReifyClosureStruct(string owner, Item fieldDecls, string member,
         IReadOnlyList<TypeSeed> typeSeeds,
-        IReadOnlyList<(string name, long value, CType type)> valueSeeds,
+        IReadOnlyList<ValueSeed> valueSeeds,
         IReadOnlyList<(string name, bool hasValue, long value, CType inner)> optionalSeeds)
     {
         var anon = owner + "__Anon";
@@ -1473,7 +1499,7 @@ internal sealed partial class ZigLowering
         // its resolved type; a VALUE arg → a comptime value; an OPTIONAL value arg → a comptime null /
         // payload. Each contributes a mangle token, so the reified struct is keyed by the resolved args.
         var typeSeeds = new List<TypeSeed>();
-        var valueSeeds = new List<(string name, long value, CType type)>();
+        var valueSeeds = new List<ValueSeed>();
         var optionalSeeds = new List<(string name, bool hasValue, long value, CType inner)>();
         var aggregateSeeds = new List<(string name, IrModule.ComptimeValue value, CType type)>();
         // `comptime eql: fn (a: []const u8, b: []const u8) bool` (std.StaticStringMapWithEql, task #99): the function each
@@ -1616,7 +1642,7 @@ internal sealed partial class ZigLowering
                     mangleTokens.Add(vv >= 0 ? vv.ToString(inv)
                         : IsUnsigned64(valueParamType) ? unchecked((ulong)vv).ToString(inv)
                         : "n" + (-(System.Int128)vv).ToString(inv));
-                    valueSeeds.Add((p.Name, vv, LowerType(p.TypeAst)));
+                    valueSeeds.Add(new ValueSeed(p.Name, vv, LowerType(p.TypeAst), DeclaredBitsOfTypeArg(p.TypeAst)));
                 }
             }
             // Module-qualified in an imported module: two modules may each declare a `fn Box(comptime T)`.
@@ -1658,11 +1684,7 @@ internal sealed partial class ZigLowering
             }
             try
             {
-                foreach (var (name, value, type) in valueSeeds)
-                {
-                    var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = type });
-                    _comptimeVars[sym] = (value, type);
-                }
+                foreach (var seed in valueSeeds) { DeclareValueSeed(seed); }
                 foreach (var (name, hasValue, value, inner) in optionalSeeds)
                 {
                     var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = new CType.Optional(inner) });
@@ -1885,7 +1907,7 @@ internal sealed partial class ZigLowering
         IReadOnlyList<(string name, CType type)> RuntimeParams,
         Item Body,
         IReadOnlyList<TypeSeed> TypeSeeds,
-        IReadOnlyList<(string name, long value, CType type)> ValueSeeds,
+        IReadOnlyList<ValueSeed> ValueSeeds,
         IReadOnlyList<(string name, bool hasValue, long value, CType inner)> OptionalSeeds,
         IReadOnlyList<(string name, ZigLowering owner, Symbol fn)>? FnSeeds = null);
 
@@ -1898,7 +1920,7 @@ internal sealed partial class ZigLowering
     /// <summary>Each reified container's comptime seeds, by its mangled name, so a member lowered lazily
     /// later (a field default, a <c>Type.NAME</c> const) can see them again (<see cref="EnterReifiedSeeds"/>).</summary>
     private readonly Dictionary<string, (IReadOnlyList<TypeSeed> Types,
-        IReadOnlyList<(string name, long value, CType type)> Values,
+        IReadOnlyList<ValueSeed> Values,
         IReadOnlyList<(string name, bool hasValue, long value, CType inner)> Optionals)> _reifiedSeeds
         = new(System.StringComparer.Ordinal);
 
