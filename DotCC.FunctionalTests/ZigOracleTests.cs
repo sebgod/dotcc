@@ -6521,6 +6521,41 @@ public sealed class ZigOracleTests
             "    total += b.size;\n" +
             "    return @truncate(total);\n" +
             "}\n", 168, "" },
+        // Task #108: a comptime `@Vector(3, u8)` (a shape .NET vectors cannot hold) is an array at compile time; a reified
+        // method taking one is analysed only if called; `@FieldType(P, "b")` is the field's type.
+        new object[] { "comptime_vector_and_field_type",
+            "inline fn iota(comptime n: usize) @Vector(n, u8) {\n" +
+            "    comptime {\n" +
+            "        var out: [n]u8 = undefined;\n" +
+            "        for (&out, 0..) |*e, i| e.* = @intCast(i * 3);\n" +
+            "        return out;\n" +
+            "    }\n" +
+            "}\n" +
+            "\n" +
+            "fn Box(comptime T: type) type {\n" +
+            "    return struct {\n" +
+            "        v: T,\n" +
+            "        const Self = @This();\n" +
+            "        fn widen(self: *Self, lanes: @Vector(3, u8)) void {\n" +
+            "            _ = self;\n" +
+            "            _ = lanes;\n" +
+            "        }\n" +
+            "        fn get(self: Self) T {\n" +
+            "            return self.v;\n" +
+            "        }\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "const P = struct { a: u8, b: u32 };\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    const v = comptime iota(3);\n" +
+            "    const arr: [3]u8 = v;\n" +
+            "    const b = Box(u8){ .v = 40 };\n" +
+            "    var wide: @FieldType(P, \"b\") = 70000;\n" +
+            "    wide += 1;\n" +
+            "    return arr[2] + arr[1] + b.get() + @as(u8, @intCast(wide % 7));\n" +
+            "}\n", 50, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

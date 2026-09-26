@@ -1499,7 +1499,8 @@ internal sealed partial class ZigLowering
                     + "(single, parallel `(a, b) |x, y|`, or indexed `(list, 0..) |x, i|`), or an "
                     + "`inline while (c) : (i = …)` with a `comptime var` counter (comptime "
                     + "unrolling) — the by-ref `|*x|` `for` forms, `inline for` over a runtime "
-                    + "slice, and a bare/expr-cont `inline while` are not supported yet");
+                    + "slice, and a bare/expr-cont `inline while` are not supported yet"
+                    + (_currentFnName.Length > 0 ? $" (in '{_currentFnName}', a {loopItem.Content?.GetType().Name})" : ""));
         }
     }
 

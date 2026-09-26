@@ -2994,6 +2994,142 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_vector_shape_dotnet_cannot_hold_is_an_array_at_compile_time()
+    {
+        var cs = EmitZig("""
+            inline fn iota(comptime n: usize) @Vector(n, u8) {
+                comptime {
+                    var out: [n]u8 = undefined;
+                    for (&out, 0..) |*e, i| e.* = @intCast(i * 3);
+                    return out;
+                }
+            }
+
+            fn Box(comptime T: type) type {
+                return struct {
+                    v: T,
+                    const Self = @This();
+                    fn widen(self: *Self, lanes: @Vector(3, u8)) void {
+                        _ = self;
+                        _ = lanes;
+                    }
+                    fn get(self: Self) T {
+                        return self.v;
+                    }
+                };
+            }
+
+            const P = struct { a: u8, b: u32 };
+
+            pub fn main() u8 {
+                const v = comptime iota(3);
+                const arr: [3]u8 = v;
+                const b = Box(u8){ .v = 40 };
+                var wide: @FieldType(P, "b") = 70000;
+                wide += 1;
+                return arr[2] + arr[1] + b.get() + @as(u8, @intCast(wide % 7));
+            }
+            """);
+        // Task #108 (std.meta.FieldEnum's `&std.simd.iota(u8, 3)`): a `@Vector(3, u8)` evaluated at compile time is held as a
+        // `[3]u8`; the uncalled method taking one by value is not declared at all (its failure waits for a call, as zig
+        // analyses it only when referenced); `@FieldType(P, "b")` is the field's type. zig returns 50.
+        cs.ShouldContain("uint wide = 70000;");
+        cs.ShouldNotContain("_widen(");
+    }
+
+    [Fact]
+    public void A_vector_shape_dotnet_cannot_hold_is_still_rejected_at_runtime()
+    {
+        // The runtime array fallback is GitHub issue #127: at runtime the shape stays the loud cut.
+        Should.Throw<Exception>(() => EmitZig("""
+            inline fn iota(comptime n: usize) @Vector(n, u8) {
+                comptime {
+                    var out: [n]u8 = undefined;
+                    for (&out, 0..) |*e, i| e.* = @intCast(i * 3);
+                    return out;
+                }
+            }
+            pub fn main() u8 {
+                const v = iota(3);
+                const arr: [3]u8 = v;
+                return arr[2];
+            }
+            """)).Message.ShouldContain("dotcc lowers a vector to .NET's Vector64/128/256/512");
+        // The same instance made at compile time first, then called at runtime: the call-graph check refuses it.
+        Should.Throw<Exception>(() => EmitZig("""
+            inline fn iota(comptime n: usize) @Vector(n, u8) {
+                comptime {
+                    var out: [n]u8 = undefined;
+                    for (&out, 0..) |*e, i| e.* = @intCast(i * 3);
+                    return out;
+                }
+            }
+            pub fn main() u8 {
+                const c = comptime iota(3);
+                const v = iota(3);
+                const a: [3]u8 = c;
+                const b: [3]u8 = v;
+                return a[1] + b[2];
+            }
+            """)).Message.ShouldContain("is called at runtime with a vector shape .NET vectors cannot hold");
+    }
+
+    [Fact]
+    public void A_reified_method_whose_signature_does_not_lower_fails_when_called()
+    {
+        Should.Throw<Exception>(() => EmitZig("""
+            fn Box(comptime T: type) type {
+                return struct {
+                    v: T,
+                    const Self = @This();
+                    fn widen(self: *Self, lanes: @Vector(3, u8)) void {
+                        _ = self;
+                        _ = lanes;
+                    }
+                };
+            }
+            pub fn main() u8 {
+                var b = Box(u8){ .v = 40 };
+                b.widen(.{ 1, 2, 3 });
+                return b.v;
+            }
+            """)).Message.ShouldContain("dotcc lowers a vector to .NET's Vector64/128/256/512");
+    }
+
+    [Fact]
+    public void A_nested_container_method_reads_its_enclosing_instance_lists_and_types()
+    {
+        var cs = EmitZig("""
+            fn L(comptime E: type) type {
+                return struct {
+                    const names = @typeInfo(E).@"struct".field_names;
+                    pub const Tag = enum { a, b };
+                    pub const In = struct {
+                        pub fn count() usize {
+                            var n: usize = 0;
+                            inline for (names) |_| n += 1;
+                            return n;
+                        }
+                        pub fn pick() Tag {
+                            return @field(Tag, "b");
+                        }
+                    };
+                };
+            }
+
+            const S = struct { x: u8, y: u8, z: u8 };
+
+            pub fn main() u8 {
+                return @intCast(L(S).In.count() * 10 + @intFromEnum(L(S).In.pick()));
+            }
+            """);
+        // Task #108 (std.MultiArrayList.Slice.set / swap): `inline for (names)` over the enclosing instance's
+        // `const names = @typeInfo(E).@"struct".field_names;`, and `@field(Tag, "b")` with `Tag` its type const. zig returns 31.
+        cs.ShouldContain("L__S__In_count()");
+        cs.ShouldContain("L__S__In_pick()");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

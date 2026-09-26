@@ -81,6 +81,14 @@ internal sealed partial class ZigLowering
     /// arm folded away — is a loud error, as it is in zig.</summary>
     private TypeBodyResult ProcessTypeReturningBody(string fnName, Item body, List<(string name, CType? prev, int? prevBits)> typeShadows)
     {
+        _shared.TypeBodyDepth++;
+        try { return ProcessTypeReturningBodyCore(fnName, body, typeShadows); }
+        finally { _shared.TypeBodyDepth--; }
+    }
+
+    /// <summary>The walk behind <see cref="ProcessTypeReturningBody"/>.</summary>
+    private TypeBodyResult ProcessTypeReturningBodyCore(string fnName, Item body, List<(string name, CType? prev, int? prevBits)> typeShadows)
+    {
         var stmts = BodyStatements(body);
         if (stmts.Count == 0)
         {

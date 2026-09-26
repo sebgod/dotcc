@@ -92,6 +92,17 @@ internal sealed class ZigImportScope
     /// a user struct's field (<c>@field(value, f_name)</c>) and asks its width (task #121).</summary>
     public Dictionary<(string Struct, string Field), int> StructFieldBits { get; } = new();
 
+    /// <summary>Above zero while ANY module evaluates a type-returning body (compile-time code), shared: std.meta.FieldEnum's
+    /// body (meta.zig) instantiates std.simd.iota in simd.zig, whose `@Vector(3, u8)` result is then a compile-time
+    /// value (task #108).</summary>
+    public int TypeBodyDepth { get; set; }
+
+    /// <summary>A reified container's methods whose SIGNATURE did not lower, by (container IR name, method) → the failure,
+    /// shared: zig analyses a declaration only when it is referenced, so the failure is raised at the first call
+    /// (<c>ZigLowering.EnsureMethodDeclared</c>), not while the type is reified (std.MultiArrayList's debugger-only
+    /// <c>dbHelper(…, entry: *Entry)</c>, task #108).</summary>
+    public Dictionary<(string Container, string Method), string> FailedMethods { get; } = new();
+
     /// <summary>A container's IR name → the module holding its VALUE consts, so a decl literal
     /// (<c>var list: std.array_list.Aligned(u8, null) = .empty;</c>) written in another module lowers the
     /// const where it was declared.</summary>

@@ -401,6 +401,7 @@ internal sealed partial class ZigLowering
         using var ownerScope = EnterContainer(g.Owner ?? _currentContainer);
 
         var inv = CultureInfo.InvariantCulture;
+        var vectorArraysBefore = _comptimeVectorArrays;
         var mangleTokens = new List<string>();
         var typeSeeds = new List<TypeSeed>();
         var valueSeeds = new List<(string name, long value, CType type)>();
@@ -740,6 +741,14 @@ internal sealed partial class ZigLowering
                         $"zig: a parameter of comptime-only type must be declared comptime ('{templateSym.Name}')");
                 }
                 if (_zigInlineFns.Contains(templateSym)) { _zigInlineFns.Add(instanceSym); }
+                // Its signature holds a vector shape .NET cannot (task #108, `std.simd.iota(u8, 3)`'s `@Vector(3, u8)`),
+                // lowered as a compile-time array: a runtime call reaching it is zig code dotcc cannot run yet.
+                if (_comptimeVectorArrays != vectorArraysBefore)
+                {
+                    _comptimeReturnFns.TryAdd(instanceSym,
+                        $"zig: '{templateSym.Name}' is called at runtime with a vector shape .NET vectors cannot hold; dotcc holds such "
+                        + "a vector only at compile time (the runtime array fallback is github.com/sebgod/dotcc/issues/127)");
+                }
                 _fnParamInfos[instanceSym] = g.Params;
                 if (DeclaredBitsOfTypeArg(g.RetType) is { } instRetBits) { _fnReturnBits[instanceSym] = instRetBits; }
                 if (anytypeBits.Count > 0) { _instanceAnytypeBits[instanceSym] = anytypeBits; }
@@ -1331,6 +1340,22 @@ internal sealed partial class ZigLowering
         _ => null,
     };
 
+    /// <summary>Declare a method of a reified container (<see cref="DeclareMethod"/>), or record why its signature does not
+    /// lower (<c>FailedMethods</c>) and return null: zig analyses the declaration only when something references it, so the
+    /// failure is raised at the first call (<see cref="EnsureMethodDeclared"/>). std.MultiArrayList's <c>dbHelper</c> takes
+    /// a <c>*Entry</c>, an <c>@Struct</c> built in a labeled block, and is referenced only from a <c>comptime</c> block for the
+    /// LLVM backend's debugger (task #108). <paramref name="resume"/> is the container to leave current afterwards.</summary>
+    private (Symbol sym, List<(string name, CType type)> ps, Item body, string? container)? TryDeclareReifiedMethod(string container, Item methodDef, string resume)
+    {
+        try { return DeclareMethod(container, methodDef); }
+        catch (IrUnsupportedException failure)
+        {
+            _currentContainer = resume;
+            _shared.FailedMethods[(container, MethodNameOf(methodDef))] = failure.Message;
+            return null;
+        }
+    }
+
     /// <summary>The container whose recorded comptime seeds a member of <paramref name="container"/> sees:
     /// the nearest reified instance on its lexical parent chain, or null.</summary>
     private string? ReifiedAncestor(string container)
@@ -1724,7 +1749,7 @@ internal sealed partial class ZigLowering
                 }
                 foreach (var (nContainer, nDef) in nestedMethods)
                 {
-                    var nm = DeclareMethod(nContainer, nDef);
+                    if (TryDeclareReifiedMethod(nContainer, nDef, mangled) is not { } nm) { continue; }
                     if (IsFnTemplate(nm.sym)) { continue; }   // a generic method instantiates per call
                     _pendingReifiedMethods.Add(new PendingReifiedMethod(
                         nm.sym, nContainer, nm.ps, nm.body, methodTypeSeeds, valueSeeds, optionalSeeds, typeFnSeeds));
@@ -1740,8 +1765,9 @@ internal sealed partial class ZigLowering
                 // clobber the in-flight per-function state (the same re-entrancy rule as W3a's worklist).
                 foreach (var methodDef in methods)
                 {
-                    var me = DeclareMethod(mangled, methodDef);
+                    var declared = TryDeclareReifiedMethod(mangled, methodDef, mangled);
                     _currentContainer = mangled;   // DeclareMethod clears it; the next signature needs it back
+                    if (declared is not { } me) { continue; }
                     if (IsFnTemplate(me.sym)) { continue; }   // a generic method instantiates per call
                     _pendingReifiedMethods.Add(new PendingReifiedMethod(
                         me.sym, mangled, me.ps, me.body, methodTypeSeeds, valueSeeds, optionalSeeds, typeFnSeeds));

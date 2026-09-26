@@ -350,6 +350,11 @@ internal sealed partial class ZigLowering
         {
             return sym;
         }
+        // A reified container's method whose signature did not lower (task #108): now that it is referenced, its failure.
+        if (_shared.FailedMethods.TryGetValue((container, method), out var failure))
+        {
+            throw new CompileException(failure);
+        }
         if (!_lazyMethodDecls.TryGetValue((container, method), out var pending))
         {
             // A file-as-struct type's methods are its module's top-level functions (road-to-zig-std G3).

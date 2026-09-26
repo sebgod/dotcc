@@ -117,9 +117,41 @@ internal sealed partial class ZigLowering
                 type = VectorTypeOf(b);
                 return true;
 
+            // `@FieldType(Elem, @tagName(field))` (std.MultiArrayList's `items` return type, task #108).
+            case "@FieldType":
+                type = FieldTypeBuiltin(b);
+                return true;
+
             default:
                 return false;
         }
+    }
+
+    /// <summary><c>@FieldType(T, name)</c>: the type of the field <c>name</c> of the struct or union <c>T</c>, the name
+    /// comptime-known (a string, or <c>@tagName</c> of a comptime enum value, as std.MultiArrayList's
+    /// <c>FieldType(comptime field: Field)</c> spells it, task #108). A union's field is its variant's payload type.</summary>
+    private CType FieldTypeBuiltin(Zig.BuiltinCall call)
+    {
+        var args = Flatten(call.Arg2);
+        if (args.Count != 2)
+        {
+            throw new IrUnsupportedException($"zig `@FieldType` expects (type, name); got {args.Count} argument(s)");
+        }
+        var container = LowerType(args[0]);
+        if (ContainerTypeName(container) is not { } containerName)
+        {
+            throw new IrUnsupportedException($"zig `@FieldType`: {container.Describe()} is not a struct or union type");
+        }
+        var name = ComptimeName(args[1]) ?? TryComptimeTagName(args[1])
+            ?? throw new IrUnsupportedException("zig `@FieldType`: the field name must be comptime-known");
+        foreach (var agg in AggregatesOf(containerName))
+        {
+            if (_ir.StructFields.TryGetValue(agg, out var fields) && fields.FirstOrDefault(f => f.Name == name) is { Type: { } fieldType })
+            {
+                return fieldType;
+            }
+        }
+        throw new IrUnsupportedException($"zig `@FieldType`: '{containerName}' has no field '{name}'");
     }
 
     // ---- @Struct: a struct from comptime field lists (task #93) ------------

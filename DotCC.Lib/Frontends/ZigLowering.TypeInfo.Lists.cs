@@ -148,6 +148,19 @@ internal sealed partial class ZigLowering
             list = bound;
             return true;
         }
+        // A list-valued const of the container in scope or one enclosing it (std.MultiArrayList's
+        // `const field_names = @typeInfo(Elem).@"struct".field_names;`, walked by `inline for` in a method of its nested
+        // `Slice`, task #108): the const's own right-hand side, read with the method's seeds live.
+        if (expr.Content is Zig.Ident cid && _symbols.Resolve(Tok(cid.Arg0)) is null)
+        {
+            for (var c = _currentContainer; c is not null; c = _containerParents.GetValueOrDefault(c))
+            {
+                if (_containerConsts.TryGetValue(c, out var consts) && consts.TryGetValue(Tok(cid.Arg0), out var decl))
+                {
+                    return decl.Item1 is null && decl.Item2 != expr && TryFoldTypeInfoList(decl.Item2, out list);
+                }
+            }
+        }
         if (expr.Content is not Zig.Field f || !TryEvalTypeInfo(f.Arg0, out var info)) { return false; }
         var field = Tok(f.Arg2);
         switch (field)
@@ -362,9 +375,10 @@ internal sealed partial class ZigLowering
                 + "over a member list");
         }
         // `@field(T, name)` with `T` an enum TYPE (std.meta.stringToEnum's `.{ name, @field(T, name) }`, task #116): the member
-        // it names, as `T.name` is.
+        // it names, as `T.name` is. `T` may be a type const of an enclosing container (std.MultiArrayList.Slice.swap's
+        // `@field(Field, field_name)`, `Field` declared on the instance, task #108).
         if (bargs[0].Content is Zig.Ident typeIdent && _symbols.Resolve(Tok(typeIdent.Arg0)) is null
-            && _typeAliases.TryGetValue(Tok(typeIdent.Arg0), out var receiverType) && receiverType.Unqualified is CType.Enum receiverEnum)
+            && TryLookupContainerType(Tok(typeIdent.Arg0), out var receiverType) && receiverType.Unqualified is CType.Enum receiverEnum)
         {
             return ResolveEnumLit(fieldName, receiverEnum);
         }

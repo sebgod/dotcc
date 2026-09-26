@@ -14,11 +14,15 @@ namespace DotCC.Frontends;
 /// comparison yields, is a lane bitmask in a <c>ulong</c>. <c>@splat</c> is <c>VectorN.Create(x)</c>, an array or
 /// a slice at a vector sink is a load from its first element, a comparison is a mask (<c>ZigVec.Eq</c>, …), and
 /// <c>@reduce</c> / <c>@select</c> / a lane read route through <c>DotCC.Libc.ZigVec</c>. A width .NET has no
-/// vector type for (a <c>@Vector(3, u8)</c>) is a loud cut.</summary>
+/// vector type for (a <c>@Vector(3, u8)</c>) is a loud cut at runtime; at compile time it is held as an array
+/// (task #108, see <see cref="VectorTypeOf"/>; the runtime fallback is GitHub issue #127).</summary>
 internal sealed partial class ZigLowering
 {
-    /// <summary>Lower <c>@Vector(len, T)</c> to its <see cref="CType.Vector"/>, loud when no .NET vector fits.</summary>
-    private CType.Vector VectorTypeOf(Zig.BuiltinCall call)
+    /// <summary>Lower <c>@Vector(len, T)</c> to its <see cref="CType.Vector"/>, loud when no .NET vector fits, except while
+    /// evaluating at compile time: there the shape is an array <c>[len]T</c> (task #108: std.meta.FieldEnum's
+    /// <c>&amp;std.simd.iota(u8, 3)</c>, a vector read through as <c>*const [3]u8</c>), and a generic instance whose
+    /// signature needed one is kept from runtime calls (<see cref="_comptimeVectorArrays"/>).</summary>
+    private CType VectorTypeOf(Zig.BuiltinCall call)
     {
         var args = Flatten(call.Arg2);
         if (args.Count != 2)
@@ -30,6 +34,11 @@ internal sealed partial class ZigLowering
         var vector = new CType.Vector(element, len);
         if (!vector.IsMask && (element.Unqualified is not CType.Prim { Name: not "_Bool" } || vector.NetFamily is null))
         {
+            if (element.Unqualified is CType.Prim { Name: not "_Bool" } && (_shared.TypeBodyDepth > 0 || _comptimeDepth > 0 || _loweringForComptimeEval > 0))
+            {
+                _comptimeVectorArrays++;
+                return new CType.Array(element, len);
+            }
             throw new IrUnsupportedException(
                 $"zig {vector.Describe()}: dotcc lowers a vector to .NET's Vector64/128/256/512, so its lanes must be "
                 + $"an integer or float type filling 8, 16, 32 or 64 bytes ({vector.Bits / 8} here)");
@@ -40,6 +49,10 @@ internal sealed partial class ZigLowering
         }
         return vector;
     }
+
+    /// <summary>How many times a vector shape .NET cannot hold was lowered as a compile-time array (<see cref="VectorTypeOf"/>).
+    /// A generic instance whose signature raised it may only be called at compile time (<see cref="ResolveGenericInstance"/>).</summary>
+    private int _comptimeVectorArrays;
 
     /// <summary>The <c>System.Runtime.Intrinsics</c> class of a numeric vector (<c>System.Runtime.Intrinsics.Vector128</c>).</summary>
     private static string VectorClass(CType.Vector v) => "System.Runtime.Intrinsics." + v.NetFamily;
