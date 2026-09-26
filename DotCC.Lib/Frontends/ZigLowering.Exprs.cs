@@ -48,13 +48,13 @@ internal sealed partial class ZigLowering
             // NUL) so it decays to `char*` exactly like a C literal — the C# backend lowers it to the
             // same pooled `Libc.L("…"u8)` pointer. Two Zig-specific reshapes happen FIRST so the shared
             // decoder is untouched: a `\\`-prefixed multiline string is folded to one quoted lexeme of
-            // its raw (un-escaped) content; a `\u{…}` unicode escape is expanded to `\xNN` UTF-8 bytes.
+            // its raw (un-escaped) content; each `\xNN` and `\u{…}` byte becomes an unambiguous octal escape (task #134).
             case Zig.StrLit s:
             {
                 var raw = Tok(s.Arg0);
                 var lexeme = raw.StartsWith("\\", System.StringComparison.Ordinal)
                     ? FoldZigMultilineString(raw)
-                    : ExpandZigUnicodeEscapes(raw);
+                    : NormalizeZigByteEscapes(raw);
                 var segs = new List<string> { lexeme };
                 DotCC.EmitHelpers.EncodeStringLiteral(segs, out var byteLen);
                 return new LitStr(segs) { Type = new CType.Array(CType.Char, byteLen) };

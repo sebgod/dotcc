@@ -1561,14 +1561,16 @@ internal sealed partial class ZigLowering
         return t.Length > 2 && t[0] == '0' && t[1] is 'x' or 'X' ? EmitHelpers.LowerHexFloat(t) : t;
     }
 
-    /// <summary>Expand Zig's <c>\u{NNNN}</c> unicode escapes in a quoted string lexeme to the
-    /// equivalent <c>\xNN</c> UTF-8 byte escapes, so the SHARED string decoder (which has no
-    /// <c>\u{…}</c> arm) handles them unchanged. Every OTHER escape (incl. a literal <c>\\</c>)
-    /// is copied verbatim, so a <c>\\u{</c> (escaped backslash then a <c>u{</c>) is not mistaken
-    /// for a unicode escape. The input/output keep the surrounding quotes.</summary>
-    private static string ExpandZigUnicodeEscapes(string quoted)
+    /// <summary>Rewrite a quoted Zig string lexeme's byte escapes for the SHARED (C) string decoder (task #134). Zig and C
+    /// disagree on <c>\x</c>: zig's is exactly two hex digits, C's consumes every hex digit that follows, so zig's
+    /// <c>"ab\x00cd"</c> handed over verbatim decoded as <c>a b 0xCD</c>, a silent miscompile. Each zig <c>\xNN</c> and
+    /// each UTF-8 byte of a <c>\u{NNNN}</c> (which the C decoder has no arm for) becomes a three-digit OCTAL escape
+    /// <c>\ooo</c>, which C ends after exactly three digits whatever follows. Every other escape (incl. a literal
+    /// <c>\\</c>) is copied verbatim, so a <c>\\x</c> (escaped backslash then an <c>x</c>) is not mistaken for one. The
+    /// input/output keep the surrounding quotes.</summary>
+    private static string NormalizeZigByteEscapes(string quoted)
     {
-        if (!quoted.Contains("\\u{", System.StringComparison.Ordinal)) { return quoted; }
+        if (!quoted.Contains('\\')) { return quoted; }
         var sb = new System.Text.StringBuilder(quoted.Length);
         var i = 0;
         while (i < quoted.Length)
@@ -1578,11 +1580,17 @@ internal sealed partial class ZigLowering
                 var close = quoted.IndexOf('}', i + 3);
                 if (close < 0) { throw new IrUnsupportedException("unterminated `\\u{…}` escape in string literal"); }
                 var cp = System.Convert.ToInt32(quoted[(i + 3)..close].Replace("_", ""), 16);
-                foreach (var b in System.Text.Encoding.UTF8.GetBytes(char.ConvertFromUtf32(cp)))
-                {
-                    sb.Append("\\x").Append(b.ToString("X2"));
-                }
+                foreach (var b in System.Text.Encoding.UTF8.GetBytes(char.ConvertFromUtf32(cp))) { AppendOctalByte(sb, b); }
                 i = close + 1;
+            }
+            else if (quoted[i] == '\\' && i + 1 < quoted.Length && quoted[i + 1] == 'x')
+            {
+                if (i + 3 >= quoted.Length || !System.Uri.IsHexDigit(quoted[i + 2]) || !System.Uri.IsHexDigit(quoted[i + 3]))
+                {
+                    throw new IrUnsupportedException("zig: `\\x` in a string literal takes exactly two hex digits");
+                }
+                AppendOctalByte(sb, System.Convert.ToByte(quoted.Substring(i + 2, 2), 16));
+                i += 4;
             }
             else if (quoted[i] == '\\' && i + 1 < quoted.Length)
             {
@@ -1593,6 +1601,10 @@ internal sealed partial class ZigLowering
         }
         return sb.ToString();
     }
+
+    /// <summary>Append <paramref name="b"/> as a three-digit octal escape (<c>\ooo</c>), unambiguous to the C decoder.</summary>
+    private static void AppendOctalByte(System.Text.StringBuilder sb, byte b)
+        => sb.Append('\\').Append(System.Convert.ToString(b, 8).PadLeft(3, '0'));
 
     /// <summary>Fold a Zig multiline string token (a run of <c>\\</c>-prefixed lines) into a single
     /// QUOTED lexeme whose decoded content is the raw concatenation joined by <c>\n</c>. Zig

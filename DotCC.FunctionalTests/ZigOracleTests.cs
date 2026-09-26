@@ -6569,6 +6569,17 @@ public sealed class ZigOracleTests
             "    total += @typeInfo(@TypeOf(y *% y)).int.bits;\n" +
             "    return total;\n" +
             "}\n", 176, "" },
+        // Task #134: zig's `\xNN` is exactly two hex digits (`"ab\x00cd"` is 5 bytes, not C's 3), and a `\u{e9}` byte
+        // followed by a hex-looking character stays two bytes.
+        new object[] { "zig_hex_escapes_two_digits",
+            "pub fn main() u8 {\n" +
+            "    const a = \"ab\\x00cd\";\n" +
+            "    const b = \"\\x41BC\\u{e9}a\";\n" +
+            "    const c = \"x\\x41\";\n" +
+            "    var n: u32 = a.len * 10 + a[4] % 10;\n" +
+            "    n += b.len * 3 + b[1] + b[3] + b[5] + c.len;\n" +
+            "    return @truncate(n);\n" +
+            "}\n", 172, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

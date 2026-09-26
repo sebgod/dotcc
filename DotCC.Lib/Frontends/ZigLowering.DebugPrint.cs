@@ -123,7 +123,7 @@ internal sealed partial class ZigLowering
             throw new IrUnsupportedException(
                 "zig `std.debug.print`: a multiline (`\\\\`) format string is not supported yet (wall-plan W6)");
         }
-        var inner = UnquoteStringLiteral(ExpandZigUnicodeEscapes(rawLexeme));
+        var inner = UnquoteStringLiteral(NormalizeZigByteEscapes(rawLexeme));
         var sb = new StringBuilder(inner.Length + 8);
         int ai = 0;
         int i = 0;

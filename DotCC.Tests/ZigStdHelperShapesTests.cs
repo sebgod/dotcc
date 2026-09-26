@@ -3166,6 +3166,31 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_zig_hex_escape_takes_exactly_two_digits()
+    {
+        var cs = EmitZig("""
+            pub fn main() u8 {
+                const a = "ab\x00cd";
+                const b = "\x41BC\u{e9}a";
+                const c = "x\x41";
+                var n: u32 = a.len * 10 + a[4] % 10;
+                n += b.len * 3 + b[1] + b[3] + b[5] + c.len;
+                return @truncate(n);
+            }
+            """);
+        // Task #134, a silent miscompile: the shared (C) decoder's `\x` takes every following hex digit, so zig's
+        // `"ab\x00cd"` decoded as `a b 0xCD` (len 3, zig 5). Each zig `\xNN` and `\u{…}` byte now reaches it as an octal
+        // escape. zig returns 172.
+        cs.ShouldContain("\"ab\\x00\\x63\\x64\\0\"u8");
+        Should.Throw<Exception>(() => EmitZig("""
+            pub fn main() u8 {
+                const s = "\x4";
+                return s[0];
+            }
+            """)).Message.ShouldContain("takes exactly two hex digits");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""
