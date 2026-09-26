@@ -9399,6 +9399,23 @@ public sealed class ZigOracleTests
             "    return @truncate((a ^ b ^ c) >> 5);\n" +
             "}\n", 34);
 
+    // Task #181: function-local aliases into std (a type, a namespace, a value) and a root unit's own
+    // `const native_endian = builtin.cpu.arch.endian();`, folded as a comptime question.
+    [Fact]
+    public void Dotcc_matches_zig_std_function_local_aliases() =>
+        MatchesZigWithRealStd("function_local_aliases",
+            "const std = @import(\"std\");\n" +
+            "const builtin = @import(\"builtin\");\n" +
+            "const native_endian = builtin.cpu.arch.endian();\n" +
+            "pub fn main() u8 {\n" +
+            "    const H = std.hash.Wyhash;\n" +
+            "    const math = std.math;\n" +
+            "    const pi = std.math.pi;\n" +
+            "    const little: u8 = if (native_endian == .little) 1 else 2;\n" +
+            "    const pi_int: u8 = @intFromFloat(pi * 10.0);\n" +
+            "    return @as(u8, @truncate(H.hash(0, \"abc\"))) +% math.rotl(u8, 0b1000_0001, 1) +% pi_int +% little;\n" +
+            "}\n", 149);
+
     // Task #180: std.hash.XxHash3 from real std past the short-input paths: hashLong over 300 bytes of runtime data (stripes,
     // `@ptrCast` of the last block, the comptime-folded `native_endian` swap), and the 17 / 200 byte paths over it too.
     [Fact]

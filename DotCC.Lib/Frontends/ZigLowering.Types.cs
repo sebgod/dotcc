@@ -218,7 +218,19 @@ internal sealed partial class ZigLowering
         RecordComptimeAggregateBinding(name, rhs);
         // `const Writer = std.Io.Writer;` is a path into another module, which may name a file-as-struct
         // TYPE (road-to-zig-std G3). Recorded unresolved; a type position resolves it on demand.
-        if (rhs.Content is Zig.Field && IsImportRootedPath(rhs)) { _moduleAliasPaths[name] = rhs; }
+        var inBody = _currentFnName.Length > 0;
+        if ((rhs.Content is Zig.Field || inBody && rhs.Content is Zig.Ident) && IsImportRootedPath(rhs))
+        {
+            _moduleAliasPaths[name] = rhs;
+            // In a body (`const H = std.hash.Wyhash;`, `const L = lib;`, task #181) the decl is not lazy as a top-level one
+            // is: a path that names a module or a type has no runtime value, so it is bound here and the decl dropped. A
+            // value path (`const pi = std.math.pi;`) resolves to neither and stays an ordinary local.
+            if (inBody)
+            {
+                if (TryResolveModuleTypeAlias(name, out _)) { _bodyTypeAliases.Add(name); return true; }
+                if (IsModuleAlias(name)) { return true; }
+            }
+        }
         if (EvalComptimeValue(rhs) is { } comptimeVal) { _comptimeValues[name] = comptimeVal; }
         // A comptime ARRAY literal (`const a = [_]u8{1,2};`) — record its raw element-type + element
         // items (no lowering, so safe in any pass) for a later `++`/`**` fold (see TryArrayLiteralParts).

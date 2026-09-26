@@ -182,4 +182,34 @@ public sealed class ZigFileStructTests
             """, ("Box.zig", Box + "\npub fn broken(b: *Box) void {\n    b.value += ;\n}\n")));
         ex.Message.ShouldContain("zig `broken` in Box.zig did not parse");
     }
+
+    [Fact]
+    public void A_function_local_alias_of_a_module_or_its_type_binds_at_compile_time()
+    {
+        // Task #181: `const P = lib.Pair;` and `const L = lib;` inside a body name a type and a module, which have no runtime
+        // value; they are bound at compile time and the decls dropped (the body had lowered each as a value and failed).
+        // zig returns 17.
+        var cs = EmitZigMulti("""
+            const lib = @import("lib.zig");
+            pub fn main() u8 {
+                const P = lib.Pair;
+                const L = lib;
+                const p = P{ .a = 3, .b = 4 };
+                return p.sum() + L.twice(5);
+            }
+            """, ("lib.zig", """
+            pub const Pair = struct {
+                a: u8,
+                b: u8,
+                pub fn sum(self: Pair) u8 {
+                    return self.a + self.b;
+                }
+            };
+            pub fn twice(x: u8) u8 {
+                return x * 2;
+            }
+            """));
+        cs.ShouldContain("lib__Pair p = new lib__Pair { a = 3, b = 4 };");
+        cs.ShouldContain("return (byte)(lib__Pair_sum(p) + lib__twice(5));");
+    }
 }
