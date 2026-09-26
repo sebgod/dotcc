@@ -62,10 +62,15 @@ internal sealed partial class ZigLowering
     /// G4/G5), around lowering one of its members lazily: a field default materialized in a struct
     /// literal, or a <c>Type.NAME</c> const. Both are stored raw and lowered at the USE site, where the
     /// instantiation's <c>T</c> / <c>cap</c> / <c>n</c> are otherwise out of scope (the method-body drain
-    /// re-applies them the same way). A no-op for any other container.</summary>
+    /// re-applies them the same way). A container nested in an instance (std.crypto.sha3's `pub const Options = struct
+    /// { delim: u8 = default_delim };` in Keccak, task #161) sees its nearest reified ancestor's seeds, as zig's lexical
+    /// scoping gives them. A no-op for any other container.</summary>
     private ReifiedSeedScope EnterReifiedSeeds(string container)
     {
-        if (!_reifiedSeeds.TryGetValue(container, out var seeds)) { return new ReifiedSeedScope(null, null); }
+        if (ReifiedAncestor(container) is not { } seedsKey || !_reifiedSeeds.TryGetValue(seedsKey, out var seeds))
+        {
+            return new ReifiedSeedScope(null, null);
+        }
         _symbols.EnterScope();
         var shadows = new List<(string Name, CType? Prev, int? PrevBits, string? PrevPtrSize)>();
         foreach (var seed in seeds.Types)
@@ -89,7 +94,7 @@ internal sealed partial class ZigLowering
             var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = new CType.Optional(inner) });
             _comptimeOptionalVars[sym] = (hasValue, value, inner);
         }
-        if (_reifiedAggregateSeeds.TryGetValue(container, out var aggregates))
+        if (_reifiedAggregateSeeds.TryGetValue(seedsKey, out var aggregates))
         {
             foreach (var (name, value, type) in aggregates)
             {

@@ -1190,6 +1190,11 @@ productions:
       # `[]const T` — a const slice. The `const` after `]` is unambiguous (no Type starts
       # with a bare `const`), so it stays conflict-free against `[]T` / `[Expr]T`.
       - { lhs: Type, rhs: ['[', ']', 'const', Type], action: tySliceConst }
+      # `volatile` on a pointee (`[]volatile T`, `*volatile T`, `*const volatile T`; std.crypto.secureZero's
+      # `s: []volatile T`). One prefix production composes under every pointer / slice form. `volatile` is outside
+      # FIRST(Expr) except after `asm`, where no Type is expected, so it is a 1-token shift. Lowering accepts it only
+      # as a pointee, as zig does.
+      - { lhs: Type, rhs: ['volatile', Type],       action: tyVolatile }
       # The same pointer / slice forms with an alignment (`PtrAlign`, symbol 169). `align` is a keyword,
       # outside FIRST(Type), so after `*` / `[*]` / `[ ]` it is a 1-token shift decision.
       - { lhs: Type, rhs: ['*', PtrAlign, Type],                action: tyPointerAlign }

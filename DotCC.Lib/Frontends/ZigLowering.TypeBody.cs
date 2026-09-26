@@ -143,6 +143,9 @@ internal sealed partial class ZigLowering
                 // `const Slice = if (alignment) |a| … else []T;` — a TYPE alias; `const bits = @typeInfo(T).int.bits;`
                 // — a comptime VALUE (std.math.Log2Int computes its result width from one). Which it is
                 // is decided by the RHS's shape (IsTypeBodyTypeRhs), before anything is lowered.
+                case Zig.ConstDecl sel when UnwrapGrouped(sel.Arg3).Content is Zig.IfExprTypeArms:
+                    BindTypeBodySelectedType(fnName, Tok(sel.Arg1), sel.Arg3, typeShadows);
+                    break;
                 case Zig.ConstDecl cd when IsTypeBodyTypeRhs(cd.Arg3):
                 {
                     var aliasName = Tok(cd.Arg1);
@@ -250,6 +253,12 @@ internal sealed partial class ZigLowering
                 case Zig.Block or Zig.BlockEmpty:
                     if (WalkTypeBody(fnName, BodyStatements(stmt), typeShadows) is { } r5) { return r5; }
                     break;
+                // `const Op = enum { uninitialized, initialized, … };` (std.crypto.keccak_p's State, task #161).
+                case Zig.EnumDecl d:          BindTypeBodyLocalContainer(fnName, Tok(d.Arg1), d, typeShadows); break;
+                case Zig.EnumDeclTyped d:     BindTypeBodyLocalContainer(fnName, Tok(d.Arg1), d, typeShadows); break;
+                case Zig.UnionDeclEnum d:     BindTypeBodyLocalContainer(fnName, Tok(d.Arg1), d, typeShadows); break;
+                case Zig.UnionDeclTagged d:   BindTypeBodyLocalContainer(fnName, Tok(d.Arg1), d, typeShadows); break;
+                case Zig.UnionDeclUntagged d: BindTypeBodyLocalContainer(fnName, Tok(d.Arg1), d, typeShadows); break;
                 // `var field_values = …;` (std.enums.EnumIndexer): a comptime variable the body then mutates in place.
                 case Zig.VarDecl vd:
                     BindTypeBodyComptimeVar(fnName, Tok(vd.Arg1), null, vd.Arg3);
@@ -476,6 +485,123 @@ internal sealed partial class ZigLowering
     /// <summary>The comptime AGGREGATE locals of the type body being walked (<c>var field_values</c>, <c>const keys =
     /// valuesFromFields(…)</c>), joining the instance's aggregate seeds the same way. Null outside a walk.</summary>
     private List<(string Name, IrModule.ComptimeValue Value, CType Type)>? _typeBodyAggregateLocals;
+
+    /// <summary>The mangled name of the instance whose type body is being walked (<c>State__1600_512_24</c>), which a
+    /// container the body declares is registered under. Null outside a walk.</summary>
+    private string? _typeBodyInstance;
+
+    /// <summary>The methods of the structs the type body being walked declares (<see cref="BindTypeBodyLocalStruct"/>), as
+    /// (container, fn def): declared once the walk ends, with the instance's seeds, as a nested container's are. Null
+    /// outside a walk.</summary>
+    private List<(string Container, Item FnDef)>? _typeBodyContainerMethods;
+
+    /// <summary>A type body's <c>const Tracker = if (mode == .Debug) struct {…} else struct {…};</c> (std.crypto.keccak_p's
+    /// State, task #161): the condition folds, and the chosen struct is the body's own container. An enum arm is an inline
+    /// type as before.</summary>
+    private void BindTypeBodySelectedType(string fnName, string name, Item rhs,
+        List<(string name, CType? prev, int? prevBits)> typeShadows)
+    {
+        var arm = UnwrapGrouped(rhs).Content is Zig.IfExprTypeArms ta
+            ? (FoldTypeBodyCondition(fnName, ta.Arg2) ? ta.Arg4 : ta.Arg6)
+            : throw new System.InvalidOperationException();
+        if (arm.Content is Zig.TypeArmStruct s)
+        {
+            BindTypeBodyLocalStruct(fnName, name, s.Arg2, typeShadows);
+            return;
+        }
+        var (aliasType, aliasBits) = LowerComptimeTypeExpr(fnName, rhs);
+        typeShadows.Add((name,
+                         _typeAliases.TryGetValue(name, out var pv) ? pv : (CType?)null,
+                         _declaredIntBits.TryGetValue(name, out var pb) ? pb : (int?)null));
+        _typeAliases[name] = aliasType;
+        SetDeclaredIntBits(name, aliasBits);
+    }
+
+    /// <summary>An expression without its enclosing parentheses.</summary>
+    private static Item UnwrapGrouped(Item expr)
+    {
+        while (expr.Content is Zig.Grouped g) { expr = g.Arg1; }
+        return expr;
+    }
+
+    /// <summary>A struct the type body declares for itself (the arm <see cref="BindTypeBodySelectedType"/> chose): registered
+    /// per instance as <c>&lt;instance&gt;__Name</c>, a lexical child of the instance so its consts and methods see the
+    /// instance's comptime seeds, and bound as a body alias. Its fields register now (the returned struct's fields may be
+    /// typed by it); its methods are queued in <see cref="_typeBodyContainerMethods"/>. A nested container is a loud cut,
+    /// as in a function body.</summary>
+    private void BindTypeBodyLocalStruct(string fnName, string name, Item? membersItem,
+        List<(string name, CType? prev, int? prevBits)> typeShadows)
+    {
+        var mangled = $"{_typeBodyInstance ?? fnName}__{name}";
+        var type = new CType.Named(mangled);
+        typeShadows.Add((name,
+                         _typeAliases.TryGetValue(name, out var pv) ? pv : (CType?)null,
+                         _declaredIntBits.TryGetValue(name, out var pb) ? pb : (int?)null));
+        _typeAliases[name] = type;
+        SetDeclaredIntBits(name, null);
+        if (_containerTypes.ContainsKey(mangled)) { return; }
+        var (fields, methods, consts, containers) = membersItem is { } m
+            ? SplitMembers(m)
+            : (new List<Item>(), new List<Item>(), new List<Item>(), new List<Item>());
+        if (containers.Count > 0)
+        {
+            throw new IrUnsupportedException(
+                $"type-returning generic '{fnName}': a body's struct (`{name}`) declares a nested container, which is not "
+                + "supported yet");
+        }
+        if (methods.Count > 0 && _typeBodyContainerMethods is null)
+        {
+            throw new IrUnsupportedException(
+                $"type-returning generic '{fnName}': a body's struct (`{name}`) with methods is only supported in a reified instance");
+        }
+        _containerTypes[mangled] = type;
+        if (_typeBodyInstance is { } instance) { _containerParents[mangled] = instance; }
+        using (EnterContainer(mangled))
+        {
+            RegisterStruct(mangled, fields, AggregateLayout.Default);
+            RegisterContainerConsts(mangled, consts);
+        }
+        foreach (var methodDef in methods) { _typeBodyContainerMethods?.Add((mangled, methodDef)); }
+    }
+
+    /// <summary>A type body's own <c>const Op = enum { … };</c> (std.crypto.keccak_p's State, task #161): registered under
+    /// the instance-mangled name <c>&lt;instance&gt;__Op</c>, as an in-function enum is under its function's (task #111), so
+    /// two instances get two types. The name is bound as a type alias for the rest of the walk, and rides along to the
+    /// returned struct's fields and methods like any other body alias. Fields only, as in a function body.</summary>
+    private void BindTypeBodyLocalContainer(string fnName, string name, object decl,
+        List<(string name, CType? prev, int? prevBits)> typeShadows)
+    {
+        var mangled = $"{_typeBodyInstance ?? fnName}__{name}";
+        if (!_containerTypes.TryGetValue(mangled, out var type))
+        {
+            if (decl is not Zig.EnumDecl and not Zig.EnumDeclTyped) { _containerTypes[mangled] = new CType.Named(mangled); }
+            List<Item> members;
+            using (EnterContainer(mangled))
+            {
+                members = decl switch
+                {
+                    Zig.EnumDecl e          => RegisterEnumZig(mangled, null, e.Arg5),
+                    Zig.EnumDeclTyped e     => RegisterEnumZig(mangled, e.Arg5, e.Arg8),
+                    Zig.UnionDeclEnum u     => RegisterUnion(mangled, u.Arg8),
+                    Zig.UnionDeclTagged u   => RegisterUnionTagged(mangled, Tok(u.Arg5), u.Arg8),
+                    Zig.UnionDeclUntagged u => RegisterUnionUntagged(mangled, u.Arg5),
+                    _ => throw new System.InvalidOperationException(),
+                };
+            }
+            if (members.Count > 0)
+            {
+                throw new IrUnsupportedException(
+                    $"type-returning generic '{fnName}': a body's enum / union (`{name}`) is fields-only; a method needs a "
+                    + "container-level declaration");
+            }
+            type = _containerTypes[mangled];
+        }
+        typeShadows.Add((name,
+                         _typeAliases.TryGetValue(name, out var pv) ? pv : (CType?)null,
+                         _declaredIntBits.TryGetValue(name, out var pb) ? pb : (int?)null));
+        _typeAliases[name] = type;
+        SetDeclaredIntBits(name, null);
+    }
 
     /// <summary>A plain <c>if</c> in a type-returning body: only the taken arm is walked (the other may
     /// name a type that does not exist for this instantiation — that is usually why it is there).</summary>

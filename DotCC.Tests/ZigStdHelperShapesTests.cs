@@ -4904,6 +4904,126 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_type_body_declares_its_own_enum_and_a_mode_selected_struct_with_methods()
+    {
+        var cs = EmitZig("""
+            const mode = @import("builtin").mode;
+            fn assert(ok: bool) void {
+                if (!ok) unreachable;
+            }
+            fn State(comptime f: u11) type {
+                comptime assert(f >= 200);
+                const Op = enum { uninitialized, initialized, absorb };
+                const Tracker = if (mode == .Debug) struct {
+                    op: Op = .uninitialized,
+                    fn to(t: *@This(), next: Op) void {
+                        t.op = next;
+                    }
+                } else struct {
+                    inline fn to(t: *@This(), next: Op) void {
+                        _ = t;
+                        _ = next;
+                    }
+                };
+                return struct {
+                    const Self = @This();
+                    n: u32,
+                    transition: Tracker = .{},
+                    pub fn init(n: u32) Self {
+                        var s = Self{ .n = n };
+                        s.transition.to(.initialized);
+                        return s;
+                    }
+                    pub fn absorb(self: *Self, x: u32) void {
+                        self.transition.to(.absorb);
+                        self.n +%= x * f;
+                    }
+                };
+            }
+            pub fn main() u8 {
+                var s = State(400).init(3);
+                s.absorb(2);
+                return @truncate(s.n);
+            }
+            """);
+        // Task #161 (std.crypto.keccak_p's State): the body's `const Op = enum {…};` and its `const Tracker = if (mode ==
+        // .Debug) struct {…} else struct {…};` are the instance's own types, registered per instance, and the struct's
+        // method is declared with the instance's seeds. dotcc reports ReleaseFast, so the no-op tracker is chosen. zig
+        // returns 35.
+        cs.ShouldContain("internal static unsafe void State__400__Tracker_to(State__400__Tracker* t, State__400__Op next)");
+        cs.ShouldContain("State__400__Tracker_to(&self->transition, State__400__Op.absorb);");
+    }
+
+    [Fact]
+    public void A_bare_enum_literal_top_level_const_emits_no_global()
+    {
+        var cs = EmitZig("""
+            const mode = @import("builtin").mode;
+            pub fn main() u8 {
+                return 0;
+            }
+            """);
+        // Task #161: `const mode = @import("builtin").mode;` is comptime-only (an untyped enum literal); a read folds
+        // through the declaration, so no runtime global is emitted (it had failed as an enum literal with no result type).
+        cs.ShouldNotContain(" mode = ");
+    }
+
+    [Fact]
+    public void A_nested_container_field_default_reads_the_instance_seed()
+    {
+        var cs = EmitZig("""
+            fn K(comptime d: u8) type {
+                return struct {
+                    pub const Options = struct { delim: u8 = d };
+                    pub fn get(o: Options) u8 {
+                        return o.delim;
+                    }
+                };
+            }
+            pub fn main() u8 {
+                return K(7).get(.{}) * 10 + K(9).get(.{});
+            }
+            """);
+        // Task #161 (std.crypto.sha3's `pub const Options = struct { delim: u8 = default_delim };`): a container nested in
+        // an instance sees the instance's comptime seeds, so each instance's default is its own. zig returns 79.
+        cs.ShouldContain("new K__7__Options { delim = 7 }");
+        cs.ShouldContain("new K__9__Options { delim = 9 }");
+    }
+
+    [Fact]
+    public void A_volatile_pointee_lowers_like_the_plain_pointer()
+    {
+        var cs = EmitZig("""
+            fn wipe(s: []volatile u8) void {
+                @memset(s, 0);
+            }
+            fn bump(p: *volatile u32) void {
+                p.* +%= 5;
+            }
+            pub fn main() u8 {
+                var buf = [_]u8{ 9, 8, 7, 6 };
+                wipe(buf[1..3]);
+                var n: u32 = 40;
+                bump(&n);
+                return buf[0] + buf[1] + buf[2] + buf[3] + @as(u8, @intCast(n));
+            }
+            """);
+        // Task #161 (std.crypto.secureZero's `s: []volatile T`): `volatile` on a pointee parses under every pointer and
+        // slice form and lowers like the plain one, since every store dotcc emits is performed. zig returns 60.
+        cs.ShouldContain("static unsafe void wipe(Slice<byte> s)");
+        cs.ShouldContain("static unsafe void bump(uint* p)");
+    }
+
+    [Fact]
+    public void A_volatile_type_that_is_not_a_pointee_is_rejected()
+    {
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "pub fn main() u8 {\n    var x: volatile u8 = 1;\n    x += 1;\n    return x;\n}\n"));
+        // Task #161: zig reads `volatile` only as a pointer's pointee qualifier.
+        ex.Message.ShouldContain("zig: `volatile` qualifies a pointer's pointee");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

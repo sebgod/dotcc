@@ -2003,6 +2003,10 @@ internal sealed partial class ZigLowering
             return;
         }
         var init = blockInit ?? LowerGlobalInit(Tok(nameTok), rhsItem, declared);
+        // A bare enum literal (`const mode = @import("builtin").mode;`, the synthetic builtin's `.ReleaseFast`, task #161) is
+        // comptime-only in zig: it has no runtime form until it meets a typed sink, and a read of the name folds through
+        // its declaration (TryEvalComptimeTag), so no global is emitted.
+        if (isConst && declared is null && init.Type?.Unqualified is CType.EnumLiteral) { return; }
         // A comptime ARRAY at a global `const` (`const TBL = comptime buildTable();`) would resolve
         // (in pass 3) to a StackArray, but by then this global is already a scalar GlobalVar — the
         // StackArray would emit as an invalid `static T* TBL = stackalloc …` field initializer. The

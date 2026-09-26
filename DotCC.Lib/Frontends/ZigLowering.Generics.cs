@@ -1680,6 +1680,9 @@ internal sealed partial class ZigLowering
                 var bodyValueLocals = new List<(string Name, long Value, CType Type)>();
                 var bodyAggregateLocals = new List<(string Name, IrModule.ComptimeValue Value, CType Type)>();
                 (_typeBodyValueLocals, _typeBodyAggregateLocals) = (bodyValueLocals, bodyAggregateLocals);
+                var (outerInstance, outerContainerMethods) = (_typeBodyInstance, _typeBodyContainerMethods);
+                var bodyContainerMethods = new List<(string Container, Item FnDef)>();
+                (_typeBodyInstance, _typeBodyContainerMethods) = (mangled, bodyContainerMethods);
                 try
                 {
                     bodyResult = ProcessTypeReturningBody(templateSym.Name, info.Body, typeShadows);
@@ -1688,6 +1691,7 @@ internal sealed partial class ZigLowering
                 {
                     _typeBodiesInProgress.Remove(mangled);
                     (_typeBodyValueLocals, _typeBodyAggregateLocals) = (outerValueLocals, outerAggregateLocals);
+                    (_typeBodyInstance, _typeBodyContainerMethods) = (outerInstance, outerContainerMethods);
                 }
                 // The body's comptime VALUE / aggregate locals (std.enums.EnumIndexer's `min`, `fields_len`, `keys`) are what
                 // the returned struct's consts and methods read after the walk, so they ride along as further seeds.
@@ -1812,7 +1816,9 @@ internal sealed partial class ZigLowering
                 {
                     EnsureNestedBody(nName);
                 }
-                foreach (var (nContainer, nDef) in nestedMethods)
+                // The methods of a struct the body declared for itself (std.crypto.keccak_p's TransitionTracker, task #161)
+                // take the same road, with the body's own aliases (`Op`) among the seeds.
+                foreach (var (nContainer, nDef) in nestedMethods.Concat(bodyContainerMethods))
                 {
                     if (TryDeclareReifiedMethod(nContainer, nDef, mangled) is not { } nm) { continue; }
                     if (IsFnTemplate(nm.sym)) { continue; }   // a generic method instantiates per call

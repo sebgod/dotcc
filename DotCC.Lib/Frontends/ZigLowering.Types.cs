@@ -628,6 +628,8 @@ internal sealed partial class ZigLowering
         // pointee `const` rides as a TypeQual so const-correctness sees it; it
         // doesn't change the C# spelling (`[*c]const u8` and `[*c]u8` are both
         // `byte*`). `[*c]const u8` is exactly the type of printf's format param.
+        Zig.TyVolatile => throw new CompileException(
+            "zig: `volatile` qualifies a pointer's pointee (`*volatile T`, `[]volatile T`), not a type on its own"),
         Zig.TyPointer p    => PointerTo(LowerPointee(p.Arg1)),
         Zig.TyPtrConst p   => PointerTo(LowerPointee(p.Arg2).WithQuals(TypeQual.Const)),
         Zig.TyCPtr p       => new CType.Pointer(LowerType(p.Arg1)),
@@ -1018,7 +1020,7 @@ internal sealed partial class ZigLowering
     /// opaque <c>void*</c> (see <see cref="LowerPointee"/>), as does a C pointer.</summary>
     private CType LowerDataType(Item type)
     {
-        var lowered = LowerType(type);
+        var lowered = LowerType(StripVolatile(type));
         return lowered.Unqualified is CType.VoidType ? ZigUnitType : lowered;
     }
 
@@ -1359,12 +1361,16 @@ internal sealed partial class ZigLowering
     private CType LowerPointee(Item pointee)
     {
         CType lowered;
-        try { lowered = LowerType(pointee); }
+        try { lowered = LowerType(StripVolatile(pointee)); }
         catch (ZigFailedContainerException) { return CType.Void; }
         // A `*T` with `T = void` (std.mem.swap(void, …) in std.StaticStringMap(void), task #114) points at DATA, as a slice
         // of void does; only `*anyopaque` is an opaque `void*`.
         return lowered.Unqualified is CType.VoidType && !IsAnyopaqueSpelling(pointee) ? ZigUnitType : lowered;
     }
+
+    /// <summary>A pointee without its <c>volatile</c> (<c>[]volatile T</c>, std.crypto.secureZero, task #161). C# has no
+    /// volatile pointee, and none is needed: every store dotcc emits is performed, none is elided.</summary>
+    private static Item StripVolatile(Item pointee) => pointee.Content is Zig.TyVolatile v ? v.Arg1 : pointee;
 
     /// <summary>Is this type spelled <c>anyopaque</c>, zig's opaque pointee (a <c>void*</c>, never data)?</summary>
     private static bool IsAnyopaqueSpelling(Item type) => type.Content is Zig.Ident id && Tok(id.Arg0) == "anyopaque";

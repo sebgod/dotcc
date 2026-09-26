@@ -93,6 +93,7 @@ internal sealed partial class ZigLowering
     /// (<c>const I = u21; f(I)</c> keys and answers exactly as <c>f(u21)</c> does).</summary>
     private int? DeclaredBitsOfTypeArg(Item typeAst)
     {
+        typeAst = StripVolatile(typeAst);   // a `[]volatile u21` element is still 21 bits wide
         if (DeclaredBitsFromSpelling(typeAst) is { } spelled) { return spelled; }
         var cur = typeAst;
         while (cur.Content is Zig.Grouped g) { cur = g.Arg1; }
@@ -771,6 +772,22 @@ internal sealed partial class ZigLowering
         {
             tag = aggTag;
             return true;
+        }
+        // A module-level alias of one (std.crypto.keccak_p's `const mode = @import("builtin").mode;`, task #161), read
+        // through its declaration as TryFoldComptimeCondition reads a module-level bool (zig forbids a local shadowing a
+        // declaration, so the name is it).
+        if (expr.Content is Zig.Ident { Arg0: var aliasTok } && Tok(aliasTok) is var aliasName
+            && _symbols.Resolve(aliasName) is null or { IsGlobal: true }
+            && _topLevelConstRhs.TryGetValue(aliasName, out var aliasRhs) && _foldingTopLevelConsts.Add(aliasName))
+        {
+            try
+            {
+                if (TryEvalComptimeTag(aliasRhs, out tag, out payload)) { return true; }
+            }
+            finally
+            {
+                _foldingTopLevelConsts.Remove(aliasName);
+            }
         }
         // A comptime ENUM variable (`const signedness: Signedness = if (from < 0) .signed else .unsigned;` in
         // std.math.IntFittingRange's type body): its value mapped back to the member's name.

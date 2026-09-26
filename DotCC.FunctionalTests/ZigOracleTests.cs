@@ -7315,6 +7315,73 @@ public sealed class ZigOracleTests
             "    H(3, 40).hash(&out);\n" +
             "    return out[4] + @as(u8, H(3, 40).digest_length);\n" +
             "}\n", 12, "" },
+        // Task #161: a type body's own enum and mode-selected struct with a method (std.crypto.keccak_p's State), a nested
+        // container's field default reading the instance seed (sha3's Options), and `volatile` pointees (secureZero).
+        new object[] { "type_body_enum_and_selected_struct",
+            "const mode = @import(\"builtin\").mode;\n" +
+            "fn assert(ok: bool) void {\n" +
+            "    if (!ok) unreachable;\n" +
+            "}\n" +
+            "fn State(comptime f: u11) type {\n" +
+            "    comptime assert(f >= 200);\n" +
+            "    const Op = enum { uninitialized, initialized, absorb };\n" +
+            "    const Tracker = if (mode == .Debug) struct {\n" +
+            "        op: Op = .uninitialized,\n" +
+            "        fn to(t: *@This(), next: Op) void {\n" +
+            "            t.op = next;\n" +
+            "        }\n" +
+            "    } else struct {\n" +
+            "        inline fn to(t: *@This(), next: Op) void {\n" +
+            "            _ = t;\n" +
+            "            _ = next;\n" +
+            "        }\n" +
+            "    };\n" +
+            "    return struct {\n" +
+            "        const Self = @This();\n" +
+            "        n: u32,\n" +
+            "        transition: Tracker = .{},\n" +
+            "        pub fn init(n: u32) Self {\n" +
+            "            var s = Self{ .n = n };\n" +
+            "            s.transition.to(.initialized);\n" +
+            "            return s;\n" +
+            "        }\n" +
+            "        pub fn absorb(self: *Self, x: u32) void {\n" +
+            "            self.transition.to(.absorb);\n" +
+            "            self.n +%= x * f;\n" +
+            "        }\n" +
+            "    };\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var s = State(400).init(3);\n" +
+            "    s.absorb(2);\n" +
+            "    return @truncate(s.n);\n" +
+            "}\n", 35, "" },
+        new object[] { "nested_container_default_reads_seed",
+            "fn K(comptime d: u8) type {\n" +
+            "    return struct {\n" +
+            "        pub const Options = struct { delim: u8 = d };\n" +
+            "        pub fn get(o: Options) u8 {\n" +
+            "            return o.delim;\n" +
+            "        }\n" +
+            "    };\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return K(7).get(.{}) * 10 + K(9).get(.{});\n" +
+            "}\n", 79, "" },
+        new object[] { "volatile_pointees",
+            "fn wipe(s: []volatile u8) void {\n" +
+            "    @memset(s, 0);\n" +
+            "}\n" +
+            "fn bump(p: *volatile u32) void {\n" +
+            "    p.* +%= 5;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var buf = [_]u8{ 9, 8, 7, 6 };\n" +
+            "    wipe(buf[1..3]);\n" +
+            "    var n: u32 = 40;\n" +
+            "    bump(&n);\n" +
+            "    return buf[0] + buf[1] + buf[2] + buf[3] + @as(u8, @intCast(n));\n" +
+            "}\n", 60, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
