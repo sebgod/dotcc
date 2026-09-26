@@ -7462,6 +7462,28 @@ public sealed class ZigOracleTests
             "    const s = State(40, 16).init(bytes);\n" +
             "    return @as(u8, @intCast(State(40, 16).rate)) + s.st.st[0];\n" +
             "}\n", 10, "" },
+        // Task #166: `@splat` of a runtime value into an array (a return, a local, an argument), its element evaluated once.
+        new object[] { "runtime_array_splat",
+            "var calls: u8 = 0;\n" +
+            "fn next() u8 {\n" +
+            "    calls += 1;\n" +
+            "    return calls * 3;\n" +
+            "}\n" +
+            "fn sum(v: [4]u8) u32 {\n" +
+            "    var t: u32 = 0;\n" +
+            "    for (v) |x| t += x;\n" +
+            "    return t;\n" +
+            "}\n" +
+            "fn fill(b: u8) [5]u8 {\n" +
+            "    return @splat(b);\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = fill(7);\n" +
+            "    var local: [3]u16 = @splat(@as(u16, a[2]) + 1);\n" +
+            "    local[0] = 1;\n" +
+            "    const s = sum(@splat(next()));\n" +
+            "    return @intCast(a[0] + a[4] + local[0] + local[2] + s + calls);\n" +
+            "}\n", 36, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

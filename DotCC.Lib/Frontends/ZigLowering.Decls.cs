@@ -2625,6 +2625,7 @@ internal sealed partial class ZigLowering
                 {
                     throw new IrUnsupportedException($"zig `@splat` into a [{splatCount}]T array is not supported yet (at most 4096 elements)");
                 }
+                var savedSplatImpure = _hoistImpureSeen;
                 var splatValue = LowerExprSink(bargs[0], splatArray.Element);
                 // A nested splat (`.fast_char_to_index = @splat(@splat(x))` at a `[4][256]u32`) repeats the inner row: one
                 // flat run of the innermost element, as a multi-dimensional array is laid out.
@@ -2634,9 +2635,11 @@ internal sealed partial class ZigLowering
                     return new StackArray(row.Element, rows) { Type = splatArray };
                 }
                 // 128-bit: `@splat(~@as(u64, 0))` (std.bit_set's `full`) is beyond `long`.
-                if (_ir.ConstEval128(splatValue) is null && splatValue is not (LitBool or LitFloat))
+                // A RUNTIME element (`St.init(@splat(b))`, task #166) is read once: a re-readable one (a parameter, a local) is
+                // repeated as is, anything else evaluated once into a hoisted temp, so its side effects run once, as in zig.
+                if (_ir.ConstEval128(splatValue) is null && splatValue is not (LitBool or LitFloat) && !IsSimpleReeval(splatValue))
                 {
-                    throw new IrUnsupportedException("zig `@splat` into an array needs a compile-time-known element value");
+                    splatValue = HoistLowered("@splat", new List<CStmt>(), splatValue, savedSplatImpure);
                 }
                 var copies = Enumerable.Repeat(splatValue, splatCount).ToList();
                 return new StackArray(splatArray.Element, copies) { Type = splatArray };

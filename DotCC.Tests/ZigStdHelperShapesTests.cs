@@ -5204,6 +5204,38 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_runtime_splat_into_an_array_repeats_its_element_evaluated_once()
+    {
+        var cs = EmitZig("""
+            var calls: u8 = 0;
+            fn next() u8 {
+                calls += 1;
+                return calls * 3;
+            }
+            fn sum(v: [4]u8) u32 {
+                var t: u32 = 0;
+                for (v) |x| t += x;
+                return t;
+            }
+            fn fill(b: u8) [5]u8 {
+                return @splat(b);
+            }
+            pub fn main() u8 {
+                const a = fill(7);
+                var local: [3]u16 = @splat(@as(u16, a[2]) + 1);
+                local[0] = 1;
+                const s = sum(@splat(next()));
+                return @intCast(a[0] + a[4] + local[0] + local[2] + s + calls);
+            }
+            """);
+        // Task #166 (`St.init(@splat(b))`): a runtime element fills the array. A re-readable one (a parameter) repeats as
+        // is; a call is evaluated once into a temp, so `next()` runs once, as in zig. zig returns 36.
+        cs.ShouldContain("byte* __cl0 = stackalloc byte[]{ b, b, b, b, b };");
+        cs.ShouldContain("byte __anf1 = next();");
+        cs.ShouldContain("stackalloc byte[]{ __anf1, __anf1, __anf1, __anf1 }");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""
