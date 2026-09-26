@@ -7567,6 +7567,23 @@ public sealed class ZigOracleTests
             "    const fixed = \"ab\" ++ if (true) \"cd\" else \"ef\";\n" +
             "    return pick(false) - pick(true) + fixed[3];\n" +
             "}\n", 132, "" },
+        // Task #173: a return type sized by an `anytype` parameter's `.len` (std.fmt.bytesToHex's `[input.len * 2]u8`).
+        new object[] { "anytype_sized_return",
+            "fn doubled(input: anytype) [input.len * 2]u8 {\n" +
+            "    if (input.len == 0) return [_]u8{};\n" +
+            "    var out: [input.len * 2]u8 = undefined;\n" +
+            "    for (input, 0..) |b, i| {\n" +
+            "        out[i * 2] = b;\n" +
+            "        out[i * 2 + 1] = b +% 1;\n" +
+            "    }\n" +
+            "    return out;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const two = doubled([_]u8{ 3, 7 });\n" +
+            "    const three = doubled([_]u8{ 1, 2, 4 });\n" +
+            "    const none = doubled([_]u8{});\n" +
+            "    return two[3] * 10 + three[5] + @as(u8, @intCast(three.len + none.len));\n" +
+            "}\n", 91, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -9040,6 +9057,18 @@ public sealed class ZigOracleTests
             "    };\n" +
             "    return 3;\n" +
             "}\n", 49);
+
+    // Task #173: std.fmt.bytesToHex from real std, upper and lower case, and an empty input.
+    [Fact]
+    public void Dotcc_matches_zig_std_fmt_bytes_to_hex() =>
+        MatchesZigWithRealStd("fmt_bytes_to_hex",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    const up = std.fmt.bytesToHex([_]u8{ 0xde, 0xad, 0x0f }, .upper);\n" +
+            "    const low = std.fmt.bytesToHex([_]u8{ 0xa5, 0x3c }, .lower);\n" +
+            "    const none = std.fmt.bytesToHex([_]u8{}, .lower);\n" +
+            "    return up[1] +% up[5] +% low[0] -% low[3] +% @as(u8, @intCast(up.len * 10 + low.len + none.len));\n" +
+            "}\n", 201);
 
     // Task #148: std.math.rotr / rotl from real std over a `@Vector(4, u32)` (Blake3's SIMD rounds rotate this way).
     [Fact]

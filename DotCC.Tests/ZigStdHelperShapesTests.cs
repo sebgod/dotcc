@@ -5434,6 +5434,35 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void An_anytype_parameter_sizes_the_return_type()
+    {
+        var cs = EmitZig("""
+            fn doubled(input: anytype) [input.len * 2]u8 {
+                if (input.len == 0) return [_]u8{};
+                var out: [input.len * 2]u8 = undefined;
+                for (input, 0..) |b, i| {
+                    out[i * 2] = b;
+                    out[i * 2 + 1] = b +% 1;
+                }
+                return out;
+            }
+            pub fn main() u8 {
+                const two = doubled([_]u8{ 3, 7 });
+                const three = doubled([_]u8{ 1, 2, 4 });
+                const none = doubled([_]u8{});
+                return two[3] * 10 + three[5] + @as(u8, @intCast(three.len + none.len));
+            }
+            """);
+        // Task #173 (std.fmt.bytesToHex's `fn bytesToHex(input: anytype, case: Case) [input.len * 2]u8`): the return type
+        // reads the `anytype` parameter, bound to its inferred type while each instance's signature lowers, so an array's
+        // `.len` folds per instance, as does the body's `if (input.len == 0) return [_]u8{};`. zig returns 91.
+        cs.ShouldContain("internal static unsafe byte* doubled__unsigned_char_3_(byte* input)");
+        cs.ShouldContain("byte* @out = stackalloc byte[6];");
+        cs.ShouldContain("return ZigAlloc.CopyArrayResult<byte>(@out, 6);");
+        cs.ShouldContain("return ZigAlloc.CopyArrayResult<byte>(__cl3, 0);");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

@@ -740,6 +740,15 @@ internal sealed partial class ZigLowering
                                     && !comptimeTupleArgs.ContainsKey(p.Name))
                         .Select(p => (p.Name, p.Kind == ParamKind.AnyType ? _anytypeSeeds[p.Name] : LowerType(p.TypeAst)))
                         .ToList();
+                    // A runtime `anytype` parameter named in the return type (std.fmt.bytesToHex's `[input.len * 2]u8`,
+                    // task #173) is bound to its inferred type while the signature lowers, so an array's `.len` folds.
+                    foreach (var (anyName, anyParamType) in runtimeParams)
+                    {
+                        if (g.Params.Any(p => p.Name == anyName && p.Kind == ParamKind.AnyType))
+                        {
+                            _symbols.Declare(new Symbol { Name = anyName, Kind = SymKind.Var, Type = anyParamType });
+                        }
+                    }
                     ret = !comptimeOnly ? LowerType(g.RetType)
                         : g.RetType.Content is Zig.TyOptional ? new CType.Optional(CType.Int128) : CType.Int128;
                     // `@TypeOf(x)` of a `comptime_int` argument (std.math.log2): the result is comptime-only too.
