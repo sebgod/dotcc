@@ -306,6 +306,15 @@ public static class ZigVec
         return r;
     }
 
+    /// <summary><c>v[i] = x</c>: the vector with lane <paramref name="i"/> replaced (a .NET vector is immutable).</summary>
+    public static System.Runtime.Intrinsics.Vector64<T> With<T>(System.Runtime.Intrinsics.Vector64<T> v, ulong i, T x) => WithLane(v, (int)i, x);
+    /// <summary><c>v[i] = x</c>: the vector with lane <paramref name="i"/> replaced (a .NET vector is immutable).</summary>
+    public static System.Runtime.Intrinsics.Vector128<T> With<T>(System.Runtime.Intrinsics.Vector128<T> v, ulong i, T x) => WithLane(v, (int)i, x);
+    /// <summary><c>v[i] = x</c>: the vector with lane <paramref name="i"/> replaced (a .NET vector is immutable).</summary>
+    public static System.Runtime.Intrinsics.Vector256<T> With<T>(System.Runtime.Intrinsics.Vector256<T> v, ulong i, T x) => WithLane(v, (int)i, x);
+    /// <summary><c>v[i] = x</c>: the vector with lane <paramref name="i"/> replaced (a .NET vector is immutable).</summary>
+    public static System.Runtime.Intrinsics.Vector512<T> With<T>(System.Runtime.Intrinsics.Vector512<T> v, ulong i, T x) => WithLane(v, (int)i, x);
+
     /// <summary>Replace one lane of a 64-bit vector.</summary>
     private static System.Runtime.Intrinsics.Vector64<T> WithLane<T>(System.Runtime.Intrinsics.Vector64<T> v, int i, T x)
         => System.Runtime.Intrinsics.Vector64.WithElement(v, i, x);

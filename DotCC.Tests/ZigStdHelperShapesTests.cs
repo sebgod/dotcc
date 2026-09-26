@@ -4691,6 +4691,56 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_vector_lane_store_replaces_the_lane()
+    {
+        var cs = EmitZig("""
+            fn transpose(comptime n: comptime_int, vecs: *[n]@Vector(n, u32)) void {
+                const temp: [n]@Vector(n, u32) = vecs.*;
+                inline for (0..n) |i| {
+                    inline for (0..n) |j| {
+                        vecs[i][j] = temp[j][i];
+                    }
+                }
+            }
+            fn lanes(comptime n: usize, base: u32) @Vector(n, u32) {
+                var result: @Vector(n, u32) = undefined;
+                inline for (0..n) |i| {
+                    result[i] = base + @as(u32, i) * 3;
+                }
+                result[1] +%= 100;
+                return result;
+            }
+            pub fn main() u8 {
+                var m = [4]@Vector(4, u32){ .{ 1, 2, 3, 4 }, .{ 5, 6, 7, 8 }, .{ 9, 10, 11, 12 }, .{ 13, 14, 15, 16 } };
+                transpose(4, &m);
+                const v = lanes(4, 1);
+                return @truncate(m[0][1] + m[1][0] * 10 + m[3][2] + v[0] + v[1] + v[3]);
+            }
+            """);
+        // Task #155 (std.crypto.blake3's `result[i] = counterLow(counter + i);` and transposeNxN's `vecs[i][j] = temp[j][i];`,
+        // both in an `inline for`): a .NET vector is immutable, so a store to one lane assigns back the vector with that lane
+        // replaced, and a compound store combines with the lane first. zig returns 152.
+        cs.ShouldContain("vecs[i] = ZigVec.With(vecs[i], j, ZigVec.Get(temp[j], i));");
+        cs.ShouldContain("result = ZigVec.With(result, 1, (uint)(ZigVec.Get(result, 1) + (uint)(100)));");
+    }
+
+    [Fact]
+    public void A_vector_lane_store_at_a_runtime_index_is_rejected()
+    {
+        var ex = Should.Throw<CompileException>(() => EmitZig("""
+            pub fn main() u8 {
+                var v: @Vector(4, u32) = @splat(0);
+                var i: usize = 0;
+                while (i < 4) : (i += 1) v[i] = @intCast(i * 3);
+                v[2] +%= 100;
+                return @truncate(v[1] + v[2] + v[3]);
+            }
+            """));
+        // Task #155: zig requires a vector store's index comptime-known (a read may take a runtime one).
+        ex.Message.ShouldContain("vector index not comptime known");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

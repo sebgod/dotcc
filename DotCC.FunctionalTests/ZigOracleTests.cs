@@ -7188,6 +7188,30 @@ public sealed class ZigOracleTests
             "    t[0][0] = 99;\n" +
             "    return s.rows[1][2] + t[0][1] + s.rows[0][0] + t[0][0] / 3;\n" +
             "}\n", 48, "" },
+        // Task #155: vector lane stores in `inline for`s, into a variable and into an array element, and a compound one.
+        new object[] { "vector_lane_store",
+            "fn transpose(comptime n: comptime_int, vecs: *[n]@Vector(n, u32)) void {\n" +
+            "    const temp: [n]@Vector(n, u32) = vecs.*;\n" +
+            "    inline for (0..n) |i| {\n" +
+            "        inline for (0..n) |j| {\n" +
+            "            vecs[i][j] = temp[j][i];\n" +
+            "        }\n" +
+            "    }\n" +
+            "}\n" +
+            "fn lanes(comptime n: usize, base: u32) @Vector(n, u32) {\n" +
+            "    var result: @Vector(n, u32) = undefined;\n" +
+            "    inline for (0..n) |i| {\n" +
+            "        result[i] = base + @as(u32, i) * 3;\n" +
+            "    }\n" +
+            "    result[1] +%= 100;\n" +
+            "    return result;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var m = [4]@Vector(4, u32){ .{ 1, 2, 3, 4 }, .{ 5, 6, 7, 8 }, .{ 9, 10, 11, 12 }, .{ 13, 14, 15, 16 } };\n" +
+            "    transpose(4, &m);\n" +
+            "    const v = lanes(4, 1);\n" +
+            "    return @truncate(m[0][1] + m[1][0] * 10 + m[3][2] + v[0] + v[1] + v[3]);\n" +
+            "}\n", 152, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

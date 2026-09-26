@@ -277,6 +277,42 @@ internal sealed partial class ZigLowering
         ? new Call("ZigVec.Bit", new List<CExpr> { vector, index }) { Type = CType.Bool }
         : new Call("ZigVec.Get", new List<CExpr> { vector, index }) { Type = type.Element };
 
+    /// <summary>A store to one LANE of a SIMD vector, <c>v[i] = x</c> or <c>v[i] op= x</c> (std.crypto.blake3's
+    /// <c>result[i] = counterLow(counter + i);</c> in an <c>inline for</c>, task #155): a .NET vector is immutable, so the
+    /// vector with that lane replaced is assigned back, <c>v = ZigVec.With(v, i, x)</c>. zig requires a store's index to
+    /// be comptime-known ("vector index not comptime known"; a READ may take a runtime one), and so does dotcc. Null
+    /// when the target is not a vector lane.</summary>
+    private CExpr? TryVectorLaneStore(Item targetItem, BinOp? op, Item valueItem)
+    {
+        if (targetItem.Content is not Zig.Index ix) { return null; }
+        CExpr probe;
+        using (EnterThrowawayHoist()) { probe = LowerExpr(ix.Arg0); }
+        if (probe.Type.Unqualified is not CType.Vector vector) { return null; }
+        if (vector.IsMask)
+        {
+            throw new IrUnsupportedException($"zig {vector.Describe()}: a store to one lane of a bool vector is not lowered yet");
+        }
+        var vec = LowerExpr(ix.Arg0);
+        if (vec is not (VarRef or Member or DotCC.Ir.Index or Unary { Op: UnOp.Deref }))
+        {
+            throw new IrUnsupportedException("zig vector lane store: the vector must be a variable, a field, an element (`vecs[i][j]`, std.crypto.blake3's transposeNxN) or a dereference");
+        }
+        var idx = LowerUsizeOperand(ix.Arg2);
+        if (_ir.ConstEval(idx) is null)
+        {
+            throw new CompileException("zig: vector index not comptime known (a store to a vector lane needs a comptime-known index)");
+        }
+        var value = LowerExprSink(valueItem, vector.Element);
+        if (op is { } binOp)
+        {
+            // `v[i] +%= x`: the lane's new value, narrowed back to the lane type (C# widens a narrow operand to int).
+            var combined = new Binary(binOp, VectorLane(vec, idx, vector), value) { Type = vector.Element };
+            value = new Cast(vector.Element, combined) { Type = vector.Element };
+        }
+        var with = new Call("ZigVec.With", new List<CExpr> { vec, idx, value }) { Type = vector };
+        return new Assign(null, vec, with) { Type = vector };
+    }
+
     /// <summary>An <c>int</c> literal.</summary>
     private static LitInt IntLit(int n) => new(n.ToString(System.Globalization.CultureInfo.InvariantCulture), n) { Type = CType.Int };
 }

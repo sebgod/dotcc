@@ -516,6 +516,8 @@ internal sealed partial class ZigLowering
     /// <c>while (…) : (i += 1)</c> continue-expression (used directly as the <see cref="For"/> post).</summary>
     private CExpr CompoundAssignExpr(Item targetItem, BinOp op, Item valueItem)
     {
+        // `v[i] +%= x` on a SIMD vector lane (task #155) replaces the lane.
+        if (TryVectorLaneStore(targetItem, op, valueItem) is { } laneStore) { return laneStore; }
         var target = LowerExpr(targetItem);
         // A shift's count is not the target's type (std.math.gcd's `x >>= @intCast(xz)`, task #86): a cast builtin there takes
         // C#'s `int` shift count.
@@ -3398,6 +3400,8 @@ internal sealed partial class ZigLowering
                         new List<CExpr> { LowerExpr(arrayPtrItem), LowerExpr(bitsItem) }) { Type = CType.Void });
                 }
             }
+            // `v[i] = x` on a SIMD vector lane (std.crypto.blake3's counterLow vector, task #155) replaces the lane.
+            if (TryVectorLaneStore(lhsItem, null, rhsItem) is { } laneStore) { return new ExprStmt(laneStore); }
             var target = LowerExpr(lhsItem);
             // `d = a;` between arrays: an element copy (the C# rep is the element pointer, so a plain assignment
             // would alias the storage). `d = undefined;` changes nothing. A ROW of a multi-dimensional array
