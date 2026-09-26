@@ -3710,6 +3710,41 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void Unsigned_element_field_and_deref_reads_divide_with_slash_and_percent()
+    {
+        var cs = EmitZig("""
+            const Box = struct { n: u16 };
+
+            pub fn main() u8 {
+                var out = [_]u16{ 0, 0x1e9, 3 };
+                _ = &out;
+                const e: []const u8 = "a7";
+                var b = Box{ .n = 47 };
+                _ = &b;
+                const p = &b;
+                return @intCast((out[1] & 0xff) % 10 + (e[1] - '0') % 10 + p.n % 10 + b.n / 7 + p.*.n % 3);
+            }
+            """);
+        // Task #136 (std.base64 and std.unicode shapes): an index, field or deref read keeps its declared
+        // unsigned zig type, so `%` and `/` over it are not refused as signed. zig returns 25.
+        cs.ShouldContain("return (byte)((@out[1] & 255) % 10 + (55u - 48) % 10 + p->n % 10 + b.n / 7 + (*p).n % 3);");
+    }
+
+    [Fact]
+    public void A_signed_element_read_is_still_refused_under_percent()
+    {
+        var ex = Should.Throw<CompileException>(() => EmitZig("""
+            pub fn main() u8 {
+                var a = [_]i32{ -7, 2 };
+                _ = &a;
+                return @intCast(@abs(a[0] % 3));
+            }
+            """));
+        // Task #136: zig rejects `%` on a runtime `i32` element; the declared type now reaches the check.
+        ex.Message.ShouldContain("signed integers and floats must use @rem or @mod");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

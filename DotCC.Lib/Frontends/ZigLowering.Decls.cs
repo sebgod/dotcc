@@ -3099,6 +3099,14 @@ internal sealed partial class ZigLowering
             case Zig.Shl a:     return ZigIntOperandType(a.Arg0);   // a shift keeps its LEFT operand's type
             case Zig.Shr a:     return ZigIntOperandType(a.Arg0);
             case Zig.Ident id:  return _symbols.Resolve(Tok(id.Arg0))?.Type?.Unqualified;
+            // An element, field or pointee READ is its declared type, unpromoted (task #136: `(out[1] & 0xff) % 10` over a
+            // `[16]u16` is a `u16` remainder, and `(e[1] - '0') % 10` over a `[]const u8` a `u8` one, both legal in zig).
+            case Zig.Index or Zig.Field or Zig.Deref:
+            {
+                CExpr read;
+                using (EnterThrowawayHoist()) { read = LowerExpr(it); }
+                return read.Type?.Unqualified is CType.Prim { Integer: true, IsComptimeInt: false } readType ? readType : null;
+            }
             case Zig.BuiltinCall b when Tok(b.Arg0) == "@as" && Flatten(b.Arg2) is [var asType, _]:
                 return LowerType(asType).Unqualified;
             // A call of a plain function has its declared return type (`score() + other()` over a `u16` and a `u8` is a

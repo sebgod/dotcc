@@ -6857,6 +6857,19 @@ public sealed class ZigOracleTests
             "    total += b.pick(20) + c.pick(20);\n" +
             "    return @intCast(total + b.val + c.val);\n" +
             "}\n", 148, "" },
+        // Task #136: unsigned `%` and `/` over an index, field and deref read (the declared type, not C#'s int promotion).
+        new object[] { "unsigned_div_mod_reads",
+            "const Box = struct { n: u16 };\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    var out = [_]u16{ 0, 0x1e9, 3 };\n" +
+            "    _ = &out;\n" +
+            "    const e: []const u8 = \"a7\";\n" +
+            "    var b = Box{ .n = 47 };\n" +
+            "    _ = &b;\n" +
+            "    const p = &b;\n" +
+            "    return @intCast((out[1] & 0xff) % 10 + (e[1] - '0') % 10 + p.n % 10 + b.n / 7 + p.*.n % 3);\n" +
+            "}\n", 25, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
