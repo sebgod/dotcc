@@ -1123,7 +1123,34 @@ internal sealed partial class ZigLowering
         {
             return new LitBool(settled) { Type = CType.Bool };
         }
+        // A left side that is always false (`and`) or always true (`or`) though not wholly comptime-known, because a
+        // conjunct of it settles the value while another is a runtime call (std.mem's `use_vectors and !inValgrind() and …
+        // and (@typeInfo(T) == .int or …) and isPowerOfTwo(@bitSizeOf(T))` over a struct T, task #108): the right side
+        // never runs, so the value is the left side's, its runtime parts still evaluated.
+        if (SettlesShortCircuit(left, op == BinOp.LogOr))
+        {
+            return LowerExpr(left);
+        }
         return Bin(op, left, right);
+    }
+
+    /// <summary>True when <paramref name="e"/> always evaluates to <paramref name="value"/>: it folds to it at compile time,
+    /// or it is an <c>and</c> (for false) / <c>or</c> (for true) chain one of whose operands does.</summary>
+    private bool SettlesShortCircuit(Item e, bool value)
+    {
+        while (e.Content is Zig.Grouped g) { e = g.Arg1; }
+        if (TryFoldComptimeCondition(e) is { } folded) { return folded == value; }
+        // A comptime call (`std.math.isPowerOfTwo(@bitSizeOf(T))`) settles through the interpreter; its lowering is discarded.
+        if (e.Content is Zig.CallArgs or Zig.CallNoArgs)
+        {
+            CExpr call;
+            using (EnterThrowawayHoist()) { call = LowerExpr(e); }
+            if (_ir.EvalComptimeValue(call) is IrModule.CtBool { Value: var called }) { return called == value; }
+            return false;
+        }
+        return (value ? e.Content as Zig.BoolOr is { } o ? (o.Arg0, o.Arg2) : ((Item, Item)?)null
+                      : e.Content as Zig.BoolAnd is { } a ? (a.Arg0, a.Arg2) : null) is var (l, r)
+            && (SettlesShortCircuit(l, value) || SettlesShortCircuit(r, value));
     }
 
     /// <summary>The comptime string a field path rooted at a comptime aggregate holds, spliced to a string literal;
@@ -1731,6 +1758,12 @@ internal sealed partial class ZigLowering
         // Any OTHER member call on a curated std TYPE: the model owns the path (so it was not
         // navigated above) but doesn't provide this function — say so precisely, instead of falling
         // through to the instance path and reporting the type as "a type, not a value".
+        // `mem.Alignment.fromByteUnits(n)` / `.of(T)` spelled through the type (std.MultiArrayList's `.big_align =
+        // mem.Alignment.fromByteUnits(big_align)`, task #108): the curated carrier's decl-literal forms.
+        if (methodName is "fromByteUnits" or "of" && TryResolveStdPath(fld.Arg0, out var alignBase) && alignBase == "std.mem.Alignment")
+        {
+            return LowerDeclLiteralCall(AlignmentTypeName, methodName, argItems);
+        }
         if (TryResolveStdPath(fld.Arg0, out var curatedBase) && StdTypes.ContainsKey(curatedBase))
         {
             throw new IrUnsupportedException(

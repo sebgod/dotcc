@@ -414,6 +414,9 @@ internal sealed partial class IrModule
     /// increment).</summary>
     private CExpr Splice(ComptimeValue v) => v switch
     {
+        // A `std.mem.Alignment` (its byte units, task #108): rebuilt through the carrier's constructor.
+        CtInt { Type.Unqualified: CType.Named { Name: "Alignment" } } al => new Call("Alignment.fromByteUnits",
+            new List<CExpr> { SpliceInt(new CtInt(al.Value, CType.ULong)) }, new List<CType> { CType.ULong }, null) { Type = al.Type },
         CtInt i => SpliceInt(i),
         CtFloat f => new LitFloat(FormatComptimeFloat(f.Value)) { Type = f.Type },
         CtBool b => new LitBool(b.Value) { Type = CType.Bool },
@@ -629,6 +632,8 @@ internal sealed partial class IrModule
         }
         // `{}`, the void value (a `context: anytype` passed `{}` to std.mem.sortUnstable).
         if (u is CType.VoidType) { return CtVoid.Value; }
+        // The runtime `std.mem.Alignment` carrier: its byte units, zero as a default-constructed C# value is (task #108).
+        if (u is CType.Named { Name: "Alignment" }) { return new CtInt(System.Int128.Zero, t); }
         // A bare enum literal (task #113): its value is its type's name.
         if (u is CType.EnumLiteral enumLiteral) { return new CtEnumLiteral(enumLiteral.Name); }
         // An enum tag zeroes to its first value; an optional / pointer to null; a slice to the empty one.
@@ -1385,6 +1390,26 @@ internal sealed partial class IrModule
                 _ => ((l.Value % r.Value) + r.Value) % r.Value,
             };
             return new CtInt(result, c.Type);
+        }
+        // The curated `std.mem.Alignment` carrier, modeled as its byte units (task #108, std.MultiArrayList's comptime
+        // `.big_align = mem.Alignment.fromByteUnits(big_align)`).
+        if (c.Callee is "Alignment.fromByteUnits" or "Alignment.ToByteUnits" or "Alignment.Forward" or "Alignment.Backward" or "Alignment.Check")
+        {
+            if (c.Args.Count == 0 || EvalComptime(c.Args[0]) is not CtInt a0) { return null; }
+            if (c.Callee == "Alignment.fromByteUnits")
+            {
+                if (a0.Value <= 0 || (a0.Value & (a0.Value - 1)) != 0) { throw new ComptimeAbort($"alignment {a0.Value} is not a power of two"); }
+                return new CtInt(a0.Value, c.Type);
+            }
+            if (c.Callee == "Alignment.ToByteUnits") { return new CtInt(a0.Value, c.Type); }
+            if (c.Args.Count != 2 || EvalComptime(c.Args[1]) is not CtInt addr) { return null; }
+            var mask = a0.Value - 1;
+            return c.Callee switch
+            {
+                "Alignment.Forward" => new CtInt((addr.Value + mask) & ~mask, c.Type),
+                "Alignment.Backward" => new CtInt(addr.Value & ~mask, c.Type),
+                _ => new CtBool((addr.Value & mask) == 0),
+            };
         }
         if (c.Callee == "__dotcc_unreachable")
         {

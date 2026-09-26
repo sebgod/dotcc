@@ -6753,6 +6753,65 @@ public sealed class ZigOracleTests
             "    bump(20) catch {};\n" +
             "    return hits + s.n;\n" +
             "}\n", 7, "" },
+        // Task #108: an untyped named literal's anonymous struct type, read at runtime and walked by a `for`.
+        new object[] { "anon_struct_literal",
+            "const S = struct {\n" +
+            "    const sizes = blk: {\n" +
+            "        var a: [2]usize = .{ 1, 2 };\n" +
+            "        a[0] = 5;\n" +
+            "        break :blk .{ .bytes = a, .n = 3 };\n" +
+            "    };\n" +
+            "};\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    var total: usize = S.sizes.n;\n" +
+            "    for (S.sizes.bytes) |b| total += b;\n" +
+            "    return @intCast(total + S.sizes.bytes[0]);\n" +
+            "}\n", 15, "" },
+        // Task #108: a `comptime_int` labeled-block const meeting a `usize` peer under `+|`.
+        new object[] { "comptime_int_block_const",
+            "const S = struct {\n" +
+            "    const init_capacity: comptime_int = init: {\n" +
+            "        var max: comptime_int = 1;\n" +
+            "        for ([_]u8{ 2, 8, 4 }) |x| max = @max(max, x);\n" +
+            "        break :init @max(1, 64 / max);\n" +
+            "    };\n" +
+            "    fn grow(minimum: usize) usize {\n" +
+            "        return minimum +| (minimum / 2 + init_capacity);\n" +
+            "    }\n" +
+            "};\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    return @intCast(S.grow(10));\n" +
+            "}\n", 23, "" },
+        // Task #108: `inline for` over arrays (value and `*`) with a type list, an enum const as a comptime
+        // argument, and `@bitSizeOf` of a uniform struct.
+        new object[] { "inline_for_arrays_and_lists",
+            "const E = enum(u8) { a, b, c };\n" +
+            "\n" +
+            "fn weight(comptime e: E) u32 {\n" +
+            "    return switch (e) {\n" +
+            "        .a => 1,\n" +
+            "        .b => 10,\n" +
+            "        .c => 100,\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "const D = struct { x: u64, y: u64 };\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    const in = [_]u32{ 1, 2, 3 };\n" +
+            "    var out: [3]u32 = undefined;\n" +
+            "    inline for (in, &out, [_]type{ u8, u16, u32 }) |x, *o, t| {\n" +
+            "        o.* = x * @sizeOf(t);\n" +
+            "    }\n" +
+            "    var total: u32 = out[0] + out[1] + out[2];\n" +
+            "    inline for (0..3) |i| {\n" +
+            "        const e = @as(E, @enumFromInt(i));\n" +
+            "        total += weight(e);\n" +
+            "    }\n" +
+            "    return @intCast(total + @bitSizeOf(D) / 8);\n" +
+            "}\n", 144, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -8037,6 +8096,37 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{x}\\n\", .{acc});\n" +
             "    return @truncate(acc ^ (acc >> 32) ^ (acc >> 16) ^ (acc >> 8));\n" +
             "}\n", 112);
+
+    // Task #108: std.MultiArrayList from real std (append, set, swapRemove, orderedRemove, items, pop).
+    [Fact]
+    public void Dotcc_matches_zig_std_multi_array_list() =>
+        MatchesZigWithRealStd("multi_array_list",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "const P = struct { a: u8, b: u32, c: u16 };\n" +
+            "\n" +
+            "pub fn main() !u8 {\n" +
+            "    var buf: [4096]u8 = undefined;\n" +
+            "    var fba = std.heap.FixedBufferAllocator.init(&buf);\n" +
+            "    const gpa = fba.allocator();\n" +
+            "    var list: std.MultiArrayList(P) = .empty;\n" +
+            "    defer list.deinit(gpa);\n" +
+            "    var i: u8 = 0;\n" +
+            "    while (i < 6) : (i += 1) {\n" +
+            "        try list.append(gpa, .{ .a = i, .b = @as(u32, i) * 100, .c = @as(u16, i) + 7 });\n" +
+            "    }\n" +
+            "    list.set(2, .{ .a = 40, .b = 1, .c = 2 });\n" +
+            "    list.swapRemove(0);\n" +
+            "    list.orderedRemove(1);\n" +
+            "    const s = list.slice();\n" +
+            "    const as = s.items(.a);\n" +
+            "    const cs = s.items(.c);\n" +
+            "    var h: u32 = 0;\n" +
+            "    for (as, cs) |a, c| h = h *% 31 +% a +% c;\n" +
+            "    const last = list.pop().?;\n" +
+            "    h = h *% 31 +% last.b;\n" +
+            "    return @truncate(h ^ (h >> 8) ^ @as(u32, @intCast(list.len)));\n" +
+            "}\n", 141);
 
     // Task #128: std.fmt.comptimePrint over ints, bools and strings, widths, fills, alignments, bases, positional and named
     // arguments; the exit code hashes every formatted byte.

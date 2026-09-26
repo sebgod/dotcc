@@ -2181,14 +2181,35 @@ internal sealed partial class ZigLowering
             // into a static (task #79): re-lowering the block at each use would put its loop in every reader.
             if (rhs.Content is Zig.LabeledBlock)
             {
+                if (_foldedContainerConsts.TryGetValue((container, name), out var foldedConst)) { return foldedConst; }
                 if (!_staticContainerConsts.TryGetValue((container, name), out var blockSym))
                 {
                     var (blockType, blockInit) = ComptimeLabeledBlockInit($"'{container}.{name}'", $"{container}__{name}", rhs, sink);
+                    // A `comptime_int` (std.MultiArrayList's `const init_capacity: comptime_int = init: { … }`, task #108) is
+                    // the literal itself, which meets a typed peer at that peer's width (`minimum +| (… + init_capacity)`
+                    // stays a usize); a static would carry it at the 128-bit comptime width.
+                    // Typed as a spelled literal of that value is (`int`, or `long` past it), which adopts a typed peer; the
+                    // comptime_int carrier is 128 bits wide and would widen the arithmetic it meets.
+                    if (blockType.Unqualified is CType.Prim { IsComptimeInt: true } && blockInit is LitInt { Value: { } } or Unary { Op: UnOp.Neg, Operand: LitInt { Value: { } } })
+                    {
+                        static CType Spelled(long v) => v is >= int.MinValue and <= int.MaxValue ? CType.Int : CType.Long;
+                        CExpr comptimeLit = blockInit switch
+                        {
+                            LitInt { Value: long lv } lit => lit with { Type = Spelled(lv) },
+                            Unary { Operand: LitInt { Value: long nv } negLit } neg => neg with { Operand = negLit with { Type = Spelled(-nv) }, Type = Spelled(-nv) },
+                            _ => blockInit,
+                        };
+                        _foldedContainerConsts[(container, name)] = comptimeLit;
+                        return comptimeLit;
+                    }
                     blockSym = _symbols.Declare(new Symbol
                     {
                         Name = $"{container}__{name}__static", Kind = SymKind.Var, Type = blockType, Storage = Storage.Static, IsGlobal = true,
                     });
                     _ir.Globals.Add(new GlobalVar(blockSym, blockInit));
+                    // Comptime-known, as the block was evaluated to it: a comptime read (std.MultiArrayList's `inline for
+                    // (sizes.bytes) |size| elem_bytes += size;` into a `comptime var`, task #108) gets the value.
+                    _ir.ConstGlobalInits[blockSym] = blockInit;
                     _staticContainerConsts[(container, name)] = blockSym;
                 }
                 return new VarRef(blockSym) { Type = blockSym.Type, IsLValue = true };

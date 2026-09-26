@@ -586,6 +586,20 @@ internal sealed partial class ZigLowering
                 _structFieldBits[(name, bitsField)] = declaredFieldBits;
             }
         }
+        // Each field's `field_attrs` entry: its spelled alignment and whether it has a default (task #108).
+        foreach (var fd in fieldItems)
+        {
+            var attr = fd.Content switch
+            {
+                Zig.StructField f => (Tok(f.Arg0), (Item?)null, false),
+                Zig.StructFieldSwitch f => (Tok(f.Arg0), null, false),
+                Zig.StructFieldDefault f => (Tok(f.Arg0), null, true),
+                Zig.StructFieldAligned f => (Tok(f.Arg0), f.Arg5, false),
+                Zig.StructFieldAlignedDefault f => (Tok(f.Arg0), f.Arg5, true),
+                _ => ((string?)null, null, false),
+            };
+            if (attr.Item1 is { } attrField) { _shared.StructFieldAttrs[(name, attrField)] = (attr.Item2, attr.Item3, this); }
+        }
         var fields = new List<StructField>();
         foreach (var fd in fieldItems)
         {
@@ -1249,6 +1263,12 @@ internal sealed partial class ZigLowering
         {
             return BuildTupleInit(fields, sink?.Unqualified as CType.Tuple);
         }
+        // An untyped named literal (std.MultiArrayList's `break :blk .{ .bytes = sizes_bytes, .fields = field_indexes, … }`
+        // for an unannotated `const sizes = blk: {…}`, task #108): zig gives it an anonymous struct type of its fields.
+        if (sink is null)
+        {
+            return BuildStructInit(fields, AnonStructType(fields));
+        }
         // Named struct / union — needs a known struct result type.
         if (sink?.Unqualified is not CType.Named named)
         {
@@ -1258,6 +1278,35 @@ internal sealed partial class ZigLowering
         // A tagged-union sink → a union literal (sets the tag + exactly one payload variant).
         if (_unions.TryGetValue(named.Name, out var uinfo)) { return BuildUnionInit(fields, uinfo); }
         return BuildStructInit(fields, named);
+    }
+
+    /// <summary>The anonymous struct type of an untyped <c>.{ .f = v, … }</c> (task #108): one field per initializer, typed
+    /// as the value's own type (a comptime_int as <c>i64</c>, a string literal without its NUL), registered once per shape
+    /// and shared across modules.</summary>
+    private CType.Named AnonStructType(IReadOnlyList<Item> fieldInitItems)
+    {
+        var fields = new List<StructField>();
+        foreach (var fiItem in fieldInitItems)
+        {
+            var fi = (Zig.FieldInit)fiItem.Content!;
+            var type = InferArgType(fi.Arg3);
+            // An enum literal with no enum to resolve against has no runtime type, so the literal still needs a result
+            // type, as before (a caller that probes speculatively handles the refusal).
+            if (type is CType.EnumLiteral)
+            {
+                throw new IrUnsupportedException(
+                    "zig anonymous struct literal `.{…}` needs a known struct result type (a typed const/var, a return, or a field)");
+            }
+            fields.Add(new StructField(Tok(fi.Arg1), type is CType.Prim { IsComptimeInt: true } ? CType.Long : type));
+        }
+        var key = string.Join(";", fields.Select(f => f.Name + ":" + f.Type.Describe()));
+        if (!_shared.AnonStructs.TryGetValue(key, out var name))
+        {
+            name = "Anon__" + _shared.AnonStructs.Count.ToString(CultureInfo.InvariantCulture);
+            _shared.AnonStructs[key] = name;
+            _ir.RegisterStructType(name, fields, isUnion: false);
+        }
+        return new CType.Named(name);
     }
 
     /// <summary>Build a tuple literal <c>.{ a, b, … }</c> (Milestone G) → <see cref="TupleNew"/>.

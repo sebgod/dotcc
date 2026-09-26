@@ -3497,6 +3497,125 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void Field_attrs_fold_to_each_fields_spelled_alignment()
+    {
+        var cs = EmitZig("""
+            const S = struct { a: u8, b: u32 align(8), c: u16 = 7 };
+
+            pub fn main() u8 {
+                var total: usize = 0;
+                inline for (@typeInfo(S).@"struct".field_types, @typeInfo(S).@"struct".field_attrs) |T, attr| {
+                    total += attr.@"align" orelse @alignOf(T);
+                }
+                const spelled = @typeInfo(S).@"struct".field_attrs[1].@"align".?;
+                return @intCast(total * 10 + spelled);
+            }
+            """);
+        // Task #108 (std.MultiArrayList's `field_attrs` walk, `f_attrs.@"align" orelse @alignOf(f_type)`): each entry's
+        // `.@"align"` is the spelled `align(N)` or null, folded while lowering. zig returns 118.
+        cs.ShouldContain("total += (default(ulong?) ?? 1UL);");
+        cs.ShouldContain("total += ((ulong?)8UL ?? 4UL);");
+    }
+
+    [Fact]
+    public void An_untyped_named_literal_has_an_anonymous_struct_type()
+    {
+        var cs = EmitZig("""
+            const S = struct {
+                const sizes = blk: {
+                    var a: [2]usize = .{ 1, 2 };
+                    a[0] = 5;
+                    break :blk .{ .bytes = a, .n = 3 };
+                };
+            };
+
+            pub fn main() u8 {
+                var total: usize = S.sizes.n;
+                for (S.sizes.bytes) |b| total += b;
+                return @intCast(total + S.sizes.bytes[0]);
+            }
+            """);
+        // Task #108 (std.MultiArrayList's unannotated `const sizes = blk: { … break :blk .{ .bytes = …, … }; }`): zig
+        // gives the literal an anonymous struct type of its fields; a runtime walk of its array field goes through
+        // Unsafe.AsPointer, since a static's fixed buffer does not decay outside `fixed` (CS1666). zig returns 15.
+        cs.ShouldContain("unsafe struct Anon__0");
+        cs.ShouldContain("public fixed ulong bytes[2];");
+        cs.ShouldContain("Unsafe.AsPointer(ref S__sizes__static.bytes[0])");
+    }
+
+    [Fact]
+    public void A_comptime_int_block_const_meets_a_typed_peer_at_its_width()
+    {
+        var cs = EmitZig("""
+            const S = struct {
+                const init_capacity: comptime_int = init: {
+                    var max: comptime_int = 1;
+                    for ([_]u8{ 2, 8, 4 }) |x| max = @max(max, x);
+                    break :init @max(1, 64 / max);
+                };
+                fn grow(minimum: usize) usize {
+                    return minimum +| (minimum / 2 + init_capacity);
+                }
+            };
+
+            pub fn main() u8 {
+                return @intCast(S.grow(10));
+            }
+            """);
+        // Task #108 (std.MultiArrayList's `const init_capacity: comptime_int = init: { … }` in `minimum +| (minimum / 2
+        // + init_capacity)`): the evaluated block is the literal, not a 128-bit static. zig returns 23.
+        cs.ShouldContain("ZigMath.SatAdd(minimum, minimum / (ulong)(2) + (ulong)(8))");
+    }
+
+    [Fact]
+    public void An_inline_for_walks_arrays_in_lockstep_with_a_comptime_list()
+    {
+        var cs = EmitZig("""
+            const E = enum(u8) { a, b, c };
+
+            fn weight(comptime e: E) u32 {
+                return switch (e) {
+                    .a => 1,
+                    .b => 10,
+                    .c => 100,
+                };
+            }
+
+            const D = struct { x: u64, y: u64 };
+
+            pub fn main() u8 {
+                const in = [_]u32{ 1, 2, 3 };
+                var out: [3]u32 = undefined;
+                inline for (in, &out, [_]type{ u8, u16, u32 }) |x, *o, t| {
+                    o.* = x * @sizeOf(t);
+                }
+                var total: u32 = out[0] + out[1] + out[2];
+                inline for (0..3) |i| {
+                    const e = @as(E, @enumFromInt(i));
+                    total += weight(e);
+                }
+                return @intCast(total + @bitSizeOf(D) / 8);
+            }
+            """);
+        // Task #108 (std.MultiArrayList.Slice.subslice's `inline for (s.ptrs, &ptrs, field_types) |in, *out, field_type|`):
+        // each copy binds an array element by value or `*` pointer beside the comptime type; an enum const folded from
+        // the index is a comptime argument; a struct of uniform scalars has an exact `@bitSizeOf`. zig returns 144.
+        cs.ShouldContain("uint* o = &@out[0];");
+        cs.ShouldContain("total += weight__2();");
+        cs.ShouldContain("(128 / 8)");
+    }
+
+    [Theory]
+    [InlineData("const N = struct { a: u8, b: u32 };\npub fn main() u8 {\n    return @intCast(@bitSizeOf(N));\n}\n", "only a scalar")]
+    [InlineData("const S = struct { a: u8 = 1 };\npub fn main() u8 {\n    const p = @typeInfo(S).@\"struct\".field_attrs[0].default_value_ptr;\n    return if (p == null) 0 else 1;\n}\n", "default_value_ptr")]
+    public void Field_attrs_and_bit_size_stay_loud_where_dotcc_cannot_be_exact(string source, string message)
+    {
+        // Task #108: a struct of mixed field sizes may be laid out differently by zig (reordered) and dotcc, so its
+        // `@bitSizeOf` stays the S7 cut; a defaulted field's pointer to its comptime default is not modeled.
+        Should.Throw<Exception>(() => EmitZig(source)).Message.ShouldContain(message);
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

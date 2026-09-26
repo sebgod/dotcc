@@ -40,7 +40,11 @@ internal sealed partial class ZigLowering
     /// undone after the copy. <c>null</c> means "the name was not bound in that domain" — no
     /// separate presence flag is needed, since neither map can hold a null.</summary>
     private readonly record struct ComptimeCaptureShadow(
-        string Name, CExpr? Value, string? Text, CType? Alias, int? Bits);
+        string Name, CExpr? Value, string? Text, CType? Alias, int? Bits, ZigFieldAttr? Attr);
+
+    /// <summary>Each name bound to one <c>field_attrs</c> entry by a comptime <c>for</c> capture (task #108), whose member
+    /// reads fold (<see cref="FieldAttrMember"/>). Name-keyed and shadow-saved like the other capture domains.</summary>
+    private readonly Dictionary<string, ZigFieldAttr> _comptimeAttrs = new(System.StringComparer.Ordinal);
 
     /// <summary>Is <paramref name="operand"/> a comptime-iterable list — a <c>@typeInfo</c> member
     /// list (or a name bound to one), or a <c>[_]type{…}</c> literal? Returns false for anything
@@ -103,8 +107,10 @@ internal sealed partial class ZigLowering
             _comptimeValues.TryGetValue(name, out var prevValue) ? prevValue : null,
             _comptimeStrings.TryGetValue(name, out var prevText) ? prevText : null,
             _typeAliases.TryGetValue(name, out var prevAlias) ? prevAlias : null,
-            _declaredIntBits.TryGetValue(name, out var prevBits) ? prevBits : null);
+            _declaredIntBits.TryGetValue(name, out var prevBits) ? prevBits : null,
+            _comptimeAttrs.TryGetValue(name, out var prevAttr) ? prevAttr : null);
 
+        _comptimeAttrs.Remove(name);
         _comptimeValues.Remove(name);
         _comptimeStrings.Remove(name);
         _typeAliases.Remove(name);
@@ -118,6 +124,10 @@ internal sealed partial class ZigLowering
         else if (list.Types is { } types)
         {
             _typeAliases[name] = types[k];
+        }
+        else if (list.Attrs is { } attrs)
+        {
+            _comptimeAttrs[name] = attrs[k];
         }
         else if (list.Ints is { } ints)
         {
@@ -138,6 +148,7 @@ internal sealed partial class ZigLowering
         if (shadow.Value is { } v) { _comptimeValues[shadow.Name] = v; } else { _comptimeValues.Remove(shadow.Name); }
         if (shadow.Text is { } t) { _comptimeStrings[shadow.Name] = t; } else { _comptimeStrings.Remove(shadow.Name); }
         if (shadow.Alias is { } a) { _typeAliases[shadow.Name] = a; } else { _typeAliases.Remove(shadow.Name); }
+        if (shadow.Attr is { } fa) { _comptimeAttrs[shadow.Name] = fa; } else { _comptimeAttrs.Remove(shadow.Name); }
         SetDeclaredIntBits(shadow.Name, shadow.Bits);
     }
 
@@ -184,6 +195,114 @@ internal sealed partial class ZigLowering
         }
         return unroll.Finish();
     }
+
+    /// <summary>Unroll an <c>inline for</c> over objects walked in lockstep where fixed-length ARRAYS join the comptime lists
+    /// (std.MultiArrayList.Slice.subslice's <c>inline for (s.ptrs, &amp;ptrs, field_types) |in, *out, field_type|</c>, task
+    /// #108). An array (or a pointer to one, <c>&amp;ptrs</c>) has a comptime-known length and storage: each copy declares its
+    /// capture as that copy's element, or with <c>|*x|</c> a pointer to it. A comptime list binds comptime as in
+    /// <see cref="UnrollComptimeFor"/>, and a <c>0..</c> range binds the index. A runtime SLICE has no comptime length, so
+    /// zig cannot unroll over it either, and it is refused.</summary>
+    private CStmt UnrollMixedInlineFor(Item objsItem, Item capsItem, Item bodyItem)
+    {
+        var (objects, captures) = DecomposeForMulti(objsItem, capsItem);
+        var lists = new ZigComptimeList?[objects.Count];
+        var arrays = new (CExpr Array, CType Element)?[objects.Count];
+        int? count = null;
+        void Measure(int n, string what)
+        {
+            if (count is { } c && c != n)
+            {
+                throw new IrUnsupportedException($"`inline for` over parallel objects requires equal lengths ({what} has {n}, not {c})");
+            }
+            count = n;
+        }
+        for (var k = 0; k < objects.Count; k++)
+        {
+            if (objects[k].IsRange) { continue; }
+            if (TryComptimeIterable(objects[k].Expr, out var list))
+            {
+                if (captures[k].ByRef)
+                {
+                    throw new IrUnsupportedException(
+                        $"`inline for` cannot capture `{captures[k].Name}` by reference over a comptime list: it has no storage");
+                }
+                lists[k] = list;
+                Measure(list.Count, list.Label);
+                continue;
+            }
+            var value = LowerExpr(objects[k].Expr);
+            var array = value.Type.Unqualified is CType.Array ? value : PointedArray(value).Array;
+            if (array?.Type.Unqualified is not CType.Array { Count: int n } arrayType)
+            {
+                throw new IrUnsupportedException(
+                    "`inline for` over a value requires a fixed-size array `[N]T` (or a pointer to one) of comptime-known length "
+                    + "(a slice's length is a runtime value)");
+            }
+            if (!IsStableArrayRef(array))
+            {
+                throw new IrUnsupportedException("`inline for` over an array expression with side effects is not supported; bind it to a name first");
+            }
+            arrays[k] = (array, arrayType.Element);
+            Measure(n, "an array");
+        }
+        if (count is not { } total)
+        {
+            throw new IrUnsupportedException("`inline for` over ranges alone needs a bounded range (`inline for (0..n) |i|`)");
+        }
+        for (var k = 0; k < objects.Count; k++)
+        {
+            if (!objects[k].IsRange) { continue; }
+            if (objects[k].End is not null || _ir.ConstEval(LowerExpr(objects[k].Expr)) is not 0)
+            {
+                throw new IrUnsupportedException("`inline for` over parallel objects with an index capture must start it at 0 (`0..`)");
+            }
+            lists[k] = IndexList(total);
+        }
+        if (total > InlineUnrollCap)
+        {
+            throw new IrUnsupportedException($"`inline for` would unroll {total} iterations, exceeding the cap ({InlineUnrollCap})");
+        }
+        var unroll = new InlineUnroll(_blockLabelCounter++);
+        for (var i = 0; i < total; i++)
+        {
+            var shadows = new List<ComptimeCaptureShadow>();
+            for (var k = 0; k < objects.Count; k++)
+            {
+                if (lists[k] is { } list) { shadows.Add(SeedComptimeCapture(captures[k].Name, list, i)); }
+            }
+            _symbols.EnterScope();
+            var decls = new List<CStmt>();
+            for (var k = 0; k < objects.Count; k++)
+            {
+                if (arrays[k] is not var (array, element) || captures[k].Name == "_") { continue; }
+                var index = new LitInt(i.ToString(System.Globalization.CultureInfo.InvariantCulture), i) { Type = CType.Int };
+                CExpr elem = new DotCC.Ir.Index(array, index) { Type = element, IsLValue = true };
+                var type = captures[k].ByRef ? new CType.Pointer(element) : element;
+                if (captures[k].ByRef) { elem = new Unary(UnOp.AddrOf, elem) { Type = type }; }
+                var sym = _symbols.Declare(new Symbol { Name = captures[k].Name, Kind = SymKind.Var, Type = type });
+                decls.Add(new DeclStmt(new List<LocalDecl> { new(sym, elem) }));
+            }
+            _inlineUnrollDepth++;
+            CStmt body;
+            try { body = LowerStmt(bodyItem); }
+            finally { _inlineUnrollDepth--; }
+            _symbols.ExitScope();
+            for (var s = shadows.Count - 1; s >= 0; s--) { RestoreComptimeCapture(shadows[s]); }
+            if (!unroll.Add(new Block([.. decls, body]))) { break; }
+        }
+        return unroll.Finish();
+    }
+
+    /// <summary>True for an array reference each unrolled copy may read again without repeating a side effect: a name, a
+    /// field of one, or a dereference of one.</summary>
+    private static bool IsStableArrayRef(CExpr e) => e switch
+    {
+        VarRef => true,
+        Member m => IsStableArrayRef(m.Base),
+        Unary { Op: UnOp.Deref, Operand: var inner } => IsStableArrayRef(inner),
+        Paren p => IsStableArrayRef(p.Inner),
+        _ => false,
+    };
 
     /// <summary>The copies of an unrolled <c>inline for</c>, with the body's <c>break</c> / <c>continue</c>
     /// retargeted: unrolling removes the loop, so a <c>break</c> becomes a jump past the last copy and a

@@ -36,9 +36,15 @@ internal sealed partial class ZigLowering
         public IReadOnlyList<string>? Strings { get; init; }
         public IReadOnlyList<CType>? Types { get; init; }
         public IReadOnlyList<long>? Ints { get; init; }
+        public IReadOnlyList<ZigFieldAttr>? Attrs { get; init; }
 
-        public int Count => Strings?.Count ?? Types?.Count ?? Ints?.Count ?? 0;
+        public int Count => Strings?.Count ?? Types?.Count ?? Ints?.Count ?? Attrs?.Count ?? 0;
     }
+
+    /// <summary>One <c>std.builtin.Type.Struct.FieldAttributes</c> of a <c>field_attrs</c> list (task #108): the field's
+    /// explicit alignment (null when unspelled, as zig's <c>?usize</c>), and whether it has a default value. dotcc has
+    /// no <c>comptime</c> fields, so <c>.@"comptime"</c> is false.</summary>
+    private sealed record ZigFieldAttr(long? Align, bool HasDefault);
 
     /// <summary>Each name bound to a folded member list (<c>const names = @typeInfo(T).@"struct"
     /// .field_names;</c>). No runtime decl is emitted, exactly as for
@@ -218,11 +224,51 @@ internal sealed partial class ZigLowering
                     + "(road-to-zig-std S5c). `@hasDecl` works, since membership needs no order");
 
             case "field_attrs":
+                if (info.Type.Unqualified is CType.Named { Name: var attrStruct } && FieldsOfAggregate(info.Type) is { } af)
+                {
+                    list = new ZigComptimeList { Label = field, Attrs = af.Select(x => FieldAttrOf(attrStruct, x.Name)).ToList() };
+                    return true;
+                }
                 throw new IrUnsupportedException(
-                    $"zig `@typeInfo({info.Type.Describe()}).{info.Tag}.field_attrs`: per-field alignment / default-value "
-                    + "attributes are not modeled (road-to-zig-std S5c)");
+                    $"zig `@typeInfo({info.Type.Describe()}).{info.Tag}.field_attrs`: only a registered struct / union has "
+                    + "field attributes");
         }
         return false;
+    }
+
+    /// <summary>The <c>field_attrs</c> entry of <paramref name="structName"/>'s field <paramref name="fieldName"/> (task
+    /// #108): its spelled <c>align(N)</c>, evaluated in the module that declared it, and whether it has a default. A field
+    /// with no recorded attributes (a reified struct's) has neither.</summary>
+    private ZigFieldAttr FieldAttrOf(string structName, string fieldName)
+    {
+        if (!_shared.StructFieldAttrs.TryGetValue((structName, fieldName), out var a)) { return new ZigFieldAttr(null, false); }
+        long? align = null;
+        if (a.Align is { } alignItem)
+        {
+            align = a.Owner.ComptimeIntValue(a.Owner.LowerExpr(alignItem))
+                ?? throw new IrUnsupportedException(
+                    $"the alignment of '{structName}.{fieldName}' is not a comptime-known integer");
+        }
+        return new ZigFieldAttr(align, a.HasDefault);
+    }
+
+    /// <summary>A member of one <c>field_attrs</c> entry, folded while lowering (task #108): <c>.@"align"</c> is a
+    /// <c>?usize</c> (null when unspelled), <c>.@"comptime"</c> false. <c>.default_value_ptr</c> is null for a field
+    /// with no default; a defaulted one's pointer to its comptime value is not modeled, a loud cut.</summary>
+    private static CExpr FieldAttrMember(ZigFieldAttr attr, string member)
+    {
+        var optUsize = new CType.Optional(CType.ULong);
+        return member switch
+        {
+            "align" => attr.Align is { } a
+                ? new Cast(optUsize, new LitInt(a.ToString(System.Globalization.CultureInfo.InvariantCulture), a) { Type = CType.ULong }) { Type = optUsize }
+                : new DefaultLit { Type = optUsize },
+            "comptime" => new LitBool(false) { Type = CType.Bool },
+            "default_value_ptr" when !attr.HasDefault => new DefaultLit { Type = new CType.Pointer(CType.Void) },
+            "default_value_ptr" => throw new IrUnsupportedException(
+                "a defaulted field's `field_attrs[i].default_value_ptr` (a pointer to its comptime default) is not modeled yet"),
+            _ => throw new IrUnsupportedException($"std.builtin.Type.Struct.FieldAttributes has no member '{member}'"),
+        };
     }
 
     /// <summary>Fold a use of a comptime member list: its <c>.len</c> (by a wide margin the commonest
@@ -239,6 +285,21 @@ internal sealed partial class ZigLowering
             value = new LitInt(lenList.Count.ToString(System.Globalization.CultureInfo.InvariantCulture), lenList.Count)
                 { Type = CType.Int };
             return true;
+        }
+        // `<attrs>[i].@"align"` at a comptime index, and `f_attrs.@"align"` of a capture bound to one (task #108).
+        if (expr.Content is Zig.Field af)
+        {
+            if (af.Arg0.Content is Zig.Index aix && TryFoldTypeInfoList(aix.Arg0, out var attrList) && attrList.Attrs is { } attrs)
+            {
+                value = FieldAttrMember(attrs[ComptimeListIndex(attrList, aix.Arg2)], Tok(af.Arg2));
+                return true;
+            }
+            if (af.Arg0.Content is Zig.Ident aid && _symbols.Resolve(Tok(aid.Arg0)) is null
+                && _comptimeAttrs.TryGetValue(Tok(aid.Arg0), out var boundAttr))
+            {
+                value = FieldAttrMember(boundAttr, Tok(af.Arg2));
+                return true;
+            }
         }
         // `<list>[i]` at a comptime index
         if (expr.Content is Zig.Index ix && TryFoldTypeInfoList(ix.Arg0, out var idxList))

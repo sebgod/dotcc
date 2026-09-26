@@ -1869,6 +1869,13 @@ internal sealed class CSharpBackend
                 {
                     return ($"({Cs(m.Type)})&{dot}", PUnary);
                 }
+                // A primitive array member of a GLOBAL (a C# static field, moveable) is a fixed buffer C# will not decay to
+                // a pointer outside a `fixed` statement (CS1666; std.MultiArrayList's `for (sizes.bytes, sizes.fields)` over
+                // a comptime-evaluated static, task #108): its element pointer through Unsafe.AsPointer, as `&global` is.
+                if (m.Type.Unqualified is CType.Array fixedArr && !m.Arrow && RootsAtGlobal(m.Base))
+                {
+                    return ($"({Cs(fixedArr.FlatElement)}*)System.Runtime.CompilerServices.Unsafe.AsPointer(ref {dot}[0])", PUnary);
+                }
                 return QualifiedRead(m, dot, PPostfix);
             }
             case StructInit si: return (StructInitText(si), PPrimary);

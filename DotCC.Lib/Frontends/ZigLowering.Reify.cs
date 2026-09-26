@@ -663,7 +663,7 @@ internal sealed partial class ZigLowering
     /// is 8 bytes on this LP64 target; an enum is its tag type; <c>bool</c> is one bit (zig's
     /// packed-field width, not the byte dotcc stores it in) and <c>void</c> is zero. An aggregate
     /// returns null deliberately — see the cut in <see cref="ZigBitWidth"/>.</summary>
-    private static int? ExactBitWidth(CType type)
+    private int? ExactBitWidth(CType type)
     {
         var t = type.Unqualified;
         if (t.Equals(CType.Bool)) { return 1; }
@@ -673,8 +673,35 @@ internal sealed partial class ZigLowering
             CType.Pointer => 64,
             CType.Enum e => ExactBitWidth(e.Underlying),
             CType.Prim p => p.Bytes * 8,
+            CType.Named n => UniformStructBits(n.Name),
             _ => null,
         };
+    }
+
+    /// <summary>The <c>@bitSizeOf</c> of a plain (not packed, not union) struct whose fields are all scalars of ONE byte
+    /// size, which is also their alignment (std.sort's comptime <c>Data { size: usize, size_index: usize, alignment: usize
+    /// }</c> through std.mem.reverse's <c>@bitSizeOf(T) &gt; 0</c>, task #108). zig defines a non-packed struct's bit size as
+    /// <c>@sizeOf(T) * 8</c>, and such fields leave neither zig's layout nor dotcc's any padding to add or reorder, so both
+    /// agree on the size. Null for any other aggregate, which stays the loud S7 cut.</summary>
+    private int? UniformStructBits(string name)
+    {
+        if (_ir.StructIsUnion.GetValueOrDefault(name) || _ir.PackedStructs.Contains(name)
+            || _ir.StructFieldsOf(name) is not { Count: > 0 } fields)
+        {
+            return null;
+        }
+        int? width = null;
+        foreach (var f in fields)
+        {
+            if (f.Type.Unqualified is not (CType.Prim { Integer: true } or CType.Prim { Integer: false } or CType.Pointer or CType.Enum)
+                || f.Type.Equals(CType.Bool) || ExactBitWidth(f.Type) is not { } bits || bits % 8 != 0
+                || (width is { } w && w != bits))
+            {
+                return null;
+            }
+            width = bits;
+        }
+        return width is { } uniform ? uniform * fields.Count : null;
     }
 
     // ---- @compileError / @compileLog / @setEvalBranchQuota ----------------

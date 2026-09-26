@@ -1055,17 +1055,17 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Rejects_inline_for_with_an_index_capture()
+    public void Unrolls_inline_for_with_an_index_capture()
     {
-        // The indexed `inline for (arr, 0..) |x, i|` and by-ref `|*x|` forms are deferred in V1 —
-        // a clear error, not a silent miscompile.
-        var ex = Should.Throw<CompileException>(() => EmitZig(
+        // The indexed `inline for (arr, 0..) |x, i|`, once a V1 cut, unrolls (task #108): each copy binds its element and
+        // its comptime index. zig returns 45.
+        var cs = EmitZig(
             "pub fn main() u8 {\n" +
             "    const items = [_]u32{ 1, 2, 3 };\n" +
             "    var sum: u32 = 0;\n" +
             "    inline for (items, 0..) |x, i| { sum += x + @as(u32, @intCast(i)); }\n" +
-            "    return @intCast(sum + 36);\n}\n"));
-        ex.Message.ShouldContain("inline");
+            "    return @intCast(sum + 36);\n}\n");
+        cs.ShouldContain("uint x__2 = items[2];");
     }
 
     [Fact]

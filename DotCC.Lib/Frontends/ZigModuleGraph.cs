@@ -92,6 +92,15 @@ internal sealed class ZigImportScope
     /// a user struct's field (<c>@field(value, f_name)</c>) and asks its width (task #121).</summary>
     public Dictionary<(string Struct, string Field), int> StructFieldBits { get; } = new();
 
+    /// <summary>Each struct field's attributes for <c>@typeInfo(T).@"struct".field_attrs</c>, by (struct IR name, field),
+    /// shared: std.MultiArrayList reads a user struct's (task #108). <c>Align</c> is the spelled <c>align(N)</c> expression,
+    /// evaluated in <c>Owner</c>, the module that declared the struct.</summary>
+    public Dictionary<(string Struct, string Field), (Item? Align, bool HasDefault, ZigLowering Owner)> StructFieldAttrs { get; } = new();
+
+    /// <summary>The struct types synthesized for untyped anonymous struct literals, by their field names and types, shared
+    /// so every module gives one shape one type (task #108).</summary>
+    public Dictionary<string, string> AnonStructs { get; } = new(StringComparer.Ordinal);
+
     /// <summary>Above zero while ANY module evaluates a type-returning body (compile-time code), shared: std.meta.FieldEnum's
     /// body (meta.zig) instantiates std.simd.iota in simd.zig, whose `@Vector(3, u8)` result is then a compile-time
     /// value (task #108).</summary>

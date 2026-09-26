@@ -1026,7 +1026,9 @@ internal sealed partial class ZigLowering
         // A local `const` whose integer initializer folds IS that value in every comptime question, as a
         // top-level one is (and as zig has it): `const max_format_args = @typeInfo(ArgSetType).int.bits;`
         // makes std.Io.Writer.print's `if (field_names.len > max_format_args) @compileError(…)` fold.
-        var folded = isConst && type.Unqualified is CType.Prim { Integer: true } ? _ir.ConstEval(init) : null;
+        // An ENUM const folds the same way (std.MultiArrayList's `const field = @as(Field, @enumFromInt(i));` in an unrolled
+        // copy, passed on as a `comptime field: Field` argument, task #108).
+        var folded = isConst && type.Unqualified is CType.Prim { Integer: true } or CType.Enum ? _ir.ConstEval(init) : null;
         var sym2 = _symbols.Declare(new Symbol
         {
             Name = Tok(nameTok), Kind = SymKind.Var, Type = type,
@@ -1476,6 +1478,10 @@ internal sealed partial class ZigLowering
                 return UnrollComptimeMultiFor(cm.Arg2, cm.Arg5, cm.Arg7);
             case Zig.StmtForMultiTrail ct when FirstForObject(ct.Arg2) is { } first1 && TryComptimeIterable(first1, out _):
                 return UnrollComptimeMultiFor(ct.Arg2, ct.Arg6, ct.Arg8);
+            // `inline for (s.ptrs, &ptrs, field_types) |in, *out, field_type|` (std.MultiArrayList.Slice.subslice, task
+            // #108): fixed-length arrays in lockstep with comptime lists, led by an array. See UnrollMixedInlineFor.
+            case Zig.StmtForMulti mm:      return UnrollMixedInlineFor(mm.Arg2, mm.Arg5, mm.Arg7);
+            case Zig.StmtForMultiTrail mt: return UnrollMixedInlineFor(mt.Arg2, mt.Arg6, mt.Arg8);
 
             // `inline for (cs) |c|` over a comptime STRING (std.fmt.parse_float's FloatStream.firstIsLower, a
             // `comptime cs: []const u8` seed): one copy per byte, the capture bound to that byte as a literal.
@@ -1510,7 +1516,9 @@ internal sealed partial class ZigLowering
                     }
                     return UnrollInlineFor(n, Tok(fs.Arg5), arr.Element, fs.Arg7, k => spliced[(int)k]);
                 }
-                if (operand is not VarRef)
+                // A name, or a field of one (std.MultiArrayList's `inline for (sizes.bytes) |size|`, task #108): each copy
+                // reads it again without a side effect.
+                if (!IsStableArrayRef(operand))
                 {
                     throw new IrUnsupportedException(
                         "`inline for` over an array requires a named array variable in V1 (so each "
@@ -2015,7 +2023,10 @@ internal sealed partial class ZigLowering
             // as zig has it: `const block_x_len = block_len / (1 << j); comptime if (block_x_len < 4) break;`
             // in std.mem.findScalarPos folds through it.
             var init = initFor(k);
-            var folded = captureType.Unqualified is CType.Prim { Integer: true } ? _ir.ConstEval(init) : null;
+            // An element of a comptime-known aggregate (a const evaluated at compile time) folds through the interpreter.
+            var folded = captureType.Unqualified is CType.Prim { Integer: true }
+                ? _ir.ConstEval(init) ?? (_ir.EvalComptimeValue(init) is IrModule.CtInt { Value: var big } && big >= long.MinValue && big <= long.MaxValue ? (long)big : null)
+                : null;
             var sym = _symbols.Declare(new Symbol
             {
                 Name = captureName, Kind = SymKind.Var, Type = captureType,
@@ -2224,6 +2235,15 @@ internal sealed partial class ZigLowering
         {
             if (settled) { return LowerStmt(thenItem); }
             return elseItem is { } settledElse ? LowerStmt(settledElse) : new Seq(new List<CStmt>());
+        }
+        // The same when a LATER operand settles it (std.mem.reverse's `use_vectors and !@inComptime() and @bitSizeOf(T) > 0
+        // and std.math.isPowerOfTwo(@bitSizeOf(T))` over a 24-byte struct, task #108): the dead arm is not lowered, and the
+        // condition still runs for its runtime operands.
+        if ((_inlineUnrollDepth > 0 || _inGenericInstance) && (SettlesShortCircuit(condItem, false) || SettlesShortCircuit(condItem, true)))
+        {
+            var always = SettlesShortCircuit(condItem, true);
+            var arm = always ? LowerStmt(thenItem) : elseItem is { } laterElse ? LowerStmt(laterElse) : new Seq(new List<CStmt>());
+            return new Seq(new List<CStmt> { new ExprStmt(LowerExpr(condItem)), arm });
         }
         var cond = LowerExpr(condItem);
         if (_inGenericInstance && _ir.ConstEval(cond) is { } cv)
@@ -3100,6 +3120,10 @@ internal sealed partial class ZigLowering
     /// subject to the plain <see cref="LowerSwitch"/>.</summary>
     /// <summary>Each container const whose address was taken, by (container, name): its static global.</summary>
     private readonly Dictionary<(string Container, string Name), Symbol> _staticContainerConsts = new();
+
+    /// <summary>Container consts whose labeled block evaluated to a <c>comptime_int</c>, kept as that literal rather than a
+    /// static (task #108), by container and name.</summary>
+    private readonly Dictionary<(string Container, string Name), CExpr> _foldedContainerConsts = new();
 
     /// <summary>The address of a container const named by <paramref name="operand"/> (a bare sibling const, or
     /// <c>Container.name</c>), in static storage: <c>&amp;vtable</c> in std.Io.Writer.Allocating's <c>.vtable = &amp;vtable</c>.
