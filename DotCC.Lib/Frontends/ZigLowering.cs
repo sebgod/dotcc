@@ -607,6 +607,9 @@ internal sealed partial class ZigLowering
         public required string ContLabel { get; init; }
         public bool BreakUsed { get; set; }
         public bool ContUsed { get; set; }
+
+        /// <summary>A labeled block statement (task #130), not a loop: <c>break :lbl;</c> leaves it, <c>continue</c> is refused.</summary>
+        public bool IsBlock { get; init; }
     }
 
     /// <summary>Active labeled loops, innermost on top — see <see cref="LabeledLoopTarget"/>.</summary>
@@ -1750,9 +1753,9 @@ internal sealed partial class ZigLowering
         LowerTopLevelGlobals(decls);
         // Container-level `var`s (Milestone R, part 6) — lowered to globals after top-level globals
         // (so a container var's init may reference one) and before pass 2 (so a body resolves it).
-        foreach (var (container, name, typeItem, rhs) in _pendingContainerVars)
+        foreach (var (container, name, _, _) in _pendingContainerVars.ToList())
         {
-            LowerContainerVar(container, name, typeItem, rhs);
+            EnsureContainerVar(container, name);
         }
 
         // Pass 2: bodies. `_currentContainer` is set for a method body so its `@This()` resolves. The list
@@ -2093,32 +2096,56 @@ internal sealed partial class ZigLowering
         return sym;
     }
 
+    /// <summary>The global of container <paramref name="container"/>'s <c>var</c> <paramref name="name"/>, lowered now if it
+    /// was only registered: a lazy module (std.bit_set's <c>var empty_masks_data</c>, task #130) has no pass 1.5 to lower
+    /// it in, so its first reader does. Null when the container declares no such var.</summary>
+    private Symbol? EnsureContainerVar(string container, string name)
+    {
+        if (_containerVars.TryGetValue(container, out var vars) && vars.TryGetValue(name, out var done)) { return done; }
+        foreach (var (c, n, typeItem, rhs) in _pendingContainerVars)
+        {
+            if (c != container || n != name) { continue; }
+            LowerContainerVar(container, name, typeItem, rhs);
+            return _containerVars[container][name];
+        }
+        return null;
+    }
+
     /// <summary>Pass 1.5: lower a container-level <c>var</c> (a namespaced mutable global, Milestone R
     /// part 6) to a <see cref="GlobalVar"/> under a mangled <c>Container_name</c> symbol — the same
     /// shape a top-level global takes, so the backend renders it as a <c>DotCcGlobals</c> field. The
     /// initializer is lowered at module scope (with <see cref="_currentConstContainer"/> set so it may
     /// reference a sibling const by bare name). The symbol is recorded in <see cref="_containerVars"/>
-    /// so a <c>Type.name</c> read/write resolves to its <see cref="VarRef"/>. V1: scalar only — an
-    /// array/aggregate container var is rejected (the pinned-store mangling isn't wired).</summary>
+    /// so a <c>Type.name</c> read/write resolves to its <see cref="VarRef"/>. An array container var takes the pinned store
+    /// a top-level array global does (task #130).</summary>
     private void LowerContainerVar(string container, string name, Item? typeItem, Item rhsItem)
     {
+        if (_containerVars.TryGetValue(container, out var done) && done.ContainsKey(name)) { return; }
         var declared = typeItem is not null ? LowerType(typeItem) : null;
         var prev = _currentConstContainer;
         _currentConstContainer = container;   // a container var's init may name a sibling const
         CExpr init;
         try { init = LowerExprSink(rhsItem, declared); }
         finally { _currentConstContainer = prev; }
-        if (init is StackArray)
+        Symbol sym;
+        if (init is StackArray sa)
         {
-            throw new IrUnsupportedException(
-                $"container '{container}' var '{name}': an array/aggregate container `var` is not supported yet (use a scalar)");
+            // An array container var (std.bit_set.DynamicBitSetUnmanaged's `var empty_masks_data = [_]MaskInt{ 0, undefined
+            // };`, task #130) lives in the pinned, program-lifetime store a top-level array global uses: a `stackalloc`
+            // cannot be a static field's initializer.
+            var (flatElement, flatElems) = FlattenArrayLiteral(container + "." + name, sa);
+            sym = AddArrayGlobal(container + "_" + name, (CType.Array)sa.Type,
+                new PinnedArray(flatElement, flatElems, null) { Type = new CType.Pointer(flatElement) });
         }
-        var type = declared ?? init.Type ?? CType.Int;
-        var sym = _symbols.Declare(new Symbol
+        else
         {
-            Name = container + "_" + name, Kind = SymKind.Var, Type = type, Storage = Storage.Static, IsGlobal = true,
-        });
-        _ir.Globals.Add(new GlobalVar(sym, init));
+            var type = declared ?? init.Type ?? CType.Int;
+            sym = _symbols.Declare(new Symbol
+            {
+                Name = container + "_" + name, Kind = SymKind.Var, Type = type, Storage = Storage.Static, IsGlobal = true,
+            });
+            _ir.Globals.Add(new GlobalVar(sym, init));
+        }
         if (!_containerVars.TryGetValue(container, out var vars))
         {
             vars = new Dictionary<string, Symbol>(System.StringComparer.Ordinal);
@@ -2132,7 +2159,8 @@ internal sealed partial class ZigLowering
     /// by its annotation). <see cref="_currentConstContainer"/> is set so a bare identifier in the RHS
     /// resolves to a SIBLING const (Milestone R, part 6); a re-entry on the same const is a dependency
     /// cycle and errors cleanly (<see cref="_constResolving"/>).</summary>
-    private CExpr LowerContainerConst(string container, string name, Item? typeItem, Item rhs)
+    /// <param name="useSink">The reader's result type, which an UNTYPED const's RHS is lowered at (task #130).</param>
+    private CExpr LowerContainerConst(string container, string name, Item? typeItem, Item rhs, CType? useSink = null)
     {
         var key = container + "." + name;
         if (!_constResolving.Add(key))
@@ -2148,7 +2176,7 @@ internal sealed partial class ZigLowering
         using var scope = EnterContainer(container);
         try
         {
-            var sink = typeItem is not null ? LowerType(typeItem) : null;
+            var sink = typeItem is not null ? LowerType(typeItem) : useSink;
             // A const computed by a labeled block (std.hash.crc's `lookup_table`) is evaluated ONCE, at compile time,
             // into a static (task #79): re-lowering the block at each use would put its loop in every reader.
             if (rhs.Content is Zig.LabeledBlock)

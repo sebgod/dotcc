@@ -578,6 +578,10 @@ productions:
       # while-capture else is, so a Stmt body followed by `else` shifts into it.
       - { lhs: LoopStmt, rhs: ['for', '(', Expr, ')', '|', IDENT, '|', Stmt, 'else', Stmt],           action: stmtForSliceElse }
       - { lhs: LoopStmt, rhs: ['for', '(', ForObjs, ')', '|', ForCaps, '|', Stmt, 'else', Stmt],      action: stmtForMultiElse }
+      # The plain `while (c) body else elsebody` statement (std.bit_set.DynamicBitSetUnmanaged.findFirstSet, task #130:
+      # `while (offset < self.bit_length) { if (mask[0] != 0) break; … } else return null;`), in this group for the same
+      # dangling-else reason.
+      - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', Stmt, 'else', Stmt],                         action: stmtWhileElse }
       # `while (opt) |x| : (cont) body` — capture-while WITH a continue-expression (runs after each
       # iteration AND on `continue`), lowered to the C `For` IR (post = cont) so `continue` runs the
       # cont — faithful to Zig, like the non-capture stmtWhileCont pair. After `'|' IDENT '|'`, a `':'`
@@ -725,6 +729,11 @@ productions:
       # assume a loop target for `break :lbl` / `continue :lbl`.
       - { lhs: Stmt, rhs: [LoopStmt] }
       - { lhs: Stmt, rhs: [IDENT, ':', LoopStmt], action: labeledLoop }
+      # A labeled block as a STATEMENT, zig's `LabeledStatement <- BlockLabel? (Block / LoopStatement / SwitchExpr)`
+      # (std.bit_set.DynamicBitSetUnmanaged.resize: `if (old_allocation.len != new_masks + 1) realloc: { … break
+      # :realloc; … }`, task #130). Its value is void, so a `break :lbl;` leaves it. After `IDENT ':'`, a `{` or a
+      # `switch` selects it over the labeled loop in one token, by the same `:` split as above.
+      - { lhs: Stmt, rhs: [LabeledBlock], action: labeledBlockStmt }
       # `inline for (lo..hi) |i| body` — a comptime-UNROLLED counted loop (Milestone T, part 3): the
       # body is replicated once per iteration with `i` bound to a compile-time-constant index, so the
       # loop disappears (no runtime `for`). Reuses the `LoopStmt` factor exactly like `labeledLoop` — a

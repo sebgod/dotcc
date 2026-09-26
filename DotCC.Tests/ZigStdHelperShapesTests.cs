@@ -3263,6 +3263,204 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_labeled_block_statement_is_left_by_break_to_its_end()
+    {
+        var cs = EmitZig("""
+            fn grow(len: u32, want: u32) u32 {
+                var out: u32 = len;
+                if (len != want) realloc: {
+                    if (want < len) {
+                        out = want;
+                        break :realloc;
+                    }
+                    out = want * 2;
+                }
+                return out;
+            }
+
+            fn scan(xs: []const u8) u32 {
+                var hits: u32 = 0;
+                for (xs) |x| {
+                    blk: {
+                        if (x == 0) break :blk;
+                        if (x > 9) continue;
+                        hits += x;
+                    }
+                    hits += 1;
+                }
+                return hits;
+            }
+
+            pub fn main() u8 {
+                const a = grow(4, 4);
+                const b = grow(8, 3);
+                const c = grow(2, 5);
+                const d = scan(&[_]u8{ 1, 0, 20, 3 });
+                return @intCast(a + b + c + d);
+            }
+            """);
+        // Task #130 (std.bit_set.DynamicBitSetUnmanaged.resize: `if (…) realloc: { … break :realloc; … }`): a labeled block
+        // as a STATEMENT, its `break :lbl;` a goto past the body; an unlabeled `continue` inside still reaches the loop. zig
+        // returns 24.
+        cs.ShouldContain("goto __blk0_brk;");
+        cs.ShouldContain("__blk0_brk:");
+    }
+
+    [Fact]
+    public void A_while_else_statement_runs_its_else_only_when_the_condition_ends_the_loop()
+    {
+        var cs = EmitZig("""
+            fn firstSet(masks: []const u8) ?usize {
+                var offset: usize = 0;
+                while (offset < masks.len) {
+                    if (masks[offset] != 0) break;
+                    offset += 1;
+                } else return null;
+                return offset;
+            }
+
+            fn sumPairs(n: u32) u32 {
+                var total: u32 = 0;
+                var i: u32 = 0;
+                while (i < n) {
+                    var j: u32 = 0;
+                    while (j < i) {
+                        j += 1;
+                        if (j == 3) continue;
+                        if (j == 5) break;
+                        total += j;
+                    } else total += 10;
+                    i += 1;
+                } else total += 100;
+                return total;
+            }
+
+            pub fn main() u8 {
+                const a = firstSet(&[_]u8{ 0, 0, 7, 1 }) orelse 99;
+                const b = firstSet(&[_]u8{ 0, 0 }) orelse 9;
+                return @intCast(a + b + sumPairs(4));
+            }
+            """);
+        // Task #130 (std.bit_set.DynamicBitSetUnmanaged.findFirstSet: `while (…) { if (…) break; … } else return null;`):
+        // the condition exits through a numbered flag, so a `break` skips the else and nested while-else loops do not
+        // shadow each other. zig returns 158.
+        cs.ShouldContain("__natural");
+        cs.ShouldContain("if (Cond.B(__natural");
+    }
+
+    [Fact]
+    public void A_decl_literal_behind_try_resolves_on_the_result_type()
+    {
+        var cs = EmitZig("""
+            const Inner = struct {
+                n: u32,
+                pub fn init(n: u32) error{Bad}!Inner {
+                    if (n > 100) return error.Bad;
+                    return .{ .n = n * 2 };
+                }
+                pub fn plain(n: u32) Inner {
+                    return .{ .n = n + 1 };
+                }
+            };
+
+            const Outer = struct {
+                inner: Inner,
+                tag: u8,
+                fn make(n: u32) !Outer {
+                    return Outer{ .inner = try .init(n), .tag = 3 };
+                }
+            };
+
+            pub fn main() !u8 {
+                const o = try Outer.make(10);
+                const p: Outer = .{ .inner = .plain(4), .tag = 1 };
+                var q: Inner = try .init(1);
+                q = try .init(2);
+                const bad: u8 = if (Outer.make(500)) |_| 0 else |_| 7;
+                return @intCast(o.inner.n + o.tag + p.inner.n + p.tag + q.n + bad);
+            }
+            """);
+        // Task #130 (std.DynamicBitSet.initEmpty: `.unmanaged = try .initEmpty(allocator, bit_length)`): zig looks the
+        // decl literal up through the error union its `try` unwraps. zig returns 40.
+        cs.ShouldContain("inner = ErrUnion.Try(Inner_init(n))");
+        cs.ShouldContain("Inner q = ErrUnion.Try(Inner_init(1));");
+    }
+
+    [Fact]
+    public void An_array_container_var_is_a_pinned_global_and_a_comptime_slice_of_it_a_many_pointer()
+    {
+        var cs = EmitZig("""
+            const Set = struct {
+                len: usize = 0,
+                masks: [*]u32 = empty_masks_ptr,
+
+                var empty_masks_data = [_]u32{ 0, undefined };
+                const empty_masks_ptr = empty_masks_data[1..2];
+
+                fn header(self: Set) u32 {
+                    return (self.masks - 1)[0];
+                }
+            };
+
+            var counter: u32 = 5;
+
+            pub fn main() u8 {
+                const s: Set = .{};
+                counter += 1;
+                return @intCast(s.header() + s.len + counter);
+            }
+            """);
+        // Task #130 (std.bit_set: `var empty_masks_data = [_]MaskInt{ 0, undefined };` and `const empty_masks_ptr =
+        // empty_masks_data[1..2];` read by a `[*]MaskInt` field default): the var takes the pinned store a top-level
+        // array global does, and comptime bounds make zig's `*[1]T`, whose pointer the field takes. zig returns 6.
+        cs.ShouldContain("Set_empty_masks_data = Libc.GlobalArrayFrom<uint>");
+        cs.ShouldContain("masks = new Slice<uint>(Set_empty_masks_data + 1");
+    }
+
+    [Fact]
+    public void Catch_unreachable_over_a_void_error_union_is_a_statement()
+    {
+        var cs = EmitZig("""
+            var hits: u8 = 0;
+
+            fn bump(n: u8) error{Big}!void {
+                if (n > 9) return error.Big;
+                hits += n;
+            }
+
+            const S = struct {
+                n: u8,
+                fn reset(self: *S) void {
+                    bump(self.n) catch unreachable;
+                    self.n = 0;
+                }
+            };
+
+            pub fn main() u8 {
+                var s: S = .{ .n = 4 };
+                s.reset();
+                bump(3) catch unreachable;
+                bump(20) catch {};
+                return hits + s.n;
+            }
+            """);
+        // Task #130 (std.bit_set.DynamicBitSetUnmanaged.deinit: `self.resize(allocator, 0, false) catch unreachable;`):
+        // a void payload has no temp to bind (it had emitted `void __anf0 = …`, CS1547). zig returns 7.
+        cs.ShouldNotContain("void __anf");
+        cs.ShouldContain("throw new System.Diagnostics.UnreachableException");
+    }
+
+    [Theory]
+    [InlineData("var n: u8 = 1;\n    while (n < 5) : (n += 1) {\n        blk: {\n            if (n == 2) continue :blk;\n        }\n    }\n    return n;", "`continue :blk` names a labeled block, not a loop")]
+    [InlineData("var n: u8 = 1;\n    blk: {\n        if (n == 1) break :blk 5;\n        n += 1;\n    }\n    return n;", "':blk' is a block statement, whose value is void")]
+    public void A_labeled_block_statement_refuses_what_zig_refuses(string body, string message)
+    {
+        // Task #130: zig rejects both ("continue outside of loop or labeled switch expression"; "incompatible types:
+        // 'comptime_int' and 'void'"): a block is not a loop, and a block statement's value is void.
+        Should.Throw<CompileException>(() => EmitZig("pub fn main() u8 {\n    " + body + "\n}\n")).Message.ShouldContain(message);
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

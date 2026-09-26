@@ -653,7 +653,8 @@ internal sealed class CSharpBackend
                     // A void-typed ternary in statement position is a real if/else
                     // (CS0173 forbids a void `?:` value) — synthesize an If and recurse
                     // so it nests/braces correctly and takes no trailing `;`.
-                    Stmt(sb, new If(ct.Cond, new ExprStmt(ct.Then), new ExprStmt(ct.Else)) { Pos = es.Pos }, ind);
+                    // A pure arm has nothing to run (a `catch unreachable` over a `!void`'s payload arm), so it is left out.
+                    Stmt(sb, new If(ct.Cond, new ExprStmt(ct.Then), IsPure(ct.Else) ? null : new ExprStmt(ct.Else)) { Pos = es.Pos }, ind);
                 }
                 else if (inner is CommaOp co)
                 {

@@ -229,6 +229,8 @@ internal sealed partial class ZigLowering
             case Zig.StmtIfAssignElse f:           return LowerIfStmt(f.Arg2, f.Arg4, f.Arg6);
             case Zig.AssignArm a:                  return LowerAssignArm(a);
             case Zig.StmtWhile w:       return new While(LowerExpr(w.Arg2), LowerStmt(w.Arg4));
+            // `while (c) body else elsebody` (task #130): the else runs when the condition ends the loop, not a `break`.
+            case Zig.StmtWhileElse w:   return LowerWhileElseStmt(w.Arg2, w.Arg4, w.Arg6);
 
             // `while (cond) : (cont) body` → the C IR `For` (no init): the cont runs after each
             // iteration AND on `continue`, exactly matching C's for-update — so `continue`
@@ -292,6 +294,9 @@ internal sealed partial class ZigLowering
             case Zig.LabeledLoop ll:       return LowerLabeledLoop(Tok(ll.Arg0), ll.Arg2);
             case Zig.StmtBreakLabel b:     return LowerLabeledLoopJump(Tok(b.Arg2), isContinue: false);
             case Zig.StmtContinueLabel c:  return LowerLabeledLoopJump(Tok(c.Arg2), isContinue: true);
+
+            // `lbl: { … break :lbl; … }` — a labeled block STATEMENT (task #130): a void block `break :lbl;` leaves.
+            case Zig.LabeledBlockStmt lbs: return LowerLabeledBlockStmt(lbs.Arg0);
 
             // `inline for (lo..hi) |i| body` — comptime loop UNROLLING (Milestone T, part 3): replicate
             // the body once per index, with `i` bound to a compile-time constant in each copy.
@@ -1321,6 +1326,11 @@ internal sealed partial class ZigLowering
         }
         // A value break targeting a labeled STATEMENT loop (no `else` → not a value loop) is still a
         // clear deferred error — and is invalid Zig anyway (a value `break` needs a value loop).
+        if (_labeledBlocks.All(t => t.Label != label) && _labeledLoops.FirstOrDefault(l => l.Label == label) is { IsBlock: true })
+        {
+            throw new IrUnsupportedException(
+                $"`break :{label} <value>` yields a value, but ':{label}' is a block statement, whose value is void");
+        }
         if (_labeledBlocks.All(t => t.Label != label) && _labeledLoops.Any(l => l.Label == label))
         {
             throw new IrUnsupportedException(
@@ -1377,6 +1387,35 @@ internal sealed partial class ZigLowering
         var stmts = new List<CStmt> { loop };
         if (t.BreakUsed) { stmts.Add(new Labeled(t.BreakLabel, new Block(new List<CStmt>()))); }
         return new Seq(stmts);
+    }
+
+    /// <summary>Lower a labeled block STATEMENT, <c>lbl: { … }</c> or <c>lbl: switch (x) { … }</c> (task #130,
+    /// std.bit_set.DynamicBitSetUnmanaged.resize's <c>realloc: { … break :realloc; … }</c>). Its value is void, so the
+    /// only jump out is <c>break :lbl;</c>, a <c>goto</c> to an end label placed after the body when used. It reuses
+    /// <see cref="LabeledLoopTarget"/> marked <see cref="LabeledLoopTarget.IsBlock"/>, so a <c>continue :lbl</c> is
+    /// refused as zig refuses it, and an unlabeled <c>break</c> / <c>continue</c> inside still reaches the enclosing
+    /// loop (a block is not a loop).</summary>
+    private CStmt LowerLabeledBlockStmt(Item labeled)
+    {
+        var (label, lowerBody) = labeled.Content switch
+        {
+            Zig.LabeledBlock lb => (Tok(lb.Arg0), (Func<CStmt>)(() => LowerBlock(lb.Arg2))),
+            Zig.LabeledSwitch { Arg2.Content: Zig.SwitchExpr sw } ls => (Tok(ls.Arg0), () => LowerSwitchStmt(sw.Arg2, sw.Arg5)),
+            Zig.LabeledSwitch { Arg2.Content: Zig.SwitchExprTrailing st } ls => (Tok(ls.Arg0), () => LowerSwitchStmt(st.Arg2, st.Arg5)),
+            _ => throw new IrUnsupportedException("internal: not a labeled block: " + (labeled.Content?.GetType().Name ?? "null")),
+        };
+        var n = _loopLabelCounter++;
+        var t = new LabeledLoopTarget
+        {
+            Label = label, BreakLabel = "__blk" + n + "_brk", ContLabel = "__blk" + n + "_cont", IsBlock = true,
+        };
+        _labeledLoops.Push(t);
+        CStmt body;
+        try { body = lowerBody(); }
+        finally { _labeledLoops.Pop(); }
+        return t.BreakUsed
+            ? new Seq(new List<CStmt> { body, new Labeled(t.BreakLabel, new Block(new List<CStmt>())) })
+            : body;
     }
 
     /// The largest number of iterations <c>inline for</c> will unroll — a backstop on an absurd
@@ -2101,6 +2140,10 @@ internal sealed partial class ZigLowering
                     $"`{what} :{label}` targets a labeled block, but a labeled block isn't a loop (use `break :{label} <value>;` to yield its value)");
             }
             throw new IrUnsupportedException($"`{what} :{label}` has no enclosing labeled loop ':{label}'");
+        }
+        if (isContinue && t.IsBlock)
+        {
+            throw new IrUnsupportedException($"`continue :{label}` names a labeled block, not a loop");
         }
         if (isContinue) { t.ContUsed = true; return new Goto(t.ContLabel); }
         t.BreakUsed = true;
@@ -3487,7 +3530,7 @@ internal sealed partial class ZigLowering
     /// <summary>True for a runtime loop statement (every <c>LoopStmt</c> form), which gets an unlabeled
     /// break target (<see cref="LowerLoopWithBreakTarget"/>).</summary>
     private static bool IsRuntimeLoopStmt(object? content) => content is
-        Zig.StmtWhile or Zig.StmtWhileCont or Zig.StmtWhileContAssign or Zig.StmtWhileContBlock
+        Zig.StmtWhile or Zig.StmtWhileElse or Zig.StmtWhileCont or Zig.StmtWhileContAssign or Zig.StmtWhileContBlock
         or Zig.StmtWhileCapture or Zig.StmtWhileCaptureElse or Zig.StmtWhileCaptureErrElse
         or Zig.StmtWhileCaptureCont or Zig.StmtWhileCaptureContAssign
         or Zig.StmtForRange or Zig.StmtForSlice or Zig.StmtForSliceRef or Zig.StmtForMulti or Zig.StmtForMultiTrail
@@ -4069,6 +4112,34 @@ internal sealed partial class ZigLowering
             pre.Add(BreaksOut(userBody) ? new If(natural, elseStmt, null) : elseStmt);
         }
         return new Block(pre);
+    }
+
+    /// <summary>Lower the statement <c>while (c) body else elsebody</c> (task #130, std.bit_set's findFirstSet) as the
+    /// for-else is (<see cref="LowerForParallel"/>): <c>while (true) { if (!c) { __natural = true; break; } body }</c>, then
+    /// the else when the condition, not a <c>break</c>, ended the loop. A <c>continue</c> in the body re-tests the condition,
+    /// as zig's does. With no <c>break</c> out of the body the else follows unguarded, so C# sees a returning else end
+    /// the function.</summary>
+    private CStmt LowerWhileElseStmt(Item condItem, Item bodyItem, Item elseItem)
+    {
+        _symbols.EnterScope();
+        // Numbered: a nested while-else's flag would otherwise shadow its enclosing one's, which C# refuses (CS0136).
+        var flag = _symbols.Declare(new Symbol { Name = "__natural" + _loopLabelCounter++, Kind = SymKind.Var, Type = CType.Bool });
+        var natural = new VarRef(flag) { Type = CType.Bool, IsLValue = true };
+        var exit = new If(new Unary(UnOp.LogNot, LowerExpr(condItem)) { Type = CType.Int }, new Block(new List<CStmt>
+        {
+            new ExprStmt(new Assign(null, natural, new LitBool(true) { Type = CType.Bool }) { Type = CType.Bool }),
+            new Break(),
+        }), null);
+        var userBody = LowerStmt(bodyItem);
+        var loop = new While(new LitBool(true) { Type = CType.Bool }, new Block(new List<CStmt> { exit, userBody }));
+        var elseStmt = LowerStmt(elseItem);
+        _symbols.ExitScope();
+        return new Block(new List<CStmt>
+        {
+            new DeclStmt(new List<LocalDecl> { new(flag, new LitBool(false) { Type = CType.Bool }) }),
+            loop,
+            BreaksOut(userBody) ? new If(natural, elseStmt, null) : elseStmt,
+        });
     }
 
     /// <summary>True when <paramref name="s"/> contains a <c>break</c> that leaves the loop it sits in, one not inside a
@@ -5322,6 +5393,14 @@ internal sealed partial class ZigLowering
         // hoist. RequireHoistable then rejects only a reordering hazard against a PRIOR side effect.
         _hoistImpureSeen = savedImpure;
         var buf = RequireHoistable(what);
+        // A VOID value (`self.resize(a, 0, false) catch unreachable;` over a `!void`, std.bit_set's deinit, task #130) has
+        // nothing to bind: it runs as a statement, and the construct is the void value.
+        if (value.Type.Unqualified is CType.VoidType)
+        {
+            buf.AddRange(pre);
+            buf.Add(new ExprStmt(value));
+            return new DefaultLit { Type = CType.Void };
+        }
         var sym = _symbols.Declare(new Symbol { Name = "__anf" + _anfTempCounter++, Kind = SymKind.Var, Type = value.Type });
         buf.AddRange(pre);
         buf.Add(new DeclStmt(new List<LocalDecl> { new(sym, value) }));

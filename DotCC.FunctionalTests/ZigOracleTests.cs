@@ -6613,6 +6613,146 @@ public sealed class ZigOracleTests
             "    q.a += 1;\n" +
             "    return @intCast(x.a * 10 + q.b);\n" +
             "}\n", 67, "" },
+        // Task #130: a labeled block statement (`if (c) lbl: { … break :lbl; }`, a bare `blk: { … }` in a loop).
+        new object[] { "labeled_block_statement",
+            "fn grow(len: u32, want: u32) u32 {\n" +
+            "    var out: u32 = len;\n" +
+            "    if (len != want) realloc: {\n" +
+            "        if (want < len) {\n" +
+            "            out = want;\n" +
+            "            break :realloc;\n" +
+            "        }\n" +
+            "        out = want * 2;\n" +
+            "    }\n" +
+            "    return out;\n" +
+            "}\n" +
+            "\n" +
+            "fn scan(xs: []const u8) u32 {\n" +
+            "    var hits: u32 = 0;\n" +
+            "    for (xs) |x| {\n" +
+            "        blk: {\n" +
+            "            if (x == 0) break :blk;\n" +
+            "            if (x > 9) continue;\n" +
+            "            hits += x;\n" +
+            "        }\n" +
+            "        hits += 1;\n" +
+            "    }\n" +
+            "    return hits;\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = grow(4, 4);\n" +
+            "    const b = grow(8, 3);\n" +
+            "    const c = grow(2, 5);\n" +
+            "    const d = scan(&[_]u8{ 1, 0, 20, 3 });\n" +
+            "    return @intCast(a + b + c + d);\n" +
+            "}\n", 24, "" },
+        // Task #130: the statement `while (c) body else elsebody`, with `break`, `continue`, a returning else and nesting.
+        new object[] { "while_else_statement",
+            "fn firstSet(masks: []const u8) ?usize {\n" +
+            "    var offset: usize = 0;\n" +
+            "    while (offset < masks.len) {\n" +
+            "        if (masks[offset] != 0) break;\n" +
+            "        offset += 1;\n" +
+            "    } else return null;\n" +
+            "    return offset;\n" +
+            "}\n" +
+            "\n" +
+            "fn sumPairs(n: u32) u32 {\n" +
+            "    var total: u32 = 0;\n" +
+            "    var i: u32 = 0;\n" +
+            "    while (i < n) {\n" +
+            "        var j: u32 = 0;\n" +
+            "        while (j < i) {\n" +
+            "            j += 1;\n" +
+            "            if (j == 3) continue;\n" +
+            "            if (j == 5) break;\n" +
+            "            total += j;\n" +
+            "        } else total += 10;\n" +
+            "        i += 1;\n" +
+            "    } else total += 100;\n" +
+            "    return total;\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = firstSet(&[_]u8{ 0, 0, 7, 1 }) orelse 99;\n" +
+            "    const b = firstSet(&[_]u8{ 0, 0 }) orelse 9;\n" +
+            "    return @intCast(a + b + sumPairs(4));\n" +
+            "}\n", 158, "" },
+        // Task #130: a decl literal behind `try` (`.inner = try .init(n)`, `var q: Inner = try .init(1);`).
+        new object[] { "decl_literal_through_try",
+            "const Inner = struct {\n" +
+            "    n: u32,\n" +
+            "    pub fn init(n: u32) error{Bad}!Inner {\n" +
+            "        if (n > 100) return error.Bad;\n" +
+            "        return .{ .n = n * 2 };\n" +
+            "    }\n" +
+            "    pub fn plain(n: u32) Inner {\n" +
+            "        return .{ .n = n + 1 };\n" +
+            "    }\n" +
+            "};\n" +
+            "\n" +
+            "const Outer = struct {\n" +
+            "    inner: Inner,\n" +
+            "    tag: u8,\n" +
+            "    fn make(n: u32) !Outer {\n" +
+            "        return Outer{ .inner = try .init(n), .tag = 3 };\n" +
+            "    }\n" +
+            "};\n" +
+            "\n" +
+            "pub fn main() !u8 {\n" +
+            "    const o = try Outer.make(10);\n" +
+            "    const p: Outer = .{ .inner = .plain(4), .tag = 1 };\n" +
+            "    var q: Inner = try .init(1);\n" +
+            "    q = try .init(2);\n" +
+            "    const bad: u8 = if (Outer.make(500)) |_| 0 else |_| 7;\n" +
+            "    return @intCast(o.inner.n + o.tag + p.inner.n + p.tag + q.n + bad);\n" +
+            "}\n", 40, "" },
+        // Task #130: an array container `var` and a comptime-bounded slice of it at a `[*]T` field default.
+        new object[] { "container_array_var",
+            "const Set = struct {\n" +
+            "    len: usize = 0,\n" +
+            "    masks: [*]u32 = empty_masks_ptr,\n" +
+            "\n" +
+            "    var empty_masks_data = [_]u32{ 0, undefined };\n" +
+            "    const empty_masks_ptr = empty_masks_data[1..2];\n" +
+            "\n" +
+            "    fn header(self: Set) u32 {\n" +
+            "        return (self.masks - 1)[0];\n" +
+            "    }\n" +
+            "};\n" +
+            "\n" +
+            "var counter: u32 = 5;\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    const s: Set = .{};\n" +
+            "    counter += 1;\n" +
+            "    return @intCast(s.header() + s.len + counter);\n" +
+            "}\n", 6, "" },
+        // Task #130: `x catch unreachable;` and `x catch {};` over a `!void`, at top level and in a method.
+        new object[] { "catch_unreachable_void",
+            "var hits: u8 = 0;\n" +
+            "\n" +
+            "fn bump(n: u8) error{Big}!void {\n" +
+            "    if (n > 9) return error.Big;\n" +
+            "    hits += n;\n" +
+            "}\n" +
+            "\n" +
+            "const S = struct {\n" +
+            "    n: u8,\n" +
+            "    fn reset(self: *S) void {\n" +
+            "        bump(self.n) catch unreachable;\n" +
+            "        self.n = 0;\n" +
+            "    }\n" +
+            "};\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    var s: S = .{ .n = 4 };\n" +
+            "    s.reset();\n" +
+            "    bump(3) catch unreachable;\n" +
+            "    bump(20) catch {};\n" +
+            "    return hits + s.n;\n" +
+            "}\n", 7, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -7897,6 +8037,31 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{x}\\n\", .{acc});\n" +
             "    return @truncate(acc ^ (acc >> 32) ^ (acc >> 16) ^ (acc >> 8));\n" +
             "}\n", 112);
+
+    // Task #130: std.DynamicBitSet from real std (initEmpty, set, toggle, unset, resize both ways, findFirstSet, count).
+    [Fact]
+    public void Dotcc_matches_zig_std_dynamic_bit_set() =>
+        MatchesZigWithRealStd("dynamic_bit_set",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "pub fn main() !u8 {\n" +
+            "    var buf: [1024]u8 = undefined;\n" +
+            "    var fba = std.heap.FixedBufferAllocator.init(&buf);\n" +
+            "    const a = fba.allocator();\n" +
+            "    var s = try std.DynamicBitSet.initEmpty(a, 70);\n" +
+            "    defer s.deinit();\n" +
+            "    const none: usize = if (s.findFirstSet()) |_| 1 else 0;\n" +
+            "    s.set(65);\n" +
+            "    s.set(3);\n" +
+            "    s.toggle(4);\n" +
+            "    s.unset(3);\n" +
+            "    try s.resize(130, true);\n" +
+            "    const first = s.findFirstSet() orelse 999;\n" +
+            "    const count = s.count();\n" +
+            "    try s.resize(10, false);\n" +
+            "    const small = s.count();\n" +
+            "    return @intCast(none + first + count + small);\n" +
+            "}\n", 67);
 
     // Task #129: std.fmt.count from real std (std.Io.Writer.Discarding's `@alignCast(@fieldParentPtr("writer", w))`).
     [Fact]

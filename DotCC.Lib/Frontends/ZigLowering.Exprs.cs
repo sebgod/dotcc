@@ -118,13 +118,7 @@ internal sealed partial class ZigLowering
                 // name a SIBLING const — inline it (comptime), or one of an ENCLOSING container's, zig's
                 // lexical scoping for a nested container. A METHOD body sees its container's consts the same
                 // way (`self == slot_tombstone` in hash_map's Metadata). Outside those, the unresolved error holds.
-                for (var cc = _currentConstContainer ?? _currentContainer; cc is not null; cc = _containerParents.GetValueOrDefault(cc))
-                {
-                    if (_containerConsts.TryGetValue(cc, out var sibs) && sibs.TryGetValue(name, out var sib))
-                    {
-                        return LowerContainerConst(cc, name, sib.typeItem, sib.rhs);
-                    }
-                }
+                if (TryLowerSiblingMember(name, null) is { } sibling) { return sibling; }
                 // A sibling FUNCTION named bare as a value, from the same scopes (std.Io.Writer.Allocating's
                 // `.rebase = growingRebase` in its vtable const).
                 for (var fc = _currentConstContainer ?? _currentContainer; fc is not null; fc = _containerParents.GetValueOrDefault(fc))
@@ -334,25 +328,7 @@ internal sealed partial class ZigLowering
             // `try e` — unwrap the error union's payload, or propagate its error by throwing
             // ZigErrorReturn (caught at the enclosing `!T` function's emitted try/catch — the
             // backend's Func wrap). An expression, so it works in any position.
-            case Zig.PreTry p:
-            {
-                var inner = LowerExpr(p.Arg1);
-                if (inner.Type.Unqualified is not CType.ErrorUnion eu)
-                {
-                    throw new IrUnsupportedException("zig `try` requires an error-union operand");
-                }
-                var unwrapped = new ZigTry(inner) { Type = eu.Payload };
-                // A `create`-style error-union-over-pointer (`Error!*T`, Milestone U) carries its
-                // payload as a `nuint` (a pointer can't be an `ErrUnion<T>` generic arg), so
-                // `ErrUnion.Try(...)` yields a `nuint`; cast it back to the `T*` the payload names.
-                // `create` is the only producer of a pointer-payload union, so the cast is
-                // exactly-and-only correct here.
-                if (eu.Payload.Unqualified is CType.Pointer)
-                {
-                    return new Cast(eu.Payload, unwrapped) { Type = eu.Payload };
-                }
-                return unwrapped;
-            }
+            case Zig.PreTry p: return LowerTry(LowerExpr(p.Arg1));
             // `comptime EXPR` (Milestone T) — force compile-time evaluation of a value. The inner
             // expression is lowered now and wrapped in a ComptimeFold, resolved at once if it evaluates
             // (a pending callee body lowers on demand), else queued and evaluated + spliced after pass 2.
@@ -506,8 +482,7 @@ internal sealed partial class ZigLowering
                     && _symbols.Resolve(Tok(cvid.Arg0)) is null
                     && TryLookupContainerType(Tok(cvid.Arg0), out var cvBaseTy)
                     && ContainerTypeName(cvBaseTy) is { } cvContainer
-                    && _containerVars.TryGetValue(cvContainer, out var cvars)
-                    && cvars.TryGetValue(fieldName, out var cvSym))
+                    && EnsureContainerVar(cvContainer, fieldName) is { } cvSym)
                 {
                     return new VarRef(cvSym) { Type = cvSym.Type, IsLValue = true };
                 }
@@ -1323,6 +1298,48 @@ internal sealed partial class ZigLowering
         // inside LowerCallInner, BEFORE this set — so `f(a catch b)` still hoists cleanly.
         if (_hoist is not null) { _hoistImpureSeen = true; }
         return result;
+    }
+
+    /// <summary>A bare name inside a container (a const's RHS re-lower or a method body) that names a SIBLING const or
+    /// container <c>var</c>, of this container or an enclosing one (zig's lexical scoping), or null. An untyped const takes
+    /// <paramref name="useSink"/>, its reader's result type (std.bit_set's <c>masks: [*]MaskInt = empty_masks_ptr</c>
+    /// with <c>const empty_masks_ptr = empty_masks_data[1..2];</c>, task #130); a container var is its mangled global.</summary>
+    private CExpr? TryLowerSiblingMember(string name, CType? useSink)
+    {
+        for (var cc = _currentConstContainer ?? _currentContainer; cc is not null; cc = _containerParents.GetValueOrDefault(cc))
+        {
+            if (_containerConsts.TryGetValue(cc, out var sibs) && sibs.TryGetValue(name, out var sib))
+            {
+                return LowerContainerConst(cc, name, sib.typeItem, sib.rhs, useSink);
+            }
+            if (EnsureContainerVar(cc, name) is { } sibVar)
+            {
+                return new VarRef(sibVar) { Type = sibVar.Type, IsLValue = true };
+            }
+        }
+        return null;
+    }
+
+    /// <summary><c>try e</c> over the already-lowered operand <paramref name="inner"/>: unwrap the error union's payload, or
+    /// propagate its error by throwing ZigErrorReturn (caught at the enclosing <c>!T</c> function's emitted try/catch, the
+    /// backend's Func wrap). Shared by the sink-free path and a <c>try</c> whose operand needs the result type (task #130).</summary>
+    private static CExpr LowerTry(CExpr inner)
+    {
+        if (inner.Type.Unqualified is not CType.ErrorUnion eu)
+        {
+            throw new IrUnsupportedException("zig `try` requires an error-union operand");
+        }
+        var unwrapped = new ZigTry(inner) { Type = eu.Payload };
+        // A `create`-style error-union-over-pointer (`Error!*T`, Milestone U) carries its
+        // payload as a `nuint` (a pointer can't be an `ErrUnion<T>` generic arg), so
+        // `ErrUnion.Try(...)` yields a `nuint`; cast it back to the `T*` the payload names.
+        // `create` is the only producer of a pointer-payload union, so the cast is
+        // exactly-and-only correct here.
+        if (eu.Payload.Unqualified is CType.Pointer)
+        {
+            return new Cast(eu.Payload, unwrapped) { Type = eu.Payload };
+        }
+        return unwrapped;
     }
 
     private CExpr LowerCallInner(Item calleeItem, Item? argListItem)

@@ -1824,6 +1824,24 @@ internal sealed partial class ZigLowering
                 return LowerDeclLiteralCall(dcc, Tok(dcl.Arg1), []);
             case Zig.EnumLit dvl when DeclLiteralContainer(sink) is { } dvc:
                 return LowerDeclLiteralValue(dvc, Tok(dvl.Arg1));
+            // A sibling container const read at a sink: an untyped one is lowered at the reader's result type (task #130).
+            case Zig.Ident sid when sink is not null && _symbols.Resolve(Tok(sid.Arg0)) is null
+                                    && TryLowerSiblingMember(Tok(sid.Arg0), sink) is { } siblingAtSink:
+                return siblingAtSink;
+            // `a[1..2]` with both bounds comptime-known is a POINTER TO AN ARRAY in zig (`*[1]T`), which coerces to a
+            // many-item pointer (std.bit_set's `masks: [*]MaskInt = empty_masks_ptr` with `empty_masks_ptr =
+            // empty_masks_data[1..2]`, task #130): the slice's own pointer. Runtime bounds make a slice, which does not.
+            case Zig.SliceRange psr when sink?.Unqualified is CType.Pointer
+                                        && ComptimeIntValue(LowerExpr(psr.Arg2)) is not null
+                                        && ComptimeIntValue(LowerExpr(psr.Arg4)) is not null
+                                        && LowerExpr(expr) is { Type.Unqualified: CType.Slice { Element: var pse } } pslice:
+                return new Member(pslice, "Ptr", false) { Type = new CType.Pointer(pse) };
+            // `try .initEmpty(a, n)` at a struct sink (std.bit_set.DynamicBitSet.initEmpty's `.unmanaged = try
+            // .initEmpty(allocator, bit_length)`, task #130): zig looks a decl literal up through the error union its
+            // `try` unwraps, so the call resolves on the sink and `try` unwraps what it returns.
+            case Zig.PreTry { Arg1.Content: Zig.CallArgs { Arg0.Content: Zig.EnumLit } or Zig.CallNoArgs { Arg0.Content: Zig.EnumLit } } tdl
+                when DeclLiteralContainer(sink) is not null:
+                return LowerTry(LowerExprSink(tdl.Arg1, sink));
             // `.{ 1, 5, 9, 5 }` at a SIMD-vector sink: one lane per element (T5).
             case Zig.AnonStructInit vecInit when sink?.Unqualified is CType.Vector vecSink:
                 return LowerVectorLiteral(Flatten(vecInit.Arg2), vecSink);
