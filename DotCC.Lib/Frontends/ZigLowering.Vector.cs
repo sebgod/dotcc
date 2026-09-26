@@ -143,6 +143,39 @@ internal sealed partial class ZigLowering
         };
     }
 
+    /// <summary>The operands of a shift whose amount is <c>@splat(n)</c> (std.math.rotr's <c>x &gt;&gt; @splat(ar)</c>), or
+    /// null for any other operator (the caller lowers it as usual). zig gives a shift amount the result type
+    /// <c>@Vector(N, Log2Int(T))</c>; the splatted count is the same for every lane, so it stays the one scalar count
+    /// .NET's vector shift operator takes. Any other operand has no result type in zig (<c>v + @splat(1)</c> is
+    /// "@splat must have a known result type"), and neither has a shift of a non-vector by a splat.</summary>
+    private (CExpr Left, CExpr Right)? TrySplatBesideVector(BinOp op, Item l, Item r)
+    {
+        static Item? SplatArg(Item it) =>
+            it.Content is Zig.BuiltinCall { Arg0: var tok } call && Tok(tok) == "@splat" && Flatten(call.Arg2) is [var one] ? one : null;
+        if (op is not (BinOp.Shl or BinOp.Shr))
+        {
+            if (SplatArg(l) is not null || SplatArg(r) is not null)
+            {
+                throw new CompileException("zig: @splat must have a known result type (an operand of a binary operator has none; write `@as(V, @splat(x))`)");
+            }
+            return null;
+        }
+        if (SplatArg(l) is not null)
+        {
+            throw new CompileException("zig: @splat must have a known result type (the shifted operand has none; write `@as(V, @splat(x))`)");
+        }
+        if (SplatArg(r) is not { } count)
+        {
+            return null;
+        }
+        var left = LowerExpr(l);
+        if (left.Type.Unqualified is not CType.Vector)
+        {
+            throw new CompileException($"zig: a `@splat` shift amount needs a vector to shift; `{left.Type.Describe()}` is not one");
+        }
+        return (left, LowerExpr(count));
+    }
+
     /// <summary>A binary operator with a vector operand: arithmetic and bitwise ops are .NET's element-wise
     /// operators; a comparison is a lane mask (<c>ZigVec.Eq</c>, …). A scalar operand is splatted to the vector's
     /// lanes, as zig coerces it. Null when neither operand is a vector.</summary>
@@ -152,6 +185,17 @@ internal sealed partial class ZigLowering
         if (vector is null) { return null; }
         CExpr Lanes(CExpr operand) => operand.Type.Unqualified is CType.Vector ? operand
             : new Call(VectorClass(vector) + ".Create", new List<CExpr> { new Cast(vector.Element, operand) { Type = vector.Element } }) { Type = vector };
+        // A shift by one scalar count (a splatted amount) is .NET's vector shift operator, a logical right shift for unsigned
+        // lanes. A count PER LANE has `Log2Int(T)` lanes, narrower than the value's, which .NET has no operator for.
+        if (op is BinOp.Shl or BinOp.Shr && !vector.IsMask && left.Type.Unqualified is CType.Vector)
+        {
+            if (right.Type.Unqualified is CType.Vector)
+            {
+                throw new IrUnsupportedException(
+                    $"zig {vector.Describe()}: a shift by a vector of per-lane counts is not lowered yet (a `@splat` count is)");
+            }
+            return new Binary(op, left, new Cast(CType.Int, right) { Type = CType.Int }) { Type = vector };
+        }
         var (l, r) = (Lanes(left), Lanes(right));
         if (vector.IsMask)
         {

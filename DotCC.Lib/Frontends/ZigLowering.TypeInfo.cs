@@ -128,6 +128,17 @@ internal sealed partial class ZigLowering
         {
             return InferredTagBits(tagEnum);
         }
+        // A vector's width is its LANE's (`@Vector(16, u32)`), so `@typeInfo(V).vector.child` passes it on to
+        // `@typeInfo(C).int.bits` (std.math.rotr over a vector in std.crypto.blake3, task #148).
+        if (cur.Content is Zig.BuiltinCall { } vec && Tok(vec.Arg0) == "@Vector" && Flatten(vec.Arg2) is [_, var laneType])
+        {
+            return DeclaredBitsOfTypeArg(laneType);
+        }
+        if (cur.Content is Zig.Field { Arg2: var childTok } childField && Tok(childTok) == "child"
+            && TryEvalTypeInfo(childField.Arg0, out var childInfo) && childInfo.Tag == "vector")
+        {
+            return childInfo.DeclaredBits;
+        }
         // An error union's width is its payload's (`fn charToDigit(…) (error{InvalidCharacter}!u8)`).
         if (cur.Content is Zig.ErrUnion eu) { return DeclaredBitsOfTypeArg(eu.Arg2); }
         // So is an optional's (`fn cast(comptime T: type, x: anytype) ?T`), so an unwrapped payload keeps it.

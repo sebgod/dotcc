@@ -4219,6 +4219,70 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_vector_shifts_by_a_splatted_count_inside_a_type_returning_generic()
+    {
+        var cs = EmitZig("""
+            fn Rot(comptime T: type) type {
+                return struct {
+                    fn rotr(x: T, ar: u5) T {
+                        const C = @typeInfo(T).vector.child;
+                        if (@typeInfo(C).int.bits != 32) @compileError("expected u32 lanes");
+                        return (x >> @splat(ar)) | (x << @splat(1 +% ~ar));
+                    }
+                };
+            }
+            pub fn main() u8 {
+                const V = @Vector(8, u32);
+                const v: V = .{ 1, 0x80000000, 3, 0xF0, 5, 6, 7, 8 };
+                const r = Rot(V).rotr(v, 4);
+                const w = v + @as(V, @splat(1));
+                return @truncate(r[0] >> 24 ^ r[3] ^ w[1] >> 24 ^ r[7]);
+            }
+            """);
+        // Task #148 (std.math.rotr over a vector): `@typeInfo(T).vector.child` reads the lane type, whose `.int.bits` is 32;
+        // a `@splat(n)` shift amount is the one scalar count every lane shifts by, and `@as(V, @splat(1))` fills the lanes.
+        // zig returns 159.
+        cs.ShouldContain("return x >> (int)ar | x << (int)(byte)(1 + (byte)(~ar & 31) & 31);");
+        cs.ShouldContain("System.Runtime.Intrinsics.Vector256<uint> r = Rot__v8_u32_rotr(v, 4);");
+        cs.ShouldContain("System.Runtime.Intrinsics.Vector256<uint> w = v + (System.Runtime.Intrinsics.Vector256<uint>)System.Runtime.Intrinsics.Vector256.Create((uint)1);");
+    }
+
+    [Theory]
+    [InlineData("const w = v + @splat(1);", "an operand of a binary operator has none")]
+    [InlineData("const w = @splat(1) + v;", "an operand of a binary operator has none")]
+    [InlineData("const w: V = v | @splat(8);", "an operand of a binary operator has none")]
+    [InlineData("const n: u5 = 2; const w: V = @splat(v[0]) << @splat(n);", "the shifted operand has none")]
+    public void A_splat_operand_without_a_result_type_is_rejected(string line, string why)
+    {
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const V = @Vector(4, u32);\n" +
+            "    const v: V = .{ 1, 2, 3, 4 };\n" +
+            "    " + line + "\n" +
+            "    return @truncate(w[1]);\n" +
+            "}\n"));
+        // Task #148: zig gives `@splat` a result type only at a typed location or as a shift AMOUNT; beside a vector in any
+        // other operator it has none (zig: "@splat must have a known result type").
+        ex.Message.ShouldContain("@splat must have a known result type");
+        ex.Message.ShouldContain(why);
+    }
+
+    [Fact]
+    public void A_splat_shift_amount_of_a_scalar_is_rejected()
+    {
+        var ex = Should.Throw<CompileException>(() => EmitZig("""
+            pub fn main() u8 {
+                const x: u32 = 5;
+                const n: u5 = 1;
+                return @truncate(x << @splat(n));
+            }
+            """));
+        // Task #148: a scalar's shift amount is a `Log2Int(T)` integer, not a vector, so a `@splat` has no vector to fill
+        // (zig: "expected array or vector type, found 'u5'").
+        ex.Message.ShouldContain("a `@splat` shift amount needs a vector to shift");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

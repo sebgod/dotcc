@@ -2594,6 +2594,9 @@ internal sealed partial class ZigLowering
         // `==` / `!=` may compare an enum value against a bare `.member` literal (`self == .red`),
         // which Zig result-locates against the other operand's enum type — so those two operands
         // get the enum-aware lowering; everything else lowers both sides plainly.
+        // A vector shifted by a `@splat(n)` amount (std.math.rotr's `(x >> @splat(ar)) | (x << @splat(1 +% ~ar))`, task #148)
+        // shifts every lane by the one scalar count; a `@splat` operand of any other operator has no result type.
+        if (TrySplatBesideVector(op, l, r) is { } splatPair) { return TryVectorBinary(op, splatPair.Left, splatPair.Right) ?? splatPair.Left; }
         var (left, right) = op is BinOp.Eq or BinOp.Ne
             ? LowerComparisonOperands(l, r)
             // A shift amount is a result location (zig types it `Log2Int(T)`): `1 << @intCast(i)` infers a cast there.

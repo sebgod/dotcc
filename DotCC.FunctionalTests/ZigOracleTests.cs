@@ -6973,6 +6973,25 @@ public sealed class ZigOracleTests
             "    const b = [_]u8{ 10, 20, 30, 40 };\n" +
             "    return first(&a) + first(&b);\n" +
             "}\n", 59, "" },
+        // Task #148: std.math.rotr's vector shape: a lane type read through `@typeInfo(T).vector.child`, a vector shifted by a
+        // `@splat` count, and `@as(V, @splat(1))`.
+        new object[] { "vector_rotate_by_splat",
+            "fn Rot(comptime T: type) type {\n" +
+            "    return struct {\n" +
+            "        fn rotr(x: T, ar: u5) T {\n" +
+            "            const C = @typeInfo(T).vector.child;\n" +
+            "            if (@typeInfo(C).int.bits != 32) @compileError(\"expected u32 lanes\");\n" +
+            "            return (x >> @splat(ar)) | (x << @splat(1 +% ~ar));\n" +
+            "        }\n" +
+            "    };\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const V = @Vector(8, u32);\n" +
+            "    const v: V = .{ 1, 0x80000000, 3, 0xF0, 5, 6, 7, 8 };\n" +
+            "    const r = Rot(V).rotr(v, 4);\n" +
+            "    const w = v + @as(V, @splat(1));\n" +
+            "    return @truncate(r[0] >> 24 ^ r[3] ^ w[1] >> 24 ^ r[7]);\n" +
+            "}\n", 159, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -8306,6 +8325,19 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{d} {d} {d} {d} {d} {d}\\n\", .{ c1, c2, c3, c4, c5, c6 });\n" +
             "    return @intCast((c1 + c2 + c3 + c4 + c5 + c6) % 256);\n" +
             "}\n", 171);
+
+    // Task #148: std.math.rotr / rotl from real std over a `@Vector(4, u32)` (Blake3's SIMD rounds rotate this way).
+    [Fact]
+    public void Dotcc_matches_zig_std_math_rotr_vector() =>
+        MatchesZigWithRealStd("math_rotr_vector",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    const V = @Vector(4, u32);\n" +
+            "    const v: V = .{ 1, 0x80000000, 3, 0xF0 };\n" +
+            "    const r = std.math.rotr(V, v, 4);\n" +
+            "    const l = std.math.rotl(V, v, 1);\n" +
+            "    return @truncate(r[0] >> 24 ^ r[3] ^ l[1] ^ (l[2] << 2));\n" +
+            "}\n", 6);
 
     // Task #147: std.mem.reverseIterator from real std over a pointer to an array (nextPtr) and a slice (next).
     [Fact]
