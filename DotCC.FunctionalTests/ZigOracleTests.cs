@@ -6857,6 +6857,21 @@ public sealed class ZigOracleTests
             "    for ([_]u8{ 0, 1, 7, 3, 9, 1 }) |v| count(v, &hits);\n" +
             "    return check(.one, 2) + check(.many, 5) + hits;\n" +
             "}\n", 15, "" },
+        // Task #146: `catch |e| return if (c) a else b`, taking both returns and the success path.
+        new object[] { "catch_return_if",
+            "const E = error{ Big, Odd };\n" +
+            "fn f(x: u8) E!u8 {\n" +
+            "    if (x > 30) return error.Big;\n" +
+            "    if (x % 2 == 1) return error.Odd;\n" +
+            "    return x;\n" +
+            "}\n" +
+            "fn g(x: u8) u8 {\n" +
+            "    const v = f(x) catch |e| return if (e == error.Big) 7 else 8;\n" +
+            "    return v + 1;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return g(40) + g(3) * 2 + g(10) * 3;\n" +
+            "}\n", 56, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

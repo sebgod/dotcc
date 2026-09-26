@@ -884,6 +884,11 @@ productions:
       - { lhs: OrElse, rhs: [OrElse, 'orelse', FallbackArm],                  action: orElseArm }
       - { lhs: OrElse, rhs: [OrElse, 'catch', FallbackArm],                   action: catchArm }
       - { lhs: OrElse, rhs: [OrElse, 'catch', '|', IDENT, '|', CaptureArm],   action: catchCaptureArm }
+      # `catch |e| return if (e == error.Big) 7 else 8` (task #146): a value `if` as the returned value. `if` is not in
+      # FIRST(BoolOr), so one token after `return` picks it. The arms are BoolOr, not IfExpr's greedy RhsExpr: an RhsExpr
+      # arm would take a following `catch` into itself, and resolving that collapsed a shared state so that NO
+      # `x catch …` parsed any more. A `catch` / `orelse` inside an arm needs parentheses here.
+      - { lhs: CaptureArm,  rhs: ['return', 'if', '(', Expr, ')', BoolOr, 'else', BoolOr], action: fbReturnIf }
       - { lhs: OrElse, rhs: [BoolOr] }
 
   # `rightmost` so a `:` after `break`/`continue` SHIFTS into the label (the dangling-else device):

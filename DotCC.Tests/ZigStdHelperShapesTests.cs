@@ -3930,6 +3930,29 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_catch_capture_arm_returns_a_value_if()
+    {
+        var cs = EmitZig("""
+            const E = error{ Big, Odd };
+            fn f(x: u8) E!u8 {
+                if (x > 30) return error.Big;
+                if (x % 2 == 1) return error.Odd;
+                return x;
+            }
+            fn g(x: u8) u8 {
+                const v = f(x) catch |e| return if (e == error.Big) 7 else 8;
+                return v + 1;
+            }
+            pub fn main() u8 {
+                return g(40) + g(3) * 2 + g(10) * 3;
+            }
+            """);
+        // Task #146: `catch |e| return if (c) a else b` is the condition, then one of two returns. The arms are BoolOr,
+        // so a following `catch` never lands inside them (an RhsExpr arm broke every `x catch …`). zig returns 56.
+        cs.ShouldContain("ushort e = __cf.Code;\n            if (Cond.B(((CBool)(e == 1))))\n                return 7;\n            else\n                return 8;");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

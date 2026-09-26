@@ -5224,6 +5224,18 @@ internal sealed partial class ZigLowering
         }
     }
 
+    /// <summary><c>catch |e| return if (c) a else b</c> (task #146): the condition first, then one of two returns, which is
+    /// what the value <c>if</c> under a <c>return</c> means. A comptime-known condition keeps only its return.</summary>
+    private CStmt LowerReturnIf(Item condItem, Item thenItem, Item elseItem)
+    {
+        if (TryFoldComptimeCondition(condItem) is { } taken)
+        {
+            return Hoisted(() => LowerReturn(taken ? thenItem : elseItem));
+        }
+        var cond = LowerExpr(condItem);
+        return new If(cond, Hoisted(() => LowerReturn(thenItem)), Hoisted(() => LowerReturn(elseItem)));
+    }
+
     /// <summary>Lower a control-flow fallback's ARM (see <see cref="IsControlFlowFallback"/>) to the
     /// statement that runs on the error / none path. Every form reuses the ordinary statement lowering
     /// of the same construct — a <c>return</c>, a (labeled) <c>break</c> / <c>continue</c>, a block —
@@ -5236,6 +5248,7 @@ internal sealed partial class ZigLowering
         Zig.OrElseReturnVoid or Zig.CatchReturnVoid => LowerReturnVoid(),
         Zig.FbReturn r       => LowerReturn(r.Arg1),
         Zig.FbReturnSwitch rs => LowerReturn(rs.Arg1),
+        Zig.FbReturnIf ri    => LowerReturnIf(ri.Arg3, ri.Arg5, ri.Arg7),
         Zig.FbBreak          => LowerUnlabeledBreak(),
         Zig.FbContinue       => new Continue(),
         Zig.FbBreakLabel b   => LowerLabeledLoopJump(Tok(b.Arg2), isContinue: false),
