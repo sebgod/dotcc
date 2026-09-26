@@ -6870,6 +6870,31 @@ public sealed class ZigOracleTests
             "    const p = &b;\n" +
             "    return @intCast((out[1] & 0xff) % 10 + (e[1] - '0') % 10 + p.n % 10 + b.n / 7 + p.*.n % 3);\n" +
             "}\n", 25, "" },
+        // Task #139: `u64` comptime arguments past i64 (std.hash.Fnv1a_64's offset basis) key, seed, compare and shift unsigned.
+        new object[] { "wide_u64_comptime_args",
+            "fn Hash(comptime T: type, comptime prime: T, comptime offset: T) type {\n" +
+            "    return struct {\n" +
+            "        value: T = offset,\n" +
+            "        const top: T = offset >> 60;\n" +
+            "        fn high() bool {\n" +
+            "            return offset > 0x8000000000000000;\n" +
+            "        }\n" +
+            "        fn mix(self: *@This(), b: u8) void {\n" +
+            "            self.value ^= b;\n" +
+            "            self.value *%= prime;\n" +
+            "        }\n" +
+            "    };\n" +
+            "}\n" +
+            "const A = Hash(u64, 0x100000001b3, 0xcbf29ce484222325);\n" +
+            "const B = Hash(u64, 3, 0xffffffffffffffff);\n" +
+            "pub fn main() u8 {\n" +
+            "    var a: A = .{};\n" +
+            "    a.mix('a');\n" +
+            "    var b: B = .{};\n" +
+            "    b.mix(1);\n" +
+            "    const t: u8 = @intCast(A.top);\n" +
+            "    return @as(u8, @truncate(a.value)) +% t +% @as(u8, @intFromBool(A.high())) +% @as(u8, @truncate(b.value >> 56));\n" +
+            "}\n", 152, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -8154,6 +8179,18 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{x}\\n\", .{acc});\n" +
             "    return @truncate(acc ^ (acc >> 32) ^ (acc >> 16) ^ (acc >> 8));\n" +
             "}\n", 112);
+
+    // Task #139: std.hash.Fnv1a_64 from real std.
+    [Fact]
+    public void Dotcc_matches_zig_std_fnv1a_64() =>
+        MatchesZigWithRealStd("fnv1a_64",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var h = std.hash.Fnv1a_64.init();\n" +
+            "    h.update(\"hel\");\n" +
+            "    h.update(\"lo\");\n" +
+            "    return @truncate(h.final() ^ std.hash.Fnv1a_64.hash(\"hello\") ^ std.hash.Fnv1a_32.hash(\"abc\"));\n" +
+            "}\n", 11);
 
     // Task #137: a call as the slice operand of bytesAsSlice / sliceAsBytes runs once.
     [Fact]

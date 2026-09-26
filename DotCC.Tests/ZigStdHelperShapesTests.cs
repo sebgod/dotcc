@@ -3795,6 +3795,43 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_u64_comptime_argument_past_i64_keys_and_seeds_a_type_returning_generic()
+    {
+        var cs = EmitZig("""
+            fn Hash(comptime T: type, comptime prime: T, comptime offset: T) type {
+                return struct {
+                    value: T = offset,
+                    const top: T = offset >> 60;
+                    fn high() bool {
+                        return offset > 0x8000000000000000;
+                    }
+                    fn mix(self: *@This(), b: u8) void {
+                        self.value ^= b;
+                        self.value *%= prime;
+                    }
+                };
+            }
+            const A = Hash(u64, 0x100000001b3, 0xcbf29ce484222325);
+            const B = Hash(u64, 3, 0xffffffffffffffff);
+            pub fn main() u8 {
+                var a: A = .{};
+                a.mix('a');
+                var b: B = .{};
+                b.mix(1);
+                const t: u8 = @intCast(A.top);
+                return @as(u8, @truncate(a.value)) +% t +% @as(u8, @intFromBool(A.high())) +% @as(u8, @truncate(b.value >> 56));
+            }
+            """);
+        // Task #139 (std.hash.Fnv1a_64 = Fnv1a(u64, 0x100000001b3, 0xcbf29ce484222325)): a `u64` comptime argument past
+        // i64 is read by the interpreter, keys the instance by its unsigned value and is spelled back unsigned
+        // wherever the body reads it, in comparisons and shifts too. zig returns 152.
+        cs.ShouldContain("Hash__u64_1099511628211_14695981039346656037 a = new Hash__u64_1099511628211_14695981039346656037 { value = 14695981039346656037UL };");
+        cs.ShouldContain("Hash__u64_3_18446744073709551615 b = new Hash__u64_3_18446744073709551615 { value = 18446744073709551615UL };");
+        cs.ShouldContain("byte t = unchecked((byte)(14695981039346656037UL >> 60));");
+        cs.ShouldContain("return ((CBool)(14695981039346656037UL > 9223372036854775808UL));");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

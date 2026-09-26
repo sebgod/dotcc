@@ -1564,11 +1564,18 @@ internal sealed partial class ZigLowering
                         var valueArg = valueParamType.Unqualified is CType.Enum
                             ? argScope.LowerExprSink(argItems[i], valueParamType)
                             : argScope.LowerExpr(argItems[i]);
-                        vv = _ir.ConstEval(valueArg) ?? throw new IrUnsupportedException(
-                            $"call to type-returning generic '{templateSym.Name}': the `comptime {p.Name}` argument "
-                            + "must be a compile-time-known value");
+                        // A `u64` past `i64` (std.hash.Fnv1a_64's `0xcbf29ce484222325`, task #139) has no long value; the
+                        // interpreter reads it, and the seed carries its bit pattern, which the unsigned type spells back.
+                        vv = _ir.ConstEval(valueArg)
+                            ?? (IsUnsigned64(valueParamType) && _ir.EvalComptimeValue(valueArg) is IrModule.CtInt { Value: var wide }
+                                && wide >= 0 && wide <= ulong.MaxValue ? unchecked((long)(ulong)wide) : (long?)null)
+                            ?? throw new IrUnsupportedException(
+                                $"call to type-returning generic '{templateSym.Name}': the `comptime {p.Name}` argument "
+                                + "must be a compile-time-known value");
                     }
-                    mangleTokens.Add(vv >= 0 ? vv.ToString(inv) : "n" + (-(System.Int128)vv).ToString(inv));
+                    mangleTokens.Add(vv >= 0 ? vv.ToString(inv)
+                        : IsUnsigned64(valueParamType) ? unchecked((ulong)vv).ToString(inv)
+                        : "n" + (-(System.Int128)vv).ToString(inv));
                     valueSeeds.Add((p.Name, vv, LowerType(p.TypeAst)));
                 }
             }

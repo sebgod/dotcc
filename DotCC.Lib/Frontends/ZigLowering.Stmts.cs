@@ -1995,6 +1995,12 @@ internal sealed partial class ZigLowering
     private static CExpr ComptimeVarLit(long v, CType t)
     {
         if (t.Unqualified is CType.Prim { Integer: true, Signed: false, Bytes: <= 2 }) { t = CType.Int; }
+        // A `u64` seed past `i64` is held as its bit pattern; spell the unsigned value (no long value, so nothing folds it
+        // as a negative number).
+        if (v < 0 && IsUnsigned64(t))
+        {
+            return new LitInt(unchecked((ulong)v).ToString(System.Globalization.CultureInfo.InvariantCulture), null) { Type = t };
+        }
         if (v >= 0)
         {
             return new LitInt(v.ToString(System.Globalization.CultureInfo.InvariantCulture), v) { Type = t };
@@ -2002,6 +2008,10 @@ internal sealed partial class ZigLowering
         var mag = -(System.Int128)v;
         return new Unary(UnOp.Neg, new LitInt(mag.ToString(System.Globalization.CultureInfo.InvariantCulture), v == long.MinValue ? null : -v) { Type = t }) { Type = t };
     }
+
+    /// <summary>True for a 64-bit unsigned integer type (<c>u64</c> / <c>usize</c>), whose comptime seeds may hold a value past
+    /// <see cref="long.MaxValue"/> as its bit pattern.</summary>
+    private static bool IsUnsigned64(CType t) => t.Unqualified is CType.Prim { Integer: true, Signed: false, Bytes: 8 };
 
     /// <summary>Build the unrolled copies of an <c>inline for</c> body: for each of
     /// <paramref name="count"/> iterations, a block <c>{ const capture = initFor(k); body }</c> with the
