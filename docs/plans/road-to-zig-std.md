@@ -977,8 +977,19 @@ vector length feeds TYPES.
   block lowered as a plain block. Oracles `simd_vectors` / `simd_masks` / `inline_for_break_comptime_int`, real-std
   differential `Dotcc_matches_zig_std_mem_index_of_scalar_simd_from_source` (82: hits in the unrolled loop, both tail
   blocks and the scalar remainder); unit `ZigVectorTests`. **Cuts:** a vector width with no .NET type
-  (`@Vector(3, u8)`), `/` `%` and shifts on vectors, `@shuffle`, a runtime bool-vector literal. (A comptime_int
+  (`@Vector(3, u8)`), `/` `%` and shifts on vectors, a runtime bool-vector literal (`@shuffle` landed with task #179). (A comptime_int
   argument beyond 64 bits, sort's `log2(maxInt(usize) + 1)`, landed with tasks #41 and #83.)
+- **std.hash.XxHash3 RUNS from real std, == zig (2026-09-27, tasks #169 to #182)**: the one-shot `hash` over every input
+  length (the short paths up to 240 bytes, hashLong's stripes past that) and the streaming `init` / `update` / `final`.
+  Needed: `noinline fn` (grammar); an empty `asm volatile` barrier as a no-op; `@ptrCast` to a vector pointer or slice,
+  and of a local holding an array pointer (dotcc keeps it as a slice); 2-D rows `a[0..16].*`; a labeled block as a
+  call argument; `@shuffle` and `@prefetch`; `&` of a container array const as static storage; a wrapping op over
+  constants folded (C# checks constant overflow, CS0220); the comptime interpreter wrapping at its operand widths and
+  bounding call depth (std.math.log10_int, task #171); and `native_endian == .big` over `builtin.cpu.arch.endian()`
+  folding, a method call rooted at the synthetic `builtin` answered by the interpreter, so the `@byteSwap` arm is never
+  lowered. On the way: function-local aliases of a module or its types (`const H = std.hash.Wyhash;`, task #181), and
+  on the C side a narrowing store of a constant expression (task #182). Real-std differentials
+  `Dotcc_matches_zig_std_hash_xxhash3` / `_long` / `_streaming`, `Dotcc_matches_zig_std_function_local_aliases`.
 - **T6 (backlog)** arm64 hosts: verify and complete the `Arm` intrinsics → `std.Target.aarch64` mapping when this runs on
   arm64 (the maintainer's request, 2026-09-24; tracked in `docs/plans/deferred.md`, target identity).
 
