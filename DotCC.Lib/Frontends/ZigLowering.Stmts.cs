@@ -1044,6 +1044,16 @@ internal sealed partial class ZigLowering
             return new ArrayDecl(asym, sa.Element, countLit, elems);
         }
         var init = LowerExprSink(initExpr, declared);
+        // `const blob = b[off..][0..8].*;` (std.crypto.siphash's update, task #159): a slice of comptime-known length
+        // deref'd is an ARRAY copy, so the local is a `[8]u8` with its own storage. Standing for the slice, it could not
+        // be passed to `round(self, b: [8]u8)`. A length only known at run time keeps the slice (zig rejects such a `.*`).
+        if (declared is null && initExpr.Content is Zig.Deref && init is SliceNew derefSlice
+            && _ir.ConstEval(derefSlice.Len) is { } derefLen and > 0 and <= 4096)
+        {
+            var derefArray = new CType.Array(derefSlice.Element.Unqualified, (int)derefLen);
+            var dsym = _symbols.Declare(new Symbol { Name = Tok(nameTok), Kind = SymKind.Var, Type = derefArray });
+            return ArrayValueCopyDecl(dsym, derefArray, derefLen, derefSlice.Ptr);
+        }
         // `const t = x > 2;` is a zig `bool`, though the IR types a comparison as C's `int` (task #81): `{}` prints it
         // `true`, and `@TypeOf(t)` is `bool`.
         var type = declared ?? (IsZigBoolValue(init) ? CType.Bool : init.Type) ?? CType.Int;

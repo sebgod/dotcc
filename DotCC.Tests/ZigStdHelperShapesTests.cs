@@ -4819,6 +4819,61 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_method_named_create_on_a_type_returning_call_is_the_types_function()
+    {
+        var cs = EmitZig("""
+            fn Hasher64(comptime c: usize, comptime d: usize) type {
+                return Hasher(u64, c, d);
+            }
+            fn Hasher(comptime T: type, comptime c: usize, comptime d: usize) type {
+                return struct {
+                    pub fn create(out: *T, x: T) void {
+                        out.* = x * c + d;
+                    }
+                };
+            }
+            pub fn main() u8 {
+                var out: u64 = 0;
+                Hasher64(2, 4).create(&out, 10);
+                const H = Hasher64(1, 1);
+                var o2: u64 = 0;
+                H.create(&o2, 5);
+                return @intCast(out + o2);
+            }
+            """);
+        // Task #159 (std.crypto.auth.siphash's `SipHash64(2, 4).create(&out, msg, &key)`): a method named like an
+        // allocator's (`create`, `alloc`, `free`, …) on a TYPE a type-returning call builds is that type's function, not
+        // an allocator call on a value. zig returns 30.
+        cs.ShouldContain("Hasher__u64_2_4_create(&@out, 10);");
+    }
+
+    [Fact]
+    public void A_deref_of_a_comptime_length_slice_binds_an_array_copy()
+    {
+        var cs = EmitZig("""
+            fn sum(b: [4]u8) u32 {
+                return b[0] + @as(u32, b[3]) * 10;
+            }
+            pub fn main() u8 {
+                var data = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 };
+                const s: []u8 = &data;
+                var off: usize = 0;
+                var t: u32 = 0;
+                while (off < s.len) : (off += 4) {
+                    var blob = s[off..][0..4].*;
+                    blob[0] +%= 100;
+                    t += sum(blob);
+                }
+                return @intCast(t % 256 + data[0]);
+            }
+            """);
+        // Task #159 (std.crypto.siphash's `const blob = b[off..][0..8].*;` passed to `round(self, b: [8]u8)`): the deref is
+        // an ARRAY value, so the local gets its own storage and a copy (a `var` bound to the slice wrote through to the
+        // source). zig returns 71.
+        cs.ShouldContain("byte* blob = stackalloc byte[4];");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

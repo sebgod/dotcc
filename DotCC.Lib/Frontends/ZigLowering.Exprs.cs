@@ -1829,6 +1829,9 @@ internal sealed partial class ZigLowering
             // task #135) is a static call, not an allocator method: it takes the `Type.func(args)` path below.
             && !(fld.Arg0.Content is Zig.Ident typeRecv && _symbols.Resolve(Tok(typeRecv.Arg0)) is null
                  && TryLookupContainerType(Tok(typeRecv.Arg0), out var recvType) && ContainerTypeName(recvType) is not null)
+            // So is one of a type a type-returning call builds (std.crypto.auth.siphash's `SipHash64(2, 4).create(&out,
+            // msg, &key)`, task #159); the reification is memoized, and any other call base answers no.
+            && !(fld.Arg0.Content is Zig.CallArgs or Zig.CallNoArgs && TryEvalTypeReturningCall(fld.Arg0, out _))
             && TryLowerAllocatorMethod(fld, methodName, argItems, out var allocExpr))
         {
             return allocExpr;

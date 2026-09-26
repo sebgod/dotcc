@@ -7258,6 +7258,43 @@ public sealed class ZigOracleTests
             "pub fn main() u8 {\n" +
             "    return @intCast(mix(-5, 200, 7, 4, 99) & 0xff);\n" +
             "}\n", 247, "" },
+        // Task #159: `create` on a type-returning call's type (a forwarding generic), and a comptime-length slice deref'd
+        // into an array copy that is then written.
+        new object[] { "type_call_create_method",
+            "fn Hasher64(comptime c: usize, comptime d: usize) type {\n" +
+            "    return Hasher(u64, c, d);\n" +
+            "}\n" +
+            "fn Hasher(comptime T: type, comptime c: usize, comptime d: usize) type {\n" +
+            "    return struct {\n" +
+            "        pub fn create(out: *T, x: T) void {\n" +
+            "            out.* = x * c + d;\n" +
+            "        }\n" +
+            "    };\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var out: u64 = 0;\n" +
+            "    Hasher64(2, 4).create(&out, 10);\n" +
+            "    const H = Hasher64(1, 1);\n" +
+            "    var o2: u64 = 0;\n" +
+            "    H.create(&o2, 5);\n" +
+            "    return @intCast(out + o2);\n" +
+            "}\n", 30, "" },
+        new object[] { "slice_deref_array_copy",
+            "fn sum(b: [4]u8) u32 {\n" +
+            "    return b[0] + @as(u32, b[3]) * 10;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var data = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 };\n" +
+            "    const s: []u8 = &data;\n" +
+            "    var off: usize = 0;\n" +
+            "    var t: u32 = 0;\n" +
+            "    while (off < s.len) : (off += 4) {\n" +
+            "        var blob = s[off..][0..4].*;\n" +
+            "        blob[0] +%= 100;\n" +
+            "        t += sum(blob);\n" +
+            "    }\n" +
+            "    return @intCast(t % 256 + data[0]);\n" +
+            "}\n", 71, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -8611,6 +8648,18 @@ public sealed class ZigOracleTests
             "    h.final(&inc);\n" +
             "    return out[0] ^ out[31] ^ keyed[5] ^ @as(u8, @intFromBool(std.mem.eql(u8, &out, &inc)));\n" +
             "}\n", 255);
+
+    // Task #159: std.crypto.auth.siphash.SipHash64(2, 4).create from real std.
+    [Fact]
+    public void Dotcc_matches_zig_std_crypto_siphash() =>
+        MatchesZigWithRealStd("crypto_siphash",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    const key: [16]u8 = @splat(1);\n" +
+            "    var out: [8]u8 = undefined;\n" +
+            "    std.crypto.auth.siphash.SipHash64(2, 4).create(&out, \"abc\", &key);\n" +
+            "    return out[0] ^ out[7];\n" +
+            "}\n", 149);
 
     // Task #148: std.math.rotr / rotl from real std over a `@Vector(4, u32)` (Blake3's SIMD rounds rotate this way).
     [Fact]
