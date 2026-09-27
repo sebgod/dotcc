@@ -8,6 +8,23 @@ using LALR.CC.LexicalGrammar;
 namespace DotCC;
 
 /// <summary>
+/// A token that an <c>#include</c> has already run through the preprocessor
+/// and <see cref="MacroExpander"/> of the included file. Macro expansion must
+/// happen exactly once, in source order, against the macro table as it stands
+/// at that point; the includer's expander therefore passes these through
+/// untouched. Rescanning them there would apply a macro that the header
+/// <c>#define</c>s AFTER the tokens (<c>int Py_Is(PyObject *x, …);</c>
+/// followed by <c>#define Py_Is(x, y) …</c>) and would expand again a
+/// self-referential call the included file's rescan had already painted blue.
+/// </summary>
+internal sealed class ExpandedItem : Item
+{
+    /// <summary>Copy <paramref name="token"/> (symbol, content, position) as an
+    /// already-expanded token.</summary>
+    public ExpandedItem(Item token) : base(token.ID, token.Content, token.Position) { }
+}
+
+/// <summary>
 /// Function-like macro expander, sitting between <see cref="PreprocessorTokenStream"/>
 /// and <see cref="TypeNameRewriter"/> in the pipeline. For each <c>ID</c>
 /// token whose content names a function-like macro in <see cref="CPreprocessor"/>'s
@@ -62,6 +79,13 @@ internal sealed class MacroExpander : RewritingTokenStream
 
     protected override void ProcessToken(Item token)
     {
+        // An included file's tokens were expanded by that file's own expander,
+        // in order, while its #defines were live. Never again here.
+        if (token is ExpandedItem)
+        {
+            Emit(token);
+            return;
+        }
         if (token.ID == _idSymbol
             && token.Content is string name
             && _cpp.TryGetMacro(name, out var macro)
