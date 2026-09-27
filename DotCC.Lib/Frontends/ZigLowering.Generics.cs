@@ -307,6 +307,14 @@ internal sealed partial class ZigLowering
                     }
                     case Zig.StmtReturn r:
                         return _ir.ResolveComptimeFold(LowerExprSink(r.Arg1, CType.Int128));
+                    // `comptime { … }` / `comptime assert(…);` (std.math.floatMantissaBits's `comptime assert(@typeInfo(T) ==
+                    // .float);`, task #189): a compile-time check with no value. The instance body is still drained (every
+                    // instance queues a pending instantiation) and runs the check there, so a failing one still fails;
+                    // here it is passed over, so the value is known while the caller lowers (std.math.floatMax passes it
+                    // on as a `comptime` argument).
+                    case Zig.ComptimeBlock:
+                    case Zig.StmtExpr { Arg0.Content: Zig.PreComptime }:
+                        break;
                     default:
                         return null;
                 }
@@ -670,7 +678,8 @@ internal sealed partial class ZigLowering
                                 $"call to generic '{templateSym.Name}'"
                                 + (argScope._currentFnName.Length > 0 ? $" (from '{argScope._currentFnName}')" : "")
                                 + $": the `comptime {g.Params[i].Name}` argument must be a "
-                                + "compile-time-known integer constant (a literal / arithmetic / comptime value; wrap a call as `comptime f()`)");
+                                + "compile-time-known integer constant (a literal / arithmetic / comptime value; wrap a call as `comptime f()`)"
+                                + (_ir.ComptimeMiss is { } intWhy ? $" (the interpreter stopped at {intWhy})" : ""));
                         }
                         // A negative value can't spell a C# identifier segment, so encode the sign;
                         // long.MinValue has no positive `long`, so widen through Int128 for the magnitude.

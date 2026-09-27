@@ -947,6 +947,16 @@ productions:
       # set, so the alternative is conflict-free. Reuses the same `Prongs`, whose bodies may now
       # be a bare value Expr (`v => e`) — a switch expression's prongs YIELD a value.
       - { lhs: RhsExpr, rhs: [SwitchExpr] }
+      # A value switch as the LEFT operand of a comparison (std.math.signbit, task #187:
+      # `return switch (@typeInfo(@TypeOf(x))) { … } < 0;`). Only at a RhsExpr start, where the switch is already a
+      # value: after the `}`, a comparison operator shifts and anything in FOLLOW(RhsExpr) reduces, so it is
+      # conflict-free, and a statement-level `switch` (reached only at Stmt position) is untouched.
+      - { lhs: RhsExpr, rhs: [SwitchExpr, '<', Bitwise],  action: switchCmpLt }
+      - { lhs: RhsExpr, rhs: [SwitchExpr, '>', Bitwise],  action: switchCmpGt }
+      - { lhs: RhsExpr, rhs: [SwitchExpr, '<=', Bitwise], action: switchCmpLe }
+      - { lhs: RhsExpr, rhs: [SwitchExpr, '>=', Bitwise], action: switchCmpGe }
+      - { lhs: RhsExpr, rhs: [SwitchExpr, '==', Bitwise], action: switchCmpEq }
+      - { lhs: RhsExpr, rhs: [SwitchExpr, '!=', Bitwise], action: switchCmpNe }
       # `comptime switch (…) {…}` / `comptime if (…) a else b` in value position (road-to-zig-std G3:
       # std.Io.Writer.print's `const arg_pos = comptime switch (placeholder.arg) {…}`; 12 in std). The
       # `comptime` Prefix operator reaches only the Expr cascade, which neither form is in; after

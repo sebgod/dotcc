@@ -5891,6 +5891,33 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_comptime_block_reaching_unreachable_is_zigs_compile_error()
+    {
+        // Task #189: `comptime { if (n > 10) unreachable; }` whose condition folds true is zig's "reached unreachable code";
+        // it had been reported as an unsupported `StmtExpr`. Skipping the check where a comptime_int value is evaluated
+        // early does not skip it: the instance body still runs it.
+        var ex = Should.Throw<CompileException>(() => EmitZig("""
+            inline fn chk(comptime n: comptime_int) comptime_int {
+                comptime {
+                    if (n > 10) unreachable;
+                }
+                return n * 2;
+            }
+            inline fn g(comptime T: type, comptime m: comptime_int) T {
+                return m;
+            }
+            inline fn f(comptime T: type) T {
+                const x = chk(20) + 1;
+                return g(T, x);
+            }
+            pub fn main() u8 {
+                return f(u8);
+            }
+            """));
+        ex.Message.ShouldContain("reached unreachable code");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

@@ -3427,6 +3427,18 @@ internal sealed partial class ZigLowering
             var narrow = sinkBytes switch { 1 => CType.UChar, 2 => CType.UShort, 4 => CType.UInt, _ => (CType?)null };
             if (narrow is not null) { operand = new Cast(narrow, operand) { Type = narrow }; }
         }
+        // `@truncate(mem.nativeToLittle(Chunk, chunk))` into a `@Vector(16, u8)` (std.unicode.utf16LeToUtf8Impl, task #188):
+        // a vector cast is lane by lane, which a C# cast between .NET vector types is not (CS0030).
+        if (name is "@truncate" or "@intCast" && sink.Unqualified is CType.Vector { IsMask: false } toVector
+            && operand.Type.Unqualified is CType.Vector { IsMask: false } fromVector && fromVector.Count == toVector.Count
+            && fromVector.Element.Unqualified is CType.Prim { Integer: true } fromLane
+            && toVector.Element.Unqualified is CType.Prim { Integer: true } toLane && fromLane.Bytes != toLane.Bytes)
+        {
+            var laneWitness = new Cast(toVector.Element, IntLit(0)) { Type = toVector.Element };
+            var laneHelper = (toLane.Bytes > fromLane.Bytes ? "ZigVec.Widen" : "ZigVec.Narrow")
+                + toVector.Bits.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            return new Call(laneHelper, new List<CExpr> { operand, laneWitness }) { Type = sink };
+        }
         return name == "@bitCast"
             ? new BitCast(sink, operand) { Type = sink }
             : new Cast(sink, operand) { Type = sink };

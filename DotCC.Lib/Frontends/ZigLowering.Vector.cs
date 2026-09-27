@@ -352,6 +352,12 @@ internal sealed partial class ZigLowering
             var combined = new Binary(binOp, VectorLane(vec, idx, vector), value) { Type = vector.Element };
             value = new Cast(vector.Element, combined) { Type = vector.Element };
         }
+        // `v[3] = 0x00ff;` (task #188): a literal renders as a bare `255`, which C# types `int`, and `ZigVec.With<T>` then
+        // infers no single T (CS1503); the lane value is given the lane type.
+        if (value is LitInt || !value.Type.Unqualified.Equals(vector.Element.Unqualified))
+        {
+            value = new Cast(vector.Element, value) { Type = vector.Element };
+        }
         var with = new Call("ZigVec.With", new List<CExpr> { vec, idx, value }) { Type = vector };
         return new Assign(null, vec, with) { Type = vector };
     }

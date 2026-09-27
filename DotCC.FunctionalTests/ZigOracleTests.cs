@@ -7879,6 +7879,79 @@ public sealed class ZigOracleTests
             "    for (&buf, 0..) |*b, i| b.* = @truncate(i * 3);\n" +
             "    return @truncate(last(buf[0..]) + last(buf[0..30]));\n" +
             "}\n", 156, "" },
+        // Task #187 (std.math.signbit): a value switch as the LEFT operand of a comparison, `return switch (…) { … } < 0;`.
+        new object[] { "switch_left_comparison_operand",
+            "fn neg(x: i32) bool {\n" +
+            "    return switch (x) {\n" +
+            "        0 => 0,\n" +
+            "        else => x,\n" +
+            "    } < 0;\n" +
+            "}\n" +
+            "fn big(x: u8) bool {\n" +
+            "    return switch (x) {\n" +
+            "        0...9 => x,\n" +
+            "        else => x * 2,\n" +
+            "    } >= 20;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var a: i32 = -5;\n" +
+            "    _ = &a;\n" +
+            "    return @as(u8, @intFromBool(neg(a))) * 40 + @intFromBool(neg(3)) + @as(u8, @intFromBool(big(10))) * 2;\n" +
+            "}\n", 42, "" },
+        // Task #188 (std.unicode.utf16LeToUtf8Impl): `@truncate` of a vector narrows lane by lane, and a lane store of a
+        // literal (`v[3] = 0x00ff;`) is typed at the lane.
+        new object[] { "vector_truncate_lanes",
+            "pub fn main() u8 {\n" +
+            "    var v: @Vector(16, u16) = @splat(0x1234);\n" +
+            "    v[3] = 0x00ff;\n" +
+            "    const n: @Vector(16, u8) = @truncate(v);\n" +
+            "    var w: @Vector(4, u64) = @splat(0x1_0000_0007);\n" +
+            "    _ = &w;\n" +
+            "    const m: @Vector(4, u32) = @truncate(w);\n" +
+            "    return n[0] +% n[3] +% @as(u8, @truncate(m[2]));\n" +
+            "}\n", 58, "" },
+        // Task #188: `catch |err| switch (err) { error.A => unreachable, … }` as a value; an `unreachable` prong stores nothing.
+        new object[] { "catch_switch_unreachable_prongs",
+            "const E = error{ A, B };\n" +
+            "fn f(x: u8) E!u8 {\n" +
+            "    if (x > 5) return error.A;\n" +
+            "    return x;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var s: u8 = 0;\n" +
+            "    for ([_]u8{ 1, 2, 3 }) |i| {\n" +
+            "        s += f(i) catch |err| switch (err) {\n" +
+            "            error.A => unreachable,\n" +
+            "            error.B => unreachable,\n" +
+            "        };\n" +
+            "    }\n" +
+            "    return s * 7;\n" +
+            "}\n", 42, "" },
+        // Task #189 (std.math.floatMax): a comptime_int call inside a generic instance folds though its callee opens with a
+        // `comptime { … }` check, so its value can be passed on as a `comptime` argument.
+        new object[] { "comptime_check_then_comptime_int",
+            "inline fn mbits(comptime T: type) comptime_int {\n" +
+            "    comptime {\n" +
+            "        if (@typeInfo(T) != .float) unreachable;\n" +
+            "    }\n" +
+            "    return switch (@typeInfo(T).float.bits) {\n" +
+            "        32 => 23,\n" +
+            "        64 => 52,\n" +
+            "        else => unreachable,\n" +
+            "    };\n" +
+            "}\n" +
+            "inline fn recon(comptime T: type, comptime mantissa: comptime_int) T {\n" +
+            "    const TBits = @Int(.unsigned, @bitSizeOf(T));\n" +
+            "    return @as(T, @bitCast(@as(TBits, mantissa)));\n" +
+            "}\n" +
+            "inline fn fmax(comptime T: type) T {\n" +
+            "    const m = (1 << mbits(T)) - 1;\n" +
+            "    return recon(T, m);\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const f = fmax(f32);\n" +
+            "    return if (f > 1e-39) 42 else 7;\n" +
+            "}\n", 42, "" },
         // Task #184 (std.crypto.blake2's final, `out.* = @as(*[digest_length]u8, @ptrCast(&d.h)).*;`): an array stored
         // through a `*[N]T` copies into the array it names (it had rebound the pointer parameter, a silent miscompile), and
         // `var c = p.*;` copies out of it (it had aliased the storage).
@@ -9463,6 +9536,96 @@ public sealed class ZigOracleTests
             "    const c = H.hash(4, \"ALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUF\");\n" +
             "    return @truncate((a ^ b ^ c) >> 5);\n" +
             "}\n", 34);
+
+    // Tasks #187 / #189: std.math.isNan / isInf / isPositiveInf / floatMax / copysign / approxEqAbs / signbit from real
+    // std; signbit compares a value switch, floatMax passes a comptime_int its check-guarded helper returns, and
+    // `@typeInfo(f64).float.bits` answers from the lowered type.
+    [Fact]
+    public void Dotcc_matches_zig_std_math_float_queries() =>
+        MatchesZigWithRealStd("math_float_queries",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var x: f64 = 0.0;\n" +
+            "    _ = &x;\n" +
+            "    const n = std.math.nan(f64);\n" +
+            "    var t: u8 = 0;\n" +
+            "    if (std.math.isNan(n)) t += 1;\n" +
+            "    if (std.math.isInf(1.0 / x)) t += 2;\n" +
+            "    if (std.math.isPositiveInf(std.math.inf(f32))) t += 4;\n" +
+            "    if (std.math.floatMax(f32) > 1e38) t += 8;\n" +
+            "    if (std.math.copysign(@as(f64, 3.0), -1.0) < 0) t += 16;\n" +
+            "    if (std.math.approxEqAbs(f64, 0.1 + 0.2, 0.3, 1e-9)) t += 32;\n" +
+            "    if (std.math.signbit(@as(f64, -0.0))) t += 64;\n" +
+            "    return t;\n" +
+            "}\n", 127);
+
+    // Task #188: std.unicode.utf8ToUtf16Le and utf16LeToUtf8 from real std (its SIMD fast path `@truncate`s a vector).
+    [Fact]
+    public void Dotcc_matches_zig_std_unicode_utf16_round_trip() =>
+        MatchesZigWithRealStd("unicode_utf16_round_trip",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var buf: [16]u16 = undefined;\n" +
+            "    const n = std.unicode.utf8ToUtf16Le(&buf, \"aé→\") catch return 1;\n" +
+            "    var back: [16]u8 = undefined;\n" +
+            "    const m = std.unicode.utf16LeToUtf8(&back, buf[0..n]) catch return 2;\n" +
+            "    const cnt = std.unicode.utf8CountCodepoints(back[0..m]) catch return 3;\n" +
+            "    return @truncate(n * 10 + m + cnt + buf[1] % 7);\n" +
+            "}\n", 41);
+
+    // std.enums.EnumArray from real std: initFill, set, getPtr and the iterator.
+    [Fact]
+    public void Dotcc_matches_zig_std_enums_enum_array() =>
+        MatchesZigWithRealStd("enums_enum_array",
+            "const std = @import(\"std\");\n" +
+            "const Dir = enum { north, east, south, west };\n" +
+            "pub fn main() u8 {\n" +
+            "    var arr = std.enums.EnumArray(Dir, u8).initFill(1);\n" +
+            "    arr.set(.south, 10);\n" +
+            "    arr.getPtr(.east).* += 4;\n" +
+            "    var sum: u8 = 0;\n" +
+            "    var it = arr.iterator();\n" +
+            "    while (it.next()) |e| sum += e.value.* * (@as(u8, @intFromEnum(e.key)) + 1);\n" +
+            "    return sum;\n" +
+            "}\n", 45);
+
+    // std.crypto.hash.sha2.Sha224 / Sha384 and std.hash.crc.Crc16Modbus from real std.
+    [Fact]
+    public void Dotcc_matches_zig_std_crypto_sha224_sha384_crc16() =>
+        MatchesZigWithRealStd("crypto_sha224_sha384_crc16",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var a: [std.crypto.hash.sha2.Sha224.digest_length]u8 = undefined;\n" +
+            "    std.crypto.hash.sha2.Sha224.hash(\"abc\", &a, .{});\n" +
+            "    var b: [std.crypto.hash.sha2.Sha384.digest_length]u8 = undefined;\n" +
+            "    std.crypto.hash.sha2.Sha384.hash(\"abc\", &b, .{});\n" +
+            "    const c = std.hash.crc.Crc16Modbus.hash(\"123456789\");\n" +
+            "    return a[0] ^ a[27] ^ b[0] ^ b[47] ^ @as(u8, @truncate(c));\n" +
+            "}\n", 223);
+
+    // std.mem.window / zeroes / bytesAsValue / alignForward / trimStart / trimEnd / containsAtLeast / eql from real std.
+    [Fact]
+    public void Dotcc_matches_zig_std_mem_more() =>
+        MatchesZigWithRealStd("mem_more",
+            "const std = @import(\"std\");\n" +
+            "const P = struct { a: u16, b: u8 };\n" +
+            "pub fn main() u8 {\n" +
+            "    var total: usize = 0;\n" +
+            "    var win = std.mem.window(u8, \"abcdefg\", 3, 2);\n" +
+            "    while (win.next()) |w| total += w[0];\n" +
+            "    const z = std.mem.zeroes(P);\n" +
+            "    total += z.a + z.b;\n" +
+            "    const raw = [_]u8{ 0x34, 0x12 };\n" +
+            "    const v = std.mem.bytesAsValue(u16, &raw);\n" +
+            "    total += v.* >> 8;\n" +
+            "    total += std.mem.alignForward(usize, 13, 8);\n" +
+            "    total += std.mem.trimStart(u8, \"  xy\", \" \").len + std.mem.trimEnd(u8, \"xy  \", \" \").len;\n" +
+            "    total += @intFromBool(std.mem.containsAtLeast(u8, \"abab ab\", 3, \"ab\"));\n" +
+            "    const w1 = [_]u16{ 1, 2, 3 };\n" +
+            "    const w2 = [_]u16{ 1, 2, 3 };\n" +
+            "    total += @as(usize, @intFromBool(std.mem.eql(u16, &w1, &w2))) * 7;\n" +
+            "    return @truncate(total);\n" +
+            "}\n", 87);
 
     // Task #184: std.crypto.hash.Sha1 and blake2.Blake2s256 from real std; Blake2s's digest had been all zeros (its
     // `out.* = …` rebound the pointer parameter).

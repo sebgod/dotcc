@@ -1956,6 +1956,9 @@ internal sealed partial class ZigLowering
                     throw new IrUnsupportedException("zig: a comptime assertion failed (`assert` in a `comptime` block)");
                 }
                 break;
+            // `if (n > 10) unreachable;` whose condition folds true (a comptime check, task #189): zig's compile error.
+            case Zig.StmtExpr { Arg0: var reached } when IsUnreachableItem(reached):
+                throw new CompileException("zig: reached unreachable code (in a `comptime` block)");
             default:
                 throw new IrUnsupportedException(
                     $"comptime block: statement '{s.Content?.GetType().Name}' is not supported — only "
@@ -5054,6 +5057,9 @@ internal sealed partial class ZigLowering
     /// The first branch lowered fixes <see cref="ValueTempTarget.ResultType"/>.</summary>
     private CStmt FillValueTemp(Item valueItem, ValueTempTarget rt)
     {
+        // An `unreachable` prong (`error.CodepointTooLarge => unreachable` in std.unicode's utf16LeToUtf8Impl, task #188) has
+        // no value to store: it is the trap, as a statement. (Assigned, its `void` call was CS0029.)
+        if (IsUnreachableItem(valueItem)) { return new ExprStmt(LowerExpr(valueItem)); }
         if (IsLabeledValue(valueItem))
         {
             return LowerLabeledValue(valueItem, rt.ResultType, blkTemp =>

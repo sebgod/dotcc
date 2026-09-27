@@ -293,6 +293,13 @@ internal sealed partial class ZigLowering
             case Zig.CmpGt a:   return Bin(BinOp.Gt, a.Arg0, a.Arg2);
             case Zig.CmpLe a:   return Bin(BinOp.Le, a.Arg0, a.Arg2);
             case Zig.CmpGe a:   return Bin(BinOp.Ge, a.Arg0, a.Arg2);
+            // A value switch as the left operand (std.math.signbit's `switch (@typeInfo(T)) { … } < 0`, task #187).
+            case Zig.SwitchCmpLt a: return Bin(BinOp.Lt, a.Arg0, a.Arg2);
+            case Zig.SwitchCmpGt a: return Bin(BinOp.Gt, a.Arg0, a.Arg2);
+            case Zig.SwitchCmpLe a: return Bin(BinOp.Le, a.Arg0, a.Arg2);
+            case Zig.SwitchCmpGe a: return Bin(BinOp.Ge, a.Arg0, a.Arg2);
+            case Zig.SwitchCmpEq a: return Bin(BinOp.Eq, a.Arg0, a.Arg2);
+            case Zig.SwitchCmpNe a: return Bin(BinOp.Ne, a.Arg0, a.Arg2);
             // boolean (short-circuit)
             case Zig.BoolOr a:  return ShortCircuit(BinOp.LogOr, a.Arg0, a.Arg2);
             case Zig.BoolAnd a: return ShortCircuit(BinOp.LogAnd, a.Arg0, a.Arg2);

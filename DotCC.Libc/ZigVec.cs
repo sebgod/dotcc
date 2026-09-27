@@ -112,6 +112,68 @@ public static class ZigVec
         return System.Runtime.Intrinsics.Vector512.Create<TTo>(lanes);
     }
 
+    // ---- narrowing: `@truncate` / `@intCast` of a vector to narrower lanes (task #188) --------------------
+
+    /// <summary>Truncate each lane of a 128-bit vector to <typeparamref name="TTo"/> in a 64-bit one (the lane
+    /// count is kept; <paramref name="witness"/> only names the target lane type).</summary>
+    public static System.Runtime.Intrinsics.Vector64<TTo> Narrow64<TFrom, TTo>(System.Runtime.Intrinsics.Vector128<TFrom> v, TTo witness)
+        where TFrom : unmanaged, System.Numerics.IBinaryInteger<TFrom> where TTo : unmanaged, System.Numerics.IBinaryInteger<TTo>
+    {
+        System.Span<TTo> lanes = stackalloc TTo[System.Runtime.Intrinsics.Vector64<TTo>.Count];
+        for (var i = 0; i < System.Runtime.Intrinsics.Vector128<TFrom>.Count; i++) { lanes[i] = TTo.CreateTruncating(v[i]); }
+        return System.Runtime.Intrinsics.Vector64.Create<TTo>(lanes);
+    }
+
+    /// <summary>Truncate each lane of a 256-bit vector to <typeparamref name="TTo"/> in a 64-bit one (the lane
+    /// count is kept; <paramref name="witness"/> only names the target lane type).</summary>
+    public static System.Runtime.Intrinsics.Vector64<TTo> Narrow64<TFrom, TTo>(System.Runtime.Intrinsics.Vector256<TFrom> v, TTo witness)
+        where TFrom : unmanaged, System.Numerics.IBinaryInteger<TFrom> where TTo : unmanaged, System.Numerics.IBinaryInteger<TTo>
+    {
+        System.Span<TTo> lanes = stackalloc TTo[System.Runtime.Intrinsics.Vector64<TTo>.Count];
+        for (var i = 0; i < System.Runtime.Intrinsics.Vector256<TFrom>.Count; i++) { lanes[i] = TTo.CreateTruncating(v[i]); }
+        return System.Runtime.Intrinsics.Vector64.Create<TTo>(lanes);
+    }
+
+    /// <summary>Truncate each lane of a 512-bit vector to <typeparamref name="TTo"/> in a 64-bit one (the lane
+    /// count is kept; <paramref name="witness"/> only names the target lane type).</summary>
+    public static System.Runtime.Intrinsics.Vector64<TTo> Narrow64<TFrom, TTo>(System.Runtime.Intrinsics.Vector512<TFrom> v, TTo witness)
+        where TFrom : unmanaged, System.Numerics.IBinaryInteger<TFrom> where TTo : unmanaged, System.Numerics.IBinaryInteger<TTo>
+    {
+        System.Span<TTo> lanes = stackalloc TTo[System.Runtime.Intrinsics.Vector64<TTo>.Count];
+        for (var i = 0; i < System.Runtime.Intrinsics.Vector512<TFrom>.Count; i++) { lanes[i] = TTo.CreateTruncating(v[i]); }
+        return System.Runtime.Intrinsics.Vector64.Create<TTo>(lanes);
+    }
+
+    /// <summary>Truncate each lane of a 256-bit vector to <typeparamref name="TTo"/> in a 128-bit one (the lane
+    /// count is kept; <paramref name="witness"/> only names the target lane type).</summary>
+    public static System.Runtime.Intrinsics.Vector128<TTo> Narrow128<TFrom, TTo>(System.Runtime.Intrinsics.Vector256<TFrom> v, TTo witness)
+        where TFrom : unmanaged, System.Numerics.IBinaryInteger<TFrom> where TTo : unmanaged, System.Numerics.IBinaryInteger<TTo>
+    {
+        System.Span<TTo> lanes = stackalloc TTo[System.Runtime.Intrinsics.Vector128<TTo>.Count];
+        for (var i = 0; i < System.Runtime.Intrinsics.Vector256<TFrom>.Count; i++) { lanes[i] = TTo.CreateTruncating(v[i]); }
+        return System.Runtime.Intrinsics.Vector128.Create<TTo>(lanes);
+    }
+
+    /// <summary>Truncate each lane of a 512-bit vector to <typeparamref name="TTo"/> in a 128-bit one (the lane
+    /// count is kept; <paramref name="witness"/> only names the target lane type).</summary>
+    public static System.Runtime.Intrinsics.Vector128<TTo> Narrow128<TFrom, TTo>(System.Runtime.Intrinsics.Vector512<TFrom> v, TTo witness)
+        where TFrom : unmanaged, System.Numerics.IBinaryInteger<TFrom> where TTo : unmanaged, System.Numerics.IBinaryInteger<TTo>
+    {
+        System.Span<TTo> lanes = stackalloc TTo[System.Runtime.Intrinsics.Vector128<TTo>.Count];
+        for (var i = 0; i < System.Runtime.Intrinsics.Vector512<TFrom>.Count; i++) { lanes[i] = TTo.CreateTruncating(v[i]); }
+        return System.Runtime.Intrinsics.Vector128.Create<TTo>(lanes);
+    }
+
+    /// <summary>Truncate each lane of a 512-bit vector to <typeparamref name="TTo"/> in a 256-bit one (the lane
+    /// count is kept; <paramref name="witness"/> only names the target lane type).</summary>
+    public static System.Runtime.Intrinsics.Vector256<TTo> Narrow256<TFrom, TTo>(System.Runtime.Intrinsics.Vector512<TFrom> v, TTo witness)
+        where TFrom : unmanaged, System.Numerics.IBinaryInteger<TFrom> where TTo : unmanaged, System.Numerics.IBinaryInteger<TTo>
+    {
+        System.Span<TTo> lanes = stackalloc TTo[System.Runtime.Intrinsics.Vector256<TTo>.Count];
+        for (var i = 0; i < System.Runtime.Intrinsics.Vector512<TFrom>.Count; i++) { lanes[i] = TTo.CreateTruncating(v[i]); }
+        return System.Runtime.Intrinsics.Vector256.Create<TTo>(lanes);
+    }
+
     // ---- comparisons to a lane mask -------------------------------------------------------------------
 
     /// <summary>Lane-wise <c>a == b</c> as a lane mask.</summary>

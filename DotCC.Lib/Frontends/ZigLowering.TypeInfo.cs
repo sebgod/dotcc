@@ -607,7 +607,12 @@ internal sealed partial class ZigLowering
         switch (info.Tag, field)
         {
             case ("int", "bits") or ("float", "bits"):
-                if (info.DeclaredBits is not { } bits)
+                // A float's width is its lowered type's (std.math.isInf over an `anytype` f64, task #189): only f32 and f64
+                // lower (to C# `float` / `double`), so no float is widened the way `u21` is, and nothing is lost.
+                var floatBits = info.Tag == "float" && info.Type.Unqualified is CType.Prim { Integer: false, Bytes: 4 or 8 } fp
+                    ? fp.Bytes * 8
+                    : (int?)null;
+                if ((info.DeclaredBits ?? floatBits) is not { } bits)
                 {
                     throw new IrUnsupportedException(
                         $"zig `@typeInfo({info.Type.Describe()}).{info.Tag}.bits`: the declared width is not known here"
