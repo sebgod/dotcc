@@ -179,12 +179,8 @@ public sealed class PreprocessorIncludeGuardTests
             // but reach in to construct the CPreprocessor ourselves so we
             // can observe the hit counter (internal field).
             var lexerTable = C.BuildLexer();
-            var includeMap = new System.Collections.Generic.Dictionary<string, string>(System.StringComparer.Ordinal)
-            {
-                ["foo.h"] = File.ReadAllText(Path.Combine(dir, "foo.h")),
-            };
-            var pre = new CPreprocessor(lexerTable, new Compiler.IncludeMap(includeMap), System.Array.Empty<string>());
-            pre.SetActiveFilename("main.c");
+            var pre = new CPreprocessor(lexerTable, Compiler.BuildIncludeResolver(null), System.Array.Empty<string>());
+            pre.SetActiveFile(srcPath);
             using var lex = LALR.CC.LexicalGrammar.BytesLexer.FromString(File.ReadAllText(srcPath), lexerTable);
             using var wrap = C.WrapPreprocessor(lex, pre);
             while (wrap.MoveNext()) { /* drain */ }
@@ -212,12 +208,8 @@ public sealed class PreprocessorIncludeGuardTests
                 "#include \"raw.h\"\n#include \"raw.h\"\nint main() { return 0; }\n");
 
             var lexerTable = C.BuildLexer();
-            var includeMap = new System.Collections.Generic.Dictionary<string, string>(System.StringComparer.Ordinal)
-            {
-                ["raw.h"] = File.ReadAllText(Path.Combine(dir, "raw.h")),
-            };
-            var pre = new CPreprocessor(lexerTable, new Compiler.IncludeMap(includeMap), System.Array.Empty<string>());
-            pre.SetActiveFilename("main.c");
+            var pre = new CPreprocessor(lexerTable, Compiler.BuildIncludeResolver(null), System.Array.Empty<string>());
+            pre.SetActiveFile(srcPath);
             using var lex = LALR.CC.LexicalGrammar.BytesLexer.FromString(File.ReadAllText(srcPath), lexerTable);
             using var wrap = C.WrapPreprocessor(lex, pre);
             while (wrap.MoveNext()) { /* drain */ }

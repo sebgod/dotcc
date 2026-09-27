@@ -289,15 +289,15 @@ public static partial class Compiler
         IReadOnlyList<string>? defines = null,
         CDialect? dialect = null)
     {
-        var includeMap = BuildIncludeMap(inputPaths, includeDirs);
+        var resolver = BuildIncludeResolver(includeDirs);
         var lexerTable = C.BuildLexer();
         var seededDefines = SeedDialectDefines(dialect ?? CDialect.Default, defines);
         foreach (var unitPath in inputPaths)
         {
             output.WriteLine($"# {unitPath}");
             var source = SpliceLineContinuations(File.ReadAllText(unitPath));
-            var pre = new CPreprocessor(lexerTable, includeMap, seededDefines);
-            pre.SetActiveFilename(Path.GetFileName(unitPath));
+            var pre = new CPreprocessor(lexerTable, resolver, seededDefines);
+            pre.SetActiveFile(unitPath);
             using var lexer = BytesLexer.FromString(source, lexerTable);
             using var preproc = C.WrapPreprocessor(lexer, pre);
             preproc.ExpandFuncMacro = pre.ExpandFuncMacro;
@@ -350,13 +350,13 @@ public static partial class Compiler
         IReadOnlyList<string>? defines = null,
         CDialect? dialect = null)
     {
-        var (content, paths) = BuildIncludeMaps(new[] { sourcePath }, includeDirs);
+        var resolver = BuildIncludeResolver(includeDirs);
         var lexerTable = C.BuildLexer();
         var seededDefines = SeedDialectDefines(dialect ?? CDialect.Default, defines);
 
         var source = SpliceLineContinuations(File.ReadAllText(sourcePath));
-        var pre = new CPreprocessor(lexerTable, content, seededDefines, quiet: true);
-        pre.SetActiveFilename(Path.GetFileName(sourcePath));
+        var pre = new CPreprocessor(lexerTable, resolver, seededDefines, quiet: true);
+        pre.SetActiveFile(sourcePath);
         var lexer = BytesLexer.FromString(source, lexerTable);
         var preproc = C.WrapPreprocessor(lexer, pre);
         preproc.ExpandFuncMacro = pre.ExpandFuncMacro;
@@ -378,11 +378,10 @@ public static partial class Compiler
         }
 
         var prereqs = new List<string> { sourcePath };
-        foreach (var (name, isSystem) in pre.IncludedHeaders)
+        foreach (var (path, isSystem) in pre.IncludedHeaders)
         {
             if (isSystem && !includeSystemHeaders) { continue; }   // -MMD: drop <...> headers
-            if (paths.TryGetValue(name, out var path)) { prereqs.Add(path); }
-            // else: a synthetic/embedded header with no disk path — nothing to stat.
+            prereqs.Add(path);
         }
         return FormatDependencyRule(targets, prereqs);
     }
