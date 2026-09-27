@@ -1815,9 +1815,14 @@ internal sealed partial class ZigLowering
                 return CallStaticMethod(navAliased, argItems);
             }
             // Through any re-export (`pub const indexOfScalar = findScalar;`), to the module that owns it.
-            var nav = navMod.Lowering?.ResolveExportedDecl(methodName, raiseIfSkipped: true)
-                ?? throw new IrUnsupportedException(
+            if (navMod.Lowering?.ResolveExportedDecl(methodName, raiseIfSkipped: true) is not { } nav)
+            {
+                // A deprecation tombstone (`pub const fields = @compileError("Deprecated; use 'fieldNames' …");` in
+                // std.meta, task #186) names its own diagnostic, as zig reports it.
+                navMod.Lowering?.RaiseIfPoisoned(methodName);
+                throw new IrUnsupportedException(
                     $"zig module '{System.IO.Path.GetFileName(navMod.Path)}' has no exported function '{methodName}'");
+            }
             return CallExportedDecl(nav.Owner, nav.Sym, argItems);
         }
 

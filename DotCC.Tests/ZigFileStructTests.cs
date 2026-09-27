@@ -212,4 +212,23 @@ public sealed class ZigFileStructTests
         cs.ShouldContain("lib__Pair p = new lib__Pair { a = 3, b = 4 };");
         cs.ShouldContain("return (byte)(lib__Pair_sum(p) + lib__twice(5));");
     }
+
+    [Fact]
+    public void A_call_to_a_module_tombstone_raises_its_compile_error()
+    {
+        // Task #186 (std.meta.fields in the 0.17 std): a `@compileError` tombstone called through its module reports the
+        // tombstone's message, as zig does; it had been "has no exported function".
+        var ex = Should.Throw<Exception>(() => EmitZigMulti("""
+            const lib = @import("lib.zig");
+            pub fn main() u8 {
+                return lib.old(1);
+            }
+            """, ("lib.zig", """
+            pub const old = @compileError("Deprecated; use 'fresh' instead");
+            pub fn fresh(x: u8) u8 {
+                return x + 1;
+            }
+            """)));
+        ex.Message.ShouldContain("Deprecated; use 'fresh' instead");
+    }
 }
