@@ -6584,4 +6584,46 @@ public sealed class ZigStdHelperShapesTests
             """.Replace("\r\n", "\n"));
         cs.ShouldContain("goto __ifbrk0;");
     }
+
+    [Fact]
+    public void An_inline_union_prong_binds_each_variant_at_its_own_payload_type()
+    {
+        var cs = EmitZig("""
+            const Tok = union(enum) { begin, number: []const u8, allocated_number: []u8 };
+            fn text(t: Tok) []const u8 {
+                const slice = switch (t) {
+                    inline .number, .allocated_number => |s| s,
+                    else => "?",
+                };
+                return slice;
+            }
+            pub fn main() u8 {
+                const t: Tok = .{ .number = "12" };
+                return @intCast(text(t).len);
+            }
+            """);
+        // Task #212 (std.json.static's `inline .number, .allocated_number, .string, .allocated_string => |slice| slice`):
+        // one section per listed variant, so the capture is a `[]const u8` in one and a `[]u8` in the other (a plain
+        // multi-variant capture requires one shared payload type).
+        cs.ShouldContain("ConstSlice<byte> s = t.__payload.number;");
+        cs.ShouldContain("Slice<byte> s__1 = t.__payload.allocated_number;");
+    }
+
+    [Fact]
+    public void An_inline_else_prong_over_a_tagged_union_is_a_loud_cut()
+    {
+        var ex = Should.Throw<Exception>(() => EmitZig("""
+            const U = union(enum) { a: u8, b: u16 };
+            fn f(u: U) usize {
+                return switch (u) {
+                    inline else => |v| @sizeOf(@TypeOf(v)),
+                };
+            }
+            pub fn main() u8 {
+                return @intCast(f(.{ .a = 1 }));
+            }
+            """));
+        // Task #212: zig instantiates the prong once per variant; dotcc asks for the variants to be listed.
+        ex.Message.ShouldContain("zig `inline else =>` in a switch over the tagged union 'U' is not supported yet (list the variants)");
+    }
 }

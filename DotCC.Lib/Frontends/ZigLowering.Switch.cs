@@ -455,6 +455,33 @@ internal sealed partial class ZigLowering
         var sections = new List<SwitchSection>();
         foreach (var prongItem in Flatten(prongsItem))
         {
+            // `inline .a, .b => |x| …` (std.json.static's `inline .number, .allocated_number, .string, .allocated_string =>
+            // |slice| slice`, task #212): one prong per listed variant, so the capture takes each variant's own payload type
+            // (a plain multi-variant capture requires them to share one). Without a capture it is the prong as written.
+            if (prongItem.Content is Zig.InlineProng inlineProng)
+            {
+                var inlined = DecomposeProng(inlineProng.Arg1);
+                if (inlined.CaseVals.Content is Zig.CaseElse)
+                {
+                    throw new IrUnsupportedException(
+                        $"zig `inline else =>` in a switch over the tagged union '{info.Name}' is not supported yet (list the variants)");
+                }
+                if (inlined.CaptureName is null or "_")
+                {
+                    AddUnionSection(inlineProng.Arg1, null);
+                    continue;
+                }
+                RejectUnionRange(inlined.CaseVals, info);
+                foreach (var (variantItem, _) in WalkCaseValItems(inlined.CaseVals)) { AddUnionSection(inlineProng.Arg1, variantItem); }
+                continue;
+            }
+            AddUnionSection(prongItem, null);
+        }
+
+        // One prong's section: its labels (or the single variant `onlyCase` an unrolled `inline` prong stands for), its
+        // capture bound to that variant's payload, and its body.
+        void AddUnionSection(Item prongItem, Item? onlyCase)
+        {
             // A bare-expr prong (`=> expr`) in a union STATEMENT switch is an expression statement,
             // with no payload capture (capture needs a braced block); handle it up front.
             if (prongItem.Content is Zig.ProngExpr pe)
@@ -464,7 +491,7 @@ internal sealed partial class ZigLowering
                 var peBody = new List<CStmt> { ProngValue(pe.Arg2) };
                 if (!EndsInJump(peBody)) { peBody.Add(new Break()); }
                 sections.Add(new SwitchSection(exprLabels, peBody));
-                continue;
+                return;
             }
             // A `return`-body prong (`.variant => return [e]`) without a capture — symmetric with the
             // non-union `LowerSwitch` (road-to-zig-std S9). `return` reuses the statement return-lowering
@@ -488,7 +515,7 @@ internal sealed partial class ZigLowering
                 RejectUnionRange(rCase, info);
                 var rLabels = LowerCaseVals(rCase, info.TagType);
                 sections.Add(new SwitchSection(rLabels, rBody));   // `return` is a jump — no Break needed
-                continue;
+                return;
             }
             // A prong body is a Block, or (road-to-zig-std S9) a bare expr / `return [e]`, each with an
             // optional `|x|` / `|*x|` payload capture. Decompose the shape once, then lower the body
@@ -516,8 +543,11 @@ internal sealed partial class ZigLowering
                 case Zig.ProngCaptureJump p:          caseVals = p.Arg0; captureName = Tok(p.Arg3); captureByRef = false; jumpBody   = p.Arg5; break;
                 default: throw new IrUnsupportedException("zig switch prong: " + (prongItem.Content?.GetType().Name ?? "null"));
             }
-            RejectUnionRange(caseVals, info);
-            var labels = LowerCaseVals(caseVals, info.TagType);   // `.variant` → EnumConstRef(U_Tag.variant)
+            if (onlyCase is null) { RejectUnionRange(caseVals, info); }
+            // `.variant` → EnumConstRef(U_Tag.variant); an unrolled `inline` prong has the one variant it stands for.
+            var labels = onlyCase is { } one
+                ? new List<SwitchLabel> { new SwitchLabel(CaseLabelValue(one, info.TagType)) }
+                : LowerCaseVals(caseVals, info.TagType);
 
             // Lower the body statements; a `return` reuses the statement return-lowering (error-union
             // wrapping / errdefer). For a block the statements are flattened (so a leading capture decl
@@ -536,7 +566,7 @@ internal sealed partial class ZigLowering
             List<CStmt> body;
             if (captureName is not null && captureName != "_")
             {
-                var variant = CaptureVariantName(caseVals, info, captureName);
+                var variant = CaptureVariantName(onlyCase ?? caseVals, info, captureName);
                 var payloadType = info.Variants[variant]
                     ?? throw new IrUnsupportedException(
                         $"union '{info.Name}' variant '{variant}' is a void variant — it has no payload to capture with `|{captureName}|`");
