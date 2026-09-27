@@ -2518,10 +2518,11 @@ public sealed class ZigStdHelperShapesTests
         // Task #114: std.StaticStringMap(void) stores `[*]const V` values, returns `?V`, swaps `*V`. C# has no void element,
         // generic argument or storage, so zig's void as DATA (the element of a slice, many-pointer, array, optional or tuple,
         // and a `*T` with T = void) is the runtime's empty `Unit`, and the void value `{}` stored there is `default(Unit)`.
-        // `{}` parses as a list element too. zig returns 86. A store of the zero-size element is a discard (task #135: zig
-        // stores nothing, and a pointer it leaves `undefined` for one must not be written through).
+        // `{}` parses as a list element too. zig returns 86. A store of the zero-size element emits nothing (task #135: zig
+        // stores nothing, and a pointer it leaves `undefined` for one must not be written through; since task #198 the
+        // erasure covers void-as-data storage, so `slots[2] = {};` is gone rather than a `_ = default(Unit);` discard).
         cs.ShouldContain("Unit* slots = stackalloc Unit[4];");
-        cs.ShouldContain("_ = default(Unit);");
+        cs.ShouldNotContain("slots[2]");
         cs.ShouldContain("ConstSlice<Unit> view = new ConstSlice<Unit>(slots, 4UL);");
         cs.ShouldContain("Unit? Map__void_get(Map__void self, byte k)");
         cs.ShouldContain("unit_vals = Libc.GlobalArrayFrom<Unit>(new Unit[]{ default(Unit), default(Unit), default(Unit) });");
@@ -6258,5 +6259,40 @@ public sealed class ZigStdHelperShapesTests
             """));
         // Task #197: its address is the byte after the fields before it, which only zig's layout fixes. zig returns 42.
         ex.Message.ShouldContain("zero-length array field `data` has no storage");
+    }
+
+    [Fact]
+    public void Storing_a_void_value_into_void_as_data_storage_emits_nothing()
+    {
+        var cs = EmitZig("""
+            fn Set(comptime V: type) type {
+                return struct {
+                    vals: [4]V = undefined,
+                    n: usize = 0,
+                    fn put(self: *@This(), value: V) void {
+                        self.vals[self.n] = value;
+                        self.n += 1;
+                    }
+                    fn putMany(self: *@This(), p: [*]V, value: V) void {
+                        p[0] = value;
+                        self.n += 1;
+                    }
+                };
+            }
+            pub fn main() u8 {
+                var s: Set(void) = .{};
+                s.put({});
+                s.put({});
+                s.putMany(&s.vals, {});
+                var t: Set(u8) = .{};
+                t.put(39);
+                return @as(u8, @intCast(s.n)) + t.vals[0];
+            }
+            """);
+        // Task #198 (std.BufSet, hash_map's `self.values()[idx] = value;` with `V = void`): the slot is void as data (the
+        // runtime Unit) and the value an erased `void` parameter, so the store moves nothing; it had emitted `_ = value;`
+        // over the erased parameter (CS0103). zig returns 42.
+        cs.ShouldNotContain("_ = value;");
+        cs.ShouldContain("internal static unsafe void Set__void_put(Set__void* self)\n    {\n        self->n += (ulong)(1);\n    }");
     }
 }

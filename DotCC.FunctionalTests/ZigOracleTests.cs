@@ -7879,6 +7879,31 @@ public sealed class ZigOracleTests
             "    for (&buf, 0..) |*b, i| b.* = @truncate(i * 3);\n" +
             "    return @truncate(last(buf[0..]) + last(buf[0..30]));\n" +
             "}\n", 156, "" },
+        // Task #198 (std.BufSet): a `void` value stored into a `[N]void` slot, directly and through a `[*]void`.
+        new object[] { "void_store_into_void_slots",
+            "fn Set(comptime V: type) type {\n" +
+            "    return struct {\n" +
+            "        vals: [4]V = undefined,\n" +
+            "        n: usize = 0,\n" +
+            "        fn put(self: *@This(), value: V) void {\n" +
+            "            self.vals[self.n] = value;\n" +
+            "            self.n += 1;\n" +
+            "        }\n" +
+            "        fn putMany(self: *@This(), p: [*]V, value: V) void {\n" +
+            "            p[0] = value;\n" +
+            "            self.n += 1;\n" +
+            "        }\n" +
+            "    };\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var s: Set(void) = .{};\n" +
+            "    s.put({});\n" +
+            "    s.put({});\n" +
+            "    s.putMany(&s.vals, {});\n" +
+            "    var t: Set(u8) = .{};\n" +
+            "    t.put(39);\n" +
+            "    return @as(u8, @intCast(s.n)) + t.vals[0];\n" +
+            "}\n", 42, "" },
         // Task #197: a zero-length array field (`data: [0]u8`) has no storage.
         new object[] { "zero_length_array_field",
             "const Header = struct {\n" +
@@ -9803,6 +9828,96 @@ public sealed class ZigOracleTests
             "    const c = H.hash(4, \"ALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUF\");\n" +
             "    return @truncate((a ^ b ^ c) >> 5);\n" +
             "}\n", 34);
+
+    // Task #198: std.BufSet from real std (insert, contains, remove, count): a string set over hash_map with `V = void`.
+    [Fact]
+    public void Dotcc_matches_zig_std_buf_set() =>
+        MatchesZigWithRealStd("buf_set",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var buf: [4096]u8 = undefined;\n" +
+            "    var fba = std.heap.FixedBufferAllocator.init(&buf);\n" +
+            "    var s = std.BufSet.init(fba.allocator());\n" +
+            "    defer s.deinit();\n" +
+            "    s.insert(\"x\") catch return 1;\n" +
+            "    s.insert(\"yy\") catch return 2;\n" +
+            "    s.insert(\"x\") catch return 3;\n" +
+            "    s.remove(\"yy\");\n" +
+            "    const c: u8 = @intCast(s.count());\n" +
+            "    return c * 10 + @as(u8, @intFromBool(s.contains(\"x\"))) * 5 + @intFromBool(s.contains(\"yy\"));\n" +
+            "}\n", 15);
+
+    // Task #198's probe batch: std.sort.binarySearch / lowerBound / upperBound with a context comparator.
+    [Fact]
+    public void Dotcc_matches_zig_std_sort_search() =>
+        MatchesZigWithRealStd("sort_search",
+            "const std = @import(\"std\");\n" +
+            "fn cmp(ctx: u32, item: u32) std.math.Order {\n" +
+            "    return std.math.order(ctx, item);\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const items = [_]u32{ 1, 3, 3, 5, 8, 13 };\n" +
+            "    const found = std.sort.binarySearch(u32, &items, @as(u32, 5), cmp) orelse return 1;\n" +
+            "    const lo = std.sort.lowerBound(u32, &items, @as(u32, 3), cmp);\n" +
+            "    const hi = std.sort.upperBound(u32, &items, @as(u32, 3), cmp);\n" +
+            "    const missing = std.sort.binarySearch(u32, &items, @as(u32, 4), cmp);\n" +
+            "    return @intCast(found * 10 + lo * 3 + hi + @as(usize, @intFromBool(missing == null)) * 5);\n" +
+            "}\n", 41);
+
+    // Task #198's probe batch: std.sort.block and std.sort.insertion with std.sort.asc / desc.
+    [Fact]
+    public void Dotcc_matches_zig_std_sort_block_insertion() =>
+        MatchesZigWithRealStd("sort_block_insertion",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var a = [_]i32{ 9, -3, 7, 1, 0, 12, -8, 5, 3, 3, 20, -1 };\n" +
+            "    std.sort.block(i32, &a, {}, std.sort.asc(i32));\n" +
+            "    var b = [_]u8{ 5, 1, 4, 2, 3 };\n" +
+            "    std.sort.insertion(u8, &b, {}, std.sort.desc(u8));\n" +
+            "    var acc: i32 = 0;\n" +
+            "    for (a, 0..) |v, i| acc += v * @as(i32, @intCast(i + 1));\n" +
+            "    return @intCast(@mod(acc, 200) + b[0] + b[4]);\n" +
+            "}\n", 198);
+
+    // Task #198's probe batch: std.mem.rotate / concat / indexOfDiff / splitBackwardsScalar and std.ascii.eqlIgnoreCase / findIgnoreCase.
+    [Fact]
+    public void Dotcc_matches_zig_std_mem_rotate_concat_ascii() =>
+        MatchesZigWithRealStd("mem_misc_ascii",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var a = [_]u8{ 1, 2, 3, 4, 5 };\n" +
+            "    std.mem.rotate(u8, &a, 2);\n" +
+            "    var buf: [256]u8 = undefined;\n" +
+            "    var fba = std.heap.FixedBufferAllocator.init(&buf);\n" +
+            "    const cat = std.mem.concat(fba.allocator(), u8, &.{ \"ab\", \"cde\", \"f\" }) catch return 1;\n" +
+            "    const diff = std.mem.indexOfDiff(u8, \"hello\", \"help\") orelse return 2;\n" +
+            "    var it = std.mem.splitBackwardsScalar(u8, \"a,bb,ccc\", ',');\n" +
+            "    const last = it.first();\n" +
+            "    const eq: u8 = @intFromBool(std.ascii.eqlIgnoreCase(\"ZiG\", \"zig\"));\n" +
+            "    const pos = std.ascii.findIgnoreCase(\"Hello World\", \"WORLD\") orelse return 3;\n" +
+            "    return @intCast(a[0] * 10 + cat.len + diff * 3 + last.len + eq * 7 + pos);\n" +
+            "}\n", 61);
+
+    // Task #198's probe batch: DefaultPrng's shuffle (the exact permutation) and std.bit_set.IntegerBitSet.
+    [Fact]
+    public void Dotcc_matches_zig_std_random_shuffle_integer_bit_set() =>
+        MatchesZigWithRealStd("random_shuffle_int_bit_set",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var prng = std.Random.DefaultPrng.init(42);\n" +
+            "    const r = prng.random();\n" +
+            "    var a = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 };\n" +
+            "    r.shuffle(u8, &a);\n" +
+            "    var sum: u16 = 0;\n" +
+            "    for (a, 0..) |v, i| sum += @as(u16, v) * @as(u16, @intCast(i));\n" +
+            "    var bs: std.bit_set.IntegerBitSet(16) = .empty;\n" +
+            "    bs.set(3);\n" +
+            "    bs.set(9);\n" +
+            "    bs.toggle(3);\n" +
+            "    bs.setRangeValue(.{ .start = 10, .end = 13 }, true);\n" +
+            "    const first = bs.findFirstSet() orelse 99;\n" +
+            "    return @truncate(sum + bs.count() * 10 + first);\n" +
+            "}\n", 165);
 
     // Task #194: std.Deque from real std (initBuffer, the Bounded pushes, iterator, popFront / popBack). pushFrontSlice's
     // `@memcpy(…, items.ptr)` takes a many-item pointer, and deque.zig's test-only FuzzAllocator no longer drags
