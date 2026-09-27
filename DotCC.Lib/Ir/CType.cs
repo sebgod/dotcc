@@ -245,13 +245,15 @@ public abstract record CType
 
     /// <summary>C23 <c>_Float128</c> / <c>__float128</c> — a 128-bit IEEE float. dotcc
     /// lowers it to a software binary128 type the backend spells (the C# backend:
-    /// <c>Float128</c>, a <c>DotCC.Libc</c> value type). Like the prior <c>Named</c>
-    /// lowering it is NOT modelled as a <see cref="Prim"/> — its arithmetic rides the
-    /// backend type's operators — so size/arithmetic stay unmodelled (a correctness
-    /// follow-up, preserved here for a no-behaviour-change neutralization).</summary>
+    /// <c>Float128</c>, a <c>DotCC.Libc</c> value type). It is NOT a <see cref="Prim"/>, since
+    /// its arithmetic rides the backend type's operators, but it IS arithmetic (16 bytes), and
+    /// <see cref="UsualArithmetic"/> ranks it above every other arithmetic type, so an
+    /// expression over one is typed <c>_Float128</c> (zig's <c>f128</c>, task #214, needs the
+    /// real type where C# alone could resolve the operators).</summary>
     public sealed record Float128Type : CType
     {
-        public override int SizeOf => 0;
+        public override int SizeOf => 16;
+        public override bool IsArithmetic => true;
     }
 
     /// <summary>A Zig optional <c>?T</c> over a NON-pointer payload. The C# backend
@@ -480,6 +482,11 @@ public abstract record CType
 
     public static CType UsualArithmetic(CType a, CType b)
     {
+        // A binary128 operand outranks every other arithmetic type (C23's `_Float128`, zig's `f128`).
+        if ((a.Unqualified is Float128Type && b.Unqualified.IsArithmetic) || (b.Unqualified is Float128Type && a.Unqualified.IsArithmetic))
+        {
+            return Float128;
+        }
         if (a.Unqualified is not Prim pa || b.Unqualified is not Prim pb) { return Int; }
 
         // Either operand floating → the wider floating operand wins (double

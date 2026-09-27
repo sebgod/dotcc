@@ -2803,7 +2803,7 @@ internal sealed partial class ZigLowering
         if (_comptimeDepth > 0) { return; }
         var peer = zigPeer?.Unqualified ?? (left is LitInt && right is not LitInt ? right.Type : left.Type).Unqualified;
         var signedInt = peer is CType.Prim { Integer: true, Signed: true, IsComptimeInt: false };
-        var isFloat = peer is CType.Prim { Integer: false } && peer != CType.Bool;
+        var isFloat = (peer is CType.Prim { Integer: false } && peer != CType.Bool) || peer is CType.Float128Type;
         if (!signedInt && !(op == BinOp.Mod && isFloat)) { return; }
         bool Known(CExpr e) => e is ComptimeFold || _ir.ConstEval(e) is not null;
         if (Known(left) && Known(right)) { return; }
@@ -2877,6 +2877,16 @@ internal sealed partial class ZigLowering
         }
         // An operator over a SIMD vector is element-wise, a comparison a lane mask (T5).
         if (TryVectorBinary(op, left, right) is { } vectorOp) { return vectorOp; }
+        // An untyped float literal beside an `f128` operand is a comptime_float coerced to it, so it is the binary128
+        // nearest its spelling (`q > 0.1`), not the double nearest it (task #214).
+        if (left.Type.Unqualified is CType.Float128Type && RetypeFloatLiteralTree(right, CType.Float128, _comptimeFloatConsts) is { } quadRight)
+        {
+            right = quadRight;
+        }
+        else if (right.Type.Unqualified is CType.Float128Type && RetypeFloatLiteralTree(left, CType.Float128, _comptimeFloatConsts) is { } quadLeft)
+        {
+            left = quadLeft;
+        }
         // `1 << 52` (std.fmt.parse_float's `1 << (1 + fractional_bits)`, FloatInfo's `2 << 52`): an untyped literal is a
         // comptime_int, which is unbounded, but its C# `int` would shift by the count MOD 32 (`1 << 52` == `1 << 20`, a
         // silent wrong answer). It widens to the comptime_int carrier, unless the count is a constant below 31 (the result
@@ -3162,7 +3172,10 @@ internal sealed partial class ZigLowering
     /// it already has that type — so <c>i32 +| i32</c> emits <c>ZigMath.SatAdd(a, b)</c> with no
     /// redundant casts, while <c>u8 +| 5</c> casts the literal so C# infers <c>byte</c>.</summary>
     private static CExpr CoerceToPeer(CExpr e, CType t)
-        => e.Type.Unqualified.Equals(t) ? e : new Cast(t, e) { Type = t };
+        => e.Type.Unqualified.Equals(t) ? e
+            // An untyped float literal at an `f128` peer is rounded at 128 bits, not converted from a double (task #214).
+            : t is CType.Float128Type && RetypeFloatLiteralTree(e, t) is { } quad ? quad
+            : new Cast(t, e) { Type = t };
 
     /// <summary>Lower a Zig SATURATING compound assignment (<c>x op|= y</c>). There is no native C#
     /// saturating compound operator, so it desugars to <c>target = ZigMath.Sat…(target, y)</c> at the

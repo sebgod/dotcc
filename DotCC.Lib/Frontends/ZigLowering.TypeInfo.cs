@@ -463,6 +463,8 @@ internal sealed partial class ZigLowering
         CType.Prim { IsComptimeInt: true } => "comptime_int",
         CType.Prim { Integer: true } => "int",
         CType.Prim => "float",
+        // zig's f128, the runtime's software binary128 (task #214).
+        CType.Float128Type => "float",
         CType.VoidType => "void",
         CType.Pointer or CType.Slice => "pointer",
         CType.Optional => "optional",
@@ -629,11 +631,12 @@ internal sealed partial class ZigLowering
         switch (info.Tag, field)
         {
             case ("int", "bits") or ("float", "bits"):
-                // A float's width is its lowered type's (std.math.isInf over an `anytype` f64, task #189): only f32 and f64
-                // lower (to C# `float` / `double`), so no float is widened the way `u21` is, and nothing is lost.
+                // A float's width is its lowered type's (std.math.isInf over an `anytype` f64, task #189): f32, f64 and f128
+                // lower at their own width (C# `float` / `double`, the runtime's `Float128`, task #214), so no float is
+                // widened the way `u21` is, and nothing is lost.
                 var floatBits = info.Tag == "float" && info.Type.Unqualified is CType.Prim { Integer: false, Bytes: 4 or 8 } fp
                     ? fp.Bytes * 8
-                    : (int?)null;
+                    : info.Type.Unqualified is CType.Float128Type ? 128 : (int?)null;
                 if ((info.DeclaredBits ?? floatBits) is not { } bits)
                 {
                     throw new IrUnsupportedException(

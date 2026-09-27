@@ -717,6 +717,54 @@ public readonly struct Float128 : IEquatable<Float128>, IComparable<Float128>,
         return (long)ival;
     }
 
+    /// <summary>Exact widening from an unsigned 64-bit integer (every ulong fits in the 113-bit significand), where
+    /// the implicit conversion would go through <c>double</c>.</summary>
+    public static Float128 FromUInt64(ulong v)
+        => v == 0 ? Zero : RoundToBinary128(false, (BigInteger)v, 0, extraSticky: false);
+
+    /// <summary>From a signed 128-bit integer, rounded to nearest-even (above 2^113 not every value fits).</summary>
+    public static Float128 FromInt128(Int128 v)
+        => v == Int128.Zero ? Zero : RoundToBinary128(v < Int128.Zero, BigInteger.Abs((BigInteger)v), 0, extraSticky: false);
+
+    /// <summary>From an unsigned 128-bit integer, rounded to nearest-even.</summary>
+    public static Float128 FromUInt128(UInt128 v)
+        => v == UInt128.Zero ? Zero : RoundToBinary128(false, ToBig(v), 0, extraSticky: false);
+
+    /// <summary>The integer part (toward zero) of <paramref name="v"/> as an exact <see cref="BigInteger"/>, or
+    /// <c>null</c> for a NaN or an infinity.</summary>
+    private static BigInteger? TruncatedInteger(Float128 v)
+    {
+        if (IsNaN(v) || IsInfinity(v)) { return null; }
+        if (IsZero(v)) { return BigInteger.Zero; }
+        Decompose(v, out bool sign, out BigInteger sig, out int q);
+        BigInteger ival = q >= 0 ? sig << q : sig >> -q;
+        return sign ? -ival : ival;
+    }
+
+    /// <summary>Narrow to an unsigned 64-bit integer, truncating toward zero. NaN and a negative value give 0; an
+    /// out-of-range value or an infinity saturates (C and zig leave these cases undefined).</summary>
+    public static ulong ToUInt64(Float128 v)
+    {
+        if (TruncatedInteger(v) is not { } i) { return IsNaN(v) || v.SignBit ? 0UL : ulong.MaxValue; }
+        return i.Sign < 0 ? 0UL : i > ulong.MaxValue ? ulong.MaxValue : (ulong)i;
+    }
+
+    /// <summary>Narrow to a signed 128-bit integer, truncating toward zero. NaN gives 0; an out-of-range value or an
+    /// infinity saturates.</summary>
+    public static Int128 ToInt128(Float128 v)
+    {
+        if (TruncatedInteger(v) is not { } i) { return IsNaN(v) ? Int128.Zero : v.SignBit ? Int128.MinValue : Int128.MaxValue; }
+        return i > (BigInteger)Int128.MaxValue ? Int128.MaxValue : i < (BigInteger)Int128.MinValue ? Int128.MinValue : (Int128)i;
+    }
+
+    /// <summary>Narrow to an unsigned 128-bit integer, truncating toward zero. NaN and a negative value give 0; an
+    /// out-of-range value or an infinity saturates.</summary>
+    public static UInt128 ToUInt128(Float128 v)
+    {
+        if (TruncatedInteger(v) is not { } i) { return IsNaN(v) || v.SignBit ? UInt128.Zero : UInt128.MaxValue; }
+        return i.Sign < 0 ? UInt128.Zero : i > (BigInteger)UInt128.MaxValue ? UInt128.MaxValue : ToU128(i);
+    }
+
     // ── operators & conversions (so emitted C# `_Float128` code Just Works) ──
     public static Float128 operator +(Float128 a, Float128 b) => Add(a, b);
     public static Float128 operator -(Float128 a, Float128 b) => Subtract(a, b);

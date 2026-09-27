@@ -2448,6 +2448,7 @@ internal sealed class CSharpBackend
         {
             return ($"({Cs(c.Target)})({Cs(fv.Type)})&{fv.Sym.TargetName}", PUnary);
         }
+        if (RenderFloat128Conversion(c) is { } quad) { return quad; }
         var operandText = Sub(c.Operand, PUnary);
         var targetText = Cs(c.Target);
         // `(System.UInt128)*a` parses as a MULTIPLICATION in C#: a cast to a NON-keyword type followed by a unary
@@ -2465,6 +2466,38 @@ internal sealed class CSharpBackend
             return ($"unchecked({text})", PPrimary);
         }
         return (text, PUnary);
+    }
+
+    /// <summary>A conversion to or from the runtime's binary128 <c>Float128</c> that its C# conversion operators would get
+    /// wrong (task #214), or <c>null</c> for one they get right. Its operators convert through <c>long</c> and
+    /// <c>double</c>, so a <c>u64</c> above 2^53 would reach it through <c>double</c> (losing bits), a 128-bit integer
+    /// has no route, and <c>(float)q</c> resolves to the <c>long</c> operator (truncating the fraction). Those use the
+    /// runtime's exact named conversions instead; <c>f128</c> to <c>f32</c> goes through <c>double</c>, whose 53 bits
+    /// (at least twice <c>float</c>'s 24, plus 2) make the double rounding innocuous.</summary>
+    private (string, int)? RenderFloat128Conversion(Cast c)
+    {
+        var to = c.Target.Unqualified;
+        var from = c.Operand.Type?.Unqualified;
+        static string? Wide(CType? t) => t switch
+        {
+            CType.Prim { Integer: true, Bytes: 16, Signed: true } => "Int128",
+            CType.Prim { Integer: true, Bytes: 16, Signed: false } => "UInt128",
+            CType.Prim { Integer: true, Bytes: 8, Signed: false } => "UInt64",
+            _ => null,
+        };
+        if (to is CType.Float128Type && Wide(from) is { } fromWide)
+        {
+            return ($"Float128.From{fromWide}({Sub(c.Operand, PAssign)})", PPrimary);
+        }
+        if (from is CType.Float128Type && Wide(to) is { } toWide)
+        {
+            return ($"Float128.To{toWide}({Sub(c.Operand, PAssign)})", PPrimary);
+        }
+        if (from is CType.Float128Type && to == CType.Float)
+        {
+            return ($"(float)(double){Sub(c.Operand, PUnary)}", PUnary);
+        }
+        return null;
     }
 
     /// <summary>True when a constant expression applies <c>~</c>: C# evaluates it on the operand PROMOTED to <c>int</c>

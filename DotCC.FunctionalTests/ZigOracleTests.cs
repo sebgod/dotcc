@@ -7879,6 +7879,93 @@ public sealed class ZigOracleTests
             "    for (&buf, 0..) |*b, i| b.* = @truncate(i * 3);\n" +
             "    return @truncate(last(buf[0..]) + last(buf[0..30]));\n" +
             "}\n", 156, "" },
+        // Task #214 (std.json.static parses a float fallback as f128): f128 arithmetic, conversions, builtins, @typeInfo.
+        new object[] { "f128_arithmetic",
+            "fn half(x: f128) f128 {\n" +
+            "    return x / 2;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var a: f128 = 2.5;\n" +
+            "    _ = &a;\n" +
+            "    const b: f128 = @floatFromInt(@as(i64, 40));\n" +
+            "    var r: u8 = 0;\n" +
+            "    if (@round(a) == 3) r += 1;\n" +
+            "    if (@round(-a) == -3) r += 2;\n" +
+            "    if (@floor(a) == 2 and @ceil(a) == 3 and @trunc(-a) == -2) r += 4;\n" +
+            "    if (@sqrt(b * 10) == 20) r += 8;\n" +
+            "    if (half(b) == 20 and b - a == 37.5) r += 16;\n" +
+            "    const as_int: i64 = @intFromFloat(b + a);\n" +
+            "    if (as_int == 42) r += 32;\n" +
+            "    if (@typeInfo(f128).float.bits == 128) r += 64;\n" +
+            "    const d: f64 = @floatCast(a);\n" +
+            "    if (d == 2.5 and @abs(-a) == a) r += 128;\n" +
+            "    return r;\n" +
+            "}\n", 255, "" },
+        // Task #214: an f128 literal is the binary128 nearest its spelling; comptime_float math and wide conversions are exact.
+        new object[] { "f128_exact",
+            "pub fn main() u8 {\n" +
+            "    var r: u8 = 0;\n" +
+            "    // A literal double cannot hold: zig rounds it at 128 bits.\n" +
+            "    const tenth: f128 = 0.1;\n" +
+            "    var one_tenth: f128 = 1;\n" +
+            "    one_tenth /= 10;\n" +
+            "    if (tenth == one_tenth) r += 1;\n" +
+            "    // comptime_float arithmetic runs at 128 bits.\n" +
+            "    const third: f128 = 1.0 / 3.0;\n" +
+            "    var t: f128 = 1;\n" +
+            "    t /= 3;\n" +
+            "    if (third == t) r += 2;\n" +
+            "    // A u64 above 2^53 converts exactly.\n" +
+            "    var big: u64 = (1 << 60) + 1;\n" +
+            "    _ = &big;\n" +
+            "    const fb: f128 = @floatFromInt(big);\n" +
+            "    const back: u64 = @intFromFloat(fb);\n" +
+            "    if (back == big) r += 4;\n" +
+            "    // An i128 converts exactly below 2^113.\n" +
+            "    var wide: i128 = -((1 << 100) + 7);\n" +
+            "    _ = &wide;\n" +
+            "    const fw: f128 = @floatFromInt(wide);\n" +
+            "    const wback: i128 = @intFromFloat(fw);\n" +
+            "    if (wback == wide) r += 8;\n" +
+            "    // A hex literal with 60 significand bits.\n" +
+            "    const hx: f128 = 0x1.23456789abcdefp0;\n" +
+            "    const hbits: u128 = @bitCast(hx);\n" +
+            "    if (@as(u64, @truncate(hbits >> 64)) == 0x3fff23456789abcd) r += 16;\n" +
+            "    // f128 -> f32 rounds, not truncates.\n" +
+            "    var q: f128 = 2.75;\n" +
+            "    _ = &q;\n" +
+            "    const f: f32 = @floatCast(q);\n" +
+            "    if (f == 2.75) r += 32;\n" +
+            "    if (@rem(@as(f128, 7.5), 2) == 1.5 and @mod(@as(f128, -7.5), 2) == 0.5) r += 64;\n" +
+            "    if (-tenth < 0 and tenth > 0.0999 and @max(tenth, t) == t) r += 128;\n" +
+            "    return r;\n" +
+            "}\n", 255, "" },
+        // Task #214: an untyped const (comptime_float) read at an f128 sink is exact, as zig keeps it at 128 bits.
+        new object[] { "f128_comptime_float_consts",
+            "const tenth = 0.1;\n" +
+            "const a = 1.0;\n" +
+            "const third = a / 3.0;\n" +
+            "const neg = -tenth * 2;\n" +
+            "pub fn main() u8 {\n" +
+            "    var r: u8 = 0;\n" +
+            "    var t: f128 = 1;\n" +
+            "    t /= 10;\n" +
+            "    const q: f128 = tenth;\n" +
+            "    if (q == t) r += 1;\n" +
+            "    var u: f128 = 1;\n" +
+            "    u /= 3;\n" +
+            "    const th: f128 = third;\n" +
+            "    if (th == u) r += 2;\n" +
+            "    const local = 0.1;\n" +
+            "    const l: f128 = local;\n" +
+            "    if (l == t) r += 4;\n" +
+            "    if (t == tenth) r += 8;\n" +
+            "    const n: f128 = neg;\n" +
+            "    if (n == -2 * t) r += 16;\n" +
+            "    const d: f64 = tenth;\n" +
+            "    if (d == 0.1) r += 32;\n" +
+            "    return r;\n" +
+            "}\n", 63, "" },
         // Task #214 (std.fmt.parseFloat(f128)'s u128 mantissa): the overflow builtins over `u128` / `i128`, exactly.
         new object[] { "overflow_builtins_128",
             "pub fn main() u8 {\n" +

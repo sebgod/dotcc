@@ -6689,4 +6689,61 @@ public sealed class ZigStdHelperShapesTests
         cs.ShouldContain("ZigMath.MulWithOverflow(big, ");
         cs.ShouldContain("ZigMath.AddWithOverflow(half, half)");
     }
+
+    [Fact]
+    public void An_f128_literal_is_the_binary128_nearest_its_spelling()
+    {
+        var cs = EmitZig("""
+            pub fn main() u8 {
+                const tenth: f128 = 0.1;
+                const half: f128 = 2.5;
+                const third: f128 = 1.0 / 3.0;
+                var q: f128 = 1;
+                q /= 3;
+                return @intFromBool(q == third and tenth < half);
+            }
+            """);
+        // Task #214: zig rounds a comptime_float at 128 bits. `0.1` needs 113 significand bits, so it is spelled by its
+        // binary128 bits (rounded at compile time); `2.5` widens exactly through `double`; `1.0 / 3.0` runs at 128 bits.
+        cs.ShouldContain("Float128.FromBits(new System.UInt128(0x3FFB999999999999UL, 0x999999999999999AUL))");
+        cs.ShouldContain("Float128.FromDouble(2.5)");
+        cs.ShouldContain("Float128.FromDouble(1.0) / Float128.FromDouble(3.0)");
+    }
+
+    [Fact]
+    public void F128_conversions_take_the_exact_runtime_helpers()
+    {
+        var cs = EmitZig("""
+            pub fn main() u8 {
+                var big: u64 = 1 << 60;
+                _ = &big;
+                const q: f128 = @floatFromInt(big);
+                const w: i128 = @intFromFloat(q);
+                const f: f32 = @floatCast(q);
+                return @intFromBool(w > 0 and f > 0);
+            }
+            """);
+        // Task #214: Float128's C# operators convert through `long` / `double`, so a u64 above 2^53 would lose bits, an
+        // i128 has no route, and `(float)q` picks the truncating `long` operator.
+        cs.ShouldContain("Float128.FromUInt64(big)");
+        cs.ShouldContain("Float128.ToInt128(q)");
+        cs.ShouldContain("(float)(double)q");
+    }
+
+    [Fact]
+    public void An_untyped_float_const_read_at_an_f128_sink_is_its_literal()
+    {
+        var cs = EmitZig("""
+            const tenth = 0.1;
+            pub fn main() u8 {
+                const q: f128 = tenth;
+                const d: f64 = tenth;
+                return @intFromBool(q > 0 and d > 0);
+            }
+            """);
+        // Task #214: `tenth` is a comptime_float, which zig keeps at 128 bits; the lowered global holds a `double`, so at
+        // an `f128` sink the read is its literal, rounded at 128 bits, while an `f64` sink still reads the global.
+        cs.ShouldContain("Float128 q = Float128.FromBits(new System.UInt128(0x3FFB999999999999UL, 0x999999999999999AUL));");
+        cs.ShouldContain("double d = tenth;");
+    }
 }

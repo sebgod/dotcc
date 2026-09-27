@@ -270,6 +270,21 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
+    public void Float128_conversions_its_operators_get_wrong_use_the_exact_helpers()
+    {
+        // Task #214: Float128's operators convert through `long` / `double`, so `(unsigned long)q` above 2^53 lost bits
+        // and `(float)q` resolved to the `long` operator, truncating 2.75 to 2.
+        var src = WriteTemp("int main() { _Float128 q = 2.75; unsigned long u = (unsigned long)q; float f = (float)q; return (int)(u + f); }");
+        try
+        {
+            var cs = Compiler.EmitCSharp(new[] { src });
+            cs.ShouldContain("Float128.ToUInt64(q)");
+            cs.ShouldContain("(float)(double)q");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void Float128_combined_with_other_specifier_throws()
     {
         var src = WriteTemp("int main() { unsigned _Float128 x = 0; return 0; }");

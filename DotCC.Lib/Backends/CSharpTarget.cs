@@ -147,11 +147,23 @@ internal sealed class CSharpTarget : ITarget
         : "";
 
     public string RenderFloatLit(LitFloat lit)
+    {
         // A `float`-typed literal without its suffix (a zig untyped literal at an `f32` sink: std.fmt.parse_float's
         // `[_]f32{ 1e0, 1e1, … }`) is spelled with `F`, since C# will not narrow a double literal (CS0664).
-        => lit.Type?.Unqualified == CType.Float && lit.Text.Length > 0 && lit.Text[^1] is not ('f' or 'F')
-            ? lit.Text + "F"
-            : lit.Text;
+        if (lit.Type?.Unqualified == CType.Float && lit.Text.Length > 0 && lit.Text[^1] is not ('f' or 'F'))
+        {
+            return lit.Text + "F";
+        }
+        // A binary128-typed literal (a zig untyped literal at an `f128` sink, task #214) is the binary128 nearest its
+        // spelling: through `double` when that is exact, else from its bits, rounded at compile time.
+        if (lit.Type?.Unqualified is CType.Float128Type)
+        {
+            if (Binary128Literal.IsExactDouble(lit.Text)) { return "Float128.FromDouble(" + lit.Text + ")"; }
+            var (hi, lo) = Binary128Literal.ToBits(lit.Text);
+            return System.FormattableString.Invariant($"Float128.FromBits(new System.UInt128(0x{hi:X16}UL, 0x{lo:X16}UL))");
+        }
+        return lit.Text;
+    }
 
     /// <summary>Map a C primitive (keyed on its canonical C name) to the C# type it
     /// lowers to. <c>char</c>→<c>byte</c> so <c>char*</c> arithmetic walks bytes;

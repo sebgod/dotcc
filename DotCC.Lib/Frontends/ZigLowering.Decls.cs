@@ -2153,6 +2153,10 @@ internal sealed partial class ZigLowering
                 {
                     return floatLit with { Type = CType.Float };
                 }
+                if (sink?.Unqualified is CType.Float128Type && RetypeFloatLiteralTree(lowered, CType.Float128, _comptimeFloatConsts) is { } quadLit)
+                {
+                    return quadLit;
+                }
                 // A plain value at an ERROR-UNION sink (`fn unwrap(v: anyerror!u8)` called as `unwrap(5)`) is its
                 // success variant, as zig coerces it; an error union or an error code passes as it is.
                 if (sink?.Unqualified is CType.ErrorUnion okSink && lowered.Type?.Unqualified is not (CType.ErrorUnion or CType.ErrorSetType))
@@ -2189,18 +2193,53 @@ internal sealed partial class ZigLowering
             ? new Cast(optInner, value) { Type = optInner }
             : null;
 
+    /// <summary>An untyped float literal tree (a literal, a negated one, or literal-only <c>+ - * /</c>) retyped to the
+    /// wide float <paramref name="type"/> it lands at, or <c>null</c> when <paramref name="e"/> is not such a tree. zig
+    /// evaluates a comptime_float at 128 bits, so at an <c>f128</c> sink every literal leaf must be the binary128 nearest
+    /// its spelling (not the double nearest it) and the arithmetic must run at 128 bits (task #214).
+    /// A read of a comptime_float const in <paramref name="floatConsts"/> is its literal tree.</summary>
+    private static CExpr? RetypeFloatLiteralTree(CExpr e, CType type, IReadOnlyDictionary<Symbol, CExpr>? floatConsts = null) => e switch
+    {
+        LitFloat f => f with { Type = type },
+        VarRef v when floatConsts is not null && floatConsts.TryGetValue(v.Sym, out var tree) => RetypeFloatLiteralTree(tree, type, floatConsts),
+        Unary { Op: UnOp.Neg or UnOp.Plus } u when RetypeFloatLiteralTree(u.Operand, type, floatConsts) is { } operand
+            => u with { Operand = operand, Type = type },
+        Binary { Op: BinOp.Add or BinOp.Sub or BinOp.Mul or BinOp.Div } b
+            when (b.Left is LitFloat or VarRef || b.Right is LitFloat or VarRef || b.Left is Binary or Unary || b.Right is Binary or Unary)
+                 && RetypeFloatOperand(b.Left, type, floatConsts) is { } left && RetypeFloatOperand(b.Right, type, floatConsts) is { } right
+            => b with { Left = left, Right = right, Type = type },
+        _ => null,
+    };
+
+    /// <summary>One operand of a float literal tree (<see cref="RetypeFloatLiteralTree"/>): a float literal tree, or an
+    /// integer literal (a comptime_int operand of comptime_float arithmetic, exact at 128 bits).</summary>
+    private static CExpr? RetypeFloatOperand(CExpr e, CType type, IReadOnlyDictionary<Symbol, CExpr>? floatConsts)
+        => e is LitInt ? e : RetypeFloatLiteralTree(e, type, floatConsts);
+
     /// <summary>True for a lowered <c>unreachable</c> (the void call the backend renders as a throw).</summary>
     private static bool IsUnreachableCallExpr(CExpr e) => e is Call { Callee: "__dotcc_unreachable" };
 
-    /// <summary>A zig float math builtin over <paramref name="operand"/> (an f64 or f32): the matching System.Math /
-    /// System.MathF call at the operand's type, or ZigMath's where zig differs from .NET (<c>@round</c> rounds half away
-    /// from zero; <c>@exp2</c> has no .NET method).</summary>
+    /// <summary>A zig float math builtin over <paramref name="operand"/> (an f64, f32 or f128): the matching System.Math /
+    /// System.MathF call at the operand's type (the runtime's <c>Float128</c> for an f128, task #214), or ZigMath's where
+    /// zig differs (<c>@round</c> rounds half away from zero; <c>@exp2</c> has no .NET method).</summary>
     private static CExpr FloatMathBuiltin(string builtin, CExpr operand)
     {
         var type = operand.Type.Unqualified;
-        if (type != CType.Double && type != CType.Float)
+        if (type != CType.Double && type != CType.Float && type != CType.Float128)
         {
-            throw new IrUnsupportedException($"zig `{builtin}` expects a float (f32 / f64) operand, got `{operand.Type.Describe()}`");
+            throw new IrUnsupportedException($"zig `{builtin}` expects a float (f32 / f64 / f128) operand, got `{operand.Type.Describe()}`");
+        }
+        if (type == CType.Float128)
+        {
+            var quad = builtin switch
+            {
+                "@sqrt" => "Float128.Sqrt", "@sin" => "Float128.Sin", "@cos" => "Float128.Cos", "@tan" => "Float128.Tan",
+                "@exp" => "Float128.Exp", "@log" => "Float128.Log", "@log2" => "Float128.Log2", "@log10" => "Float128.Log10",
+                "@floor" => "Float128.Floor", "@ceil" => "Float128.Ceiling", "@trunc" => "Float128.Truncate",
+                "@abs" => "Float128.Abs", "@exp2" => "Float128.Exp2", "@round" => "ZigMath.RoundAway",
+                _ => throw new IrUnsupportedException($"internal: `{builtin}` is not a float math builtin"),
+            };
+            return new Call(quad, new List<CExpr> { operand }) { Type = type };
         }
         var math = type == CType.Float ? "System.MathF" : "System.Math";
         var callee = builtin switch
@@ -2220,6 +2259,22 @@ internal sealed partial class ZigLowering
     /// <see cref="IsStringLiteralValue"/> answers for a reference to one exactly as for the literal itself.
     /// Keyed by symbol identity.</summary>
     private readonly HashSet<Symbol> _stringLiteralSyms = new();
+
+    /// <summary>Untyped <c>const</c>s (zig's comptime_float) whose initializer is a float literal tree, with that tree
+    /// (task #214). The lowered symbol holds a <c>double</c>, so at an <c>f128</c> sink a read substitutes the tree, which
+    /// is then rounded at 128 bits as zig does (<c>const tenth = 0.1;</c> then <c>const q: f128 = tenth;</c>).</summary>
+    private readonly Dictionary<Symbol, CExpr> _comptimeFloatConsts = new();
+
+    /// <summary>Record <paramref name="sym"/> as a comptime_float const when it is an untyped const whose initializer is
+    /// a float literal tree (<see cref="RetypeFloatLiteralTree"/>).</summary>
+    private void NoteComptimeFloatConst(Symbol sym, bool isConst, CType? declared, CExpr init)
+    {
+        if (isConst && declared is null && init.Type?.Unqualified == CType.Double
+            && RetypeFloatLiteralTree(init, CType.Float128, _comptimeFloatConsts) is not null)
+        {
+            _comptimeFloatConsts[sym] = init;
+        }
+    }
 
     /// <summary>Local <c>const</c>s bound to a comptime STRING (<c>const tag = @tagName(key);</c>), with its text: a
     /// comptime name position (<c>@field(init_values, tag)</c>) reads it. Symbol-keyed, so an inner shadow is its own.</summary>
@@ -2994,7 +3049,8 @@ internal sealed partial class ZigLowering
                     throw new IrUnsupportedException($"zig `@abs` expects (number); got {bargs.Count} argument(s)");
                 }
                 var absArg = LowerExpr(bargs[0]);
-                if (absArg.Type.Unqualified == CType.Double || absArg.Type.Unqualified == CType.Float)
+                if (absArg.Type.Unqualified == CType.Double || absArg.Type.Unqualified == CType.Float
+                    || absArg.Type.Unqualified is CType.Float128Type)
                 {
                     return FloatMathBuiltin("@abs", absArg);
                 }
@@ -3513,8 +3569,9 @@ internal sealed partial class ZigLowering
         {
             throw new IrUnsupportedException($"zig `@intFromFloat`: expected float type, found '{operand.Type.Describe()}'");
         }
-        if (name == "@floatFromInt" && operand.Type.Unqualified is CType.Prim { Integer: false } floatOperand
-            && (floatOperand == CType.Double || floatOperand == CType.Float))
+        if (name == "@floatFromInt" && (operand.Type.Unqualified is CType.Float128Type
+            || (operand.Type.Unqualified is CType.Prim { Integer: false } floatOperand
+                && (floatOperand == CType.Double || floatOperand == CType.Float))))
         {
             throw new IrUnsupportedException($"zig `@floatFromInt`: expected integer type, found '{operand.Type.Describe()}'");
         }

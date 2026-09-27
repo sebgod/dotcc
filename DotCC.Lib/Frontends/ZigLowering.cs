@@ -2069,6 +2069,7 @@ internal sealed partial class ZigLowering
             ConstValue = folded ?? 0,
         });
         if (declared is null && init is LitStr) { _stringLiteralSyms.Add(sym); }
+        NoteComptimeFloatConst(sym, isConst, declared, init);
         _ir.Globals.Add(new GlobalVar(sym, init));
         // A top-level CONST aggregate (`const cpu: std.Target.Cpu = .{…}`) is comptime-known, so a comptime
         // call may read it (`comptime std.atomic.cacheLineForCpu(cpu)`): the interpreter evaluates its init.
