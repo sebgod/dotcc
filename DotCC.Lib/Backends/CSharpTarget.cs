@@ -31,7 +31,7 @@ internal sealed class CSharpTarget : ITarget
         // unchanged — `&fn` of dotcc's own methods stays a managed delegate*.
         CType.Func f => (f.IsNativeCallConv ? "delegate* unmanaged[Cdecl]<" : "delegate*<")
             + string.Join(", ", f.Params.Where(p => !CSharpBackend.IsVoidParam(p)).Select(RenderType).Append(RenderType(f.Return))) + ">",
-        CType.Named n => n.Name,
+        CType.Named n => NoteNamed(n.Name),
         CType.Enum e => e.Name,
         // A Zig SIMD vector: a bool one is its lane bitmask, a numeric one .NET's vector of its width.
         CType.Vector { IsMask: true } => "ulong",
@@ -78,6 +78,17 @@ internal sealed class CSharpTarget : ITarget
             $"zig enum literal `.{el.Name}` needs a known result type at runtime (use a typed declaration, a return, an assignment, or a switch on the enum)"),
         _ => throw new IrUnsupportedException("C# target cannot render type " + t.GetType().Name),
     };
+
+    /// <summary>Every struct / union name rendered so far: what the program reaches, which decides the prunable
+    /// aggregates the backend emits (<see cref="IrModule.PrunableTypes"/>, task #194).</summary>
+    internal HashSet<string> RenderedNamedTypes { get; } = new(System.StringComparer.Ordinal);
+
+    /// <summary>Record <paramref name="name"/> in <see cref="RenderedNamedTypes"/> and return it.</summary>
+    private string NoteNamed(string name)
+    {
+        RenderedNamedTypes.Add(name);
+        return name;
+    }
 
     /// <summary>Render a <c>System.ValueTuple</c> type of arbitrary arity: empty → the non-generic
     /// <c>System.ValueTuple</c>; 1..7 → <c>ValueTuple&lt;T1, …&gt;</c>; &gt; 7 → the first 7 plus an
