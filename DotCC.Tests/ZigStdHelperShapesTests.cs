@@ -6516,4 +6516,44 @@ public sealed class ZigStdHelperShapesTests
         cs.ShouldContain("byte __anf3 = default;");
         cs.ShouldContain("CBool __anf5 = default;");
     }
+
+    [Fact]
+    public void True_false_and_null_name_enum_and_union_members()
+    {
+        var cs = EmitZig("""
+            const Tok = union(enum) { begin, true, false, null, num: u8 };
+            const Kind = enum { true, false, null };
+            fn classify(t: Tok) u8 {
+                return switch (t) {
+                    .true => 1,
+                    .null => 3,
+                    else => 9,
+                };
+            }
+            pub fn main() u8 {
+                const k: Kind = .false;
+                const t: Tok = .null;
+                return classify(t) + @as(u8, @intFromEnum(k));
+            }
+            """);
+        // Task #207 (std.json's `Token` / `TokenType`): zig's primitive values are plain names after `.` and in a field
+        // list, escaped as C# identifiers.
+        cs.ShouldContain("new Tok { __tag = Tok_Tag.@true } => 1");
+        cs.ShouldContain("Kind k = Kind.@false;");
+        cs.ShouldContain("__tag = Tok_Tag.@null");
+    }
+
+    [Fact]
+    public void An_enum_field_without_a_comma_must_be_the_last()
+    {
+        var ex = Should.Throw<Exception>(() => EmitZig("""
+            const E = enum { a, b c };
+            pub fn main() u8 {
+                return @intFromEnum(E.c);
+            }
+            """));
+        // Task #207: only the last field may omit its comma, as zig has it ("expected ',' after field"). Letting a comma-less
+        // field be followed by another member had put every member-starting token into what may follow an expression.
+        ex.Message.ShouldContain("parse error at line 1, column 23");
+    }
 }

@@ -7879,6 +7879,50 @@ public sealed class ZigOracleTests
             "    for (&buf, 0..) |*b, i| b.* = @truncate(i * 3);\n" +
             "    return @truncate(last(buf[0..]) + last(buf[0..30]));\n" +
             "}\n", 156, "" },
+        // Task #207: `orelse break :l true` keeps its value once `true` can name an enum member (std.Treap's rotate_right).
+        new object[] { "orelse_break_label_bool_value",
+            "fn f(o: ?u8) bool {\n" +
+            "    const r = blk: {\n" +
+            "        const x = o orelse break :blk true;\n" +
+            "        break :blk x > 3;\n" +
+            "    };\n" +
+            "    return r;\n" +
+            "}\n" +
+            "fn g(o: ?u8) bool {\n" +
+            "    const r = blk: {\n" +
+            "        _ = o orelse break :blk false;\n" +
+            "        break :blk true;\n" +
+            "    };\n" +
+            "    return r;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return @as(u8, @intFromBool(f(null))) + @as(u8, @intFromBool(g(1))) * 2;\n" +
+            "}\n", 3, "" },
+        // Task #207 (std.json.Token / TokenType): `true` / `false` / `null` as union variant, enum member and literal names.
+        new object[] { "bool_and_null_named_members",
+            "const Tok = union(enum) { begin, true, false, null, num: u8 };\n" +
+            "const Kind = enum { true, false, null, other };\n" +
+            "fn classify(t: Tok) u8 {\n" +
+            "    return switch (t) {\n" +
+            "        .true => 1,\n" +
+            "        .false => 2,\n" +
+            "        .null => 3,\n" +
+            "        .num => |n| n,\n" +
+            "        else => 9,\n" +
+            "    };\n" +
+            "}\n" +
+            "fn kind(b: bool) Kind {\n" +
+            "    return if (b) .true else .false;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const toks = [_]Tok{ .true, .false, .null, .{ .num = 20 }, .begin };\n" +
+            "    var s: u8 = 0;\n" +
+            "    for (toks) |t| s += classify(t);\n" +
+            "    s += @as(u8, @intFromEnum(kind(false))) * 5;\n" +
+            "    if (kind(true) == .true) s += 3;\n" +
+            "    if (kind(false) != .null) s += 4;\n" +
+            "    return s;\n" +
+            "}\n", 47, "" },
         // Task #200 (std.heap.MemoryPool.create): a value `if` whose else arm is `return`, nested in a capture-if else.
         new object[] { "value_if_else_return",
             "const E = error{Oom};\n" +

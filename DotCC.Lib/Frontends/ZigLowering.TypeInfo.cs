@@ -1013,15 +1013,9 @@ internal sealed partial class ZigLowering
     /// generic, never demand a field the type does not have, and never fail to compile. That is the
     /// whole point of the fold: <c>switch (@typeInfo(T))</c> is how std asks "which kind is T", and
     /// every non-taken arm is written for a different kind.</summary>
-    /// <summary>The tag an enum literal names: <c>.int</c>, and the keyword-named <c>.undefined</c> / <c>.null</c>;
-    /// null for any other node.</summary>
-    private static string? EnumLitName(Item lit) => lit.Content switch
-    {
-        Zig.EnumLit el => Tok(el.Arg1),
-        Zig.EnumLitUndefined => "undefined",
-        Zig.EnumLitNull => "null",
-        _ => null,
-    };
+    /// <summary>The tag an enum literal names: <c>.int</c>, and the keyword-named <c>.undefined</c> / <c>.null</c> (the
+    /// same record, spelled by its token); null for any other node.</summary>
+    private static string? EnumLitName(Item lit) => lit.Content is Zig.EnumLit el ? Tok(el.Arg1) : null;
 
     private ZigProng? SelectComptimeProng(Item subjectItem, Item prongsItem, out ZigTypeInfo? payload)
     {
