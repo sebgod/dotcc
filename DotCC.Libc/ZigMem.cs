@@ -67,6 +67,9 @@ public static class ZigMem
         for (ulong i = 0; i < source.Len; i++) { d[i] = s[i]; }
     }
 
+    /// <summary>zig <c>@constCast</c> of a <c>[]const T</c> slice: the <c>[]T</c> over the same pointer and length.</summary>
+    public static unsafe Slice<T> ConstCast<T>(ConstSlice<T> slice) where T : unmanaged => new(slice.Ptr, slice.Len);
+
     /// <summary><c>@memmove(dest, source)</c> — copy <c>source.len</c> elements into <c>dest</c> where the two
     /// may OVERLAP (array_list's in-place shifts): the direction is chosen so every element is read before it
     /// is overwritten, as C's <c>memmove</c>.</summary>
