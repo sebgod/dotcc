@@ -2036,14 +2036,22 @@ internal sealed partial class ZigLowering
             case Zig.IfExpr ie when sink is not null:
             {
                 if (TryFoldComptimeCondition(ie.Arg2) is { } taken) { return LowerExprSink(taken ? ie.Arg4 : ie.Arg6, sink); }
-                var then = LowerExprSink(ie.Arg4, sink);
-                var otherwise = LowerExprSink(ie.Arg6, sink);
+                // The condition first, as zig evaluates it; each arm under its own hoist buffer (task #203).
+                var ifImpure = _hoistImpureSeen;
+                var ifCond = LowerExpr(ie.Arg2);
+                var (then, thenPre) = LowerArmIsolated(() => LowerExprSink(ie.Arg4, sink));
+                var (otherwise, elsePre) = LowerArmIsolated(() => LowerExprSink(ie.Arg6, sink));
                 // `var acc: T = if (does_one_overflow) unreachable else 1;` (std.math.powi): an `unreachable` arm has
                 // no value type, so the ternary is the sink's type and the literal arm is cast to it.
                 var condType = IsUnreachableCallExpr(then) || IsUnreachableCallExpr(otherwise)
                     ? sink.IsArithmetic ? sink : IsUnreachableCallExpr(then) ? otherwise.Type : then.Type
                     : then.Type;
-                return new CondExpr(LowerExpr(ie.Arg2), then, otherwise) { Type = condType };
+                if (thenPre.Count > 0 || elsePre.Count > 0)
+                {
+                    return HoistedValueIf(ifCond, ifImpure, then, thenPre, otherwise, elsePre,
+                        HoistedResultType(sink, condType, new[] { then, otherwise }));
+                }
+                return new CondExpr(ifCond, then, otherwise) { Type = condType };
             }
             case Zig.SwitchExpr s:         return LowerSwitchExpr(s.Arg2, s.Arg5, sink);
             case Zig.SwitchExprTrailing s: return LowerSwitchExpr(s.Arg2, s.Arg5, sink);

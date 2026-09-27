@@ -207,8 +207,17 @@ internal sealed partial class ZigLowering
                 // a comptime tag) selects its arm at lowering time, as a statement `if`'s does: the other arm
                 // may not even lower (it may name a value only the taken arm's types admit).
                 if (TryFoldComptimeCondition(e.Arg2) is { } taken) { return LowerExpr(taken ? e.Arg4 : e.Arg6); }
-                var then = LowerExpr(e.Arg4);
-                return new CondExpr(LowerExpr(e.Arg2), then, LowerExpr(e.Arg6)) { Type = then.Type };
+                // The condition first, as zig evaluates it; each arm under its own hoist buffer (task #203).
+                var ifImpure = _hoistImpureSeen;
+                var ifCond = LowerExpr(e.Arg2);
+                var (then, thenPre) = LowerArmIsolated(() => LowerExpr(e.Arg4));
+                var (otherwise, elsePre) = LowerArmIsolated(() => LowerExpr(e.Arg6));
+                if (thenPre.Count > 0 || elsePre.Count > 0)
+                {
+                    return HoistedValueIf(ifCond, ifImpure, then, thenPre, otherwise, elsePre,
+                        HoistedResultType(null, then.Type, new[] { then, otherwise }));
+                }
+                return new CondExpr(ifCond, then, otherwise) { Type = then.Type };
             }
             // `x != if (c) a else b` (the right operand of a comparison): the same ternary, arms at the operand level.
             case Zig.IfOperand io:
@@ -886,10 +895,12 @@ internal sealed partial class ZigLowering
                 {
                     left = HoistLowered("orelse", new List<CStmt>(), left, impureBeforeLeft);
                 }
-                // The fallback is at the payload's result type (`alignment orelse default_alignment`, an enum literal).
-                var right = left.Type.Unqualified is CType.Optional { Inner: var fallbackSink }
+                // The fallback is at the payload's result type (`alignment orelse default_alignment`, an enum literal). It
+                // runs only when the left is null, so what it hoists stays with it (task #203).
+                var (right, rightHoisted) = LowerArmIsolated(() => left.Type.Unqualified is CType.Optional { Inner: var fallbackSink }
                     ? LowerExprSink(o.Arg2, fallbackSink)
-                    : LowerExpr(o.Arg2);
+                    : LowerExpr(o.Arg2));
+                if (rightHoisted.Count > 0) { return OrElseHoistedFallback(left, impureBeforeLeft, right, rightHoisted); }
                 // An optional ARRAY (task #151) is a generated value type, which C#'s `??` does not apply to: its payload
                 // (the element pointer) when it has one, else the fallback array.
                 if (left.Type.Unqualified is CType.Optional { Inner.Unqualified: CType.Array } optArray)
@@ -2803,6 +2814,17 @@ internal sealed partial class ZigLowering
     /// will treat it: usual-arithmetic for arithmetic/bitwise, the promoted left type
     /// for a shift (operands promote independently), and <c>int</c> for a relational /
     /// boolean (the backend renders those as an integer-valued <c>(CBool)(…)</c>).</summary>
+    /// <summary>The operands of <c>a and b</c> / <c>a or b</c>: the left as usual, the right under its own hoist buffer
+    /// (<see cref="LowerArmIsolated"/>), since it runs only when the left does not decide the result.
+    /// <paramref name="rightHoisted"/> is what the right side hoisted.</summary>
+    private (CExpr Left, CExpr Right) LowerShortCircuitOperands(Item l, Item r, out List<CStmt> rightHoisted)
+    {
+        var left = LowerExpr(l);
+        var (right, hoisted) = LowerArmIsolated(() => LowerExpr(r));
+        rightHoisted = hoisted;
+        return (left, right);
+    }
+
     private CExpr Bin(BinOp op, Item l, Item r)
     {
         // `<comptime tag> == .member` (road-to-zig-std S5) — `@typeInfo(T).int.signedness == .unsigned`
@@ -2824,7 +2846,13 @@ internal sealed partial class ZigLowering
         // A vector shifted by a `@splat(n)` amount (std.math.rotr's `(x >> @splat(ar)) | (x << @splat(1 +% ~ar))`, task #148)
         // shifts every lane by the one scalar count; a `@splat` operand of any other operator has no result type.
         if (TrySplatBesideVector(op, l, r) is { } splatPair) { return TryVectorBinary(op, splatPair.Left, splatPair.Right) ?? splatPair.Left; }
-        var (left, right) = op is BinOp.Eq or BinOp.Ne
+        // The right side of `and` / `or` runs only when the left does not decide the result, so what it hoists (the early
+        // return of `a and (opt orelse return false)`) stays with it (task #203).
+        var impureBeforeLeft = _hoistImpureSeen;
+        List<CStmt>? rightHoisted = null;
+        var (left, right) = op is BinOp.LogAnd or BinOp.LogOr
+            ? LowerShortCircuitOperands(l, r, out rightHoisted)
+            : op is BinOp.Eq or BinOp.Ne
             ? LowerComparisonOperands(l, r)
             // A shift amount is a result location (zig types it `Log2Int(T)`): `1 << @intCast(i)` infers a cast there.
             : op is BinOp.Shl or BinOp.Shr && r.Content is Zig.BuiltinCall { Arg0: var shiftCast }
@@ -2836,6 +2864,14 @@ internal sealed partial class ZigLowering
         if (op is BinOp.Eq or BinOp.Ne && IsVoidValueType(left.Type) && IsVoidValueType(right.Type))
         {
             return new LitBool(op == BinOp.Eq) { Type = CType.Bool };
+        }
+        if (rightHoisted is { Count: > 0 })
+        {
+            // `a and b` is `if (a) b else false`; `a or b` is `if (a) true else b`.
+            var decided = new LitBool(op == BinOp.LogOr) { Type = CType.Bool };
+            return op == BinOp.LogAnd
+                ? HoistedValueIf(left, impureBeforeLeft, right, rightHoisted, decided, new List<CStmt>(), CType.Bool)
+                : HoistedValueIf(left, impureBeforeLeft, decided, new List<CStmt>(), right, rightHoisted, CType.Bool);
         }
         // An operator over a SIMD vector is element-wise, a comparison a lane mask (T5).
         if (TryVectorBinary(op, left, right) is { } vectorOp) { return vectorOp; }

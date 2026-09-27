@@ -195,15 +195,13 @@ internal sealed partial class ZigLowering
 
         // The fallback is result-located at the payload type: `bufPrint(…) catch "ERR"` coerces the string literal to the
         // slice the payload is (it had been left a `byte*` beside a `Slice<byte>`, CS0029).
+        // It runs only on error, so what it hoists stays with it (task #203).
         if (capName is null)
         {
-            var fb = LowerExprSink(fallbackItem, payload);
-            if (IsSimpleReeval(fb)) { return (pre, new ZigCatch(union, fb) { Type = payload }); }
+            var (fb, fbHoisted) = LowerArmIsolated(() => LowerExprSink(fallbackItem, payload));
+            if (fbHoisted.Count == 0 && IsSimpleReeval(fb)) { return (pre, new ZigCatch(union, fb) { Type = payload }); }
             var ce = HoistCatchUnion(union, pre);
-            return (pre, new CondExpr(
-                new Member(ce, "IsErr", false) { Type = CType.Bool },
-                fb,
-                new Member(ce, "Value", false) { Type = payload }) { Type = payload });
+            return (pre, LazyCatchFallback(ce, fb, fbHoisted, payload, pre));
         }
 
         // Capture form `catch |e| b`: hoist, bind `e`, then the lazy ternary (with `e` visible).
@@ -213,11 +211,33 @@ internal sealed partial class ZigLowering
             var errSym = _symbols.Declare(new Symbol { Name = capName, Kind = SymKind.Var, Type = CType.ErrorSet });
             pre.Add(new DeclStmt(new List<LocalDecl> { new(errSym, new Member(ceCap, "Code", false) { Type = CType.ErrorSet }) }));
         }
-        var fbCap = LowerExprSink(fallbackItem, payload);
-        return (pre, new CondExpr(
-            new Member(ceCap, "IsErr", false) { Type = CType.Bool },
-            fbCap,
-            new Member(ceCap, "Value", false) { Type = payload }) { Type = payload });
+        var (fbCap, fbCapHoisted) = LowerArmIsolated(() => LowerExprSink(fallbackItem, payload));
+        return (pre, LazyCatchFallback(ceCap, fbCap, fbCapHoisted, payload, pre));
+    }
+
+    /// <summary>The lazy value of <c>e catch b</c> over the once-read union <paramref name="union"/>: the ternary
+    /// <c>union.IsErr ? b : union.Value</c>, or, when <c>b</c> hoisted statements (task #203), a statement <c>if</c>
+    /// appended to <paramref name="pre"/> that runs them only on error and fills a result temp.</summary>
+    private CExpr LazyCatchFallback(CExpr union, CExpr fallback, List<CStmt> fallbackHoisted, CType payload, List<CStmt> pre)
+    {
+        var isErr = new Member(union, "IsErr", false) { Type = CType.Bool };
+        var value = new Member(union, "Value", false) { Type = payload };
+        if (fallbackHoisted.Count == 0) { return new CondExpr(isErr, fallback, value) { Type = payload }; }
+        if (payload.Unqualified is CType.VoidType)
+        {
+            fallbackHoisted.Add(new ExprStmt(fallback));
+            pre.Add(new If(isErr, new Block(fallbackHoisted), null));
+            return new DefaultLit { Type = CType.Void };
+        }
+        var temp = _symbols.Declare(new Symbol { Name = "__anf" + _anfTempCounter++, Kind = SymKind.Var, Type = payload });
+        var target = new VarRef(temp) { Type = payload, IsLValue = true };
+        fallbackHoisted.Add(IsUnreachableCallExpr(fallback)
+            ? new ExprStmt(fallback)
+            : new ExprStmt(new Assign(null, target, fallback) { Type = payload }));
+        pre.Add(new DeclStmt(new List<LocalDecl> { new(temp, null) }));
+        pre.Add(new If(isErr, new Block(fallbackHoisted),
+            new Block(new List<CStmt> { new ExprStmt(new Assign(null, target, value) { Type = payload }) })));
+        return new VarRef(temp) { Type = payload };
     }
     /// <summary>Hoist a (possibly side-effecting) error-union operand to a single-eval <c>__cE</c>
     /// temp unless it is already a bare variable; append the decl to <paramref name="pre"/> and

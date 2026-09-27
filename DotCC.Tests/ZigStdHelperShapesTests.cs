@@ -6387,4 +6387,108 @@ public sealed class ZigStdHelperShapesTests
         cs.ShouldContain("return ErrUnion<byte>.Err(e);");
         cs.ShouldContain("throw new System.Diagnostics.UnreachableException(");
     }
+
+    [Fact]
+    public void The_right_operand_of_and_keeps_its_hoist_inside_the_short_circuit()
+    {
+        var cs = EmitZig("""
+            fn andRhs(a: bool, opt: ?u8) u8 {
+                const ok = a and (opt orelse return 20) > 3;
+                return if (ok) 1 else 2;
+            }
+            pub fn main() u8 {
+                return andRhs(false, null) + andRhs(true, null);
+            }
+            """);
+        // Task #203: the `orelse return` had been hoisted ahead of the statement, so `andRhs(false, null)` returned 20.
+        cs.ShouldContain("""
+                    if (Cond.B(a))
+                    {
+                        if (Cond.B((Cond.B(opt.HasValue) ? 0 : 1)))
+                        {
+                            return 20;
+                        }
+            """.Replace("\r\n", "\n"));
+        cs.ShouldContain("__anf1 = false;");
+    }
+
+    [Fact]
+    public void A_switch_expression_arm_that_hoists_becomes_a_statement_switch()
+    {
+        var cs = EmitZig("""
+            fn pick(k: u8, opt: ?u8) u8 {
+                const v: u8 = switch (k) {
+                    0 => 40,
+                    else => opt orelse return 7,
+                };
+                return v + 2;
+            }
+            pub fn main() u8 {
+                return pick(0, null) + pick(1, null);
+            }
+            """);
+        // Task #203: the arm's early return stays in its section.
+        cs.ShouldContain("""
+                        default:
+                            {
+                                if (Cond.B((Cond.B(opt.HasValue) ? 0 : 1)))
+                                {
+                                    return 7;
+                                }
+            """.Replace("\r\n", "\n"));
+        cs.ShouldContain("byte v = __anf1;");
+    }
+
+    [Fact]
+    public void A_catch_fallback_that_hoists_runs_only_on_error()
+    {
+        var cs = EmitZig("""
+            fn f(x: u8) !u8 {
+                if (x == 0) return error.Bad;
+                return x;
+            }
+            fn g(x: u8, opt: ?u8) u8 {
+                const v: u8 = f(x) catch (opt orelse return 8);
+                return v;
+            }
+            pub fn main() u8 {
+                return g(3, null) + g(0, 30) + g(0, null);
+            }
+            """);
+        // Task #203: before, the fallback's hoist was refused (it would have run ahead of the call to `f`).
+        cs.ShouldContain("""
+                    if (Cond.B(__cE.IsErr))
+                    {
+                        if (Cond.B((Cond.B(opt.HasValue) ? 0 : 1)))
+                        {
+                            return 8;
+                        }
+            """.Replace("\r\n", "\n"));
+        cs.ShouldContain("__anf1 = __cE.Value;");
+    }
+
+    [Fact]
+    public void A_hoisted_value_if_result_temp_takes_the_peer_or_sink_type()
+    {
+        var cs = EmitZig("""
+            fn wide(c: bool, opt: ?u64) u64 {
+                return (if (c) 5 else opt orelse return 9) * 2;
+            }
+            fn narrow(c: bool, a: u8, b: u8, opt: ?u8) u8 {
+                const v: u8 = if (c) a + b else opt orelse return 11;
+                return v;
+            }
+            fn flag(c: bool, opt: ?bool) bool {
+                const v = if (c) true else opt orelse return false;
+                return v;
+            }
+            pub fn main() u8 {
+                return @truncate(wide(true, null) + narrow(false, 1, 2, 3) + @intFromBool(flag(false, true)));
+            }
+            """);
+        // Task #203: the ternary it replaces was peer-typed by C#; an `int` temp would not hold the `u64` arm (CS0266).
+        cs.ShouldContain("ulong __anf1 = default;");
+        cs.ShouldContain("byte __anf3 = default;");
+        cs.ShouldContain("CBool __anf5 = default;");
+    }
 }

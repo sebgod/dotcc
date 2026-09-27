@@ -395,7 +395,15 @@ internal sealed partial class ZigLowering
     /// assignment, and the value is the block's result temp.</summary>
     private CExpr LowerCaptureBranch(Item item, CType? sink, List<CStmt>? into)
     {
-        if (!IsLabeledValue(item)) { return sink is { } s ? LowerExprSink(item, s) : LowerExpr(item); }
+        if (!IsLabeledValue(item))
+        {
+            // A branch of the hoisted capture `if` keeps what it hoists inside itself (task #203); a folded one (`into` is
+            // the enclosing buffer) is the whole value, so its hoists belong there.
+            if (into is null || ReferenceEquals(into, _hoist)) { return sink is { } s ? LowerExprSink(item, s) : LowerExpr(item); }
+            var (branchValue, branchHoisted) = LowerArmIsolated(() => sink is { } bs ? LowerExprSink(item, bs) : LowerExpr(item));
+            into.AddRange(branchHoisted);
+            return branchValue;
+        }
         if (into is null) { throw new IrUnsupportedException("a labeled value block as a folded `if` arm needs a statement position"); }
         Symbol? result = null;
         into.Add(LowerLabeledValue(item, sink, temp =>
