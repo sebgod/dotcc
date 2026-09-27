@@ -1332,6 +1332,14 @@ internal sealed partial class IrModule
                 ["1"] = new CtInt(wrappedOv == exactOv ? 0 : 1, ovBit),
             }, c.Type);
         }
+        // `System.Math.Min(count, bits)`: `@ctz` of an integer narrower than its carrier caps the carrier's count at the
+        // declared width (std.math.gcd's `@ctz(a)` over an IntFittingRange type, std.math.lcm, task #183).
+        if (c is { Callee: "System.Math.Min" or "System.Math.Max", Args: [var minA, var minB] })
+        {
+            if (EvalComptime(minA) is not CtInt ia || EvalComptime(minB) is not CtInt ib) { return null; }
+            var picked = c.Callee == "System.Math.Min" ? System.Int128.Min(ia.Value, ib.Value) : System.Int128.Max(ia.Value, ib.Value);
+            return new CtInt(picked, c.Type);
+        }
         // The float math builtins over a comptime float (std.math.log10_int's `bit_size > … * @log2(10.0)`, task #171):
         // System.Math is pure, so the value is the one the runtime call would compute.
         if (c is { Callee: var mathCallee, Args: [var mathArg] } && mathCallee.StartsWith("System.Math.", System.StringComparison.Ordinal))

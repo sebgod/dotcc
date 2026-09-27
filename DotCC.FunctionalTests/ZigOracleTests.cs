@@ -7879,6 +7879,18 @@ public sealed class ZigOracleTests
             "    for (&buf, 0..) |*b, i| b.* = @truncate(i * 3);\n" +
             "    return @truncate(last(buf[0..]) + last(buf[0..30]));\n" +
             "}\n", 156, "" },
+        // Task #183 (std.math.gcd / lcm): `@ctz` of an integer narrower than its carrier, evaluated at comptime.
+        new object[] { "comptime_ctz_narrow",
+            "fn trailing(x: u5) u8 {\n" +
+            "    return @ctz(x);\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = comptime trailing(8);\n" +
+            "    const b = comptime trailing(0);\n" +
+            "    var z: u5 = 0;\n" +
+            "    _ = &z;\n" +
+            "    return a * 10 + b + trailing(z) * 7;\n" +
+            "}\n", 70, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -9398,6 +9410,122 @@ public sealed class ZigOracleTests
             "    const c = H.hash(4, \"ALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUF\");\n" +
             "    return @truncate((a ^ b ^ c) >> 5);\n" +
             "}\n", 34);
+
+    // Task #183: std.math.isPowerOfTwo / ceilPowerOfTwo / log2_int / lcm / mulWide / add from real std; lcm runs
+    // gcd at comptime, whose `@ctz` over an IntFittingRange type the interpreter had stopped at.
+    [Fact]
+    public void Dotcc_matches_zig_std_math_misc() =>
+        MatchesZigWithRealStd("math_misc",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    const a: u32 = if (std.math.isPowerOfTwo(@as(u32, 64))) 1 else 0;\n" +
+            "    const b = std.math.ceilPowerOfTwo(u32, 37) catch 0;\n" +
+            "    const c = std.math.log2_int(u32, 1000);\n" +
+            "    const d = std.math.lcm(12, 18);\n" +
+            "    const e = std.math.mulWide(u16, 300, 300);\n" +
+            "    const f = std.math.add(u8, 200, 100) catch 7;\n" +
+            "    return @truncate(a + b + c + @as(u32, @intCast(d)) + (e >> 12) + f);\n" +
+            "}\n", 138);
+
+    // std.hash.Murmur2_32 / Adler32 / CityHash32 / Fnv1a_32 from real std.
+    [Fact]
+    public void Dotcc_matches_zig_std_hash_misc() =>
+        MatchesZigWithRealStd("hash_misc",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = std.hash.Murmur2_32.hash(\"abc\");\n" +
+            "    const b = std.hash.Adler32.hash(\"abcdef\");\n" +
+            "    const c = std.hash.CityHash32.hash(\"hello world\");\n" +
+            "    const d = std.hash.Fnv1a_32.hash(\"xyz\");\n" +
+            "    return @truncate(a ^ (b >> 3) ^ (c >> 7) ^ (d >> 11));\n" +
+            "}\n", 114);
+
+    // std.fmt.parseInt / parseUnsigned / charToDigit from real std, an overflow included.
+    [Fact]
+    public void Dotcc_matches_zig_std_fmt_parse_int() =>
+        MatchesZigWithRealStd("fmt_parse_int",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = std.fmt.parseInt(u32, \"1234\", 10) catch return 1;\n" +
+            "    const b = std.fmt.parseInt(i16, \"-77\", 10) catch return 2;\n" +
+            "    const c = std.fmt.parseUnsigned(u8, \"ff\", 16) catch return 3;\n" +
+            "    const d = std.fmt.charToDigit('7', 10) catch return 4;\n" +
+            "    const e: u8 = if (std.fmt.parseInt(u8, \"300\", 10)) |_| 0 else |_| 5;\n" +
+            "    return @truncate(a % 97 + @as(u32, @intCast(-b)) + c + d + e);\n" +
+            "}\n", 158);
+
+    // std.mem.tokenizeAny / splitSequence / indexOfAny / replacementSize / readInt / writeInt from real std.
+    [Fact]
+    public void Dotcc_matches_zig_std_mem_misc() =>
+        MatchesZigWithRealStd("mem_misc",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var total: usize = 0;\n" +
+            "    var it = std.mem.tokenizeAny(u8, \"a, b;;c ,d\", \", ;\");\n" +
+            "    while (it.next()) |tok| total += tok.len + 1;\n" +
+            "    var sp = std.mem.splitSequence(u8, \"one--two--three\", \"--\");\n" +
+            "    while (sp.next()) |part| total += part.len;\n" +
+            "    total += std.mem.indexOfAny(u8, \"hello\", \"ol\") orelse 99;\n" +
+            "    total += std.mem.replacementSize(u8, \"aXbXc\", \"X\", \"YY\");\n" +
+            "    const bytes = [_]u8{ 0x78, 0x56, 0x34, 0x12 };\n" +
+            "    const v = std.mem.readInt(u32, &bytes, .little);\n" +
+            "    var out: [4]u8 = undefined;\n" +
+            "    std.mem.writeInt(u16, out[0..2], 0xBEEF, .big);\n" +
+            "    return @truncate(total + (v >> 24) + out[0]);\n" +
+            "}\n", 236);
+
+    // std.sort.insertion / heap / isSorted / binarySearch from real std.
+    [Fact]
+    public void Dotcc_matches_zig_std_sort_misc() =>
+        MatchesZigWithRealStd("sort_misc",
+            "const std = @import(\"std\");\n" +
+            "fn lessThan(_: void, a: i32, b: i32) bool {\n" +
+            "    return a < b;\n" +
+            "}\n" +
+            "fn order(ctx: i32, item: i32) std.math.Order {\n" +
+            "    return std.math.order(ctx, item);\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var xs = [_]i32{ 5, -2, 9, 1, 7, 3 };\n" +
+            "    std.sort.insertion(i32, &xs, {}, lessThan);\n" +
+            "    const sorted = std.sort.isSorted(i32, &xs, {}, lessThan);\n" +
+            "    var ys = [_]i32{ 4, 8, 1, 6 };\n" +
+            "    std.sort.heap(i32, &ys, {}, lessThan);\n" +
+            "    const idx = std.sort.binarySearch(i32, &xs, @as(i32, 7), order) orelse 99;\n" +
+            "    return @intCast(@as(i32, @intFromBool(sorted)) + xs[0] + ys[3] + @as(i32, @intCast(idx)) * 10);\n" +
+            "}\n", 47);
+
+    // std.ascii.lowerString / upperString / eqlIgnoreCase / startsWithIgnoreCase from real std.
+    [Fact]
+    public void Dotcc_matches_zig_std_ascii_case() =>
+        MatchesZigWithRealStd("ascii_case",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var buf: [16]u8 = undefined;\n" +
+            "    const lower = std.ascii.lowerString(&buf, \"HeLLo\");\n" +
+            "    const eq: u8 = if (std.ascii.eqlIgnoreCase(\"ZiG\", \"zig\")) 10 else 0;\n" +
+            "    const idx: u8 = if (std.ascii.startsWithIgnoreCase(\"Hello World\", \"HELLO\")) 3 else 99;\n" +
+            "    var up: [8]u8 = undefined;\n" +
+            "    const upper = std.ascii.upperString(&up, \"abc\");\n" +
+            "    return @truncate(lower[1] + eq + idx + upper[2]);\n" +
+            "}\n", 181);
+
+    // std.unicode.Utf8View iteration from real std over two- and three-byte sequences.
+    [Fact]
+    public void Dotcc_matches_zig_std_unicode_utf8_view() =>
+        MatchesZigWithRealStd("unicode_utf8_view",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    const view = std.unicode.Utf8View.init(\"héllo→\") catch return 1;\n" +
+            "    var it = view.iterator();\n" +
+            "    var sum: u32 = 0;\n" +
+            "    var n: u32 = 0;\n" +
+            "    while (it.nextCodepoint()) |cp| {\n" +
+            "        sum +%= cp;\n" +
+            "        n += 1;\n" +
+            "    }\n" +
+            "    return @truncate(sum +% n);\n" +
+            "}\n", 48);
 
     // Task #181: function-local aliases into std (a type, a namespace, a value) and a root unit's own
     // `const native_endian = builtin.cpu.arch.endian();`, folded as a comptime question.
