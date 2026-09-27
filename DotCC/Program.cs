@@ -283,7 +283,16 @@ internal static class Program
         imports ??= ImportOptions.Empty;
         if (preprocessOnly)
         {
-            Compiler.Preprocess(inputPaths, Console.Out, includeDirs, defines, dialect);
+            try
+            {
+                Compiler.Preprocess(inputPaths, Console.Out, includeDirs, defines, dialect);
+            }
+            catch (CompileException ex)
+            {
+                // `#error`, a missing include: a diagnostic, not a crash.
+                Console.Error.WriteLine($"dotcc: {ex.Message}");
+                return 2;
+            }
             return 0;
         }
 
