@@ -114,10 +114,13 @@ public sealed class LibraryModeTests
             .Select(a => MetadataReference.CreateFromFile(a.Location))
             .Cast<MetadataReference>()
             .ToList();
-        // The spliced runtime block references System.Diagnostics.Process
-        // (system()); it's type-forwarded and not in the harvested set. See
-        // FixtureRunner.AddReferenceByType.
+        // The spliced runtime block references type-forwarded assemblies that
+        // aren't in the harvested set unless another test happened to load them
+        // first — the same set FixtureRunner adds (see its comment).
         FixtureRunner.AddReferenceByType(refs, typeof(System.Diagnostics.Process));
+        FixtureRunner.AddReferenceByType(refs, typeof(System.Net.Sockets.Socket));
+        FixtureRunner.AddReferenceByType(refs, typeof(System.Net.IPAddress));
+        FixtureRunner.AddReferenceByType(refs, typeof(System.ComponentModel.Win32Exception));
 
         var options = new CSharpCompilationOptions(
             OutputKind.DynamicallyLinkedLibrary,
