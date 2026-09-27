@@ -9537,6 +9537,29 @@ public sealed class ZigOracleTests
             "    return @truncate((a ^ b ^ c) >> 5);\n" +
             "}\n", 34);
 
+    // Task #190: std.PriorityDequeue from real std (pushSlice, popMin, popMax, count). Its methods are lowered only when
+    // referenced, so the debugging `dump` (std.debug.print, Io.Terminal) is never reached; and the std local
+    // `const order = compareFn(…)` no longer shadows the user's comparator `order` in C#.
+    [Fact]
+    public void Dotcc_matches_zig_std_priority_dequeue() =>
+        MatchesZigWithRealStd("priority_dequeue",
+            "const std = @import(\"std\");\n" +
+            "fn order(_: void, a: u32, b: u32) std.math.Order {\n" +
+            "    return std.math.order(a, b);\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var buf: [256]u8 = undefined;\n" +
+            "    var fba = std.heap.FixedBufferAllocator.init(&buf);\n" +
+            "    const gpa = fba.allocator();\n" +
+            "    const Q = std.PriorityDequeue(u32, void, order);\n" +
+            "    var q: Q = .initContext({});\n" +
+            "    defer q.deinit(gpa);\n" +
+            "    q.pushSlice(gpa, &.{ 5, 1, 9, 3, 7 }) catch return 1;\n" +
+            "    const lo = q.popMin() orelse 0;\n" +
+            "    const hi = q.popMax() orelse 0;\n" +
+            "    return @intCast(lo * 10 + hi + q.count());\n" +
+            "}\n", 22);
+
     // Tasks #187 / #189: std.math.isNan / isInf / isPositiveInf / floatMax / copysign / approxEqAbs / signbit from real
     // std; signbit compares a value switch, floatMax passes a comptime_int its check-guarded helper returns, and
     // `@typeInfo(f64).float.bits` answers from the lowered type.

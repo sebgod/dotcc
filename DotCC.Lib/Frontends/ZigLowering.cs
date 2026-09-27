@@ -217,6 +217,10 @@ internal sealed partial class ZigLowering
     /// captured in pass 1 so an importing module can build a call against them (<see cref="ExportedFns"/>).</summary>
     private readonly Dictionary<string, Symbol> _exportedFns = new(System.StringComparer.Ordinal);
 
+    /// <summary>The emitted names of this unit's top-level functions (see <see cref="ZigModuleGraph.RootFunctionTargetNames"/>).</summary>
+    internal IEnumerable<string> TopLevelFunctionTargetNames()
+        => _exportedFns.Values.Where(s => s.Kind == SymKind.Func).Select(s => s.TargetName);
+
     /// <summary>The top-level functions this unit declares, for an importer to call — see
     /// <see cref="_exportedFns"/>. Meaningful after <see cref="Lower"/> has run.</summary>
     internal IReadOnlyDictionary<string, Symbol> ExportedFns => _exportedFns;
@@ -348,7 +352,7 @@ internal sealed partial class ZigLowering
     {
         if (_methods.TryGetValue(container, out var known) && known.TryGetValue(method, out var sym))
         {
-            return sym;
+            return ActivateMethod(sym);   // a held reified body is queued now that it is referenced (task #190)
         }
         // A reified container's method whose signature did not lower (task #108): now that it is referenced, its failure.
         if (_shared.FailedMethods.TryGetValue((container, method), out var failure))

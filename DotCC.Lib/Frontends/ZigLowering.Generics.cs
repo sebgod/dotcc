@@ -1151,7 +1151,7 @@ internal sealed partial class ZigLowering
                      && argScope._methods.TryGetValue(containerName, out var containerMethods)
                      && containerMethods.TryGetValue(Tok(memberTok), out var method)
                      && !argScope._genericFns.ContainsKey(method):
-                return (argScope, method);
+                return (argScope, argScope.ActivateMethod(method));
             default:
                 return null;
         }
@@ -1891,7 +1891,7 @@ internal sealed partial class ZigLowering
                 {
                     if (TryDeclareReifiedMethod(nContainer, nDef, mangled) is not { } nm) { continue; }
                     if (IsFnTemplate(nm.sym)) { continue; }   // a generic method instantiates per call
-                    _pendingReifiedMethods.Add(new PendingReifiedMethod(
+                    DeferReifiedMethod(new PendingReifiedMethod(
                         nm.sym, nContainer, nm.ps, nm.body, methodTypeSeeds, valueSeeds, optionalSeeds, typeFnSeeds));
                 }
                 _currentContainer = mangled;
@@ -1909,7 +1909,7 @@ internal sealed partial class ZigLowering
                     _currentContainer = mangled;   // DeclareMethod clears it; the next signature needs it back
                     if (declared is not { } me) { continue; }
                     if (IsFnTemplate(me.sym)) { continue; }   // a generic method instantiates per call
-                    _pendingReifiedMethods.Add(new PendingReifiedMethod(
+                    DeferReifiedMethod(new PendingReifiedMethod(
                         me.sym, mangled, me.ps, me.body, methodTypeSeeds, valueSeeds, optionalSeeds, typeFnSeeds));
                 }
             }
@@ -1949,6 +1949,31 @@ internal sealed partial class ZigLowering
     /// <c>Self</c> and sibling-method calls resolve while the body lowers) and the reification's comptime
     /// seeds, re-applied per body so the method's own references to <c>T</c> / a comptime value param
     /// resolve to the same concrete types the signature was built from.</summary>
+    /// <summary>Queue a reified container's method body, or, in a lazily prepared module, hold it until something references
+    /// the method (task #190): zig analyses only the functions a program reaches, and an unreferenced one (std.PriorityDequeue's
+    /// debugging `dump`, which prints through std.debug) may need what dotcc cannot lower. A lookup of the method
+    /// (<see cref="ActivateMethod"/>) or a comptime evaluation demanding it (<see cref="TryLowerBodyOnDemand"/>) queues it
+    /// for this module's drain, which the graph's fixpoint re-runs. A root unit keeps its bodies eager: it drains once, in
+    /// pass 2.5, so a body woken after that would never lower.</summary>
+    private void DeferReifiedMethod(PendingReifiedMethod method)
+    {
+        if (!_lazy)
+        {
+            _pendingReifiedMethods.Add(method);
+            return;
+        }
+        var owner = this;
+        _shared.DormantMethodBodies[method.Method] = () => owner._pendingReifiedMethods.Add(method);
+    }
+
+    /// <summary>Queue the body of a method a reference has just reached, if it was held (see <see cref="DeferReifiedMethod"/>),
+    /// and return the method.</summary>
+    private Symbol ActivateMethod(Symbol method)
+    {
+        if (_shared.DormantMethodBodies.Remove(method, out var queue)) { queue(); }
+        return method;
+    }
+
     private sealed record PendingReifiedMethod(
         Symbol Method,
         string Container,

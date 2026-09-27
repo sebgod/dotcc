@@ -73,6 +73,10 @@ internal sealed class ZigImportScope
     /// <summary>Per enum name, member name → its enum-constant symbol.</summary>
     public Dictionary<string, Dictionary<string, Symbol>> EnumMembers { get; } = new(StringComparer.Ordinal);
 
+    /// <summary>A reified container's method whose BODY is held until something references the method (task #190), →
+    /// the action that queues it for its owner's drain. Shared: the reference may come from another module.</summary>
+    public Dictionary<Symbol, System.Action> DormantMethodBodies { get; } = new();
+
     /// <summary>(container, method) → the module that owns an as-yet-undeclared lazy method + its AST.</summary>
     public Dictionary<(string container, string method), (ZigLowering owner, Item decl)> LazyMethodDecls { get; } = new();
 
@@ -334,6 +338,9 @@ internal sealed class ZigModuleGraph
 
     /// <summary>Record a root module for <see cref="TryLowerBodyOnDemand"/>.</summary>
     internal void RegisterRoot(ZigLowering lowering) => _roots.Add(lowering);
+
+    /// <summary>The emitted names of every root unit's top-level functions, which are unmangled (task #190).</summary>
+    internal IEnumerable<string> RootFunctionTargetNames() => _roots.SelectMany(r => r.TopLevelFunctionTargetNames());
 
     /// <summary>Every deferred <c>comptime</c> fold of the build, from any module (Milestone T pass 3,
     /// lifted to the graph). A fold may call a function another module owns, such as

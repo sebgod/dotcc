@@ -231,4 +231,64 @@ public sealed class ZigFileStructTests
             """)));
         ex.Message.ShouldContain("Deprecated; use 'fresh' instead");
     }
+
+    [Fact]
+    public void An_unreferenced_method_of_a_reified_generic_is_never_lowered()
+    {
+        // Task #190 (std.PriorityDequeue's debugging `dump`): zig analyses only the functions a program reaches, so a method
+        // nothing calls may hold what cannot compile. In a lazily prepared module its body is held until a reference; it
+        // had been lowered with every other method, and its `@compileError` failed the build. zig returns 42.
+        var cs = EmitZigMulti("""
+            const lib = @import("lib.zig");
+            pub fn main() u8 {
+                const b: lib.Box(u8) = .{ .value = 42 };
+                return b.get();
+            }
+            """, ("lib.zig", """
+            pub fn Box(comptime T: type) type {
+                return struct {
+                    value: T,
+                    const Self = @This();
+                    pub fn get(self: Self) T {
+                        return self.value;
+                    }
+                    pub fn broken(self: Self) void {
+                        _ = self;
+                        @compileError("Box.broken is not meant to be called");
+                    }
+                };
+            }
+            """));
+        cs.ShouldContain("_get(");
+        cs.ShouldNotContain("_broken");
+    }
+
+    [Fact]
+    public void A_called_method_of_a_reified_generic_still_raises_its_compile_error()
+    {
+        // Task #190: the held body lowers once referenced, so its diagnostic is zig's, at the call.
+        var ex = Should.Throw<Exception>(() => EmitZigMulti("""
+            const lib = @import("lib.zig");
+            pub fn main() u8 {
+                const b: lib.Box(u8) = .{ .value = 42 };
+                b.broken();
+                return b.get();
+            }
+            """, ("lib.zig", """
+            pub fn Box(comptime T: type) type {
+                return struct {
+                    value: T,
+                    const Self = @This();
+                    pub fn get(self: Self) T {
+                        return self.value;
+                    }
+                    pub fn broken(self: Self) void {
+                        _ = self;
+                        @compileError("Box.broken is not meant to be called");
+                    }
+                };
+            }
+            """)));
+        ex.Message.ShouldContain("Box.broken is not meant to be called");
+    }
 }

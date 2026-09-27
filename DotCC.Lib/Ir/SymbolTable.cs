@@ -187,6 +187,11 @@ public sealed class SymbolTable
     /// <c>i</c>).</summary>
     public void BeginFunction() => _usedNames.Clear();
 
+    /// <summary>Treat <paramref name="name"/> as already used in the current function, so a block local declared
+    /// with it is uniquified: an identifier the body must still reach by that name (a function of another unit it
+    /// calls, which a same-named C# local would shadow for the whole block).</summary>
+    internal void Reserve(string name) => _usedNames.Add(name);
+
     /// <summary>A function's lowering, set aside while another body lowers in the middle of it: its
     /// block scopes (everything above file scope) and its used names.</summary>
     internal sealed record SuspendedFunction(List<Dictionary<string, Symbol>> Scopes, string[] UsedNames);

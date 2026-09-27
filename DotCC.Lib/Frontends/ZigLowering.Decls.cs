@@ -440,6 +440,14 @@ internal sealed partial class ZigLowering
                 ? (esName, esMembers)
                 : null;
         _symbols.BeginFunction();
+        // A std body may call a root unit's function (std.PriorityDequeue's `compareFn` bound to the user's `order`, task
+        // #190), whose name is unmangled; a std local of that name (`const order = compareFn(…);`) would shadow it for the
+        // whole C# block, so the local is renamed. zig forbids that shadowing within one file, so only another unit's
+        // body needs it.
+        if (_lazy && _moduleGraph is { } rootGraph)
+        {
+            foreach (var rootFn in rootGraph.RootFunctionTargetNames()) { _symbols.Reserve(rootFn); }
+        }
         _symbols.EnterScope();
         var ptrSizeShadows = new List<(string name, string? prev)>();
         // Seed comptime-TYPE parameters (wall-plan W3b): `T ↦ concrete` into _typeAliases, shadow-saved

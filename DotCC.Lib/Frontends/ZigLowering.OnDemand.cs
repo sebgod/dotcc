@@ -56,6 +56,8 @@ internal sealed partial class ZigLowering
     /// <summary>The lookup and lowering behind <see cref="TryLowerBodyOnDemand"/>.</summary>
     private bool TryLowerBodyOnDemandCore(Symbol sym)
     {
+        // A held reified method body (task #190) moves to its owner's queue first, where the owner's call below finds it.
+        ActivateMethod(sym);
         if (_rootBodies.FirstOrDefault(e => ReferenceEquals(e.sym, sym)) is { body: not null } root)
         {
             using var _ = new FnStateScope(this);
