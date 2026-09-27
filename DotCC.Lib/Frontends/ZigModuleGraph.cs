@@ -101,6 +101,10 @@ internal sealed class ZigImportScope
     /// evaluated in <c>Owner</c>, the module that declared the struct.</summary>
     public Dictionary<(string Struct, string Field), (Item? Align, bool HasDefault, ZigLowering Owner)> StructFieldAttrs { get; } = new();
 
+    /// <summary>Each struct field's spelled sentinel (<see cref="ZigLowering.ZigSentinel"/>), by (struct IR name, field),
+    /// shared: std.json.static's innerParse reads a user struct's field types and asks `ptrInfo.sentinel()` (task #213).</summary>
+    public Dictionary<(string Struct, string Field), ZigLowering.ZigSentinel> StructFieldSentinels { get; } = new();
+
     /// <summary>The struct types synthesized for untyped anonymous struct literals, by their field names and types, shared
     /// so every module gives one shape one type (task #108).</summary>
     public Dictionary<string, string> AnonStructs { get; } = new(StringComparer.Ordinal);

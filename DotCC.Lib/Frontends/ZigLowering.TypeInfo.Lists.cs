@@ -35,6 +35,8 @@ internal sealed partial class ZigLowering
         public required string Label { get; init; }
         public IReadOnlyList<string>? Strings { get; init; }
         public IReadOnlyList<CType>? Types { get; init; }
+        /// <summary>Beside <see cref="Types"/>: each element type's spelled sentinel where one is known (task #213).</summary>
+        public IReadOnlyList<ZigSentinel?>? TypeSentinels { get; init; }
         public IReadOnlyList<long>? Ints { get; init; }
         public IReadOnlyList<ZigFieldAttr>? Attrs { get; init; }
 
@@ -213,7 +215,13 @@ internal sealed partial class ZigLowering
             case "field_types":
                 if (FieldsOfAggregate(info.Type) is { } tf)
                 {
-                    list = new ZigComptimeList { Label = field, Types = tf.Select(x => x.Type).ToList() };
+                    var owner = ((CType.Named)info.Type.Unqualified).Name;
+                    list = new ZigComptimeList
+                    {
+                        Label = field,
+                        Types = tf.Select(x => x.Type).ToList(),
+                        TypeSentinels = tf.Select(x => _shared.StructFieldSentinels.GetValueOrDefault((owner, x.Name))).ToList(),
+                    };
                     return true;
                 }
                 if (info.Type.Unqualified is CType.Tuple tt)

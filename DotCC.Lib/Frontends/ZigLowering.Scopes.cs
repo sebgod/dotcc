@@ -36,9 +36,9 @@ internal sealed partial class ZigLowering
     private readonly ref struct ReifiedSeedScope
     {
         private readonly ZigLowering? _owner;
-        private readonly List<(string Name, CType? Prev, int? PrevBits, string? PrevPtrSize)>? _shadows;
+        private readonly List<(string Name, CType? Prev, int? PrevBits, string? PrevPtrSize, ZigSentinel? PrevSentinel)>? _shadows;
 
-        internal ReifiedSeedScope(ZigLowering? owner, List<(string Name, CType? Prev, int? PrevBits, string? PrevPtrSize)>? shadows)
+        internal ReifiedSeedScope(ZigLowering? owner, List<(string Name, CType? Prev, int? PrevBits, string? PrevPtrSize, ZigSentinel? PrevSentinel)>? shadows)
         {
             _owner = owner;
             _shadows = shadows;
@@ -49,10 +49,11 @@ internal sealed partial class ZigLowering
             if (_owner is not { } o || _shadows is not { } sh) { return; }
             for (var i = sh.Count - 1; i >= 0; i--)
             {
-                var (name, prev, prevBits, prevPtrSize) = sh[i];
+                var (name, prev, prevBits, prevPtrSize, prevSentinel) = sh[i];
                 if (prev is { } p) { o._typeAliases[name] = p; } else { o._typeAliases.Remove(name); }
                 o.SetDeclaredIntBits(name, prevBits);
                 o.SetDeclaredPtrSize(name, prevPtrSize);
+                o.SetDeclaredSentinel(name, prevSentinel);
             }
             o._symbols.ExitScope();
         }
@@ -72,17 +73,19 @@ internal sealed partial class ZigLowering
             return new ReifiedSeedScope(null, null);
         }
         _symbols.EnterScope();
-        var shadows = new List<(string Name, CType? Prev, int? PrevBits, string? PrevPtrSize)>();
+        var shadows = new List<(string Name, CType? Prev, int? PrevBits, string? PrevPtrSize, ZigSentinel? PrevSentinel)>();
         foreach (var seed in seeds.Types)
         {
             shadows.Add((seed.Name,
                          _typeAliases.TryGetValue(seed.Name, out var prev) ? prev : (CType?)null,
                          _declaredIntBits.TryGetValue(seed.Name, out var pb) ? pb : (int?)null,
-                         _declaredPtrSize.GetValueOrDefault(seed.Name)));
+                         _declaredPtrSize.GetValueOrDefault(seed.Name),
+                         _declaredSentinel.GetValueOrDefault(seed.Name)));
             _typeAliases[seed.Name] = seed.Type;
             SetDeclaredIntBits(seed.Name, seed.DeclaredBits);
             // A pointer seed's size class (`Rev([*]const u8)` reads `.many`, task #150); a seed without one clears it.
             SetDeclaredPtrSize(seed.Name, seed.PointerSize);
+            SetDeclaredSentinel(seed.Name, seed.Sentinel);
         }
         foreach (var seed in seeds.Values) { DeclareValueSeed(seed); }
         foreach (var (name, hasValue, value, inner) in seeds.Optionals)

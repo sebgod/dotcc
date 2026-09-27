@@ -37,7 +37,10 @@ internal sealed partial class ZigLowering
             // so an `anytype` it is passed to can answer `@typeInfo(@TypeOf(x)).int.bits`.
             // A `field_attrs` entry's `defaultValue(T)` (task #162) is a `T`: its receiver has no runtime value to lower.
             if (capName != "_" && _symbols.Resolve(capName) is { } foldedCap
-                && (DefaultValueCall(condItem) is var (_, defaultType) ? DeclaredBitsOfTypeArg(defaultType) : DeclaredBitsOfArgument(condItem))
+                && (DefaultValueCall(condItem) is var (_, defaultType) ? DeclaredBitsOfTypeArg(defaultType)
+                    // A `@typeInfo` payload's `sentinel()` (task #213) is comptime only: there is no value to lower.
+                    : IsTypeInfoSentinelCall(condItem) ? null
+                    : DeclaredBitsOfArgument(condItem))
                    is { } capBits)
             {
                 RecordValueBits(foldedCap, capBits, null);
@@ -242,6 +245,8 @@ internal sealed partial class ZigLowering
         // `f_attr.defaultValue(f_type)` over a comptime `field_attrs` entry (std.mem.zeroInit, task #162): checked before a
         // call is lowered below, since the receiver has no runtime value.
         if (TryFieldAttrDefaultValue(cur, out info)) { return true; }
+        // `ptrInfo.sentinel()` over a folded `@typeInfo` pointer or array (std.json.static's innerParse, task #213).
+        if (TryTypeInfoSentinel(cur, out info)) { return true; }
         // `if (comptime f()) |x|`: a comptime OPTIONAL value (the comptime engine's E2 runs the call now,
         // lowering its body on demand), so `x` is a comptime integer and the branch folds.
         // A call returning `?comptime_int` (`if (std.simd.suggestVectorLength(T)) |block_len|` in std.mem) is
