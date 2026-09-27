@@ -42,6 +42,21 @@ public static class ZigMem
         for (ulong i = 0; i < source.Len; i++) { d[i] = s[i]; }
     }
 
+    /// <summary><c>@memcpy(dest, source)</c> with a many-item pointer SOURCE (<c>items.ptr</c>, std.Deque, task #194):
+    /// <c>dest.len</c> elements are copied, as zig takes the length from the operand that has one.</summary>
+    public static unsafe void CopyForwards<T>(Slice<T> dest, T* source) where T : unmanaged
+    {
+        T* d = dest.Ptr;
+        for (ulong i = 0; i < dest.Len; i++) { d[i] = source[i]; }
+    }
+
+    /// <summary><c>@memcpy(dest, source)</c> with a many-item pointer DEST: <c>source.len</c> elements are copied.</summary>
+    public static unsafe void CopyForwards<T>(T* dest, ConstSlice<T> source) where T : unmanaged
+    {
+        T* s = source.Ptr;
+        for (ulong i = 0; i < source.Len; i++) { dest[i] = s[i]; }
+    }
+
     /// <summary><see cref="CopyForwards{T}(Slice{T}, ConstSlice{T})"/> over a slice of POINTERS (a <c>[N]?*T</c> array
     /// copy, std.Treap's <c>new.children = old.children</c>): C# takes no pointer type argument, so the type argument is
     /// the pointee.</summary>
@@ -68,6 +83,14 @@ public static class ZigMem
             for (ulong i = source.Len; i > 0; i--) { d[i - 1] = s[i - 1]; }
         }
     }
+
+    /// <summary><c>@memmove(dest, source)</c> with a many-item pointer SOURCE: <c>dest.len</c> elements, overlap-safe.</summary>
+    public static unsafe void Move<T>(Slice<T> dest, T* source) where T : unmanaged
+        => Move(dest, new ConstSlice<T>(source, dest.Len));
+
+    /// <summary><c>@memmove(dest, source)</c> with a many-item pointer DEST: <c>source.len</c> elements, overlap-safe.</summary>
+    public static unsafe void Move<T>(T* dest, ConstSlice<T> source) where T : unmanaged
+        => Move(new Slice<T>(dest, source.Len), source);
 
     /// <summary><see cref="Move{T}(Slice{T}, ConstSlice{T})"/> over a slice of POINTERS; the type argument is the
     /// pointee.</summary>

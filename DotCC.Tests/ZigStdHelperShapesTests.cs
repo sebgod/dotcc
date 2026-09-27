@@ -6180,4 +6180,44 @@ public sealed class ZigStdHelperShapesTests
         cs.ShouldContain("byte? __cfv0 = default;");
         cs.ShouldContain("__vcf0 = null;");
     }
+
+    [Fact]
+    public void A_memcpy_operand_may_be_a_many_pointer_when_the_other_has_a_length()
+    {
+        var cs = EmitZig("""
+            pub fn main() u8 {
+                var dst: [4]u8 = .{ 0, 0, 0, 0 };
+                const src = [_]u8{ 1, 2, 3, 4, 5 };
+                const p: [*]const u8 = &src;
+                @memcpy(dst[0..3], p);
+                var raw: [4]u8 = .{ 0, 0, 0, 0 };
+                const q: [*]u8 = &raw;
+                @memcpy(q, src[1..3]);
+                @memmove(dst[1..], p);
+                return dst[0] + dst[3] * 10 + raw[0] * 3 + raw[1];
+            }
+            """);
+        // Task #194 (std.Deque's `@memcpy(deque.buffer[deque.head..], items.ptr)`): a many-item pointer takes the other
+        // operand's length, through the runtime's pointer overloads. zig returns 40.
+        cs.ShouldContain("ZigMem.CopyForwards<byte>(new Slice<byte>(dst + 0, (ulong)(3 - 0)), p);");
+        cs.ShouldContain("ZigMem.CopyForwards<byte>(q, new Slice<byte>(src + 1, (ulong)(3 - 1)));");
+        cs.ShouldContain("ZigMem.Move<byte>(new Slice<byte>(dst + 1, 4UL - (ulong)1), p);");
+    }
+
+    [Fact]
+    public void A_memcpy_between_two_many_pointers_is_rejected()
+    {
+        var ex = Should.Throw<CompileException>(() => EmitZig("""
+            pub fn main() u8 {
+                var raw: [4]u8 = .{ 0, 0, 0, 0 };
+                const src = [_]u8{ 1, 2, 3, 4 };
+                const p: [*]const u8 = &src;
+                const q: [*]u8 = &raw;
+                @memcpy(q, p);
+                return raw[0];
+            }
+            """));
+        // Task #194: neither operand has a length (zig: "unknown copy length").
+        ex.Message.ShouldContain("at least one of dest and source must have a length");
+    }
 }

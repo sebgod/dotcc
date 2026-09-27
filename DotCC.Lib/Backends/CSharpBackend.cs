@@ -142,7 +142,28 @@ internal sealed class CSharpBackend
 
         // struct/union/enum type declarations → the top-level type-decls section.
         var structs = new StringBuilder();
-        foreach (var t in unit.Types) { structs.Append(cg.StructText(t)); }
+        // A prunable aggregate (one a lazily prepared zig module registered, task #194) is emitted only when the program
+        // reaches it: a function or global named it, or so did an aggregate that is emitted. Rendering an emitted
+        // aggregate names its field types, so this repeats until nothing new is reached; the output keeps list order.
+        var structTexts = new string?[unit.Types.Count];
+        bool reachedMore;
+        do
+        {
+            reachedMore = false;
+            for (var i = 0; i < unit.Types.Count; i++)
+            {
+                var t = unit.Types[i];
+                if (structTexts[i] is not null
+                    || unit.PrunableTypes.Contains(t.Name) && !cg._target.RenderedNamedTypes.Contains(t.Name))
+                {
+                    continue;
+                }
+                structTexts[i] = cg.StructText(t);
+                reachedMore = true;
+            }
+        }
+        while (reachedMore);
+        foreach (var text in structTexts) { if (text is not null) { structs.Append(text); } }
         foreach (var en in unit.Enums) { structs.Append(cg.EnumText(en)); }
         // The zig optional-array value types (task #151), last: every type above has rendered by now.
         structs.Append(cg._target.OptionalArrayTypesText());

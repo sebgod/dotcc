@@ -7879,6 +7879,19 @@ public sealed class ZigOracleTests
             "    for (&buf, 0..) |*b, i| b.* = @truncate(i * 3);\n" +
             "    return @truncate(last(buf[0..]) + last(buf[0..30]));\n" +
             "}\n", 156, "" },
+        // Task #194 (std.Deque): a `@memcpy` / `@memmove` operand that is a many-item pointer takes the other's length.
+        new object[] { "memcpy_many_pointer_operand",
+            "pub fn main() u8 {\n" +
+            "    var dst: [4]u8 = .{ 0, 0, 0, 0 };\n" +
+            "    const src = [_]u8{ 1, 2, 3, 4, 5 };\n" +
+            "    const p: [*]const u8 = &src;\n" +
+            "    @memcpy(dst[0..3], p);\n" +
+            "    var raw: [4]u8 = .{ 0, 0, 0, 0 };\n" +
+            "    const q: [*]u8 = &raw;\n" +
+            "    @memcpy(q, src[1..3]);\n" +
+            "    @memmove(dst[1..], p);\n" +
+            "    return dst[0] + dst[3] * 10 + raw[0] * 3 + raw[1];\n" +
+            "}\n", 40, "" },
         // Task #195 (std.SemanticVersion.parse): a later struct-literal field hoists an `orelse return` after an earlier call.
         new object[] { "struct_field_order_with_hoisted_fallback",
             "const It = struct {\n" +
@@ -8969,6 +8982,21 @@ public sealed class ZigOracleTests
             "}\n" +
             "const TestTree = Tree(u8, 5);\n" +
             "const TestNode = TestTree.Node;\n", 42, "" },
+        // Task #194: an imported module's unreached aggregates are not emitted; one reached through an emitted field is.
+        new object[] { "unreached_module_aggregates_pruned",
+            "const lib = @import(\"lib.zig\");\n" +
+            "const RootOnly = struct { x: u8 };\n" +
+            "pub fn main() u8 {\n" +
+            "    const o = lib.make(41);\n" +
+            "    return o.inner.v + @as(u8, @intCast(o.w));\n" +
+            "}\n",
+            "lib.zig",
+            "const Inner = struct { v: u8 };\n" +
+            "pub const Outer = struct { inner: Inner, w: u16 };\n" +
+            "const Unused = struct { b: u16, next: ?*Unused };\n" +
+            "pub fn make(v: u8) Outer {\n" +
+            "    return .{ .inner = .{ .v = v }, .w = 1 };\n" +
+            "}\n", 42, "" },
     };
 
     [Theory]
@@ -9763,6 +9791,71 @@ public sealed class ZigOracleTests
             "    const c = H.hash(4, \"ALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUF\");\n" +
             "    return @truncate((a ^ b ^ c) >> 5);\n" +
             "}\n", 34);
+
+    // Task #194: std.Deque from real std (initBuffer, the Bounded pushes, iterator, popFront / popBack). pushFrontSlice's
+    // `@memcpy(…, items.ptr)` takes a many-item pointer, and deque.zig's test-only FuzzAllocator no longer drags
+    // std.Build into the program (unreached aggregates of an imported module are not emitted).
+    [Fact]
+    public void Dotcc_matches_zig_std_deque() =>
+        MatchesZigWithRealStd("deque",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var buf: [8]u32 = undefined;\n" +
+            "    var d = std.Deque(u32).initBuffer(&buf);\n" +
+            "    d.pushBackBounded(10) catch return 1;\n" +
+            "    d.pushFrontBounded(5) catch return 1;\n" +
+            "    d.pushBackBounded(20) catch return 1;\n" +
+            "    d.pushFrontSliceBounded(&.{ 1, 2 }) catch return 1;\n" +
+            "    var sum: u32 = 0;\n" +
+            "    var it = d.iterator();\n" +
+            "    var i: u32 = 1;\n" +
+            "    while (it.next()) |v| : (i += 1) sum += v * i;\n" +
+            "    const f = d.popFront() orelse return 2;\n" +
+            "    const b = d.popBack() orelse return 3;\n" +
+            "    return @truncate(sum + f * 100 + b);\n" +
+            "}\n", 24);
+
+    // Task #194's probe batch: std.SinglyLinkedList / DoublyLinkedList (intrusive, through @fieldParentPtr) and
+    // std.BitStack from real std.
+    [Fact]
+    public void Dotcc_matches_zig_std_linked_lists_and_bit_stack() =>
+        MatchesZigWithRealStd("linked_lists_bit_stack",
+            "const std = @import(\"std\");\n" +
+            "const Item = struct {\n" +
+            "    v: u8,\n" +
+            "    snode: std.SinglyLinkedList.Node = .{},\n" +
+            "    dnode: std.DoublyLinkedList.Node = .{},\n" +
+            "};\n" +
+            "pub fn main() u8 {\n" +
+            "    var a = Item{ .v = 1 };\n" +
+            "    var b = Item{ .v = 2 };\n" +
+            "    var c = Item{ .v = 3 };\n" +
+            "    var sl: std.SinglyLinkedList = .{};\n" +
+            "    sl.prepend(&c.snode);\n" +
+            "    sl.prepend(&b.snode);\n" +
+            "    sl.prepend(&a.snode);\n" +
+            "    var dl: std.DoublyLinkedList = .{};\n" +
+            "    dl.append(&a.dnode);\n" +
+            "    dl.append(&c.dnode);\n" +
+            "    dl.insertBefore(&c.dnode, &b.dnode);\n" +
+            "    var acc: u16 = 0;\n" +
+            "    var it = dl.last;\n" +
+            "    while (it) |n| : (it = n.prev) {\n" +
+            "        const item: *Item = @fieldParentPtr(\"dnode\", n);\n" +
+            "        acc = acc * 10 + item.v;\n" +
+            "    }\n" +
+            "    sl.remove(&b.snode);\n" +
+            "    var buf: [256]u8 = undefined;\n" +
+            "    var fba = std.heap.FixedBufferAllocator.init(&buf);\n" +
+            "    var bs = std.BitStack.init(fba.allocator());\n" +
+            "    defer bs.deinit();\n" +
+            "    bs.push(1) catch return 1;\n" +
+            "    bs.push(0) catch return 1;\n" +
+            "    bs.push(1) catch return 1;\n" +
+            "    var bits: u8 = 0;\n" +
+            "    while (bs.bit_len > 0) bits = bits * 2 + bs.pop();\n" +
+            "    return @truncate(acc + sl.len() * 7 + bits);\n" +
+            "}\n", 84);
 
     // Task #195: std.SemanticVersion.parse / order / Range.includesVersion from real std. parse's struct literal hoists
     // a later field's `orelse return` behind the earlier field's call; order's `?usize` catch switch has a `null` prong.

@@ -636,7 +636,7 @@ internal sealed partial class ZigLowering
                     throw new IrUnsupportedException("zig struct field: " + (fd.Content?.GetType().Name ?? "null"));
             }
         }
-        _ir.RegisterStructType(name, fields, isUnion: false, layout);
+        RegisterAggregate(name, fields, isUnion: false, layout);
     }
 
     /// <summary>The TYPE a comptime <c>switch</c> selects (std.mem.SplitIterator's
@@ -1101,11 +1101,11 @@ internal sealed partial class ZigLowering
         if (payloadFields.Count > 0)
         {
             payloadTypeName = name + PayloadSuffix;
-            _ir.RegisterStructType(payloadTypeName, payloadFields, isUnion: true);   // [StructLayout(Explicit)], all at offset 0
+            RegisterAggregate(payloadTypeName, payloadFields, isUnion: true);   // [StructLayout(Explicit)], all at offset 0
         }
         var fields = new List<StructField> { new StructField(TagFieldName, tagType) };
         if (payloadTypeName is not null) { fields.Add(new StructField(PayloadFieldName, new CType.Named(payloadTypeName))); }
-        _ir.RegisterStructType(name, fields, isUnion: false);
+        RegisterAggregate(name, fields, isUnion: false);
         _unions[name] = new ZigUnionInfo(name, tagType, TagFieldName, payloadTypeName, PayloadFieldName, variantMap);
     }
 
@@ -1134,7 +1134,7 @@ internal sealed partial class ZigLowering
             }
             fields.Add(new StructField(vname, payload));
         }
-        _ir.RegisterStructType(name, fields, isUnion: true);   // [StructLayout(Explicit)], all at offset 0
+        RegisterAggregate(name, fields, isUnion: true);   // [StructLayout(Explicit)], all at offset 0
         RegisterContainerConsts(name, consts);
         return methods;
     }
@@ -1328,7 +1328,7 @@ internal sealed partial class ZigLowering
         {
             name = "Anon__" + _shared.AnonStructs.Count.ToString(CultureInfo.InvariantCulture);
             _shared.AnonStructs[key] = name;
-            _ir.RegisterStructType(name, fields, isUnion: false);
+            RegisterAggregate(name, fields, isUnion: false);
         }
         return new CType.Named(name);
     }
@@ -2483,8 +2483,41 @@ internal sealed partial class ZigLowering
     /// (unqualified) element type via <paramref name="element"/>. When <paramref name="wantConst"/>
     /// the target slice is <c>[]const T</c> (a read source); otherwise <c>[]T</c> (a write dest).</summary>
     private CExpr LowerMemSlice(Item item, bool wantConst, out CType element)
+        => CoerceMemSlice(LowerExpr(item), wantConst, out element);
+
+    /// <summary>The operands of <c>@memcpy</c> / <c>@memmove</c>, dest first, as zig evaluates them. Each is a slice, an
+    /// array or <c>&amp;array</c>, or a MANY-ITEM POINTER, which takes the other operand's length (std.Deque's
+    /// <c>@memcpy(deque.buffer[deque.head..], items.ptr)</c>, task #194): that pointer is passed as is, and the runtime's
+    /// pointer overload copies the other side's length. zig requires at least one of the two to have a length.</summary>
+    private (CExpr Dest, CExpr Src, CType Element) LowerMemCopyOperands(Item destItem, Item srcItem, string what)
     {
-        var lowered = LowerExpr(item);
+        var destRaw = LowerExpr(destItem);
+        var srcRaw = LowerExpr(srcItem);
+        var destPtr = IsLengthlessPointer(destRaw);
+        var srcPtr = IsLengthlessPointer(srcRaw);
+        if (destPtr && srcPtr)
+        {
+            throw new CompileException(
+                $"zig `{what}`: at least one of dest and source must have a length (a slice, an array or a pointer to an array), "
+                + "not two many-item pointers");
+        }
+        if (destPtr)
+        {
+            var srcSlice = CoerceMemSlice(srcRaw, wantConst: true, out var fromSrc);
+            return (destRaw, srcSlice, fromSrc);
+        }
+        var destSlice = CoerceMemSlice(destRaw, wantConst: false, out var element);
+        return (destSlice, srcPtr ? srcRaw : CoerceMemSlice(srcRaw, wantConst: true, out _), element);
+    }
+
+    /// <summary>True for a pointer with no length of its own (a <c>[*]T</c>, not a <c>*[N]T</c>): a <c>@memcpy</c>
+    /// operand that takes the other operand's length.</summary>
+    private static bool IsLengthlessPointer(CExpr e)
+        => e.Type.Unqualified is CType.Pointer { Pointee.Unqualified: not (CType.Array or CType.VoidType) };
+
+    /// <summary>The body of <see cref="LowerMemSlice"/> over an already-lowered operand.</summary>
+    private CExpr CoerceMemSlice(CExpr lowered, bool wantConst, out CType element)
+    {
         element = SliceElementOf(lowered).Unqualified;
         if (lowered.Type.Unqualified is CType.Slice) { return lowered; }
         var elemQ = wantConst ? element.WithQuals(TypeQual.Const) : element;
@@ -3041,8 +3074,7 @@ internal sealed partial class ZigLowering
                 {
                     throw new IrUnsupportedException($"zig `@memcpy` expects (dest, source); got {bargs.Count} argument(s)");
                 }
-                var mcDest = LowerMemSlice(bargs[0], wantConst: false, out var mcElem);
-                var mcSrc = LowerMemSlice(bargs[1], wantConst: true, out _);
+                var (mcDest, mcSrc, mcElem) = LowerMemCopyOperands(bargs[0], bargs[1], "@memcpy");
                 return new ZigMemCall("CopyForwards", mcElem, new List<CExpr> { mcDest, mcSrc }) { Type = CType.Void };
             case "@call":
             {
@@ -3068,8 +3100,7 @@ internal sealed partial class ZigLowering
                 {
                     throw new IrUnsupportedException($"zig `@memmove` expects (dest, source); got {bargs.Count} argument(s)");
                 }
-                var mmDest = LowerMemSlice(bargs[0], wantConst: false, out var mmElem);
-                var mmSrc = LowerMemSlice(bargs[1], wantConst: true, out _);
+                var (mmDest, mmSrc, mmElem) = LowerMemCopyOperands(bargs[0], bargs[1], "@memmove");
                 return new ZigMemCall("Move", mmElem, new List<CExpr> { mmDest, mmSrc }) { Type = CType.Void };
             case "@memset":
                 // `@memset(dest, value)` — set every element of `dest` to `value` (lowered at the

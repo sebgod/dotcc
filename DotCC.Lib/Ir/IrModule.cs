@@ -225,6 +225,12 @@ internal sealed partial class IrModule
         }
     }
 
+    /// <summary>The aggregates a lazily prepared Zig module registered (std, a sibling file), which the backend emits
+    /// only when the program reaches them (task #194). zig analyses a declaration only when something references it, so
+    /// std.Deque's test-only <c>FuzzAllocator</c> (a field of type <c>*std.testing.Smith</c>) must not bring std.Build,
+    /// os.windows and dwarf into the program; a C or root-unit aggregate is always emitted.</summary>
+    internal HashSet<string> PrunableTypes { get; } = new(System.StringComparer.Ordinal);
+
     /// <summary>Withdraw a registered struct / union so it is not emitted: a lazy Zig module's container
     /// found, after registering, to hold a container that could not be lowered (road-to-zig-std G3,
     /// <c>ZigLowering.FailDependentContainers</c>). A no-op for a name that is not registered.</summary>

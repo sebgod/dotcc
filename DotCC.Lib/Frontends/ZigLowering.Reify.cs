@@ -373,7 +373,7 @@ internal sealed partial class ZigLowering
         {
             if (f.Default is { } d) { _reifiedFieldDefaults[(name, f.Name)] = d; }
         }
-        _ir.RegisterStructType(name, fields.Select(f => new StructField(f.Name, f.Type)).ToList(), isUnion: false, layout);
+        RegisterAggregate(name, fields.Select(f => new StructField(f.Name, f.Type)).ToList(), isUnion: false, layout);
     }
 
     /// <summary>Each <c>@Struct</c>-built field's default, already a literal (the other field defaults are ASTs, see
@@ -1027,6 +1027,14 @@ internal sealed partial class ZigLowering
         CType.Func f => FailedContainerIn(f.Return) ?? f.Params.Select(FailedContainerIn).FirstOrDefault(x => x is not null),
         _ => null,
     };
+
+    /// <summary>Register a struct / union with the IR (<see cref="IrModule.RegisterStructType"/>). One a lazily prepared
+    /// module registers is prunable: the backend emits it only when the program reaches it (task #194).</summary>
+    private void RegisterAggregate(string name, List<StructField> fields, bool isUnion, AggregateLayout layout = AggregateLayout.Default)
+    {
+        _ir.RegisterStructType(name, fields, isUnion, layout);
+        if (_lazy) { _ir.PrunableTypes.Add(name); }
+    }
 
     /// <summary>Run one container's pass-0 registration, isolating a failure in a LAZY module (see
     /// <see cref="_failedContainers"/>): the container is withdrawn from the type table, so nothing

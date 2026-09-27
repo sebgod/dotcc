@@ -338,4 +338,31 @@ public sealed class ZigFileStructTests
         cs.ShouldContain("lib__Tree__u8_fnless__Node a = __anf0;");
         cs.ShouldNotContain("fn5");
     }
+
+    [Fact]
+    public void A_lazy_module_aggregate_is_emitted_only_when_the_program_reaches_it()
+    {
+        var cs = EmitZigMulti("""
+            const lib = @import("lib.zig");
+            const RootOnly = struct { x: u8 };
+            pub fn main() u8 {
+                const o = lib.make(41);
+                return o.inner.v + @as(u8, @intCast(o.w));
+            }
+            """, ("lib.zig", """
+            const Inner = struct { v: u8 };
+            pub const Outer = struct { inner: Inner, w: u16 };
+            const Unused = struct { b: u16, next: ?*Unused };
+            pub fn make(v: u8) Outer {
+                return .{ .inner = .{ .v = v }, .w = 1 };
+            }
+            """));
+        // Task #194 (std.Deque's test-only `FuzzAllocator` field `*std.testing.Smith` had pulled std.Build, os.windows
+        // and dwarf into the program, some of which cannot build): an imported module's aggregate is emitted when a
+        // function or global names it, or an emitted aggregate's field does; a root aggregate always is. zig returns 42.
+        cs.ShouldContain("unsafe struct lib__Outer");
+        cs.ShouldContain("unsafe struct lib__Inner");
+        cs.ShouldContain("unsafe struct RootOnly");
+        cs.ShouldNotContain("lib__Unused");
+    }
 }
