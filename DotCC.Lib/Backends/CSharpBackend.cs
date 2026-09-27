@@ -223,6 +223,9 @@ internal sealed class CSharpBackend
             // A zig `void` field (std.sort's `sub_ctx: @TypeOf(context)` for a `{}` context) has no storage, and C#
             // has no void field (CS0670): it is left out, as its initializers and argument uses are erased too.
             if (f.Type.Unqualified is CType.VoidType) { fi++; continue; }
+            // A zero-length array field (zig's `data: [0]u8`, the flexible-array idiom, task #197) has no storage either,
+            // and C# has no zero-length fixed buffer or InlineArray (CS1665): it is left out too.
+            if (f.Type.Unqualified is CType.Array zeroArr && FlatCount(zeroArr) == 0) { fi++; continue; }
             if (t.IsUnion) { sb.Append("    [System.Runtime.InteropServices.FieldOffset(0)]\n"); }
             // An array member is C-inline storage, not a pointer field. A primitive
             // element lowers to a C# `fixed` buffer (inline, indexable, decays to a
@@ -1959,6 +1962,14 @@ internal sealed class CSharpBackend
                 return ("default(Unit)", PPrimary);
             case Member m:
             {
+                // A zero-length array field has no emitted storage (StructText): its address would be the byte after the
+                // fields before it, which only zig's layout rules fix, so a read of it is not modeled yet (task #197).
+                if (m.Type.Unqualified is CType.Array zeroField && FlatCount(zeroField) == 0)
+                {
+                    throw new IrUnsupportedException(
+                        $"zig zero-length array field `{m.Field}` has no storage in the emitted C#; reading it (a flexible "
+                        + "array's address) is not supported yet");
+                }
                 var dot = $"{Sub(m.Base, PPostfix)}{(m.Arrow ? "->" : ".")}{DotCC.EmitHelpers.Id(m.Field)}";
                 // A non-primitive array member is stored as an [InlineArray]; its
                 // access decays to the element pointer `(T*)&field` (C#'s InlineArray

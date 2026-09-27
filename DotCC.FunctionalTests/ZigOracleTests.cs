@@ -7879,6 +7879,18 @@ public sealed class ZigOracleTests
             "    for (&buf, 0..) |*b, i| b.* = @truncate(i * 3);\n" +
             "    return @truncate(last(buf[0..]) + last(buf[0..30]));\n" +
             "}\n", 156, "" },
+        // Task #197: a zero-length array field (`data: [0]u8`) has no storage.
+        new object[] { "zero_length_array_field",
+            "const Header = struct {\n" +
+            "    kind: u8,\n" +
+            "    len: u8,\n" +
+            "    data: [0]u8,\n" +
+            "};\n" +
+            "pub fn main() u8 {\n" +
+            "    var h = Header{ .kind = 40, .len = 2, .data = .{} };\n" +
+            "    h.len += @sizeOf(Header);\n" +
+            "    return h.kind + h.len - @sizeOf(Header);\n" +
+            "}\n", 42, "" },
         // Task #194 (std.Deque): a `@memcpy` / `@memmove` operand that is a many-item pointer takes the other's length.
         new object[] { "memcpy_many_pointer_operand",
             "pub fn main() u8 {\n" +
