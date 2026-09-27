@@ -505,20 +505,32 @@ internal sealed partial class ZigLowering
         return pre.Count == 1 ? pre[0] : new Seq(pre);
     }
     /// <summary>A value <c>if (c) return v else w</c> (std.fmt.parse_float's FloatStream.first): the then arm leaves the
-    /// function, so the statement hoists <c>if (c) return v;</c> ahead of itself and the expression is <c>w</c>. The
-    /// condition is evaluated exactly once, before the rest of the statement, as zig does; a comptime-false one
-    /// drops the return.</summary>
+    /// function, so the statement hoists <c>if (c) return v;</c> ahead of itself and the expression is <c>w</c>.</summary>
     private CExpr LowerIfReturnThen(Item condItem, Item returnedItem, Item elseItem, CType? sink)
+        => LowerIfEarlyReturn(condItem, returnOnTrue: true, returnedItem, elseItem, sink);
+
+    /// <summary>A value <c>if (c) v else return e</c> (std.heap.MemoryPool.create's <c>… else if (growable) x else return
+    /// error.OutOfMemory;</c>, task #200), the mirror of <see cref="LowerIfReturnThen"/>: the statement hoists
+    /// <c>if (!c) return e;</c> ahead of itself and the expression is <c>v</c>.</summary>
+    private CExpr LowerIfElseReturn(Item condItem, Item thenItem, Item returnedItem, CType? sink)
+        => LowerIfEarlyReturn(condItem, returnOnTrue: false, returnedItem, thenItem, sink);
+
+    /// <summary>The shared body of <see cref="LowerIfReturnThen"/> and <see cref="LowerIfElseReturn"/>: one arm returns
+    /// from the function, the other is the value. The condition is evaluated exactly once, before the rest of the
+    /// statement, as zig does; when it is comptime-known not to take the returning arm, the return is dropped.</summary>
+    private CExpr LowerIfEarlyReturn(Item condItem, bool returnOnTrue, Item returnedItem, Item valueItem, CType? sink)
     {
-        if (TryFoldComptimeCondition(condItem) is false)
+        if (TryFoldComptimeCondition(condItem) is { } known && known != returnOnTrue)
         {
-            return sink is null ? LowerExpr(elseItem) : LowerExprSink(elseItem, sink);
+            return sink is null ? LowerExpr(valueItem) : LowerExprSink(valueItem, sink);
         }
         var savedImpure = _hoistImpureSeen;
         var cond = LowerExpr(condItem);
+        var test = returnOnTrue ? cond : new Unary(UnOp.LogNot, cond) { Type = CType.Int };
         var early = Hoisted(() => LowerReturn(returnedItem));
         _hoistImpureSeen = savedImpure;
-        RequireHoistable("zig value `if (c) return x else y`").Add(new If(cond, early, null));
-        return sink is null ? LowerExpr(elseItem) : LowerExprSink(elseItem, sink);
+        RequireHoistable(returnOnTrue ? "zig value `if (c) return x else y`" : "zig value `if (c) x else return y`")
+            .Add(new If(test, early, null));
+        return sink is null ? LowerExpr(valueItem) : LowerExprSink(valueItem, sink);
     }
 }
