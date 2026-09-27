@@ -6669,4 +6669,24 @@ public sealed class ZigStdHelperShapesTests
         // Task #213: dotcc erases a sentinel in the lowered type; with no spelling in reach it does not guess.
         ex.Message.ShouldContain("dotcc erases a sentinel in the lowered type, and nothing that spelled this one is in reach");
     }
+
+    [Fact]
+    public void Overflow_builtins_over_128_bit_operands_lower_to_the_exact_helpers()
+    {
+        var cs = EmitZig("""
+            pub fn main() u8 {
+                var big: u128 = 1;
+                big <<= 127;
+                var half: i128 = 1;
+                half <<= 126;
+                const m = @mulWithOverflow(big, @as(u128, 2));
+                const a = @addWithOverflow(half, half);
+                return @as(u8, m[1]) + @as(u8, a[1]);
+            }
+            """);
+        // Task #214: a 128-bit operand was a loud cut (the helpers' 128-bit accumulator cannot hold its exact result); the
+        // runtime's non-generic UInt128 / Int128 overloads now compute it in a BigInteger.
+        cs.ShouldContain("ZigMath.MulWithOverflow(big, ");
+        cs.ShouldContain("ZigMath.AddWithOverflow(half, half)");
+    }
 }

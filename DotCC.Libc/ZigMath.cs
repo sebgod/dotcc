@@ -96,6 +96,46 @@ public static class ZigMath
             ? OverflowSigned<T>(System.Int128.CreateTruncating(a) * System.Int128.CreateTruncating(b))
             : OverflowUnsigned<T>(System.UInt128.CreateTruncating(a) * System.UInt128.CreateTruncating(b));
 
+    // The 128-bit operands (a `u128` mantissa in std.fmt.parseFloat(f128, …), task #214) have no wider primitive
+    // accumulator, so their exact result is a BigInteger. C# prefers these non-generic overloads for a UInt128 / Int128
+    // pair, so the generic helpers above keep every narrower width.
+
+    /// <summary><c>@addWithOverflow</c> over <c>u128</c>: the wrapped sum and whether the exact one leaves the range.</summary>
+    public static (System.UInt128, byte) AddWithOverflow(System.UInt128 a, System.UInt128 b)
+        => (unchecked(a + b), (System.Numerics.BigInteger)a + b > System.UInt128.MaxValue ? (byte)1 : (byte)0);
+
+    /// <summary><c>@addWithOverflow</c> over <c>i128</c>.</summary>
+    public static (System.Int128, byte) AddWithOverflow(System.Int128 a, System.Int128 b)
+        => (unchecked(a + b), OutOfInt128((System.Numerics.BigInteger)a + b));
+
+    /// <summary><c>@subWithOverflow</c> over <c>u128</c>: a difference below zero overflows.</summary>
+    public static (System.UInt128, byte) SubWithOverflow(System.UInt128 a, System.UInt128 b)
+        => (unchecked(a - b), a < b ? (byte)1 : (byte)0);
+
+    /// <summary><c>@subWithOverflow</c> over <c>i128</c>.</summary>
+    public static (System.Int128, byte) SubWithOverflow(System.Int128 a, System.Int128 b)
+        => (unchecked(a - b), OutOfInt128((System.Numerics.BigInteger)a - b));
+
+    /// <summary><c>@mulWithOverflow</c> over <c>u128</c>.</summary>
+    public static (System.UInt128, byte) MulWithOverflow(System.UInt128 a, System.UInt128 b)
+        => (unchecked(a * b), (System.Numerics.BigInteger)a * b > System.UInt128.MaxValue ? (byte)1 : (byte)0);
+
+    /// <summary><c>@mulWithOverflow</c> over <c>i128</c>.</summary>
+    public static (System.Int128, byte) MulWithOverflow(System.Int128 a, System.Int128 b)
+        => (unchecked(a * b), OutOfInt128((System.Numerics.BigInteger)a * b));
+
+    /// <summary><c>@shlWithOverflow</c> over <c>u128</c>: the shifted-out bits overflow.</summary>
+    public static (System.UInt128, byte) ShlWithOverflow(System.UInt128 a, int shift)
+        => (a << shift, ((System.Numerics.BigInteger)a << shift) > System.UInt128.MaxValue ? (byte)1 : (byte)0);
+
+    /// <summary><c>@shlWithOverflow</c> over <c>i128</c>.</summary>
+    public static (System.Int128, byte) ShlWithOverflow(System.Int128 a, int shift)
+        => (a << shift, OutOfInt128((System.Numerics.BigInteger)a << shift));
+
+    /// <summary>1 when an exact result leaves <c>i128</c>'s range, else 0.</summary>
+    private static byte OutOfInt128(System.Numerics.BigInteger exact)
+        => exact > System.Int128.MaxValue || exact < System.Int128.MinValue ? (byte)1 : (byte)0;
+
     /// <summary><c>@shlWithOverflow(a, shift)</c> → <c>.{ a &lt;&lt;% shift, overflow }</c>; the overflow
     /// bit is set when the shift loses any high bits (truncating the exact 128-bit shift changed the
     /// value). The shift amount is a small non-negative count (Zig's <c>Log2(T)</c>).</summary>

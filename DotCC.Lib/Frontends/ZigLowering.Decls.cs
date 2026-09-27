@@ -3314,9 +3314,8 @@ internal sealed partial class ZigLowering
     /// <c>@subWithOverflow</c>/<c>@mulWithOverflow</c>) to a <c>ZigMath.&lt;helper&gt;&lt;T&gt;</c> call
     /// (<see cref="DotCC.Libc.ZigMath"/>) returning Zig's <c>struct { T, u1 }</c> — modeled as a
     /// <c>CType.Tuple([T, u8])</c> so it destructures / indexes through the existing tuple path. Both
-    /// operands coerce to the peer-resolved type (evaluated once, as call arguments). A 128-bit operand
-    /// is a loud cut (the overflow flag is computed in a 128-bit accumulator, which can't be widened
-    /// further to detect a 128-bit overflow).</summary>
+    /// operands coerce to the peer-resolved type (evaluated once, as call arguments). A 128-bit pair takes the
+    /// runtime's exact BigInteger overloads (task #214), since no primitive accumulator is wider.</summary>
     private CExpr OverflowBin(string helper, string zigName, IReadOnlyList<Item> bargs)
     {
         if (bargs.Count != 2)
@@ -3326,7 +3325,6 @@ internal sealed partial class ZigLowering
         var a = LowerExpr(bargs[0]);
         var b = LowerExpr(bargs[1]);
         var t = PeerIntType(a, b);
-        RejectWideOverflowOperand(zigName, t);
         return new Call($"ZigMath.{helper}", new List<CExpr> { CoerceToPeer(a, t), CoerceToPeer(b, t) })
         {
             Type = new CType.Tuple(new List<CType> { t, CType.UChar }),
@@ -3348,25 +3346,11 @@ internal sealed partial class ZigLowering
         {
             throw new IrUnsupportedException($"zig `{zigName}` expects an integer value operand, got {value.Type.Describe()}");
         }
-        RejectWideOverflowOperand(zigName, t);
         var shift = new Cast(CType.Int, LowerExpr(bargs[1])) { Type = CType.Int };
         return new Call("ZigMath.ShlWithOverflow", new List<CExpr> { value, shift })
         {
             Type = new CType.Tuple(new List<CType> { t, CType.UChar }),
         };
-    }
-
-    /// <summary>Reject a 128-bit operand of an overflow-detecting builtin: the flag is derived in a
-    /// 128-bit accumulator, so a 128-bit operation can't have its overflow detected (there is no wider
-    /// primitive accumulator). A clear cut rather than a silently-wrong flag.</summary>
-    private static void RejectWideOverflowOperand(string zigName, CType t)
-    {
-        if (t.Unqualified is CType.Prim { Bytes: 16, Integer: true })
-        {
-            throw new IrUnsupportedException(
-                $"zig `{zigName}` on a 128-bit operand is not lowered yet (overflow is computed in a 128-bit "
-                + "accumulator, which can't detect a 128-bit overflow); use a <= 64-bit integer");
-        }
     }
 
     /// <summary>A bit-count builtin (<c>@popCount</c>/<c>@clz</c>/<c>@ctz</c>) → <c>ZigMath.&lt;helper&gt;</c>,

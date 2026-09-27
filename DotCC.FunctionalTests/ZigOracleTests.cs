@@ -7879,6 +7879,28 @@ public sealed class ZigOracleTests
             "    for (&buf, 0..) |*b, i| b.* = @truncate(i * 3);\n" +
             "    return @truncate(last(buf[0..]) + last(buf[0..30]));\n" +
             "}\n", 156, "" },
+        // Task #214 (std.fmt.parseFloat(f128)'s u128 mantissa): the overflow builtins over `u128` / `i128`, exactly.
+        new object[] { "overflow_builtins_128",
+            "pub fn main() u8 {\n" +
+            "    var big: u128 = 1;\n" +
+            "    big <<= 127;\n" +
+            "    var two: u128 = 2;\n" +
+            "    _ = &two;\n" +
+            "    const m = @mulWithOverflow(big, two);\n" +
+            "    var max: u128 = 0;\n" +
+            "    max = ~max;\n" +
+            "    const a = @addWithOverflow(max, 1);\n" +
+            "    const s = @subWithOverflow(two, 5);\n" +
+            "    const k = @shlWithOverflow(two, 127);\n" +
+            "    var half: i128 = 1;\n" +
+            "    half <<= 126;\n" +
+            "    const j = @addWithOverflow(half, half);\n" +
+            "    const i = @mulWithOverflow(-half, 2);\n" +
+            "    var r: u8 = @as(u8, m[1]) + @as(u8, a[1]) * 2 + @as(u8, s[1]) * 4 + @as(u8, k[1]) * 8 + @as(u8, j[1]) * 16 + @as(u8, i[1]) * 32;\n" +
+            "    if (m[0] == 0) r += 64;\n" +
+            "    if (s[0] == max - 2) r += 128;\n" +
+            "    return r;\n" +
+            "}\n", 223, "" },
         // Task #213 (std.json.static.innerParse): `@typeInfo(T).pointer.sentinel()` / `.array.sentinel()` from the spelled type.
         new object[] { "typeinfo_sentinel_from_spelling",
             "fn sentinelOf(comptime T: type) u8 {\n" +
