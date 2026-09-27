@@ -133,6 +133,56 @@ internal sealed partial class ZigLowering
         }
     }
 
+    /// <summary>A struct literal's fields already lowered, while a LATER field lowers (task #195). zig evaluates the fields
+    /// in order, so a later field that must hoist a statement (std.SemanticVersion.parse's
+    /// <c>.minor = try parseNum(it.next() orelse return error.InvalidVersion)</c>, after
+    /// <c>.major = try parseNum(it.first())</c>) cannot be hoisted past an earlier field's call. Instead that earlier
+    /// field goes first: it is bound to a temp in the same buffer, just ahead of the hoisted statement. While a later
+    /// field lowers, the earlier fields' impurity is held in <see cref="ImpureUnspilled"/> rather than in the watermark,
+    /// and <see cref="RequireHoistable"/> spills it on demand. When no hoist comes nothing is spilled, and the literal
+    /// emits as before.</summary>
+    private sealed class SiblingSpillFrame(SiblingSpillFrame? parent, List<CStmt> buffer, List<FieldInit> members)
+    {
+        /// <summary>The enclosing literal's frame, when this literal is one of its fields.</summary>
+        internal SiblingSpillFrame? Parent { get; } = parent;
+
+        /// <summary>The hoist buffer the literal is lowered against; only a hoist into this same buffer spills.</summary>
+        internal List<CStmt> Buffer { get; } = buffer;
+
+        /// <summary>The literal's lowered fields, in order; a spilled one's value is replaced by its temp.</summary>
+        internal List<FieldInit> Members { get; } = members;
+
+        /// <summary>Indices into <see cref="Members"/> of the fields with a side effect that is not in the buffer yet.</summary>
+        internal List<int> ImpureUnspilled { get; } = [];
+    }
+
+    /// <summary>Bind every held-back impure field (<see cref="SiblingSpillFrame"/>) of the literals being lowered against
+    /// <paramref name="buffer"/> to a temp in it, outermost literal first, since an enclosing literal's earlier fields
+    /// were evaluated before this one's. Called just before a construct appends its hoisted statements.</summary>
+    private void SpillHeldSiblings(List<CStmt> buffer)
+    {
+        var chain = new List<SiblingSpillFrame>();
+        for (var f = _siblingSpill; f is not null && ReferenceEquals(f.Buffer, buffer); f = f.Parent) { chain.Add(f); }
+        for (var i = chain.Count - 1; i >= 0; i--)
+        {
+            var frame = chain[i];
+            foreach (var index in frame.ImpureUnspilled)
+            {
+                var member = frame.Members[index];
+                if (member.Value.Type.Unqualified is CType.VoidType)
+                {
+                    buffer.Add(new ExprStmt(member.Value));
+                    frame.Members[index] = member with { Value = new DefaultLit { Type = CType.Void } };
+                    continue;
+                }
+                var temp = _symbols.Declare(new Symbol { Name = "__anf" + _anfTempCounter++, Kind = SymKind.Var, Type = member.Value.Type });
+                buffer.Add(new DeclStmt(new List<LocalDecl> { new(temp, member.Value) }));
+                frame.Members[index] = member with { Value = new VarRef(temp) { Type = member.Value.Type } };
+            }
+            frame.ImpureUnspilled.Clear();
+        }
+    }
+
     /// <summary>Lower into a THROWAWAY hoist buffer until the guard is disposed — for a lowering whose
     /// statements must never reach an emitted body: an operand read only for its TYPE (<c>@TypeOf</c>,
     /// <c>anytype</c> inference) or only for its comptime VALUE (a type body's condition or const). The

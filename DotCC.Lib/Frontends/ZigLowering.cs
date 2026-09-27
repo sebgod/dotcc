@@ -571,6 +571,10 @@ internal sealed partial class ZigLowering
     /// (they don't count against a later hoist). See <see cref="Hoisted"/>.</summary>
     private bool _hoistImpureSeen;
 
+    /// <summary>The innermost struct literal whose earlier fields' side effects are held back while a later field lowers
+    /// (task #195); see <see cref="SiblingSpillFrame"/>.</summary>
+    private SiblingSpillFrame? _siblingSpill;
+
     /// <summary>Monotonic counter for ANF result temporaries (<c>__anfN</c>).</summary>
     private int _anfTempCounter;
 

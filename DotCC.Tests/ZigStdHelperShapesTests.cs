@@ -6089,4 +6089,95 @@ public sealed class ZigStdHelperShapesTests
         // Task #193: only a function is modeled there; zig itself rejects this program (it calls a comptime_int).
         ex.Message.ShouldContain("the `comptime lessFn: anytype` argument must name a function at compile time");
     }
+
+    [Fact]
+    public void A_later_struct_field_that_hoists_goes_after_the_earlier_impure_fields()
+    {
+        var cs = EmitZig("""
+            const It = struct {
+                parts: []const u8,
+                i: usize = 0,
+                fn next(it: *It) ?u8 {
+                    if (it.i >= it.parts.len) return null;
+                    defer it.i += 1;
+                    return it.parts[it.i];
+                }
+            };
+            const V = struct { a: u8, b: u8, c: u8 };
+            fn num(x: u8) !u8 {
+                if (x > 9) return error.Big;
+                return x;
+            }
+            fn parse(parts: []const u8) !V {
+                var it = It{ .parts = parts };
+                const v = V{
+                    .a = try num(it.next() orelse 0),
+                    .b = try num(it.next() orelse return error.Short),
+                    .c = try num(it.next() orelse return error.Short),
+                };
+                return v;
+            }
+            pub fn main() u8 {
+                const v = parse(&.{ 4, 2, 7 }) catch return 1;
+                const short = if (parse(&.{ 1, 2 })) |_| @as(u8, 0) else |_| @as(u8, 50);
+                return v.a * 10 + v.b * 3 + v.c + short;
+            }
+            """);
+        // Task #195 (std.SemanticVersion.parse's `.minor = try parseNum(it.next() orelse return error.InvalidVersion)` after
+        // `.major = try parseNum(it.first())`): zig evaluates the fields in order, so the earlier field's call is bound to a
+        // temp ahead of the later field's hoisted `orelse return`, rather than refused. zig returns 103.
+        cs.ShouldContain("byte __anf0 = ErrUnion.Try(num((It_next(&it) ?? 0)));");
+        cs.ShouldContain("V v = new V { a = __anf0, b = __anf2, c = ErrUnion.Try(num(__anf3)) };");
+    }
+
+    [Fact]
+    public void A_struct_literal_after_an_impure_operand_still_cannot_hoist_a_field()
+    {
+        var ex = Should.Throw<CompileException>(() => EmitZig("""
+            const S = struct { a: u8, b: u8 };
+            var n: u8 = 0;
+            fn side() u8 {
+                n += 1;
+                return n;
+            }
+            fn opt(x: u8) ?u8 {
+                return if (x > 0) x else null;
+            }
+            pub fn main() u8 {
+                return side() + (S{ .a = side(), .b = opt(side()) orelse return 0 }).b;
+            }
+            """));
+        // Task #195: `side()` runs before the literal, so binding the literal's fields ahead of the statement would reorder
+        // them before it; that stays a loud cut. zig returns 4.
+        ex.Message.ShouldContain("can't be hoisted past an earlier side-effecting operand");
+    }
+
+    [Fact]
+    public void A_catch_switch_value_takes_an_optional_result_type()
+    {
+        var cs = EmitZig("""
+            const E = error{ Bad, Big };
+            fn parse(x: u8) E!u8 {
+                if (x == 0) return error.Bad;
+                if (x > 200) return error.Big;
+                return x;
+            }
+            pub fn main() u8 {
+                var total: u8 = 0;
+                for ([_]u8{ 5, 0, 7 }) |x| {
+                    const v: ?u8 = parse(x) catch |err| switch (err) {
+                        error.Bad => null,
+                        error.Big => unreachable,
+                    };
+                    total += if (v) |n| n else 30;
+                }
+                return total;
+            }
+            """);
+        // Task #195 (std.SemanticVersion.order's `const lnum: ?usize = parseUnsigned(…) catch |err| switch (err) {
+        // error.InvalidCharacter => null, … };`): the result is the declared `?u8`, so a prong may be `null` (it had been
+        // the `u8` payload, CS0037). zig returns 42.
+        cs.ShouldContain("byte? __cfv0 = default;");
+        cs.ShouldContain("__vcf0 = null;");
+    }
 }
