@@ -725,8 +725,11 @@ internal sealed partial class ZigLowering
             finally { ExitComptimeProng(); }
         }
         if (TryFoldComptimeIntSwitch(subjectItem, prongsItem, sink) is { } folded) { return folded; }
+        var subjectImpure = _hoistImpureSeen;
         var subject = LowerExpr(subjectItem);
         var arms = new List<SwitchExprArm>();
+        // What each arm hoisted: an arm runs only when selected, so its statements stay with it (task #203).
+        var armHoists = new List<List<CStmt>>();
         foreach (var prongItem in Flatten(prongsItem))
         {
             if (prongItem.Content is not Zig.ProngExpr pe)
@@ -736,7 +739,8 @@ internal sealed partial class ZigLowering
                     "(a labeled `break :blk v`) is supported only as a full `const`/`var`/`return`/assignment RHS " +
                     "(Milestone Y, part 1), not in a sub-expression; a `|x|` capture in a switch expression is not supported yet");
             }
-            var value = LowerExprSink(pe.Arg2, sink);
+            var (value, hoisted) = LowerArmIsolated(() => LowerExprSink(pe.Arg2, sink));
+            armHoists.Add(hoisted);
             // `else` → the `_` default arm; otherwise the prong's case values become the arm's
             // labels (a multi-value prong → several, rendered `a or b`), reusing LowerCaseVals so an
             // inclusive range `lo...hi` lowers to a relational-pattern label exactly as in a
@@ -763,6 +767,11 @@ internal sealed partial class ZigLowering
         var resultType = sink
             ?? arms.Select(a => a.Value.Type).FirstOrDefault(t => t is not null)
             ?? CType.Int;
+        if (armHoists.Any(h => h.Count > 0))
+        {
+            return HoistedValueSwitch(subject, subjectImpure, arms, armHoists,
+                HoistedResultType(sink, resultType, arms.Select(a => a.Value)));
+        }
         return new SwitchExpr(subject, arms) { Type = resultType };
     }
     /// <summary>A switch EXPRESSION over a compile-time-known integer whose prongs a runtime C# switch

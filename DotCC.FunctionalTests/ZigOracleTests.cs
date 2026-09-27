@@ -7962,6 +7962,52 @@ public sealed class ZigOracleTests
             "    q.* = 0;\n" +
             "    return fill(&storage) + cell;\n" +
             "}\n", 42, "" },
+        // Task #203: the right operand of `and` / `or` keeps its `orelse return` inside the short circuit.
+        new object[] { "short_circuit_operand_keeps_its_hoist",
+            "const E = error{Oom};\n" +
+            "fn f(x: u8) E!u8 {\n" +
+            "    if (x == 0) return error.Oom;\n" +
+            "    return x;\n" +
+            "}\n" +
+            "fn andRhs(a: bool, opt: ?u8) u8 {\n" +
+            "    const ok = a and (opt orelse return 20) > 3;\n" +
+            "    return if (ok) 1 else 2;\n" +
+            "}\n" +
+            "fn orRhs(a: bool, opt: ?u8) u8 {\n" +
+            "    const ok = a or (opt orelse return 30) > 3;\n" +
+            "    return if (ok) 3 else 4;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return andRhs(false, null) + andRhs(true, null) + orRhs(true, null) + orRhs(false, 9);\n" +
+            "}\n", 28, "" },
+        // Task #203: the result temp of a value `if` / switch whose arm hoists takes the arms' peer type.
+        new object[] { "hoisted_arm_result_peer_type",
+            "fn wide(c: bool, opt: ?u64) u64 {\n" +
+            "    const v = (if (c) 5 else opt orelse return 9) * 2;\n" +
+            "    return v;\n" +
+            "}\n" +
+            "fn narrow(c: bool, a: u8, b: u8, opt: ?u8) u8 {\n" +
+            "    const v: u8 = if (c) a + b else opt orelse return 11;\n" +
+            "    return v;\n" +
+            "}\n" +
+            "fn sw(k: u8, opt: ?u64) u64 {\n" +
+            "    const v = (switch (k) {\n" +
+            "        0 => 3,\n" +
+            "        else => opt orelse return 13,\n" +
+            "    }) + 1;\n" +
+            "    return v;\n" +
+            "}\n" +
+            "fn flag(c: bool, opt: ?bool) bool {\n" +
+            "    const v = if (c) true else opt orelse return false;\n" +
+            "    return v;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const w = wide(true, null) + wide(false, 1 << 40) / (1 << 38) + wide(false, null);\n" +
+            "    const n = narrow(true, 3, 4, null) + narrow(false, 0, 0, 2) + narrow(false, 0, 0, null);\n" +
+            "    const s = sw(0, null) + sw(1, 20) + sw(2, null);\n" +
+            "    const f = @as(u8, @intFromBool(flag(true, null))) + @as(u8, @intFromBool(flag(false, true))) * 2 + @as(u8, @intFromBool(flag(false, null))) * 4;\n" +
+            "    return @truncate(w + n + s + f);\n" +
+            "}\n", 88, "" },
         // Task #198 (std.BufSet): a `void` value stored into a `[N]void` slot, directly and through a `[*]void`.
         new object[] { "void_store_into_void_slots",
             "fn Set(comptime V: type) type {\n" +
