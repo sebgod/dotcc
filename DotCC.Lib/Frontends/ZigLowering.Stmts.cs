@@ -367,6 +367,11 @@ internal sealed partial class ZigLowering
                 var (objects, captures) = DecomposeForMulti(f.Arg2, f.Arg5);
                 return LowerForParallel(objects, captures, f.Arg7, f.Arg9);
             }
+            case Zig.StmtForMultiTrailElse f:
+            {
+                var (objects, captures) = DecomposeForMulti(f.Arg2, f.Arg6);
+                return LowerForParallel(objects, captures, f.Arg8, f.Arg10);
+            }
 
             // A brace block in statement position (`Stmt -> Block`, pass-through).
             case Zig.Block:

@@ -7879,6 +7879,55 @@ public sealed class ZigOracleTests
             "    for (&buf, 0..) |*b, i| b.* = @truncate(i * 3);\n" +
             "    return @truncate(last(buf[0..]) + last(buf[0..30]));\n" +
             "}\n", 156, "" },
+        // Task #210 (std.json.static.innerParse): `inline for (…,) |…| { … break; } else { … }` and the runtime trailing-comma for-else.
+        new object[] { "inline_for_else_trailing_comma",
+            "fn has(size: usize) u8 {\n" +
+            "    inline for ([_]type{ u8, u16, u32 }) |T| {\n" +
+            "        if (@sizeOf(T) == size) break;\n" +
+            "    } else {\n" +
+            "        return 90;\n" +
+            "    }\n" +
+            "    return 1;\n" +
+            "}\n" +
+            "fn indexOfSize(size: usize) u8 {\n" +
+            "    var found: u8 = 0;\n" +
+            "    inline for ([_]type{ u8, u16, u32 }, 0..,) |T, i| {\n" +
+            "        if (@sizeOf(T) == size) {\n" +
+            "            found = @intCast(i + 10);\n" +
+            "            break;\n" +
+            "        }\n" +
+            "    } else {\n" +
+            "        found = 50;\n" +
+            "    }\n" +
+            "    return found;\n" +
+            "}\n" +
+            "fn countBelow(size: usize) u8 {\n" +
+            "    var n: u8 = 0;\n" +
+            "    inline for ([_]type{ u8, u16, u32 }, 0..) |T, i| {\n" +
+            "        if (@sizeOf(T) >= size) break;\n" +
+            "        n += @intCast(i + 1);\n" +
+            "    } else {\n" +
+            "        n += 20;\n" +
+            "    }\n" +
+            "    return n;\n" +
+            "}\n" +
+            "fn scan(xs: []const u8) u8 {\n" +
+            "    var hits: u8 = 0;\n" +
+            "    for (xs, 0..,) |x, i| {\n" +
+            "        if (x == 0) break;\n" +
+            "        hits += @intCast(i);\n" +
+            "    } else {\n" +
+            "        hits += 7;\n" +
+            "    }\n" +
+            "    return hits;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = has(2) + has(8);\n" +
+            "    const b = indexOfSize(4) + indexOfSize(3);\n" +
+            "    const c = countBelow(4) + countBelow(9);\n" +
+            "    const d = scan(&.{ 1, 2, 3 }) + scan(&.{ 1, 0, 3 });\n" +
+            "    return a + b + c - d;\n" +
+            "}\n", 172, "" },
         // Task #207: `orelse break :l true` keeps its value once `true` can name an enum member (std.Treap's rotate_right).
         new object[] { "orelse_break_label_bool_value",
             "fn f(o: ?u8) bool {\n" +

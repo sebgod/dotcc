@@ -6556,4 +6556,32 @@ public sealed class ZigStdHelperShapesTests
         // field be followed by another member had put every member-starting token into what may follow an expression.
         ex.Message.ShouldContain("parse error at line 1, column 23");
     }
+
+    [Fact]
+    public void An_inline_for_else_runs_the_else_only_when_no_copy_breaks()
+    {
+        var cs = EmitZig("""
+            fn has(size: usize) u8 {
+                inline for ([_]type{ u8, u16 }, 0..,) |T, i| {
+                    _ = i;
+                    if (@sizeOf(T) == size) break;
+                } else {
+                    return 90;
+                }
+                return 1;
+            }
+            pub fn main() u8 {
+                return has(2) + has(8);
+            }
+            """);
+        // Task #210 (std.json.static's innerParse): the unrolled copies, then the else body, then the label a `break` in
+        // any copy jumps to, past the else.
+        cs.ShouldContain("""
+                    {
+                        return 90;
+                    }
+                    __ifbrk0:
+            """.Replace("\r\n", "\n"));
+        cs.ShouldContain("goto __ifbrk0;");
+    }
 }
