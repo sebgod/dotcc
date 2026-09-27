@@ -98,6 +98,9 @@ internal sealed partial class ZigLowering
                     // A value `if` at a slice payload (std.mem.join's `return if (zero) try allocator.dupe(…) else
                     // &[0]u8{};`): each arm coerces to the slice.
                     || valueItem.Content is Zig.IfExpr && eu.Payload.Unqualified is CType.Slice
+                    // A comptime-bounded slice at an array-pointer payload (std.Io.Reader.takeArray's `return (try
+                    // r.take(n))[0..n];` for a `*[n]u8`, task #202): the slice's own pointer.
+                    || valueItem.Content is Zig.SliceRange && eu.Payload.Unqualified is CType.Pointer
                 ? LowerExprSink(valueItem, eu.Payload)
                 : LowerExpr(valueItem);
             if (UnifyErrUnionArms(v, eu) is { } unified) { v = unified; }

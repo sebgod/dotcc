@@ -6356,4 +6356,35 @@ public sealed class ZigStdHelperShapesTests
         cs.ShouldContain("Limit a = Limit_limited(30);");
         cs.ShouldContain("take(Limit_limited(12))");
     }
+
+    [Fact]
+    public void An_error_switch_prong_captures_the_error()
+    {
+        var cs = EmitZig("""
+            const E = error{ A, B, C };
+            fn f(x: u8) E!u8 {
+                return switch (x) {
+                    0 => error.A,
+                    1 => error.B,
+                    2 => error.C,
+                    else => x,
+                };
+            }
+            fn h(x: u8) E!u8 {
+                while (f(x)) |n| {
+                    return n;
+                } else |err| switch (err) {
+                    error.A => return 1,
+                    error.B, error.C => |e| return e,
+                }
+            }
+            pub fn main() u8 {
+                return h(0) catch 5;
+            }
+            """);
+        // Task #202 (std.Io.Reader): the capture is the switched error; the last prong is the unreachable default.
+        cs.ShouldContain("ushort e = err;");
+        cs.ShouldContain("return ErrUnion<byte>.Err(e);");
+        cs.ShouldContain("throw new System.Diagnostics.UnreachableException(");
+    }
 }
