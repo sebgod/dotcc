@@ -1228,7 +1228,15 @@ internal sealed partial class ZigLowering
             return new Seq(stmts);
         }
 
-        var rhs = LowerExpr(d.Arg4);
+        // `const scheme, const rest = std.mem.cutScalar(u8, text, ':') orelse return error.InvalidFormat;` (std.Uri.parse,
+        // task #192): the RHS is a statement point, so a statement-lowering form (an `orelse` / `catch` with a control-flow
+        // fallback) hoists ahead of the temp, as it does for a single binder.
+        CExpr rhs;
+        using (EnterFreshHoist())
+        {
+            rhs = LowerExpr(d.Arg4);
+            if (_hoist is { Count: > 0 } hoisted) { stmts.AddRange(hoisted); }
+        }
         if (rhs.Type.Unqualified is not CType.Tuple tup)
         {
             throw new IrUnsupportedException(

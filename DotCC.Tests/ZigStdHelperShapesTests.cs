@@ -5927,4 +5927,31 @@ public sealed class ZigStdHelperShapesTests
             }
             """)).Message.ShouldContain("empty array literal");
     }
+
+    [Fact]
+    public void A_destructure_takes_an_orelse_return_fallback()
+    {
+        var cs = EmitZig("""
+            fn cut(s: []const u8, c: u8) ?struct { []const u8, []const u8 } {
+                for (s, 0..) |ch, i| {
+                    if (ch == c) return .{ s[0..i], s[i + 1 ..] };
+                }
+                return null;
+            }
+            fn parse(s: []const u8) !usize {
+                const a, const b = cut(s, ':') orelse return error.Bad;
+                return a.len * 10 + b.len;
+            }
+            pub fn main() u8 {
+                const x = parse("ab:cde") catch 0;
+                const y = parse("nocolon") catch 7;
+                return @intCast(x + y);
+            }
+            """);
+        // Task #192 (std.Uri.parse's `const scheme, const rest = std.mem.cutScalar(u8, text, ':') orelse return
+        // error.InvalidFormat;`): the destructure's RHS is a statement point, so the control-flow fallback hoists ahead of
+        // the tuple temp. zig returns 30.
+        cs.ShouldContain("return ErrUnion<ulong>.Err(1);");
+        cs.ShouldContain("ConstSlice<byte> a = __tup0.Item1;");
+    }
 }

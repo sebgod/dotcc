@@ -7879,6 +7879,23 @@ public sealed class ZigOracleTests
             "    for (&buf, 0..) |*b, i| b.* = @truncate(i * 3);\n" +
             "    return @truncate(last(buf[0..]) + last(buf[0..30]));\n" +
             "}\n", 156, "" },
+        // Task #192 (std.Uri.parse): a destructure whose RHS is an `orelse` with a control-flow fallback.
+        new object[] { "destructure_orelse_return",
+            "fn cut(s: []const u8, c: u8) ?struct { []const u8, []const u8 } {\n" +
+            "    for (s, 0..) |ch, i| {\n" +
+            "        if (ch == c) return .{ s[0..i], s[i + 1 ..] };\n" +
+            "    }\n" +
+            "    return null;\n" +
+            "}\n" +
+            "fn parse(s: []const u8) !usize {\n" +
+            "    const a, const b = cut(s, ':') orelse return error.Bad;\n" +
+            "    return a.len * 10 + b.len;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const x = parse(\"ab:cde\") catch 0;\n" +
+            "    const y = parse(\"nocolon\") catch 7;\n" +
+            "    return @intCast(x + y);\n" +
+            "}\n", 30, "" },
         // Task #191 (std.Io.Terminal's `pub const WindowsApi = if (!is_windows) noreturn else struct { … };`): an `if`
         // choosing between a type name and an inline container, and one choosing between two containers, at top level.
         new object[] { "if_type_name_or_container",
@@ -9557,6 +9574,18 @@ public sealed class ZigOracleTests
             "    const c = H.hash(4, \"ALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUF\");\n" +
             "    return @truncate((a ^ b ^ c) >> 5);\n" +
             "}\n", 34);
+
+    // Task #192: std.Uri.parse from real std (scheme, user, host, port, path, query, fragment). Its
+    // `const scheme, const rest = … orelse return error.InvalidFormat;` destructure hoists the fallback.
+    [Fact]
+    public void Dotcc_matches_zig_std_uri_parse() =>
+        MatchesZigWithRealStd("uri_parse",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    const u = std.Uri.parse(\"https://user@example.com:8080/a/b?q=1#frag\") catch return 1;\n" +
+            "    const port: u16 = u.port orelse 0;\n" +
+            "    return @truncate(u.scheme.len + port % 251 + @as(usize, @intFromBool(u.fragment != null)) * 7);\n" +
+            "}\n", 60);
 
     // Task #190: std.PriorityDequeue from real std (pushSlice, popMin, popMax, count). Its methods are lowered only when
     // referenced, so the debugging `dump` (std.debug.print, Io.Terminal) is never reached; and the std local
