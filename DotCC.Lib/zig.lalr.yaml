@@ -999,6 +999,11 @@ productions:
       - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', 'return', Expr, 'else', RhsExpr], action: ifExprReturnThen }
       # An `if` choosing between two inline container TYPES (a type const's RHS, folded at lowering time).
       - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', TypeArm, 'else', TypeArm], action: ifExprTypeArms }
+      # One arm a type NAME, the other an inline container (std.Io.Terminal's `pub const WindowsApi = if (!is_windows)
+      # noreturn else struct { … };`, task #191). After the arm's `}`, a `.` continues the closure idiom
+      # (`struct { … }.f`) and anything else ends the TypeArm, the same one-token split as the two-TypeArm form.
+      - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', RhsExpr, 'else', TypeArm], action: ifExprValueTypeArm }
+      - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', TypeArm, 'else', RhsExpr], action: ifExprTypeArmValue }
       # The captured form (std.mem.eqlBytes' `const Scan = if (std.simd.suggestVectorLength(u8)) |vec_size| struct {…}
       # else struct {…};`): after the capture, `struct` / `enum` starts a TypeArm, not a RhsExpr.
       - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', TypeArm, 'else', TypeArm], action: ifExprCaptureTypeArms }

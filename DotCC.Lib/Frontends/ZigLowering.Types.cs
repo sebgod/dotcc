@@ -369,6 +369,22 @@ internal sealed partial class ZigLowering
                 type = ifType;
                 return true;
 
+            // `const Api = if (is_windows) struct { … } else struct { … };` at a module or container's top level, and the
+            // mixed `if (!is_windows) noreturn else struct { … }` (std.Io.Terminal's WindowsApi, task #191): the condition
+            // folds, and a container arm reifies as the inline type it spells, as in an annotation.
+            case Zig.IfExprTypeArms ta when TryFoldTypeIfCondition(ta.Arg2) is { } takenTypeArm
+                                            && TryTypeArmType(takenTypeArm ? ta.Arg4 : ta.Arg6, out var armsType):
+                type = armsType;
+                return true;
+            case Zig.IfExprValueTypeArm vt when TryFoldTypeIfCondition(vt.Arg2) is { } takenValueFirst
+                                                && TryTypeArmType(takenValueFirst ? vt.Arg4 : vt.Arg6, out var mixedType):
+                type = mixedType;
+                return true;
+            case Zig.IfExprTypeArmValue tv when TryFoldTypeIfCondition(tv.Arg2) is { } takenTypeFirst
+                                                && TryTypeArmType(takenTypeFirst ? tv.Arg4 : tv.Arg6, out var mixedType2):
+                type = mixedType2;
+                return true;
+
             // `pub const Size = Unmanaged.Size;` (std.HashMap) — a container's nested type or type const,
             // named qualified. Before the std-path case: a local container name is never a std path.
             case Zig.Field when TryResolveQualifiedNestedType(rhs) is { } qualified:
@@ -388,6 +404,23 @@ internal sealed partial class ZigLowering
             default:
                 type = CType.Int;
                 return false;
+        }
+    }
+
+    /// <summary>The type one arm of a type-choosing <c>if</c> names (task #191): an inline <c>struct { … }</c> /
+    /// <c>enum { … }</c> reified as the type it spells, or a type expression.</summary>
+    private bool TryTypeArmType(Item arm, out CType type)
+    {
+        switch (arm.Content)
+        {
+            case Zig.TypeArmStruct s:
+                type = ReifyInlineStruct(arm, s.Arg2);
+                return true;
+            case Zig.TypeArmEnum e:
+                type = ReifyInlineEnum(arm, e.Arg2);
+                return true;
+            default:
+                return TryTypeAliasRhs(arm, out type);
         }
     }
 

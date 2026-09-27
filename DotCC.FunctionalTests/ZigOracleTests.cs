@@ -7879,6 +7879,27 @@ public sealed class ZigOracleTests
             "    for (&buf, 0..) |*b, i| b.* = @truncate(i * 3);\n" +
             "    return @truncate(last(buf[0..]) + last(buf[0..30]));\n" +
             "}\n", 156, "" },
+        // Task #191 (std.Io.Terminal's `pub const WindowsApi = if (!is_windows) noreturn else struct { … };`): an `if`
+        // choosing between a type name and an inline container, and one choosing between two containers, at top level.
+        new object[] { "if_type_name_or_container",
+            "const is_windows = false;\n" +
+            "const Api = if (!is_windows) u8 else struct {\n" +
+            "    a: u8,\n" +
+            "    b: u16,\n" +
+            "};\n" +
+            "const Api2 = if (is_windows) u8 else struct { x: u32 };\n" +
+            "pub fn main() u8 {\n" +
+            "    const v: Api = 40;\n" +
+            "    const w: Api2 = .{ .x = 2 };\n" +
+            "    return v + @as(u8, @intCast(w.x));\n" +
+            "}\n", 42, "" },
+        new object[] { "if_two_container_types_top_level",
+            "const is_windows = false;\n" +
+            "const Api = if (is_windows) struct { a: u8 } else struct { b: u8, c: u8 };\n" +
+            "pub fn main() u8 {\n" +
+            "    const v: Api = .{ .b = 40, .c = 2 };\n" +
+            "    return v.b + v.c;\n" +
+            "}\n", 42, "" },
         // Task #187 (std.math.signbit): a value switch as the LEFT operand of a comparison, `return switch (…) { … } < 0;`.
         new object[] { "switch_left_comparison_operand",
             "fn neg(x: i32) bool {\n" +
