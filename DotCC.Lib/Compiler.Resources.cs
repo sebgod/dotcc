@@ -55,19 +55,6 @@ public static partial class Compiler
     }
 
     /// <summary>
-    /// True iff <paramref name="content"/> is the body of one of dotcc's synthetic
-    /// system headers — NOT a user <c>-I</c> header that happens to share the name.
-    /// The include map seeds <see cref="SystemHeaders"/>'s string REFERENCES and a
-    /// user header on the path overwrites the slot with a freshly-read string, so
-    /// reference identity distinguishes the embedded original from a shadowing copy.
-    /// <see cref="CPreprocessor.OnInclude"/> uses this to lex synthetic headers in the
-    /// reserved line band (see <see cref="Ir.SrcPos.SyntheticLineBase"/>), which is what
-    /// flags every prototype they declare as runtime-provided rather than importable.
-    /// </summary>
-    internal static bool IsSyntheticHeaderContent(string name, string content)
-        => SystemHeaders.TryGetValue(name, out var sys) && ReferenceEquals(sys, content);
-
-    /// <summary>
     /// Concatenated DotCC.Libc runtime source — the embedded <c>.cs</c>
     /// files from <c>../DotCC.Libc/*.cs</c> with their file-scope
     /// artifacts (<c>#nullable enable</c>, <c>using</c> directives,

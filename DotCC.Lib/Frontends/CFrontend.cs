@@ -40,7 +40,7 @@ internal sealed class CFrontend : IFrontend
         var pedantic = (warnings & WarningFlags.Pedantic) != 0;
         var pedanticErrors = (warnings & WarningFlags.PedanticErrors) == WarningFlags.PedanticErrors;
 
-        var includeMap = Compiler.BuildIncludeMap(inputPaths, includeDirs);
+        var includeResolver = Compiler.BuildIncludeResolver(includeDirs);
         var lexerTable = C.BuildLexer();
         var activeDialect = dialect ?? CDialect.Default;
         var seededDefines = Compiler.SeedDialectDefines(activeDialect, defines);
@@ -64,8 +64,8 @@ internal sealed class CFrontend : IFrontend
             var embedDirs = new List<string>();
             if (Path.GetDirectoryName(unitPath) is { Length: > 0 } unitDir) { embedDirs.Add(unitDir); }
             if (includeDirs is not null) { embedDirs.AddRange(includeDirs); }
-            var pre = new CPreprocessor(lexerTable, includeMap, seededDefines, quiet, gate, embedDirs, embeds);
-            pre.SetActiveFilename(Path.GetFileName(unitPath));
+            var pre = new CPreprocessor(lexerTable, includeResolver, seededDefines, quiet, gate, embedDirs, embeds);
+            pre.SetActiveFile(unitPath);
             using var lexer = BytesLexer.FromString(source, lexerTable);
             using var preproc = C.WrapPreprocessor(lexer, pre);
             // Enable function-like macro expansion in #if/#elif expressions.

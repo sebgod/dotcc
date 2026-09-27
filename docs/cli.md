@@ -14,7 +14,7 @@
 | `--emit=obj` | **Separate compilation.** Compile ONE `.c` to a `.cs` object fragment (functions + its type decls + globals, no shell/runtime). Link by passing `.cs` objects back: `dotcc a.cs b.cs -o app` merges (deduping shared types) and wraps in the shell. Drives CMake/make per file (`examples/cmake-demo/`). |
 | **`-o` ⇄ `--emit` inference** | When one is omitted it's inferred: `-o foo.cs` ⇒ `file`; `-o <dir>` ⇒ `csproj`; `--emit=obj` with no `-o` ⇒ `<src>.cs`. Explicit `--emit` wins; `obj` is never inferred. |
 | `-E` | Preprocess only — dump the post-`#include`/`#define` token stream to stdout. No parsing. |
-| `-I <dir>` | Add header search dir. Repeatable. Auto-includes each `<input>.c`'s directory. |
+| `-I <dir>` | Add header search dir. Repeatable; searched in command-line order, first match wins (as in gcc/clang). A quoted `#include "x.h"` first looks next to the file holding the directive; `<x.h>` searches only the `-I` dirs, then the embedded system headers. A header that resolves nowhere is a fatal error. |
 | `-D NAME[=VALUE]` | Predefine a macro. Repeatable. `=VALUE` is lexed through the same byte lexer as the parser; bare `NAME` is a defined-as-marker (empty body). |
 | `-MD` / `-MMD` | **Header-dependency file** (`Compiler.EmitDependencyRule`): a Make rule listing the TU + every transitively-`#include`d header, so CMake/Ninja/Make recompile on header change. `-MMD` drops angle headers; synthetic system headers (no disk path) are always omitted. The scan honors `#if`/`#ifdef`. Paths normalized to `/`, make-special chars escaped. |
 | `-MF <file>` | Dependency-file output path (defaults to the object/source name with `.d`). |

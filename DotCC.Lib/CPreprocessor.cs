@@ -10,8 +10,9 @@ namespace DotCC;
 /// <summary>
 /// <c>IPreprocessor</c> impl. Owns the macro table that <c>#define</c>
 /// populates, <c>#undef</c> mutates, and which <see cref="Rewrite"/> +
-/// <see cref="IsDefined"/> consult. Resolves <c>#include</c> against a shared
-/// header map (system + user headers).
+/// <see cref="IsDefined"/> consult. Resolves <c>#include</c> through the
+/// compile's <see cref="Compiler.IncludeResolver"/> (the includer's directory,
+/// the <c>-I</c> directories, the embedded system headers).
 /// </summary>
 /// <summary>
 /// One macro definition. Object-like macros have <see cref="Params"/> = null
@@ -35,22 +36,25 @@ internal sealed record MacroDef(
 internal sealed class CPreprocessor : C.IPreprocessor
 {
     private readonly Dictionary<string, LexRule[]> _lexerTable;
-    private readonly Compiler.IncludeMap _files;
+    private readonly Compiler.IncludeResolver _resolver;
     private readonly System.IO.TextWriter _diag;
     private readonly Dictionary<string, MacroDef> _macros = new(StringComparer.Ordinal);
-    // `#pragma once` machinery + active filename for `__FILE__`. The same
-    // `_currentlyIncluding` field tracks both: it names the file the
-    // preprocessor is currently processing (the top-level translation unit
-    // OR a recursive `#include`). The top-level value is set by
-    // `SetActiveFilename` from Compiler.EmitCSharp before processing; the
-    // OnInclude handler saves+restores around its recursive sub-preprocess
-    // so nested includes work correctly.
+    // The file the preprocessor is currently processing (the top-level
+    // translation unit OR a recursive `#include`), three ways:
+    // `_currentlyIncluding` is its name as spelled (what `__FILE__` reports),
+    // `_currentKey` its identity (what `#pragma once` records) and `_currentDir`
+    // its directory (where a quoted `#include` inside it looks first; null for
+    // an embedded header). The top-level values are set by `SetActiveFile`
+    // before processing; OnInclude saves and restores them around its
+    // recursive sub-preprocess so nested includes work correctly.
     private string? _currentlyIncluding;
+    private string? _currentKey;
+    private string? _currentDir;
     // `#line` remapping (C89 §6.10.4). `#line N` makes the line FOLLOWING the
     // directive logical line N, so __LINE__ on a token at physical line `phys`
     // reports `phys + _lineDelta`. `#line N "file"` also overrides __FILE__ via
-    // _fileOverride — kept SEPARATE from _currentlyIncluding, which #pragma once
-    // and -MD dependency tracking still key on the real on-disk filename. Both
+    // _fileOverride — kept SEPARATE from the current file's identity, which
+    // #pragma once and -MD dependency tracking key on (its real path). Both
     // are per-file: OnInclude saves/resets/restores them around a recursive
     // #include so an includer's remap can't bleed into the included file (and
     // vice versa). CHEAP IMPLEMENTATION — these feed only the user-observable
@@ -79,16 +83,16 @@ internal sealed class CPreprocessor : C.IPreprocessor
     // optimization can be asserted observable without resorting to timing.
     internal int IncludeOptimizationHits { get; private set; }
 
-    // Dependency tracking for -MD/-MMD depfiles: every header actually
+    // Dependency tracking for -MD/-MMD depfiles: every disk file actually
     // `#include`d (transitively — recursive includes share this instance), in
     // first-seen order, paired with whether it arrived via the angle `<...>`
     // (system) or quoted `"..."` form. The angle flag is what -MMD keys on to
-    // drop system headers. Only resolvable headers are recorded — an
-    // unresolvable name is not a real build input. Populated in OnInclude;
-    // read by Compiler.EmitDependencyRule after draining the stream.
-    private readonly List<(string Name, bool IsSystem)> _includes = new();
+    // drop system headers. Embedded headers have no path and are not recorded
+    // (nothing for a build tool to stat). Populated in OnInclude; read by
+    // Compiler.EmitDependencyRule after draining the stream.
+    private readonly List<(string Path, bool IsSystem)> _includedHeaders = new();
     private readonly HashSet<string> _includeSeen = new(StringComparer.Ordinal);
-    internal IReadOnlyList<(string Name, bool IsSystem)> IncludedHeaders => _includes;
+    internal IReadOnlyList<(string Path, bool IsSystem)> IncludedHeaders => _includedHeaders;
 
     // Symbol ids resolved once for the predefined-identifier substitutions
     // in `Rewrite`. `__FILE__` synthesizes a STRING token; `__LINE__`
@@ -115,7 +119,7 @@ internal sealed class CPreprocessor : C.IPreprocessor
 
     public CPreprocessor(
         Dictionary<string, LexRule[]> lexerTable,
-        Compiler.IncludeMap files,
+        Compiler.IncludeResolver resolver,
         IEnumerable<string> predefines,
         bool quiet = false,
         DialectGate? gate = null,
@@ -123,7 +127,7 @@ internal sealed class CPreprocessor : C.IPreprocessor
         Dictionary<string, byte[]>? embeds = null)
     {
         _lexerTable = lexerTable;
-        _files = files;
+        _resolver = resolver;
         _gate = gate;
         _embedDirs = embedDirs ?? Array.Empty<string>();
         _embeds = embeds ?? new Dictionary<string, byte[]>(StringComparer.Ordinal);
@@ -187,28 +191,51 @@ internal sealed class CPreprocessor : C.IPreprocessor
         => _macros.TryGetValue(name, out macro!);
 
     /// <summary>
-    /// Set the active source filename for <c>__FILE__</c> expansion. Called
-    /// by <see cref="Compiler.EmitCSharp"/> / <see cref="Compiler.Preprocess"/>
-    /// at the start of each translation unit. <c>#include</c>'s recursive
-    /// drive overwrites this around the nested processing (then restores).
+    /// Set the active translation unit: its name as <c>__FILE__</c> reports it,
+    /// its identity for <c>#pragma once</c>, and its directory, where a quoted
+    /// <c>#include</c> looks first. Called by <see cref="Compiler.EmitCSharp"/> /
+    /// <see cref="Compiler.Preprocess"/> at the start of each translation unit.
+    /// <c>#include</c>'s recursive drive overwrites these around the nested
+    /// processing (then restores).
     /// </summary>
-    public void SetActiveFilename(string name) => _currentlyIncluding = name;
+    public void SetActiveFile(string path)
+    {
+        var full = System.IO.Path.GetFullPath(path);
+        _currentlyIncluding = System.IO.Path.GetFileName(path);
+        _currentKey = full;
+        _currentDir = System.IO.Path.GetDirectoryName(full);
+    }
 
+    /// <summary>
+    /// <c>#include "name"</c> / <c>#include &lt;name&gt;</c>: resolve the file
+    /// (<see cref="Compiler.IncludeResolver"/>), then preprocess and macro-expand
+    /// it in place. A name that resolves to no file is a fatal error, as in every
+    /// C compiler: carrying on would only surface later as an unexpanded macro or
+    /// an undeclared name far from the cause.
+    /// </summary>
     public IEnumerable<Item> OnInclude(IReadOnlyList<Item> args)
     {
         var name = ResolveIncludeName(args, out var isSystem);
-        if (name is null) { return Array.Empty<Item>(); }
-        // Dependency tracking (-MD/-MMD): record every resolvable header once,
-        // in first-seen order, BEFORE the pragma-once / include-guard
-        // short-circuits below. Those short-circuits only fire for files we've
-        // already opened (hence already in `_files`), so recording here still
-        // captures a header that's pulled in many times. A name that resolves
-        // to no known file is skipped — it isn't a real build input.
-        if (_files.ContainsKey(name) && _includeSeen.Add(name))
+        var line = args.Count > 0 ? args[0].Position.Line : 0;
+        if (name is null)
         {
-            _includes.Add((name, isSystem));
+            throw new CompileException(
+                $"{_currentlyIncluding}:{line}: error: #include expects \"FILENAME\" or <FILENAME>");
         }
-        if (_pragmaOnceFiles.Contains(name))
+        if (_resolver.Resolve(name, isSystem, _currentDir) is not { } file)
+        {
+            throw new CompileException(
+                $"{_currentlyIncluding}:{line}: fatal error: '{name}' file not found");
+        }
+        // Dependency tracking (-MD/-MMD): record every disk file once, in
+        // first-seen order, BEFORE the pragma-once / include-guard
+        // short-circuits below, so a header that's pulled in many times is
+        // still listed.
+        if (_includeSeen.Add(file.Key) && file.Path is { } diskPath)
+        {
+            _includedHeaders.Add((diskPath, isSystem));
+        }
+        if (_pragmaOnceFiles.Contains(file.Key))
         {
             // Already processed via `#pragma once` — drop the include body.
             return Array.Empty<Item>();
@@ -217,32 +244,36 @@ internal sealed class CPreprocessor : C.IPreprocessor
         // file detected the standard header-guard wrapping pattern and the
         // guard macro is still defined, the file is guaranteed to expand
         // to nothing useful — skip opening + lexing entirely.
-        if (_fileGuards.TryGetValue(name, out var cachedGuard)
+        if (_fileGuards.TryGetValue(file.Key, out var cachedGuard)
             && cachedGuard is not null
             && _macros.ContainsKey(cachedGuard))
         {
             IncludeOptimizationHits++;
             return Array.Empty<Item>();
         }
-        if (!_files.TryGetValue(name, out var source))
+        if (!_resolver.TryRead(file, name, out var source, out var readError))
         {
-            _diag.WriteLine($"dotcc: #include '{name}' not resolvable (not in -I dirs or system headers)");
-            return Array.Empty<Item>();
+            throw new CompileException(
+                $"{_currentlyIncluding}:{line}: fatal error: '{name}' could not be read: {readError}");
         }
         // First-time include of this file: scan the source text for a
         // controlling header guard. Cache the result (or null) so the
-        // detection cost is paid at most once per filename.
-        if (!_fileGuards.ContainsKey(name))
+        // detection cost is paid at most once per file.
+        if (!_fileGuards.ContainsKey(file.Key))
         {
-            _fileGuards[name] = DetectControllingMacro(source);
+            _fileGuards[file.Key] = DetectControllingMacro(source);
         }
         var saved = _currentlyIncluding;
+        var savedKey = _currentKey;
+        var savedDir = _currentDir;
         // A #line remap is per-file: the included file starts fresh (physical
         // line 1, its own presumed name), so reset on entry and restore the
         // includer's remap on exit.
         var savedLineDelta = _lineDelta;
         var savedFileOverride = _fileOverride;
         _currentlyIncluding = name;
+        _currentKey = file.Key;
+        _currentDir = file.Directory;
         _lineDelta = 0;
         _fileOverride = null;
         try
@@ -250,11 +281,10 @@ internal sealed class CPreprocessor : C.IPreprocessor
             // Lex a synthetic system header in a reserved line band so every
             // prototype it declares lands at Line >= SyntheticLineBase, flagging
             // it FromSystemHeader (runtime-provided — never an `-l` import
-            // candidate). A user `-I` header that happens to share a synthetic
-            // name stays at line 1: IsSyntheticHeaderContent tests content
-            // identity, not just the name (clang's local-first rule already let
-            // the user file win the slot). User headers and `.c` splices: line 1.
-            var initialLine = Compiler.IsSyntheticHeaderContent(name, source)
+            // candidate). A user `-I` header that shares a synthetic name is
+            // found first and stays at line 1, like every user header and `.c`
+            // splice.
+            var initialLine = file.IsSynthetic
                 ? Ir.SrcPos.SyntheticLineBase
                 : 1;
             using var subLexer = BytesLexer.FromString(source, _lexerTable, initialLine: initialLine);
@@ -287,6 +317,8 @@ internal sealed class CPreprocessor : C.IPreprocessor
         finally
         {
             _currentlyIncluding = saved;
+            _currentKey = savedKey;
+            _currentDir = savedDir;
             _lineDelta = savedLineDelta;
             _fileOverride = savedFileOverride;
         }
@@ -464,13 +496,13 @@ internal sealed class CPreprocessor : C.IPreprocessor
     }
 
     /// <summary>Evaluate <c>__has_include("hdr")</c> / <c>&lt;hdr&gt;</c> (C23 /
-    /// long-standing extension) for a <c>#if</c>: 1 when the header resolves
-    /// against the include map (synthetic system headers + <c>-I</c> dirs), else 0.</summary>
+    /// long-standing extension) for a <c>#if</c>: 1 when the header resolves the
+    /// way <c>#include</c> would resolve it here, else 0.</summary>
     private bool EvalHasInclude(IReadOnlyList<Item> argTokens)
     {
         if (argTokens.Count == 0) { return false; }
-        var name = ResolveIncludeName(argTokens, out _);
-        return name is not null && _files.ContainsKey(name);
+        var name = ResolveIncludeName(argTokens, out var isSystem);
+        return name is not null && _resolver.Resolve(name, isSystem, _currentDir) is not null;
     }
 
     /// <summary>
@@ -911,11 +943,11 @@ internal sealed class CPreprocessor : C.IPreprocessor
         if (args.Count > 0 && args[0].Content is string s && s == "once")
         {
             // Remember the currently-being-processed file as include-once.
-            // Any subsequent #include of the same filename short-circuits in
-            // OnInclude.
-            if (_currentlyIncluding is not null)
+            // Any subsequent #include that resolves to the same file (by any
+            // spelling) short-circuits in OnInclude.
+            if (_currentKey is not null)
             {
-                _pragmaOnceFiles.Add(_currentlyIncluding);
+                _pragmaOnceFiles.Add(_currentKey);
             }
         }
         return Array.Empty<Item>();
