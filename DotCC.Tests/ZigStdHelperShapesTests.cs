@@ -6332,4 +6332,28 @@ public sealed class ZigStdHelperShapesTests
         // Task #199: zig rejects it too ("expected pointer type").
         ex.Message.ShouldContain("zig `@constCast` expects a pointer or a slice");
     }
+
+    [Fact]
+    public void A_decl_literal_call_resolves_against_an_enum_result_type()
+    {
+        var cs = EmitZig("""
+            const Limit = enum(usize) {
+                nothing = 0,
+                _,
+                pub fn limited(n: usize) Limit {
+                    return @enumFromInt(n);
+                }
+            };
+            fn take(l: Limit) usize {
+                return @intFromEnum(l);
+            }
+            pub fn main() u8 {
+                const a: Limit = .limited(30);
+                return @intCast(take(.limited(12)) + @intFromEnum(a));
+            }
+            """);
+        // Task #201 (std.Io.Limit): `.limited(n)` is the enum's own function, at a const and at a parameter.
+        cs.ShouldContain("Limit a = Limit_limited(30);");
+        cs.ShouldContain("take(Limit_limited(12))");
+    }
 }

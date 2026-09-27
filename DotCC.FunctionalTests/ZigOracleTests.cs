@@ -7879,6 +7879,26 @@ public sealed class ZigOracleTests
             "    for (&buf, 0..) |*b, i| b.* = @truncate(i * 3);\n" +
             "    return @truncate(last(buf[0..]) + last(buf[0..30]));\n" +
             "}\n", 156, "" },
+        // Task #201 (std.Io.Limit): a decl-literal call `.limited(n)` against an enum result type.
+        new object[] { "enum_decl_literal_call",
+            "const Limit = enum(usize) {\n" +
+            "    nothing = 0,\n" +
+            "    unlimited = 100,\n" +
+            "    _,\n" +
+            "    pub fn limited(n: usize) Limit {\n" +
+            "        return @enumFromInt(n);\n" +
+            "    }\n" +
+            "    pub fn toInt(l: Limit) usize {\n" +
+            "        return @intFromEnum(l);\n" +
+            "    }\n" +
+            "};\n" +
+            "fn take(l: Limit) usize {\n" +
+            "    return l.toInt();\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const a: Limit = .limited(30);\n" +
+            "    return @intCast(take(.limited(12)) + a.toInt());\n" +
+            "}\n", 42, "" },
         // Task #199 (std.Io.Reader.fixed): `@constCast` of a `[]const u8` and of a `*const u8`.
         new object[] { "const_cast_slice_and_pointer",
             "fn fill(buf: []const u8) u8 {\n" +
