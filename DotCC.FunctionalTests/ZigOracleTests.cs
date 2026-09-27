@@ -7879,6 +7879,36 @@ public sealed class ZigOracleTests
             "    for (&buf, 0..) |*b, i| b.* = @truncate(i * 3);\n" +
             "    return @truncate(last(buf[0..]) + last(buf[0..30]));\n" +
             "}\n", 156, "" },
+        // Task #212 (std.json.static): `inline .a, .b => |x| …` over a tagged union, each variant bound at its own payload type.
+        new object[] { "inline_union_prong_per_variant_capture",
+            "const Tok = union(enum) {\n" +
+            "    begin,\n" +
+            "    number: []const u8,\n" +
+            "    allocated_number: []u8,\n" +
+            "    string: []const u8,\n" +
+            "    count: u8,\n" +
+            "};\n" +
+            "fn text(t: Tok) []const u8 {\n" +
+            "    const slice = switch (t) {\n" +
+            "        inline .number, .allocated_number, .string => |s| s,\n" +
+            "        else => \"?\",\n" +
+            "    };\n" +
+            "    return slice;\n" +
+            "}\n" +
+            "fn width(t: Tok) usize {\n" +
+            "    switch (t) {\n" +
+            "        inline .number, .allocated_number => |s| return s.len * 10,\n" +
+            "        .count => |c| return c,\n" +
+            "        else => return 1,\n" +
+            "    }\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var buf = [_]u8{ 'a', 'b', 'c' };\n" +
+            "    const toks = [_]Tok{ .{ .number = \"12\" }, .{ .allocated_number = buf[0..] }, .{ .string = \"hey!\" }, .begin, .{ .count = 7 } };\n" +
+            "    var total: usize = 0;\n" +
+            "    for (toks) |t| total += text(t).len + width(t);\n" +
+            "    return @intCast(total);\n" +
+            "}\n", 70, "" },
         // Task #210 (std.json.static.innerParse): `inline for (…,) |…| { … break; } else { … }` and the runtime trailing-comma for-else.
         new object[] { "inline_for_else_trailing_comma",
             "fn has(size: usize) u8 {\n" +
