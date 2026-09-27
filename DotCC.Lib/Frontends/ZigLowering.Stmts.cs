@@ -933,8 +933,10 @@ internal sealed partial class ZigLowering
                     temp => new ExprStmt(new Assign(null, target, new VarRef(temp) { Type = temp.Type }) { Type = target.Type }));
             }
             var value = LowerExprSink(rhsItem, target.Type);   // target type is the sink (`x = .member;`)
-            // Storing a void value into void storage (`unit = {};`) moves no data.
-            if (target.Type.Unqualified is CType.VoidType && IsErasableVoid(value)) { return new Seq(new List<CStmt>()); }
+            // Storing a void value into void storage (`unit = {};`) moves no data; nor into void-as-data storage (the runtime
+            // `Unit`), such as hash_map's `self.values()[idx] = value;` for a set (`V = void`, std.BufSet, task #198), where the
+            // value is an erased `void` parameter.
+            if (IsVoidValueType(target.Type) && IsErasableVoid(value)) { return new Seq(new List<CStmt>()); }
             return new ExprStmt(new Assign(null, target, value) { Type = target.Type });
         });
     /// <summary>True when a callee names <c>assert</c> (a bare alias, <c>const assert = std.debug.assert;</c>,
