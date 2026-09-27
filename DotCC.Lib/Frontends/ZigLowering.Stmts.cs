@@ -417,8 +417,10 @@ internal sealed partial class ZigLowering
     /// <summary>An array expression that NAMES existing storage (a local, a field, an element): read as a value it
     /// must be copied, since its C# rep is the storage's element pointer.</summary>
     /// <remarks>A conditional selects one of two arrays (an optional array's <c>x orelse fallback</c>, task #151): binding it
-    /// without a copy would alias whichever it picked, so it counts too (a fresh arm is merely copied once more).</remarks>
-    private static bool IsArrayLvalue(CExpr e) => e is VarRef or Member or DotCC.Ir.Index or CondExpr || e is Paren p && IsArrayLvalue(p.Inner);
+    /// without a copy would alias whichever it picked, so it counts too (a fresh arm is merely copied once more). So does
+    /// the array a pointer names (`var c = p.*;`, task #184), whose C# rep is the pointer itself.</remarks>
+    private static bool IsArrayLvalue(CExpr e) =>
+        e is VarRef or Member or DotCC.Ir.Index or CondExpr or Unary { Op: UnOp.Deref } || e is Paren p && IsArrayLvalue(p.Inner);
 
     /// <summary>Declare <paramref name="sym"/> as a fresh <c>[N]T</c> local and copy <paramref name="source"/>'s elements
     /// into it.</summary>
@@ -3607,8 +3609,11 @@ internal sealed partial class ZigLowering
             var target = LowerExpr(lhsItem);
             // `d = a;` between arrays: an element copy (the C# rep is the element pointer, so a plain assignment
             // would alias the storage). `d = undefined;` changes nothing. A ROW of a multi-dimensional array
-            // (`self.cv_stack[self.cv_stack_len] = new_cv;` in std.crypto.blake3, task #154) is such a target too.
-            if (target.Type.Unqualified is CType.Array { Count: { } assignCount } assignArr && target is VarRef or Member or DotCC.Ir.Index)
+            // (`self.cv_stack[self.cv_stack_len] = new_cv;` in std.crypto.blake3, task #154) is such a target too, and so is
+            // the array a `*[N]T` names (`out.* = @as(*[digest_length]u8, @ptrCast(&d.h)).*;` in std.crypto.blake2's final,
+            // task #184): a plain assignment there rebound the pointer PARAMETER, and the caller's array was never written.
+            if (target.Type.Unqualified is CType.Array { Count: { } assignCount } assignArr
+                && target is VarRef or Member or DotCC.Ir.Index or Unary { Op: UnOp.Deref })
             {
                 var assigned = LowerExprSink(rhsItem, assignArr);
                 if (assigned is DefaultLit) { return new Seq(new List<CStmt>()); }

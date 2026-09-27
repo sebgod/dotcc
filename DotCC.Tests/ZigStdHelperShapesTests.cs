@@ -5855,6 +5855,42 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void An_array_stored_through_a_pointer_copies_its_elements()
+    {
+        var cs = EmitZig("""
+            fn fill(out: *[4]u8, src: *const [4]u8) void {
+                out.* = src.*;
+            }
+            fn fill2(out: *[4]u8, words: *const [1]u32) void {
+                out.* = @as(*const [4]u8, @ptrCast(words)).*;
+            }
+            fn fill3(out: *[4]u8) void {
+                out.* = .{ 9, 8, 7, 6 };
+            }
+            fn fill4(out: *[4]u8, v: [4]u8) void {
+                out.* = v;
+            }
+            pub fn main() u8 {
+                var a: [4]u8 = .{ 0, 0, 0, 0 };
+                const b = [4]u8{ 1, 2, 3, 4 };
+                fill(&a, &b);
+                var c: [4]u8 = undefined;
+                const w = [1]u32{0x04030201};
+                fill2(&c, &w);
+                var d: [4]u8 = undefined;
+                fill3(&d);
+                var e: [4]u8 = undefined;
+                fill4(&e, b);
+                return a[0] + a[3] * 10 + c[1] * 50 + d[2] + e[3];
+            }
+            """);
+        // Task #184 (std.crypto.blake2's final): `out.* = v` with `out: *[4]u8` copies into the array `out` names. It had been
+        // `@out = src;`, rebinding the pointer parameter, so the caller's array was never written. zig returns 152.
+        cs.ShouldContain("ZigMem.CopyForwards<byte>(new Slice<byte>(@out, 4UL), new ConstSlice<byte>(src, 4UL));");
+        cs.ShouldNotContain("@out = ");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

@@ -7879,6 +7879,59 @@ public sealed class ZigOracleTests
             "    for (&buf, 0..) |*b, i| b.* = @truncate(i * 3);\n" +
             "    return @truncate(last(buf[0..]) + last(buf[0..30]));\n" +
             "}\n", 156, "" },
+        // Task #184 (std.crypto.blake2's final, `out.* = @as(*[digest_length]u8, @ptrCast(&d.h)).*;`): an array stored
+        // through a `*[N]T` copies into the array it names (it had rebound the pointer parameter, a silent miscompile), and
+        // `var c = p.*;` copies out of it (it had aliased the storage).
+        new object[] { "array_store_through_pointer",
+            "fn fill(out: *[4]u8, src: *const [4]u8) void {\n" +
+            "    out.* = src.*;\n" +
+            "}\n" +
+            "fn fill2(out: *[4]u8, words: *const [1]u32) void {\n" +
+            "    out.* = @as(*const [4]u8, @ptrCast(words)).*;\n" +
+            "}\n" +
+            "fn fill3(out: *[4]u8) void {\n" +
+            "    out.* = .{ 9, 8, 7, 6 };\n" +
+            "}\n" +
+            "fn fill4(out: *[4]u8, v: [4]u8) void {\n" +
+            "    out.* = v;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var a: [4]u8 = .{ 0, 0, 0, 0 };\n" +
+            "    const b = [4]u8{ 1, 2, 3, 4 };\n" +
+            "    fill(&a, &b);\n" +
+            "    var c: [4]u8 = undefined;\n" +
+            "    const w = [1]u32{0x04030201};\n" +
+            "    fill2(&c, &w);\n" +
+            "    var d: [4]u8 = undefined;\n" +
+            "    fill3(&d);\n" +
+            "    var e: [4]u8 = undefined;\n" +
+            "    fill4(&e, b);\n" +
+            "    return a[0] + a[3] * 10 + c[1] * 50 + d[2] + e[3];\n" +
+            "}\n", 152, "" },
+        new object[] { "array_deref_value_copies",
+            "const S = struct { arr: [3]u8 };\n" +
+            "fn copyOut(p: *const [3]u8) [3]u8 {\n" +
+            "    return p.*;\n" +
+            "}\n" +
+            "fn grid(dst: *[2][3]u8, src: *const [2][3]u8) void {\n" +
+            "    dst.* = src.*;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var a = [3]u8{ 1, 2, 3 };\n" +
+            "    const p = &a;\n" +
+            "    var c = p.*;\n" +
+            "    const d: [3]u8 = p.*;\n" +
+            "    var e = copyOut(&a);\n" +
+            "    var s = S{ .arr = p.* };\n" +
+            "    a[0] = 9;\n" +
+            "    c[1] = 7;\n" +
+            "    e[2] = 5;\n" +
+            "    s.arr[0] = 4;\n" +
+            "    var g: [2][3]u8 = undefined;\n" +
+            "    const h = [2][3]u8{ .{ 1, 2, 3 }, .{ 4, 5, 6 } };\n" +
+            "    grid(&g, &h);\n" +
+            "    return a[0] + c[0] * 2 + c[1] + d[0] * 3 + e[0] + e[2] + s.arr[0] + a[1] + g[1][2] * 10;\n" +
+            "}\n", 93, "" },
         // Task #183 (std.math.gcd / lcm): `@ctz` of an integer narrower than its carrier, evaluated at comptime.
         new object[] { "comptime_ctz_narrow",
             "fn trailing(x: u5) u8 {\n" +
@@ -9410,6 +9463,101 @@ public sealed class ZigOracleTests
             "    const c = H.hash(4, \"ALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUF\");\n" +
             "    return @truncate((a ^ b ^ c) >> 5);\n" +
             "}\n", 34);
+
+    // Task #184: std.crypto.hash.Sha1 and blake2.Blake2s256 from real std; Blake2s's digest had been all zeros (its
+    // `out.* = …` rebound the pointer parameter).
+    [Fact]
+    public void Dotcc_matches_zig_std_crypto_sha1_blake2s() =>
+        MatchesZigWithRealStd("crypto_sha1_blake2s",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var d1: [std.crypto.hash.Sha1.digest_length]u8 = undefined;\n" +
+            "    std.crypto.hash.Sha1.hash(\"abc\", &d1, .{});\n" +
+            "    var d2: [std.crypto.hash.blake2.Blake2s256.digest_length]u8 = undefined;\n" +
+            "    std.crypto.hash.blake2.Blake2s256.hash(\"abc\", &d2, .{});\n" +
+            "    return d1[0] ^ d1[19] ^ d2[0] ^ d2[31];\n" +
+            "}\n", 230);
+
+    // std.math.cast / lossyCast / maxInt from real std.
+    [Fact]
+    public void Dotcc_matches_zig_std_math_cast() =>
+        MatchesZigWithRealStd("math_cast",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    const a: u8 = std.math.cast(u8, @as(u32, 200)) orelse 1;\n" +
+            "    const b: u8 = std.math.cast(u8, @as(u32, 300)) orelse 2;\n" +
+            "    const c: u8 = std.math.lossyCast(u8, @as(f32, 300.5));\n" +
+            "    const d: i8 = std.math.lossyCast(i8, @as(i32, -500));\n" +
+            "    const e = std.math.maxInt(u7);\n" +
+            "    return a +% b +% c +% @as(u8, @bitCast(d)) +% e;\n" +
+            "}\n", 200);
+
+    // std.fmt.bufPrint with fill, alignment and width (`{x:0>4}`, `{s:>5}`, `{d:<3}`), `{b}` and `{X}`.
+    [Fact]
+    public void Dotcc_matches_zig_std_fmt_padding() =>
+        MatchesZigWithRealStd("fmt_padding",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var buf: [64]u8 = undefined;\n" +
+            "    const s = std.fmt.bufPrint(&buf, \"[{x:0>4}|{b}|{s:>5}|{d:<3}|{X}]\", .{ @as(u16, 0xab), @as(u8, 5), \"hi\", @as(u8, 7), @as(u32, 0xbeef) }) catch return 1;\n" +
+            "    var h: u32 = 0;\n" +
+            "    for (s) |ch| h = h *% 31 +% ch;\n" +
+            "    return @truncate(h ^ @as(u32, @intCast(s.len)));\n" +
+            "}\n", 214);
+
+    // The intrusive std.SinglyLinkedList / DoublyLinkedList from real std, nodes found back through `@fieldParentPtr`.
+    [Fact]
+    public void Dotcc_matches_zig_std_linked_lists() =>
+        MatchesZigWithRealStd("linked_lists",
+            "const std = @import(\"std\");\n" +
+            "const Item = struct {\n" +
+            "    value: u8,\n" +
+            "    node: std.SinglyLinkedList.Node = .{},\n" +
+            "};\n" +
+            "const DItem = struct {\n" +
+            "    value: u8,\n" +
+            "    node: std.DoublyLinkedList.Node = .{},\n" +
+            "};\n" +
+            "pub fn main() u8 {\n" +
+            "    var list: std.SinglyLinkedList = .{};\n" +
+            "    var a: Item = .{ .value = 3 };\n" +
+            "    var b: Item = .{ .value = 5 };\n" +
+            "    var c: Item = .{ .value = 7 };\n" +
+            "    list.prepend(&a.node);\n" +
+            "    list.prepend(&b.node);\n" +
+            "    a.node.insertAfter(&c.node);\n" +
+            "    var sum: u32 = 0;\n" +
+            "    var it = list.first;\n" +
+            "    var pos: u32 = 1;\n" +
+            "    while (it) |n| : (it = n.next) {\n" +
+            "        const item: *Item = @fieldParentPtr(\"node\", n);\n" +
+            "        sum += item.value * pos;\n" +
+            "        pos += 1;\n" +
+            "    }\n" +
+            "    var dl: std.DoublyLinkedList = .{};\n" +
+            "    var x: DItem = .{ .value = 10 };\n" +
+            "    var y: DItem = .{ .value = 20 };\n" +
+            "    dl.append(&x.node);\n" +
+            "    dl.prepend(&y.node);\n" +
+            "    const last: *DItem = @fieldParentPtr(\"node\", dl.last.?);\n" +
+            "    return @truncate(sum + last.value + list.len());\n" +
+            "}\n", 45);
+
+    // std.mem.sort with std.sort.asc / desc, std.mem.reverse / max / min from real std.
+    [Fact]
+    public void Dotcc_matches_zig_std_mem_sort() =>
+        MatchesZigWithRealStd("mem_sort",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var xs = [_]u8{ 9, 3, 7, 1, 8, 2 };\n" +
+            "    std.mem.sort(u8, &xs, {}, std.sort.asc(u8));\n" +
+            "    var ys = [_]u16{ 4, 40, 400, 4000 };\n" +
+            "    std.mem.sort(u16, &ys, {}, std.sort.desc(u16));\n" +
+            "    std.mem.reverse(u8, xs[0..3]);\n" +
+            "    const m = std.mem.max(u8, &xs);\n" +
+            "    const mn = std.mem.min(u16, &ys);\n" +
+            "    return @truncate(xs[0] * 10 + xs[5] + m + mn + ys[0] % 97);\n" +
+            "}\n", 75);
 
     // Task #183: std.math.isPowerOfTwo / ceilPowerOfTwo / log2_int / lcm / mulWide / add from real std; lcm runs
     // gcd at comptime, whose `@ctz` over an IntFittingRange type the interpreter had stopped at.
