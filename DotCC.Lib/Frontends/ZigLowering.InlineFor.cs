@@ -160,7 +160,8 @@ internal sealed partial class ZigLowering
     /// <para>Unlike <see cref="UnrollInlineFor"/> no <c>const</c> is emitted per copy: a comptime
     /// capture has no runtime slot. The body is still wrapped in a block so sibling copies get
     /// distinct scopes for any locals they declare.</para></summary>
-    private CStmt UnrollComptimeFor(IReadOnlyList<(ZigComptimeList List, string Capture)> binds, Item bodyItem)
+    private CStmt UnrollComptimeFor(IReadOnlyList<(ZigComptimeList List, string Capture)> binds, Item bodyItem,
+        Item? elseItem = null)
     {
         var count = binds[0].List.Count;
         foreach (var (list, _) in binds)
@@ -193,7 +194,7 @@ internal sealed partial class ZigLowering
             for (var i = shadows.Count - 1; i >= 0; i--) { RestoreComptimeCapture(shadows[i]); }
             if (!unroll.Add(new Block(new List<CStmt> { body }))) { break; }
         }
-        return unroll.Finish();
+        return unroll.Finish(elseItem is null ? null : () => LowerStmt(elseItem));
     }
 
     /// <summary>Unroll an <c>inline for</c> over objects walked in lockstep where fixed-length ARRAYS join the comptime lists
@@ -202,7 +203,7 @@ internal sealed partial class ZigLowering
     /// capture as that copy's element, or with <c>|*x|</c> a pointer to it. A comptime list binds comptime as in
     /// <see cref="UnrollComptimeFor"/>, and a <c>0..</c> range binds the index. A runtime SLICE has no comptime length, so
     /// zig cannot unroll over it either, and it is refused.</summary>
-    private CStmt UnrollMixedInlineFor(Item objsItem, Item capsItem, Item bodyItem)
+    private CStmt UnrollMixedInlineFor(Item objsItem, Item capsItem, Item bodyItem, Item? elseItem = null)
     {
         var (objects, captures) = DecomposeForMulti(objsItem, capsItem);
         var lists = new ZigComptimeList?[objects.Count];
@@ -290,7 +291,7 @@ internal sealed partial class ZigLowering
             for (var s = shadows.Count - 1; s >= 0; s--) { RestoreComptimeCapture(shadows[s]); }
             if (!unroll.Add(new Block([.. decls, body]))) { break; }
         }
-        return unroll.Finish();
+        return unroll.Finish(elseItem is null ? null : () => LowerStmt(elseItem));
     }
 
     /// <summary>True for an array reference each unrolled copy may read again without repeating a side effect: a name, a
@@ -316,6 +317,7 @@ internal sealed partial class ZigLowering
         private readonly List<CStmt> _copies = new();
         private readonly string _breakLabel = "__ifbrk" + id.ToString(System.Globalization.CultureInfo.InvariantCulture);
         private bool _breakUsed;
+        private bool _stoppedByBreak;
 
         /// <summary>Add one copy; false when it always breaks, so no later copy is lowered.</summary>
         public bool Add(Block copy)
@@ -344,12 +346,16 @@ internal sealed partial class ZigLowering
             _copies.Add(continueUsed
                 ? new Block(new List<CStmt>(body.Stmts) { new Labeled(continueLabel, new Block(new List<CStmt>())) })
                 : body);
+            _stoppedByBreak |= alwaysBreaks;
             return !alwaysBreaks;
         }
 
-        /// <summary>The unrolled statement, with the break label after the last copy when one was used.</summary>
-        public CStmt Finish()
+        /// <summary>The unrolled statement, with the break label after the last copy when one was used. A for-else's
+        /// <paramref name="lowerElse"/> body goes between the copies and that label, so a <c>break</c> skips it (task
+        /// #210); when a copy always breaks it is never reached, and zig analyses no such else, so it is not lowered.</summary>
+        public CStmt Finish(Func<CStmt>? lowerElse = null)
         {
+            if (lowerElse is not null && !_stoppedByBreak) { _copies.Add(lowerElse()); }
             if (_breakUsed) { _copies.Add(new Labeled(_breakLabel, new Block(new List<CStmt>()))); }
             return new Seq(_copies);
         }

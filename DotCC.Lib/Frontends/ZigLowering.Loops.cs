@@ -63,6 +63,17 @@ internal sealed partial class ZigLowering
             case Zig.StmtForSlice cf when TryComptimeIterable(cf.Arg2, out var cl):
                 return UnrollComptimeFor(new[] { (cl, Tok(cf.Arg5)) }, cf.Arg7);
 
+            // `inline for (…) |…| { … break; } else { … }` (std.json.static's innerParse, task #210): the copies, then the
+            // else body, which a `break` in any copy jumps past; a copy that always breaks leaves no else to reach.
+            case Zig.StmtForSliceElse cfe when TryComptimeIterable(cfe.Arg2, out var cle):
+                return UnrollComptimeFor(new[] { (cle, Tok(cfe.Arg5)) }, cfe.Arg7, cfe.Arg9);
+            case Zig.StmtForMultiElse cme when FirstForObject(cme.Arg2) is { } firstE0 && TryComptimeIterable(firstE0, out _):
+                return UnrollComptimeMultiFor(cme.Arg2, cme.Arg5, cme.Arg7, cme.Arg9);
+            case Zig.StmtForMultiTrailElse cte when FirstForObject(cte.Arg2) is { } firstE1 && TryComptimeIterable(firstE1, out _):
+                return UnrollComptimeMultiFor(cte.Arg2, cte.Arg6, cte.Arg8, cte.Arg10);
+            case Zig.StmtForMultiElse mme:      return UnrollMixedInlineFor(mme.Arg2, mme.Arg5, mme.Arg7, mme.Arg9);
+            case Zig.StmtForMultiTrailElse mte: return UnrollMixedInlineFor(mte.Arg2, mte.Arg6, mte.Arg8, mte.Arg10);
+
             // `inline for (a, b, 0.., …) |x, y, i, …|` — comptime lists walked in lockstep (road-to-zig-std S6; any number
             // of them since task #108). Measured in the pinned std the pair `(field_names, field_types)` is the DOMINANT
             // member-list shape (17 uses); `(list, 0..)` binds the list's own indices. See UnrollComptimeMultiFor.
@@ -541,7 +552,7 @@ internal sealed partial class ZigLowering
         or Zig.StmtWhileCapture or Zig.StmtWhileCaptureElse or Zig.StmtWhileCaptureErrElse
         or Zig.StmtWhileCaptureCont or Zig.StmtWhileCaptureContAssign
         or Zig.StmtForRange or Zig.StmtForSlice or Zig.StmtForSliceRef or Zig.StmtForMulti or Zig.StmtForMultiTrail
-        or Zig.StmtForSliceElse or Zig.StmtForMultiElse;
+        or Zig.StmtForSliceElse or Zig.StmtForMultiElse or Zig.StmtForMultiTrailElse;
     /// <summary>Lower a runtime loop with an unlabeled break target (<see cref="LoopBreakTarget"/>), so a
     /// <c>break</c> inside a <c>switch</c> in its body exits the loop, as in zig. The label is emitted
     /// after the loop only when such a break used it; otherwise the loop lowers exactly as before.</summary>
@@ -621,7 +632,7 @@ internal sealed partial class ZigLowering
     /// since task #108): each object a comptime list, or an index range starting at 0 (the list's own indices). A comptime
     /// list paired with a runtime slice cannot be unrolled at all, and a comptime list has no storage to capture by
     /// reference, so each is named rather than left to a downstream type error.</summary>
-    private CStmt UnrollComptimeMultiFor(Item objsItem, Item capsItem, Item bodyItem)
+    private CStmt UnrollComptimeMultiFor(Item objsItem, Item capsItem, Item bodyItem, Item? elseItem = null)
     {
         var (objects, captures) = DecomposeForMulti(objsItem, capsItem);
         var lists = new List<(ZigComptimeList List, string Name)>(objects.Count);
@@ -653,7 +664,7 @@ internal sealed partial class ZigLowering
             first ??= list;
             lists.Add((list, captures[k].Name));
         }
-        return UnrollComptimeFor(lists.ToArray(), bodyItem);
+        return UnrollComptimeFor(lists.ToArray(), bodyItem, elseItem);
     }
     /// <summary>Lower a runtime lockstep <c>for (a, b, c) |x, y, z| body</c> (road-to-zig-std G5): one index walks every
     /// object, each capture a per-iteration copy of its object's element (<c>|*x|</c>: a pointer into it). Each object is a

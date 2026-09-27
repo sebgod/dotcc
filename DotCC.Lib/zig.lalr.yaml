@@ -582,6 +582,9 @@ productions:
       # while-capture else is, so a Stmt body followed by `else` shifts into it.
       - { lhs: LoopStmt, rhs: ['for', '(', Expr, ')', '|', IDENT, '|', Stmt, 'else', Stmt],           action: stmtForSliceElse }
       - { lhs: LoopStmt, rhs: ['for', '(', ForObjs, ')', '|', ForCaps, '|', Stmt, 'else', Stmt],      action: stmtForMultiElse }
+      # The same with a trailing comma after the objects (std.json.static's innerParse: `inline for (…, 0..,) |…| { … }
+      # else { … }`, task #210).
+      - { lhs: LoopStmt, rhs: ['for', '(', ForObjs, ',', ')', '|', ForCaps, '|', Stmt, 'else', Stmt], action: stmtForMultiTrailElse }
       # The plain `while (c) body else elsebody` statement (std.bit_set.DynamicBitSetUnmanaged.findFirstSet, task #130:
       # `while (offset < self.bit_length) { if (mask[0] != 0) break; … } else return null;`), in this group for the same
       # dangling-else reason.
