@@ -47,6 +47,56 @@ public sealed class NullPointerConstantTests
     }
 
     [Fact]
+    public void zero_argument_through_a_function_pointer_emits_null()
+    {
+        // GH #230: a call through a member, a pointer-to-struct member, an array
+        // element or an explicit `(*fp)` takes the pointer's parameter types.
+        var emitted = Emit("""
+            typedef void (*cb)(int *);
+            struct s { cb fn; };
+            static void noop(int *p) { (void)p; }
+            int main(void) {
+                struct s v = { noop };
+                struct s *pv = &v;
+                cb local = noop;
+                cb table[1] = { noop };
+                v.fn(0);
+                pv->fn(0);
+                table[0](0);
+                (*local)(0);
+                return 0;
+            }
+            """);
+        emitted.ShouldContain("v.fn(null);");
+        emitted.ShouldContain("pv->fn(null);");
+        emitted.ShouldContain("table[0](null);");
+        emitted.ShouldContain("local(null);");
+    }
+
+    [Fact]
+    public void comparing_a_pointer_with_zero_compares_with_null()
+    {
+        // C11 6.5.9p5: the constant converts to the pointer type (GH #230); C#
+        // rejects `int* == int` (CS0019). Either operand order, == and !=.
+        var emitted = Emit("""
+            static int f(int *p, int (*g)(void)) { return (p == 0) + (0 != p) + (g == 0); }
+            int main(void) { return f(0, 0); }
+            """);
+        emitted.ShouldContain("p == null");
+        emitted.ShouldContain("null != p");
+        emitted.ShouldContain("g == null");
+    }
+
+    [Fact]
+    public void comparing_an_integer_with_zero_stays_zero()
+    {
+        var emitted = Emit("""
+            int main(void) { int x = 3; return x == 0; }
+            """);
+        emitted.ShouldContain("x == 0");
+    }
+
+    [Fact]
     public void zero_to_a_non_pointer_target_stays_zero()
     {
         // Guard: an int target keeps the literal 0 (no spurious null).

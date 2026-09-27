@@ -113,8 +113,13 @@ public sealed record Call(string Callee, IReadOnlyList<CExpr> Args,
 
 /// <summary>A call through a computed function-pointer expression — <c>(*fp)(x)</c>,
 /// <c>tbl[i](x)</c>, <c>s.fn(x)</c>. (A call of a named function or fn-ptr
-/// variable uses <see cref="Call"/> instead.)</summary>
-public sealed record IndirectCall(CExpr Callee, IReadOnlyList<CExpr> Args) : CExpr;
+/// variable uses <see cref="Call"/> instead.) <see cref="ParamTypes"/> is the
+/// function pointer's fixed-parameter types when the C binder knows them, so each
+/// argument gets the same implicit conversion as at a direct call (the null
+/// pointer constant <c>0</c> to a pointer parameter, GH #230); null leaves the
+/// arguments as lowered (the Zig front end, which coerces them itself).</summary>
+public sealed record IndirectCall(CExpr Callee, IReadOnlyList<CExpr> Args,
+    IReadOnlyList<CType>? ParamTypes = null) : CExpr;
 
 /// <summary>A cast (explicit or inserted by a coercion pass).</summary>
 public sealed record Cast(CType Target, CExpr Operand) : CExpr;
