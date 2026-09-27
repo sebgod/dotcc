@@ -1008,13 +1008,17 @@ internal sealed class CPreprocessor : C.IPreprocessor
     }
 
     /// <summary>
-    /// <c>#error msg</c> — abort compilation with the joined message text.
-    /// Visible to callers as a <see cref="CompileException"/>, same as a
-    /// parse failure.
+    /// <c>#error msg</c>: abort compilation with the joined message text, as a
+    /// fatal diagnostic naming the file and line the way clang and gcc report it
+    /// (<c>npy_cpu.h:122: error: #error Unknown CPU…</c>). Visible to callers as
+    /// a <see cref="CompileException"/>, same as a parse failure.
     /// </summary>
     public IEnumerable<Item> OnError(IReadOnlyList<Item> args)
     {
-        throw new CompileException($"#error: {JoinArgs(args)}");
+        var where = args.Count > 0
+            ? $"{_currentlyIncluding}:{args[0].Position.Line}: "
+            : $"{_currentlyIncluding}: ";
+        throw new CompileException($"{where}error: #error {JoinArgs(args)}");
     }
 
     /// <summary>

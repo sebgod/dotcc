@@ -780,6 +780,24 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
+    public void Error_directive_reports_its_file_and_line()
+    {
+        // GH #208: clang-shaped `file:line: error: #error …`, the location a build
+        // log needs (numpy's `npy_cpu.h:122: #error Unknown CPU…`).
+        var src = WriteTemp("""
+            int x;
+            #error this is a forced failure
+            int main() { return 0; }
+            """);
+        try
+        {
+            Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { src }))
+                .Message.ShouldContain($"{Path.GetFileName(src)}:2: error: #error this is a forced failure");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void Warning_directive_continues_compilation()
     {
         // #warning emits to stderr but doesn't abort; the program should
