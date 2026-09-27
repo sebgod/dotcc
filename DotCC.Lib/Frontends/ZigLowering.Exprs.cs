@@ -852,6 +852,7 @@ internal sealed partial class ZigLowering
             // (a noreturn RHS) isn't expressible in the grammar yet — that's Milestone B2.
             case Zig.OrElse o:
             {
+                var impureBeforeLeft = _hoistImpureSeen;
                 var left = LowerExpr(o.Arg0);
                 // A comptime-known optional (`comptime st.nextArg(null) orelse @compileError(…)`, std.fmt): its
                 // payload, or the fallback when it is null; an untaken fallback is never lowered.
@@ -877,6 +878,14 @@ internal sealed partial class ZigLowering
                     var unionType = new CType.ErrorUnion(orPayload);
                     return new Call("ErrUnion.OrError", new List<CExpr> { left, LowerErrorLit(Tok(orErr.Arg2)) }) { Type = unionType };
                 }
+                // An optional POINTER or ARRAY lowers to a conditional that reads the left operand twice, so one that is not
+                // a pure reread (`get(1) orelse &fallback`, a call) is bound to a temp first where the statement can hoist it
+                // (task #193). The fallback is lowered after, so any hoist of its own is sequenced behind the temp.
+                if (left.Type.Unqualified is CType.Pointer or CType.Optional { Inner.Unqualified: CType.Array }
+                    && !IsPureReread(left) && _hoist is not null && !impureBeforeLeft)
+                {
+                    left = HoistLowered("orelse", new List<CStmt>(), left, impureBeforeLeft);
+                }
                 // The fallback is at the payload's result type (`alignment orelse default_alignment`, an enum literal).
                 var right = left.Type.Unqualified is CType.Optional { Inner: var fallbackSink }
                     ? LowerExprSink(o.Arg2, fallbackSink)
@@ -885,7 +894,7 @@ internal sealed partial class ZigLowering
                 // (the element pointer) when it has one, else the fallback array.
                 if (left.Type.Unqualified is CType.Optional { Inner.Unqualified: CType.Array } optArray)
                 {
-                    if (!IsSimpleReeval(left))
+                    if (!IsPureReread(left))
                     {
                         throw new IrUnsupportedException(
                             "zig `orelse` on an optional array with a non-trivial left operand not lowered yet (it would be double-evaluated)");
@@ -899,7 +908,7 @@ internal sealed partial class ZigLowering
                 }
                 if (left.Type.Unqualified is CType.Pointer)
                 {
-                    if (!IsSimpleReeval(left))
+                    if (!IsPureReread(left))
                     {
                         throw new IrUnsupportedException(
                             "zig `orelse` on a pointer with a non-trivial left operand not lowered yet (it would be double-evaluated)");
@@ -3222,6 +3231,24 @@ internal sealed partial class ZigLowering
     {
         VarRef or NullPtr or LitInt or LitFloat => true,
         Paren p => IsSimpleReeval(p.Inner),
+        _ => false,
+    };
+
+    /// <summary>True for an expression that yields the same value when read a second time straight after the first,
+    /// with no write between: <see cref="IsSimpleReeval"/>'s leaves, and a field, element or pointee read or an
+    /// arithmetic, comparison or cast over such (std.Treap's <c>node.children[0] orelse node.children[1]</c> and
+    /// <c>node.children[@intFromBool(!right)] orelse unreachable</c>, task #193). Wider than IsSimpleReeval, and only for
+    /// a REREAD (<c>a != null ? a : b</c>, where <c>a</c> has already been read once): a read through a pointer may trap,
+    /// so it is not safe to evaluate eagerly where zig would not have evaluated it at all.</summary>
+    private static bool IsPureReread(CExpr e) => e switch
+    {
+        VarRef or NullPtr or LitInt or LitFloat or LitBool or EnumConstRef => true,
+        Paren p => IsPureReread(p.Inner),
+        Member m => IsPureReread(m.Base),
+        DotCC.Ir.Index ix => IsPureReread(ix.Base) && IsPureReread(ix.Idx),
+        Cast c => IsPureReread(c.Operand),
+        Unary { Op: UnOp.Plus or UnOp.Neg or UnOp.BitNot or UnOp.LogNot or UnOp.Deref or UnOp.AddrOf } u => IsPureReread(u.Operand),
+        Binary b => IsPureReread(b.Left) && IsPureReread(b.Right),
         _ => false,
     };
 

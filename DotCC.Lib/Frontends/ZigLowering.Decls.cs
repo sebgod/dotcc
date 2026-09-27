@@ -63,7 +63,9 @@ internal sealed partial class ZigLowering
             allParams = allParams.Select(p => p.Kind == ParamKind.Runtime && p.TypeAst.Content is Zig.Ident { Arg0: var ctTok }
                                                    && Tok(ctTok) is "comptime_int" or "comptime_float"
                                                ? p with { Kind = ParamKind.ComptimeValue } : p).ToList();
-            if (allParams.Any(p => p.Kind is ParamKind.Runtime or ParamKind.AnyType))
+            // A `comptime f: anytype` (std.Treap's `comptime compareFn: anytype`, task #193) is a compile-time argument, bound
+            // when the type is reified; a plain `anytype` or a runtime parameter has no place in a type constructor.
+            if (allParams.Any(p => p.Kind == ParamKind.Runtime || p.Kind == ParamKind.AnyType && !p.Comptime))
             {
                 throw new IrUnsupportedException(
                     $"function '{Tok(nameTok)}': a `type`-returning function's parameters must be `comptime` "

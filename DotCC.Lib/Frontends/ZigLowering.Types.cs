@@ -157,8 +157,10 @@ internal sealed partial class ZigLowering
         // (the monomorphization-shaped case — the operand is in scope in a body).
         // A lazy module's type-former alias that names a container declared LATER in the file (std.base64's
         // `const decoderWithIgnoreProto = *const fn (…) Base64DecoderWithIgnore;`, task #75) cannot lower while the module is
-        // still preparing: it is deferred to its first type-position use, as a top-level type CALL is.
-        if (_lazy && _currentFnName.Length == 0 && IsTypeFormer(rhs))
+        // still preparing: it is deferred to its first type-position use, as a top-level type CALL is. So is a qualified path
+        // into one (std.treap's test-only `const TestNode = TestTreap.Node;` over `TestTreap = Treap(u64, std.math.order)`,
+        // task #193): zig analyses neither unless something names it.
+        if (_lazy && _currentFnName.Length == 0 && (IsTypeFormer(rhs) || rhs.Content is Zig.Field))
         {
             try { _ = TryTypeAliasRhs(rhs, out _); }
             catch (IrUnsupportedException)
@@ -886,6 +888,7 @@ internal sealed partial class ZigLowering
         }
         var name = QualifyTypeName($"__AnonEnum{_inlineStructNames.Count}");   // shares the per-module counter
         _inlineStructNames[occurrence] = name;
+        if (_currentContainer is { } enumParent) { _containerParents[name] = enumParent; }   // as an inline union's (task #193)
         using (EnterContainer(name)) { RegisterEnumZig(name, null, enumFields); }
         return _containerTypes[name];
     }
@@ -900,6 +903,10 @@ internal sealed partial class ZigLowering
         var name = QualifyTypeName($"__AnonUnion{_inlineStructNames.Count}");   // shares the per-module counter
         _inlineStructNames[occurrence] = name;
         _containerTypes[name] = new CType.Named(name);
+        // Its variant types resolve where it is written: std.Treap's `Entry { context: union(enum) { inserted_under: ?*Node,
+        // … } }` names the reified Treap's sibling `Node` (task #193), which the union's own scope reaches only through its
+        // enclosing container.
+        if (_currentContainer is { } unionParent) { _containerParents[name] = unionParent; }
         List<Item> methods;
         using (EnterContainer(name))
         {
@@ -1297,9 +1304,12 @@ internal sealed partial class ZigLowering
             _ => null,
         };
         if (baseName is null) { return null; }
-        return _nestedContainerTypes.TryGetValue(baseName, out var nested) && nested.TryGetValue(Tok(f.Arg2), out var inner)
+        // The base may be a container ANOTHER module reified (`const T = std.Treap(u32, cmp);` then `T.Node`, task
+        // #193): its nested types are registered by that module.
+        var owner = _moduleGraph?.OwnerOfContainer(baseName) ?? this;
+        return owner._nestedContainerTypes.TryGetValue(baseName, out var nested) && nested.TryGetValue(Tok(f.Arg2), out var inner)
             ? inner
-            : TryContainerTypeConst(baseName, Tok(f.Arg2));
+            : owner.TryContainerTypeConst(baseName, Tok(f.Arg2));
     }
 
     /// <summary>Look up the container type named at a use site — a registered struct/enum/union

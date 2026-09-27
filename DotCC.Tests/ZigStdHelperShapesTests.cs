@@ -4527,20 +4527,23 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
-    public void An_optional_array_orelse_over_a_call_is_not_supported_yet()
+    public void An_optional_array_orelse_over_a_call_binds_the_call_first()
     {
-        var ex = Should.Throw<CompileException>(() => EmitZig("""
+        var cs = EmitZig("""
             fn maybe(n: u8) ?[2]u32 {
                 if (n == 0) return null;
                 return .{ n, n * 2 };
             }
             pub fn main() u8 {
                 const got = maybe(0) orelse [2]u32{ 4, 5 };
-                return @intCast(got[0] + got[1]);
+                const got2 = maybe(3) orelse [2]u32{ 4, 5 };
+                return @intCast(got[0] + got[1] + got2[0] * 10 + got2[1]);
             }
-            """));
-        // Task #151: the conditional reads the optional twice, so its operand must be a plain name or field. zig returns 9.
-        ex.Message.ShouldContain("`orelse` on an optional array with a non-trivial left operand");
+            """);
+        // Task #151 had rejected this: the conditional reads the optional twice. Since task #193 a left operand that is no
+        // pure reread is bound to a temp first, where the statement can hoist it. zig returns 45.
+        cs.ShouldContain("ZigOptArray_uint_2 __anf0 = maybe(0);");
+        cs.ShouldContain("(Cond.B(__anf0.HasValue) ? __anf0.Value : __cl1)");
     }
 
     [Fact]
@@ -5953,5 +5956,137 @@ public sealed class ZigStdHelperShapesTests
         // the tuple temp. zig returns 30.
         cs.ShouldContain("return ErrUnion<ulong>.Err(1);");
         cs.ShouldContain("ConstSlice<byte> a = __tup0.Item1;");
+    }
+
+    [Fact]
+    public void A_pointer_orelse_rereads_an_element_and_an_array_of_pointers_copies()
+    {
+        var cs = EmitZig("""
+            const Node = struct {
+                key: u8,
+                children: [2]?*Node,
+            };
+            fn firstChild(n: *Node) ?*Node {
+                return n.children[0] orelse n.children[1];
+            }
+            fn pick(n: *Node, right: bool) *Node {
+                return n.children[@intFromBool(right)] orelse unreachable;
+            }
+            pub fn main() u8 {
+                var leaf = Node{ .key = 40, .children = .{ null, null } };
+                var a = Node{ .key = 1, .children = .{ null, &leaf } };
+                var b: Node = undefined;
+                b.key = 1;
+                b.children = a.children;
+                const c = pick(&b, true);
+                const d = firstChild(&a) orelse return 99;
+                a.children = [_]?*Node{ null, null };
+                var gone: u8 = 0;
+                while (a.children[0] orelse a.children[1]) |_| {
+                    gone += 50;
+                    break;
+                }
+                return c.key + d.key / 20 + gone + b.key - 1;
+            }
+            """);
+        // Task #193 (std.Treap's `node.children[0] orelse node.children[1]` and `new.children = old.children`): an element
+        // read is a pure reread, so the conditional names it twice; a `[2]?*Node` copy is the runtime's PtrSlice overload,
+        // whose type argument is the pointee (C# takes no pointer type argument, CS0306). zig returns 42.
+        cs.ShouldContain("? ((Node**)&n->children)[0] : ((Node**)&n->children)[1]");
+        cs.ShouldContain("ZigMem.CopyForwards<Node>(new PtrSlice<Node>((Node**)&b.children, 2UL), new ConstPtrSlice<Node>((Node**)&a.children, 2UL));");
+    }
+
+    [Fact]
+    public void A_pointer_orelse_binds_a_call_operand_to_a_temp()
+    {
+        var cs = EmitZig("""
+            const Node = struct { key: u8, next: ?*Node };
+            var g = Node{ .key = 40, .next = null };
+            fn get(n: u8) ?*Node {
+                return if (n == 0) null else &g;
+            }
+            var calls: u8 = 0;
+            fn bump() u8 {
+                calls += 1;
+                return calls;
+            }
+            pub fn main() u8 {
+                var fallback = Node{ .key = 7, .next = null };
+                const p = get(1) orelse &fallback;
+                const q = get(0) orelse &fallback;
+                const r = get(bump()) orelse &fallback;
+                return p.key + q.key / 7 + r.key / 40 + calls - 2;
+            }
+            """);
+        // Task #193: a call is no pure reread, so where the statement can hoist it the left operand is bound once, first.
+        // zig returns 41.
+        cs.ShouldContain("Node* __anf0 = get(1);");
+        cs.ShouldContain("Node* p = (Cond.B(((CBool)(__anf0 != null))) ? __anf0 : &fallback);");
+        cs.ShouldContain("Node* __anf2 = get(bump());");
+    }
+
+    [Fact]
+    public void A_pointer_orelse_over_a_call_in_a_loop_condition_is_not_supported_yet()
+    {
+        var ex = Should.Throw<CompileException>(() => EmitZig("""
+            const Node = struct { key: u8 };
+            var g = Node{ .key = 3 };
+            fn get(n: u8) ?*Node {
+                return if (n == 0) null else &g;
+            }
+            pub fn main() u8 {
+                var fb = Node{ .key = 5 };
+                var i: u8 = 0;
+                while (i < (get(i) orelse &fb).key) : (i += 1) {}
+                return i;
+            }
+            """));
+        // Task #193: a loop condition is re-evaluated per iteration, so it has no hoist point for the temp. zig returns 3.
+        ex.Message.ShouldContain("`orelse` on a pointer with a non-trivial left operand");
+    }
+
+    [Fact]
+    public void A_comptime_anytype_function_argument_keys_a_type_returning_generic()
+    {
+        var cs = EmitZig("""
+            fn Sorted(comptime T: type, comptime lessFn: anytype) type {
+                return struct {
+                    pub fn pick(a: T, b: T) T {
+                        return if (lessFn(a, b)) a else b;
+                    }
+                };
+            }
+            fn less(a: u8, b: u8) bool {
+                return a < b;
+            }
+            pub fn main() u8 {
+                const S = Sorted(u8, less);
+                return S.pick(42, 50);
+            }
+            """);
+        // Task #193 (std.Treap's `comptime compareFn: anytype`): the argument binds as a `comptime f: fn (…)` does, and the
+        // function joins the instance key. zig returns 42.
+        cs.ShouldContain("return Sorted__u8_fnless_pick(42, 50);");
+        cs.ShouldContain("return (Cond.B(less(a, b)) ? a : b);");
+    }
+
+    [Fact]
+    public void A_comptime_anytype_value_argument_to_a_type_returning_generic_is_not_supported_yet()
+    {
+        var ex = Should.Throw<CompileException>(() => EmitZig("""
+            fn Sorted(comptime T: type, comptime lessFn: anytype) type {
+                return struct {
+                    pub fn pick(a: T, b: T) T {
+                        return if (lessFn(a, b)) a else b;
+                    }
+                };
+            }
+            pub fn main() u8 {
+                const S = Sorted(u8, 5);
+                return S.pick(42, 50);
+            }
+            """));
+        // Task #193: only a function is modeled there; zig itself rejects this program (it calls a comptime_int).
+        ex.Message.ShouldContain("the `comptime lessFn: anytype` argument must name a function at compile time");
     }
 }

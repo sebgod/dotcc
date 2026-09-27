@@ -1611,6 +1611,18 @@ internal sealed partial class ZigLowering
                 {
                     mangleTokens.Add(MangleTypeSeed(typeSeeds.First(s => s.Name == p.Name)));
                 }
+                // `comptime compareFn: anytype` (std.Treap, task #193): a function, bound as a `comptime f: fn (…)` is.
+                else if (p.Kind == ParamKind.AnyType)
+                {
+                    if (TryResolveComptimeFnValue(argItems[i], argScope) is not { } anyFn)
+                    {
+                        throw new IrUnsupportedException(
+                            $"call to type-returning generic '{templateSym.Name}': the `comptime {p.Name}: anytype` argument must "
+                            + "name a function at compile time (another comptime value there is not supported yet)");
+                    }
+                    mangleTokens.Add("fn" + anyFn.Fn.Name);
+                    typeFnSeeds.Add((p.Name, anyFn.Owner, anyFn.Fn));
+                }
                 else if (LowerType(p.TypeAst).Unqualified is CType.Func)
                 {
                     // A comptime FUNCTION value: the function it names keys the instance (one struct per function).

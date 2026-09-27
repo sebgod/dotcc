@@ -1801,7 +1801,9 @@ internal sealed class CSharpBackend
             // name and renders the args (slice fat pointers, a value, or a sentinel pointer).
             case ZigMemCall zm:
             {
-                var elem = Cs(zm.Element.Unqualified);
+                // Over a slice of POINTERS (`new.children = old.children` for a `[2]?*Node`, std.Treap, task #193) the helper
+                // is the runtime's PtrSlice overload, whose type argument is the pointee: C# takes no pointer type argument.
+                var elem = Cs(CSharpTarget.PtrSliceTarget(zm.Element.Unqualified) ?? zm.Element.Unqualified);
                 var callArgs = string.Join(", ", zm.Args.Select(x => Expr(x)));
                 return ($"ZigMem.{zm.Method}<{elem}>({callArgs})", PPostfix);
             }

@@ -7879,6 +7879,108 @@ public sealed class ZigOracleTests
             "    for (&buf, 0..) |*b, i| b.* = @truncate(i * 3);\n" +
             "    return @truncate(last(buf[0..]) + last(buf[0..30]));\n" +
             "}\n", 156, "" },
+        // Task #193 (std.Treap): a pointer `orelse` over element reads, a `[2]?*Node` array copy, and `orelse unreachable`.
+        new object[] { "pointer_orelse_elements_and_pointer_array_copy",
+            "const Node = struct {\n" +
+            "    key: u8,\n" +
+            "    children: [2]?*Node,\n" +
+            "};\n" +
+            "fn firstChild(n: *Node) ?*Node {\n" +
+            "    return n.children[0] orelse n.children[1];\n" +
+            "}\n" +
+            "fn pick(n: *Node, right: bool) *Node {\n" +
+            "    return n.children[@intFromBool(right)] orelse unreachable;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var leaf = Node{ .key = 40, .children = .{ null, null } };\n" +
+            "    var a = Node{ .key = 1, .children = .{ null, &leaf } };\n" +
+            "    var b: Node = undefined;\n" +
+            "    b.key = 1;\n" +
+            "    b.children = a.children;\n" +
+            "    const c = pick(&b, true);\n" +
+            "    const d = firstChild(&a) orelse return 99;\n" +
+            "    a.children = [_]?*Node{ null, null };\n" +
+            "    var gone: u8 = 0;\n" +
+            "    while (a.children[0] orelse a.children[1]) |_| {\n" +
+            "        gone += 50;\n" +
+            "        break;\n" +
+            "    }\n" +
+            "    return c.key + d.key / 20 + gone + b.key - 1;\n" +
+            "}\n", 42, "" },
+        // Task #193: a pointer `orelse` whose left operand is a call binds it once, first.
+        new object[] { "pointer_orelse_call_operand",
+            "const Node = struct { key: u8, next: ?*Node };\n" +
+            "var g = Node{ .key = 40, .next = null };\n" +
+            "fn get(n: u8) ?*Node {\n" +
+            "    return if (n == 0) null else &g;\n" +
+            "}\n" +
+            "var calls: u8 = 0;\n" +
+            "fn bump() u8 {\n" +
+            "    calls += 1;\n" +
+            "    return calls;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var fallback = Node{ .key = 7, .next = null };\n" +
+            "    const p = get(1) orelse &fallback;\n" +
+            "    const q = get(0) orelse &fallback;\n" +
+            "    const r = get(bump()) orelse &fallback;\n" +
+            "    return p.key + q.key / 7 + r.key / 40 + calls - 2;\n" +
+            "}\n", 41, "" },
+        // Task #193: an optional-array `orelse` whose left operand is a call binds it once, first (task #151 had refused it).
+        new object[] { "optional_array_orelse_call_operand",
+            "fn maybe(n: u8) ?[2]u32 {\n" +
+            "    if (n == 0) return null;\n" +
+            "    return .{ n, n * 2 };\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const got = maybe(0) orelse [2]u32{ 4, 5 };\n" +
+            "    const got2 = maybe(3) orelse [2]u32{ 4, 5 };\n" +
+            "    return @intCast(got[0] + got[1] + got2[0] * 10 + got2[1]);\n" +
+            "}\n", 45, "" },
+        // Task #193: `comptime lessFn: anytype` bound to a function in a type-returning generic.
+        new object[] { "comptime_anytype_fn_type_arg",
+            "fn Sorted(comptime T: type, comptime lessFn: anytype) type {\n" +
+            "    return struct {\n" +
+            "        pub fn pick(a: T, b: T) T {\n" +
+            "            return if (lessFn(a, b)) a else b;\n" +
+            "        }\n" +
+            "    };\n" +
+            "}\n" +
+            "fn less(a: u8, b: u8) bool {\n" +
+            "    return a < b;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const S = Sorted(u8, less);\n" +
+            "    return S.pick(42, 50);\n" +
+            "}\n", 42, "" },
+        // Task #193 (std.Treap's Entry): an inline `union(enum)` field type inside a nested struct names its sibling `Node`.
+        new object[] { "inline_union_field_names_sibling_type",
+            "fn Tree(comptime K: type) type {\n" +
+            "    return struct {\n" +
+            "        const Self = @This();\n" +
+            "        root: ?*Node = null,\n" +
+            "        pub const Node = struct {\n" +
+            "            key: K,\n" +
+            "        };\n" +
+            "        pub const Entry = struct {\n" +
+            "            key: K,\n" +
+            "            node: ?*Node,\n" +
+            "            context: union(enum) {\n" +
+            "                inserted_under: ?*Node,\n" +
+            "                removed,\n" +
+            "            },\n" +
+            "        };\n" +
+            "        pub fn entry(self: *Self, k: K) Entry {\n" +
+            "            return .{ .key = k, .node = self.root, .context = .{ .inserted_under = null } };\n" +
+            "        }\n" +
+            "    };\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const T = Tree(u8);\n" +
+            "    var t: T = .{};\n" +
+            "    const e = t.entry(42);\n" +
+            "    return e.key;\n" +
+            "}\n", 42, "" },
         // Task #192 (std.Uri.parse): a destructure whose RHS is an `orelse` with a control-flow fallback.
         new object[] { "destructure_orelse_return",
             "fn cut(s: []const u8, c: u8) ?struct { []const u8, []const u8 } {\n" +
@@ -8780,6 +8882,44 @@ public sealed class ZigOracleTests
             "    return x + x;\n" +
             "}\n" +
             "pub const twice = double;\n", 42, "" },
+        // Task #193 (std.Treap): `T.Node` of a generic another module reified, and that module's deferred
+        // `const TestNode = TestTree.Node;` over an instance that is never referenced (so never evaluated).
+        new object[] { "nested_type_of_foreign_generic_instance",
+            "const lib = @import(\"lib.zig\");\n" +
+            "fn less(a: u8, b: u8) bool {\n" +
+            "    return a < b;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const T = lib.Tree(u8, less);\n" +
+            "    var t: T = .{};\n" +
+            "    var a: T.Node = .{ .key = 40, .children = .{ null, null } };\n" +
+            "    var b: T.Node = .{ .key = 2, .children = .{ null, null } };\n" +
+            "    t.put(&a);\n" +
+            "    t.put(&b);\n" +
+            "    const r = t.root orelse return 1;\n" +
+            "    const l = r.children[1] orelse r.children[0];\n" +
+            "    return r.key + (l orelse return 3).key;\n" +
+            "}\n",
+            "lib.zig",
+            "pub fn Tree(comptime K: type, comptime cmp: anytype) type {\n" +
+            "    return struct {\n" +
+            "        const Self = @This();\n" +
+            "        root: ?*Node = null,\n" +
+            "        pub const Node = struct {\n" +
+            "            key: K,\n" +
+            "            children: [2]?*Node,\n" +
+            "        };\n" +
+            "        pub fn put(self: *Self, n: *Node) void {\n" +
+            "            if (self.root) |r| {\n" +
+            "                r.children[@intFromBool(cmp(n.key, r.key))] = n;\n" +
+            "            } else {\n" +
+            "                self.root = n;\n" +
+            "            }\n" +
+            "        }\n" +
+            "    };\n" +
+            "}\n" +
+            "const TestTree = Tree(u8, 5);\n" +
+            "const TestNode = TestTree.Node;\n", 42, "" },
     };
 
     [Theory]
@@ -9574,6 +9714,33 @@ public sealed class ZigOracleTests
             "    const c = H.hash(4, \"ALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUF\");\n" +
             "    return @truncate((a ^ b ^ c) >> 5);\n" +
             "}\n", 34);
+
+    // Task #193: std.Treap from real std (getEntryFor, Entry.set, inorderIterator, getMin). Its
+    // `comptime compareFn: anytype` binds the user's comparator, `T.Node` resolves in treap.zig, and the pointer
+    // `orelse` / `[2]?*Node` copies in insert, remove and rotate lower.
+    [Fact]
+    public void Dotcc_matches_zig_std_treap() =>
+        MatchesZigWithRealStd("treap",
+            "const std = @import(\"std\");\n" +
+            "fn cmp(a: u32, b: u32) std.math.Order {\n" +
+            "    return std.math.order(a, b);\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const T = std.Treap(u32, cmp);\n" +
+            "    var treap: T = .{};\n" +
+            "    var nodes: [5]T.Node = undefined;\n" +
+            "    const keys = [_]u32{ 50, 20, 70, 10, 30 };\n" +
+            "    for (&nodes, keys) |*n, k| {\n" +
+            "        var entry = treap.getEntryFor(k);\n" +
+            "        entry.set(n);\n" +
+            "    }\n" +
+            "    var sum: u32 = 0;\n" +
+            "    var it = treap.inorderIterator();\n" +
+            "    var pos: u32 = 1;\n" +
+            "    while (it.next()) |n| : (pos += 1) sum += n.key * pos;\n" +
+            "    const min = treap.getMin() orelse return 2;\n" +
+            "    return @truncate(sum + min.key);\n" +
+            "}\n", 188);
 
     // Task #192: std.Uri.parse from real std (scheme, user, host, port, path, query, fragment). Its
     // `const scheme, const rest = … orelse return error.InvalidFormat;` destructure hoists the fallback.

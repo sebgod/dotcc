@@ -42,6 +42,16 @@ public static class ZigMem
         for (ulong i = 0; i < source.Len; i++) { d[i] = s[i]; }
     }
 
+    /// <summary><see cref="CopyForwards{T}(Slice{T}, ConstSlice{T})"/> over a slice of POINTERS (a <c>[N]?*T</c> array
+    /// copy, std.Treap's <c>new.children = old.children</c>): C# takes no pointer type argument, so the type argument is
+    /// the pointee.</summary>
+    public static unsafe void CopyForwards<T>(PtrSlice<T> dest, ConstPtrSlice<T> source) where T : unmanaged
+    {
+        T** d = dest.Ptr;
+        T** s = source.Ptr;
+        for (ulong i = 0; i < source.Len; i++) { d[i] = s[i]; }
+    }
+
     /// <summary><c>@memmove(dest, source)</c> — copy <c>source.len</c> elements into <c>dest</c> where the two
     /// may OVERLAP (array_list's in-place shifts): the direction is chosen so every element is read before it
     /// is overwritten, as C's <c>memmove</c>.</summary>
@@ -59,11 +69,35 @@ public static class ZigMem
         }
     }
 
+    /// <summary><see cref="Move{T}(Slice{T}, ConstSlice{T})"/> over a slice of POINTERS; the type argument is the
+    /// pointee.</summary>
+    public static unsafe void Move<T>(PtrSlice<T> dest, ConstPtrSlice<T> source) where T : unmanaged
+    {
+        T** d = dest.Ptr;
+        T** s = source.Ptr;
+        if (d <= s)
+        {
+            for (ulong i = 0; i < source.Len; i++) { d[i] = s[i]; }
+        }
+        else
+        {
+            for (ulong i = source.Len; i > 0; i--) { d[i - 1] = s[i - 1]; }
+        }
+    }
+
     /// <summary><c>@memset(dest, value)</c> — set every element of <c>dest</c> to
     /// <paramref name="value"/>.</summary>
     public static unsafe void Set<T>(Slice<T> dest, T value) where T : unmanaged
     {
         T* d = dest.Ptr;
+        for (ulong i = 0; i < dest.Len; i++) { d[i] = value; }
+    }
+
+    /// <summary><see cref="Set{T}(Slice{T}, T)"/> over a slice of POINTERS (<c>@memset(&amp;ptrs, null)</c>); the type
+    /// argument is the pointee.</summary>
+    public static unsafe void Set<T>(PtrSlice<T> dest, T* value) where T : unmanaged
+    {
+        T** d = dest.Ptr;
         for (ulong i = 0; i < dest.Len; i++) { d[i] = value; }
     }
 

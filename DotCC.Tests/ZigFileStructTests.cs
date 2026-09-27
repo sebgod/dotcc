@@ -291,4 +291,51 @@ public sealed class ZigFileStructTests
             """)));
         ex.Message.ShouldContain("Box.broken is not meant to be called");
     }
+
+    [Fact]
+    public void A_nested_type_of_a_generic_another_module_reified_resolves_there()
+    {
+        var cs = EmitZigMulti("""
+            const lib = @import("lib.zig");
+            fn less(a: u8, b: u8) bool {
+                return a < b;
+            }
+            pub fn main() u8 {
+                const T = lib.Tree(u8, less);
+                var t: T = .{};
+                var a: T.Node = .{ .key = 40, .children = .{ null, null } };
+                var b: T.Node = .{ .key = 2, .children = .{ null, null } };
+                t.put(&a);
+                t.put(&b);
+                const r = t.root orelse return 1;
+                const l = r.children[1] orelse r.children[0];
+                return r.key + (l orelse return 3).key;
+            }
+            """, ("lib.zig", """
+            pub fn Tree(comptime K: type, comptime cmp: anytype) type {
+                return struct {
+                    const Self = @This();
+                    root: ?*Node = null,
+                    pub const Node = struct {
+                        key: K,
+                        children: [2]?*Node,
+                    };
+                    pub fn put(self: *Self, n: *Node) void {
+                        if (self.root) |r| {
+                            r.children[@intFromBool(cmp(n.key, r.key))] = n;
+                        } else {
+                            self.root = n;
+                        }
+                    }
+                };
+            }
+            const TestTree = Tree(u8, 5);
+            const TestNode = TestTree.Node;
+            """));
+        // Task #193 (std.Treap): `T.Node` with `const T = lib.Tree(u8, less);` names the nested type the owning module
+        // registered when it reified the instance; and lib's own `const TestNode = TestTree.Node;` stays deferred, so its
+        // (unreferenced, here unlowerable) `Tree(u8, 5)` is never evaluated. zig returns 42.
+        cs.ShouldContain("lib__Tree__u8_fnless__Node a = __anf0;");
+        cs.ShouldNotContain("fn5");
+    }
 }

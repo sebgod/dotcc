@@ -183,15 +183,23 @@ internal sealed class CSharpTarget : ITarget
         {
             return (isConst ? "ConstSlice<" : "Slice<") + RenderType(rows.FlatElement.Unqualified) + ">";
         }
-        // A pointer to an array renders as the array's flat element pointer, so its pointee is that element.
-        if (element is CType.Pointer { Pointee: var pointee }
-            && (pointee.Unqualified is CType.Array pointedRows ? pointedRows.FlatElement : pointee).Unqualified
-                is var target && target is not (CType.Pointer or CType.VoidType or CType.Func or CType.Array))
+        if (PtrSliceTarget(element) is { } target)
         {
             return (isConst ? "ConstPtrSlice<" : "PtrSlice<") + RenderType(target) + ">";
         }
         return (isConst ? "ConstSlice<" : "Slice<") + RenderType(element) + ">";
     }
+
+    /// <summary>The pointee a slice of <paramref name="element"/> is a <c>PtrSlice</c> over (see <see cref="SliceType"/>),
+    /// or null when the element is not a pointer that shape covers. Also the type argument of a <c>ZigMem</c> helper over
+    /// such a slice, whose <c>PtrSlice</c> overload takes the pointee (task #193).</summary>
+    internal static CType? PtrSliceTarget(CType element)
+        // A pointer to an array renders as the array's flat element pointer, so its pointee is that element.
+        => element is CType.Pointer { Pointee: var pointee }
+           && (pointee.Unqualified is CType.Array pointedRows ? pointedRows.FlatElement : pointee).Unqualified
+               is var target && target is not (CType.Pointer or CType.VoidType or CType.Func or CType.Array)
+            ? target
+            : null;
 
     /// <summary>The generated value types standing for zig optional arrays <c>?[N]T</c> (task #151), by name: the
     /// element's C# spelling and the flat element count. Filled as types render; the backend emits one declaration per
