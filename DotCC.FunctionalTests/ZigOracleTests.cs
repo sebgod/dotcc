@@ -7879,6 +7879,54 @@ public sealed class ZigOracleTests
             "    for (&buf, 0..) |*b, i| b.* = @truncate(i * 3);\n" +
             "    return @truncate(last(buf[0..]) + last(buf[0..30]));\n" +
             "}\n", 156, "" },
+        // Task #202 (std.Io.Reader): prong captures on an error switch, in a `catch |err| switch` and a while-else.
+        new object[] { "error_switch_prong_captures",
+            "const E = error{ A, B, C };\n" +
+            "fn f(x: u8) E!u8 {\n" +
+            "    return switch (x) {\n" +
+            "        0 => error.A,\n" +
+            "        1 => error.B,\n" +
+            "        2 => error.C,\n" +
+            "        else => x,\n" +
+            "    };\n" +
+            "}\n" +
+            "fn g(x: u8) E!u8 {\n" +
+            "    const v = f(x) catch |err| switch (err) {\n" +
+            "        error.A => return 7,\n" +
+            "        error.B, error.C => |e| return e,\n" +
+            "    };\n" +
+            "    return v;\n" +
+            "}\n" +
+            "fn h(x: u8) E!u8 {\n" +
+            "    while (f(x)) |n| {\n" +
+            "        return n;\n" +
+            "    } else |err| switch (err) {\n" +
+            "        error.A => return 1,\n" +
+            "        error.B => |e| return e,\n" +
+            "        error.C => |e| return e,\n" +
+            "    }\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = g(0) catch 0;\n" +
+            "    const b = g(1) catch 30;\n" +
+            "    const c = h(2) catch 5;\n" +
+            "    return a + b + c;\n" +
+            "}\n", 42, "" },
+        // Task #202 (std.Io.Reader.takeArray): `return (try take(buf, n))[0..n];` at a `*const [n]u8` payload.
+        new object[] { "slice_at_array_pointer_payload",
+            "const E = error{Short};\n" +
+            "fn take(buf: []const u8, n: usize) E![]const u8 {\n" +
+            "    if (buf.len < n) return error.Short;\n" +
+            "    return buf[0..n];\n" +
+            "}\n" +
+            "fn takeArray(buf: []const u8, comptime n: usize) E!*const [n]u8 {\n" +
+            "    return (try take(buf, n))[0..n];\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = takeArray(\"hello\", 3) catch return 1;\n" +
+            "    const b = takeArray(\"hi\", 3);\n" +
+            "    return a[0] - 'h' + a[2] - 'l' + @as(u8, if (b) |_| 0 else |_| 42);\n" +
+            "}\n", 42, "" },
         // Task #201 (std.Io.Limit): a decl-literal call `.limited(n)` against an enum result type.
         new object[] { "enum_decl_literal_call",
             "const Limit = enum(usize) {\n" +
@@ -9863,6 +9911,23 @@ public sealed class ZigOracleTests
             "    const c = H.hash(4, \"ALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUF\");\n" +
             "    return @truncate((a ^ b ^ c) >> 5);\n" +
             "}\n", 34);
+
+    // Task #202 (with #199 and #201): std.Io.Reader from real std over a fixed buffer. `fixed` is `@constCast(buffer)`, a
+    // `Limit` argument is the decl literal `.limited(n)`, and the error switches in `take*` capture the error they return.
+    [Fact]
+    public void Dotcc_matches_zig_std_io_reader() =>
+        MatchesZigWithRealStd("io_reader",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var r = std.Io.Reader.fixed(\"hello,zig!\\x07\\x02\\x00\");\n" +
+            "    const b0 = r.takeByte() catch return 1;\n" +
+            "    const part = r.takeDelimiterInclusive(',') catch return 2;\n" +
+            "    const arr = r.takeArray(3) catch return 3;\n" +
+            "    const bang = r.peekByte() catch return 4;\n" +
+            "    r.toss(1);\n" +
+            "    const n = r.takeVarInt(u16, .little, 2) catch return 5;\n" +
+            "    return @truncate(b0 + part.len + arr[0] + bang + n);\n" +
+            "}\n", 15);
 
     // Task #198: std.BufSet from real std (insert, contains, remove, count): a string set over hash_map with `V = void`.
     [Fact]

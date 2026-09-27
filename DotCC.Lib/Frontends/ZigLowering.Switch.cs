@@ -261,13 +261,35 @@ internal sealed partial class ZigLowering
     /// <see cref="SwitchSection"/>: its case values are the labels (<c>else</c> → the null
     /// default label), and its braced block is the body. Zig switch has NO fall-through, so a
     /// terminating <see cref="Break"/> is appended to any section that doesn't already end
-    /// control flow — otherwise the C# backend would synthesize C's fall-through jump. A payload
-    /// capture <c>|x|</c> here is an error (only a tagged-union switch binds a payload).</summary>
+    /// control flow — otherwise the C# backend would synthesize C's fall-through jump. A capture <c>|x|</c> binds a
+    /// payload only on a tagged-union switch, and on an ERROR switch the error itself (below); anything else rejects it,
+    /// as zig does.</summary>
     private CStmt LowerSwitch(CExpr subject, Item prongsItem)
     {
         var sections = new List<SwitchSection>();
-        foreach (var prongItem in Flatten(prongsItem))
+        var prongs = Flatten(prongsItem);
+        // A switch over an error value binds a prong capture to that error (`error.ReadFailed, error.EndOfStream => |e|
+        // return e`, `else => |e| return e` all through std.Io.Reader, task #202): dotcc erases error sets, so the narrowed
+        // error zig binds is the subject's code. The subject is read once into a temp when a capture reads it again.
+        var errorType = subject.Type is { Unqualified: CType.ErrorSetType } et ? et : null;
+        var errorSwitch = errorType is not null;
+        var pre = new List<CStmt>();
+        if (errorType is { } swType && subject is not VarRef
+            && prongs.Any(p => p.Content is Zig.ProngCapture or Zig.ProngCaptureExpr or Zig.ProngCaptureReturn
+                                   or Zig.ProngCaptureReturnVoid or Zig.ProngCaptureJump))
         {
+            var st = _symbols.Declare(new Symbol { Name = "__sw" + _blockLabelCounter++, Kind = SymKind.Var, Type = swType });
+            pre.Add(new DeclStmt(new List<LocalDecl> { new(st, subject) }));
+            subject = new VarRef(st) { Type = swType, IsLValue = true };
+        }
+        foreach (var prongItem in prongs)
+        {
+            if (errorSwitch && prongItem.Content is Zig.ProngCapture or Zig.ProngCaptureExpr or Zig.ProngCaptureReturn
+                                                    or Zig.ProngCaptureReturnVoid or Zig.ProngCaptureJump)
+            {
+                sections.Add(LowerErrorCaptureSection(prongItem, subject));
+                continue;
+            }
             // `inline 0, 1, 2, 3 => |count| { … }` (std.hash.XxHash32's finalize, task #87): one section per case value, the
             // capture a comptime constant of that value (so the body's `inline for (0..count)` unrolls).
             if (prongItem.Content is Zig.InlineProng inlineProng)
@@ -315,15 +337,49 @@ internal sealed partial class ZigLowering
         }
         // A switch over an enum with no `else` names every member (zig checks it), so no value reaches past it: an
         // unreachable default says so to C#, which otherwise sees a function whose every prong returns as falling off
-        // its end (std.array_hash_map's capacityIndexSize, CS0161, task #135).
-        if (subject.Type?.Unqualified is CType.Enum && sections.All(s => s.Labels.All(l => l.CaseExpr is not null)))
+        // its end (std.array_hash_map's capacityIndexSize, CS0161, task #135). An error switch with no `else` names every
+        // error of its set the same way (std.Io.Reader.peekDelimiterInclusive's `} else |err| switch (err) { … }`, task
+        // #202).
+        if (subject.Type?.Unqualified is CType.Enum or CType.ErrorSetType
+            && sections.All(s => s.Labels.All(l => l.CaseExpr is not null)))
         {
             sections.Add(new SwitchSection(new List<SwitchLabel> { new SwitchLabel(null) }, new List<CStmt>
             {
                 new ExprStmt(new Call("__dotcc_unreachable", new List<CExpr>(), new List<CType>(), null) { Type = CType.Void }),
             }));
         }
-        return new Switch(subject, sections);
+        if (pre.Count == 0) { return new Switch(subject, sections); }
+        pre.Add(new Switch(subject, sections));
+        return new Seq(pre);
+    }
+
+    /// <summary>One section of an error switch whose prong captures the error (<c>… => |e| return e</c>, task #202): the
+    /// capture is bound to the subject's code in the section's own scope, then the prong body runs.</summary>
+    private SwitchSection LowerErrorCaptureSection(Item prongItem, CExpr subject)
+    {
+        var prong = DecomposeProng(prongItem);
+        var labels = LowerCaseVals(prong.CaseVals, subject.Type);
+        var stmts = new List<CStmt>();
+        _symbols.EnterScope();
+        try
+        {
+            if (prong.CaptureName is { } cap && cap != "_")
+            {
+                var capSym = _symbols.Declare(new Symbol { Name = cap, Kind = SymKind.Var, Type = subject.Type });
+                stmts.Add(new DeclStmt(new List<LocalDecl> { new(capSym, subject) }));
+            }
+            if (prong.Block is { } block) { stmts.Add(LowerBlock(block)); }
+            else if (prong.Expr is { } expr) { stmts.Add(LowerProngExprStmt(expr)); }
+            else if (prong.Return is { } returned) { stmts.Add(Hoisted(() => LowerReturn(returned))); }
+            else if (prong.ReturnsVoid) { stmts.Add(LowerReturnVoid()); }
+            else if (prong.Jump is { } jump) { stmts.Add(LowerProngJump(jump)); }
+        }
+        finally
+        {
+            _symbols.ExitScope();
+        }
+        if (!EndsInJump(stmts)) { stmts.Add(new Break()); }   // no Zig fall-through
+        return new SwitchSection(labels, new List<CStmt> { new Block(stmts) });
     }
     /// <summary>The sections of an <c>inline</c> prong of a runtime integer switch: the body instantiated once per case
     /// value (a range expands, up to 256 values), each with its <c>|x|</c> capture bound as a comptime constant of that
