@@ -562,16 +562,16 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Rejects_overflow_builtin_on_a_128_bit_operand()
+    public void Overflow_builtin_on_a_128_bit_operand_lowers()
     {
-        // The overflow flag is derived in a 128-bit accumulator, so a 128-bit operation can't have its
-        // overflow detected — a clear cut rather than a silently-wrong flag.
-        var ex = Should.Throw<CompileException>(() => EmitZig(
+        // Once a loud cut (the generic helpers' 128-bit accumulator cannot hold a 128-bit result); since task #214 the
+        // runtime's non-generic UInt128 / Int128 overloads compute it exactly, so the call lowers like any narrower one.
+        var cs = EmitZig(
             "pub fn main() u8 {\n" +
             "    const r = @addWithOverflow(@as(u128, 3), 4);\n" +
             "    return @intCast(r[0]);\n" +
-            "}\n"));
-        ex.Message.ShouldContain("128-bit operand");
+            "}\n");
+        cs.ShouldContain("ZigMath.AddWithOverflow(");
     }
 
     [Fact]
