@@ -2676,8 +2676,30 @@ internal sealed partial class IrBuilder
         return new Binary(op, le, re) { Type = BinaryType(op, le.Type, re.Type) };
     }
 
-    private CExpr Rel(BinOp op, Item l, Item r) =>
-        new Binary(op, BuildExpr(l), BuildExpr(r)) { Type = CType.Int };
+    private CExpr Rel(BinOp op, Item l, Item r)
+    {
+        var le = BuildExpr(l);
+        var re = BuildExpr(r);
+        // C11 6.5.9p5: comparing a pointer (or function pointer) with a null
+        // pointer constant converts the constant to the pointer's type. C# will
+        // not compare `int*` with `int` (CS0019), so the `0` becomes the typed
+        // null pointer (GH #230).
+        if (op is BinOp.Eq or BinOp.Ne)
+        {
+            if (IsPointerOperand(le.Type) && IsNullPointerConstant(re)) { re = new NullPtr { Type = le.Type }; }
+            else if (IsPointerOperand(re.Type) && IsNullPointerConstant(le)) { le = new NullPtr { Type = re.Type }; }
+        }
+        return new Binary(op, le, re) { Type = CType.Int };
+    }
+
+    /// <summary>A pointer or function-pointer operand of <c>==</c> / <c>!=</c>.</summary>
+    private static bool IsPointerOperand(CType t) => t.Unqualified is CType.Pointer or CType.Func;
+
+    /// <summary>C's null pointer constant (C11 6.3.2.3p3): an integer constant
+    /// expression with the value 0 (<c>0</c>, <c>0L</c>, <c>(0)</c>, <c>'\0'</c>, an
+    /// enumerator equal to 0).</summary>
+    private bool IsNullPointerConstant(CExpr e) =>
+        e.Type.Unqualified is CType.Prim { Integer: true } or CType.Enum && ConstEval(e) is 0;
 
     /// <summary>The C type of a binary arithmetic/bitwise/shift expression's
     /// result. Pointer arithmetic (<c>p + i</c> / <c>p - i</c>) yields the
@@ -2921,13 +2943,15 @@ internal sealed partial class IrBuilder
             if (callee is Unary { Op: UnOp.Deref } u && IsFuncPtr(u.Operand.Type)) { callee = u.Operand; continue; }
             break;
         }
-        var rty = callee.Type switch
+        var calleeFn = callee.Type.Unqualified switch
         {
-            CType.Func f2 => f2.Return,
-            CType.Pointer { Pointee: CType.Func f3 } => f3.Return,
-            _ => CType.Int,
+            CType.Func f2 => f2,
+            CType.Pointer { Pointee: CType.Func f3 } => f3,
+            _ => null,
         };
-        return new IndirectCall(callee, args) { Type = rty };
+        // The function pointer's parameter types drive the same call-argument
+        // coercion as a direct call's (GH #230: `s.fn(0)` passes `null`).
+        return new IndirectCall(callee, args, calleeFn?.Params) { Type = calleeFn?.Return ?? CType.Int };
     }
 
     /// <summary>True when <paramref name="t"/> is a function pointer (or a bare

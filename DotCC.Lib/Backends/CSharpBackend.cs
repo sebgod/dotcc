@@ -1300,6 +1300,33 @@ internal sealed class CSharpBackend
     private string Coerced(CExpr value, CType target) =>
         TryCoerceCast(value, target, out var t) ? t : Expr(value);
 
+    /// <summary>
+    /// The argument list of a call through a function pointer. With the pointer's
+    /// parameter types known (<see cref="IndirectCall.ParamTypes"/>, set by the C
+    /// binder) each fixed argument coerces to its parameter exactly as at a direct
+    /// call (<see cref="CallText"/>): the null pointer constant <c>0</c> becomes
+    /// <c>null</c>, an integer stores into an enum, and a variadic-tail argument
+    /// takes the default promotions. Without them (the Zig front end) the arguments
+    /// render as lowered. A zig <c>void</c> argument is erased either way.
+    /// </summary>
+    private string IndirectCallArgs(IndirectCall ic)
+    {
+        var parts = new List<string>(ic.Args.Count);
+        for (var i = 0; i < ic.Args.Count; i++)
+        {
+            var arg = ic.Args[i];
+            if (IsVoidParam(arg.Type)) { continue; }
+            if (ic.ParamTypes is not { } pts)
+            {
+                parts.Add(Sub(arg, PAssign));
+                continue;
+            }
+            if (i < pts.Count && IsVoidParam(pts[i])) { continue; }
+            parts.Add(i < pts.Count ? CoercedArg(arg, pts[i]) : Sub(DecayEnum(arg), PAssign));
+        }
+        return string.Join(", ", parts);
+    }
+
     /// <summary>Coerce a call argument to its parameter type, falling back to the
     /// argument rendered at assignment precedence (so a bare comma operator can't
     /// be misread as an argument separator).</summary>
@@ -1895,7 +1922,7 @@ internal sealed class CSharpBackend
                 ? ($"&{v.Sym.TargetName}", PUnary)
                 : QualifiedRead(v, GlobalName(v.Sym), PPrimary);
             case IndirectCall ic:
-                return ($"{Sub(ic.Callee, PPostfix)}({string.Join(", ", ic.Args.Where(a => !IsVoidParam(a.Type)).Select(a => Sub(a, PAssign)))})", PPostfix);
+                return ($"{Sub(ic.Callee, PPostfix)}({IndirectCallArgs(ic)})", PPostfix);
             case Paren p: return Render(p.Inner); // explicit C parens are redundant; precedence re-adds as needed
             case Cast c: return RenderCast(c);
             case BitCast bc:
