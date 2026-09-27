@@ -6295,4 +6295,41 @@ public sealed class ZigStdHelperShapesTests
         cs.ShouldNotContain("_ = value;");
         cs.ShouldContain("internal static unsafe void Set__void_put(Set__void* self)\n    {\n        self->n += (ulong)(1);\n    }");
     }
+
+    [Fact]
+    public void ConstCast_drops_const_from_a_slice_and_from_a_pointer()
+    {
+        var cs = EmitZig("""
+            fn fill(buf: []const u8) u8 {
+                const m: []u8 = @constCast(buf);
+                m[0] = 40;
+                return m[0];
+            }
+            var cell: u8 = 9;
+            pub fn main() u8 {
+                const p: *const u8 = &cell;
+                const q: *u8 = @constCast(p);
+                q.* = 2;
+                var storage = [_]u8{ 1, 2 };
+                return fill(&storage) + cell;
+            }
+            """);
+        // Task #199 (std.Io.Reader.fixed's `.buffer = @constCast(buffer)`): the same pointer and length as a `[]u8`, and
+        // the same address as a `*u8`.
+        cs.ShouldContain("Slice<byte> m = ZigMem.ConstCast<byte>(buf);");
+        cs.ShouldContain("byte* q = (byte*)p;");
+    }
+
+    [Fact]
+    public void ConstCast_of_a_non_pointer_is_rejected()
+    {
+        var ex = Should.Throw<CompileException>(() => EmitZig("""
+            pub fn main() u8 {
+                const x: u8 = 3;
+                return @constCast(x);
+            }
+            """));
+        // Task #199: zig rejects it too ("expected pointer type").
+        ex.Message.ShouldContain("zig `@constCast` expects a pointer or a slice");
+    }
 }

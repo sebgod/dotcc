@@ -2997,6 +2997,38 @@ internal sealed partial class ZigLowering
                 {
                     Type = new CType.Slice(CType.UChar.WithQuals(TypeQual.Const)),
                 };
+            case "@constCast":
+            {
+                // `@constCast(p)` drops the pointee's `const` (std.Io.Reader.fixed's `.buffer = @constCast(buffer)`, task
+                // #199). A pointer is the same address (C# pointers carry no const); a `[]const T` becomes the `[]T` over
+                // the same pointer and length (ZigMem.ConstCast, so the operand is evaluated once).
+                if (bargs.Count != 1)
+                {
+                    throw new IrUnsupportedException($"zig `@constCast` expects (pointer); got {bargs.Count} argument(s)");
+                }
+                var ccOperand = LowerExpr(bargs[0]);
+                switch (ccOperand.Type.Unqualified)
+                {
+                    case CType.Pointer { Pointee: var ccPointee } when ccPointee.IsConst:
+                    {
+                        var mutable = new CType.Pointer(ccPointee with { Quals = ccPointee.Quals & ~TypeQual.Const });
+                        return new Cast(mutable, ccOperand) { Type = mutable };
+                    }
+                    case CType.Slice { Element: var ccElem } when ccElem.IsConst:
+                    {
+                        var mutableElem = ccElem with { Quals = ccElem.Quals & ~TypeQual.Const };
+                        return new ZigMemCall("ConstCast", mutableElem.Unqualified, new List<CExpr> { ccOperand })
+                        {
+                            Type = new CType.Slice(mutableElem),
+                        };
+                    }
+                    case CType.Pointer or CType.Slice:
+                        return ccOperand;   // already mutable: zig accepts it, and it is the same value
+                    default:
+                        throw new CompileException(
+                            $"zig `@constCast` expects a pointer or a slice, got {ccOperand.Type.Describe()}");
+                }
+            }
             case "@alignCast":
                 // `@alignCast(p)` only raises the pointee's alignment requirement — unobservable
                 // in dotcc's managed model — so it's the IDENTITY (the enclosing `@ptrCast` / sink

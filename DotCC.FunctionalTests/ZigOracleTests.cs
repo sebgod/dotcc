@@ -7879,6 +7879,21 @@ public sealed class ZigOracleTests
             "    for (&buf, 0..) |*b, i| b.* = @truncate(i * 3);\n" +
             "    return @truncate(last(buf[0..]) + last(buf[0..30]));\n" +
             "}\n", 156, "" },
+        // Task #199 (std.Io.Reader.fixed): `@constCast` of a `[]const u8` and of a `*const u8`.
+        new object[] { "const_cast_slice_and_pointer",
+            "fn fill(buf: []const u8) u8 {\n" +
+            "    const m: []u8 = @constCast(buf);\n" +
+            "    m[0] = 40;\n" +
+            "    return m[0] + @as(u8, @intCast(m.len));\n" +
+            "}\n" +
+            "var storage = [_]u8{ 1, 2 };\n" +
+            "var cell: u8 = 9;\n" +
+            "pub fn main() u8 {\n" +
+            "    const p: *const u8 = &cell;\n" +
+            "    const q: *u8 = @constCast(p);\n" +
+            "    q.* = 0;\n" +
+            "    return fill(&storage) + cell;\n" +
+            "}\n", 42, "" },
         // Task #198 (std.BufSet): a `void` value stored into a `[N]void` slot, directly and through a `[*]void`.
         new object[] { "void_store_into_void_slots",
             "fn Set(comptime V: type) type {\n" +
