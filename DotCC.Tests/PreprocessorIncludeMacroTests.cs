@@ -68,4 +68,46 @@ public sealed class PreprocessorIncludeMacroTests
         }
         finally { Directory.Delete(dir, recursive: true); }
     }
+
+    [Fact]
+    public void A_macro_defined_later_in_a_header_leaves_the_earlier_prototype_alone()
+    {
+        // CPython's object.h: `PyAPI_FUNC(int) Py_Is(PyObject *x, PyObject *y);`
+        // then `#define Py_Is(x, y) ((x) == (y))`. The prototype is expanded
+        // while the header is read, before the #define exists, so it stays a
+        // prototype; the includer's expander must not rescan it (GH #214).
+        var (mainPath, dir) = WritePair(
+            "int twice(int x);\n#define twice(x) ((x) * 2)\n",
+            "#include \"mac.h\"\nint main(void) { return twice(3); }\n");
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { mainPath });
+            emitted.ShouldContain("return 3 * 2;");
+        }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
+
+    [Fact]
+    public void A_self_referential_macro_in_a_header_expands_once()
+    {
+        // `#define Py_REFCNT(ob) Py_REFCNT(_PyObject_CAST(ob))`: the inner name is
+        // painted blue by the header's own rescan. Before GH #214 every include
+        // level rescanned the result, so a header two levels down came out as
+        // `get(v + 1 + 1 + 1)`.
+        var dir = Path.Combine(Path.GetTempPath(), "dotcc-incmac-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(Path.Combine(dir, "inner.h"),
+            "static int get(int x) { return x; }\n#define get(x) get((x) + 1)\n"
+            + "static int use(int v) { return get(v); }\n");
+        File.WriteAllText(Path.Combine(dir, "mac.h"), "#include \"inner.h\"\n");
+        var mainPath = Path.Combine(dir, "main.c");
+        File.WriteAllText(mainPath, "#include \"mac.h\"\nint main(void) { return use(1) + get(2); }\n");
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { mainPath });
+            emitted.ShouldContain("return get(v + 1);");
+            emitted.ShouldContain("use(1) + get(2 + 1)");
+        }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
 }

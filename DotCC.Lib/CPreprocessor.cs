@@ -272,9 +272,16 @@ internal sealed class CPreprocessor : C.IPreprocessor
             // #define→use→#undef token stream lazily expands each use before the
             // #undef is reached. (A file that defines without undefining — e.g.
             // opcodes.c's `_I` — worked either way; this fixes the undef case.)
+            // Each token leaves as an ExpandedItem so the includer's expander
+            // (which sees them only after the whole file, #defines and all, has
+            // been processed) does not expand them a second time.
             using var subMacro = new MacroExpander(subPreproc, this);
             var tokens = new List<Item>();
-            while (subMacro.MoveNext()) { tokens.Add(subMacro.Current); }
+            while (subMacro.MoveNext())
+            {
+                var t = subMacro.Current;
+                tokens.Add(t as ExpandedItem ?? new ExpandedItem(t));
+            }
             return tokens;
         }
         finally
