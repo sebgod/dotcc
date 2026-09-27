@@ -47,7 +47,8 @@ internal sealed partial class ZigLowering
     /// <c>.int =&gt; |i|</c> are the same folded thing, which is what lets one map bind all three.</summary>
     /// <remarks>A pointer's spelled size class (<see cref="PointerSizeOfTypeArg"/>) rides in <c>PointerSize</c> the
     /// same way, for <c>.pointer.size</c>.</remarks>
-    private sealed record ZigTypeInfo(string Tag, CType Type, int? DeclaredBits, string? PointerSize = null);
+    private sealed record ZigTypeInfo(string Tag, CType Type, int? DeclaredBits, string? PointerSize = null,
+        ZigSentinel? Sentinel = null);
 
     /// <summary>Each name bound to a folded <c>@typeInfo</c> value — a <c>const i = @typeInfo(T);</c>
     /// or <c>const i = @typeInfo(T).int;</c> (no runtime decl is emitted: the value is comptime-only),
@@ -542,7 +543,8 @@ internal sealed partial class ZigLowering
                 }
                 var t = LowerType(args[0]);
                 info = new ZigTypeInfo(TypeInfoTag(t), t, DeclaredBitsOfTypeArg(args[0]),
-                                       t.Unqualified is CType.Pointer ? PointerSizeOfTypeArg(args[0]) : null);
+                                       t.Unqualified is CType.Pointer ? PointerSizeOfTypeArg(args[0]) : null,
+                                       t.Unqualified is CType.Pointer or CType.Slice or CType.Array ? SentinelOfTypeArg(args[0]) : null);
                 return true;
             }
 
@@ -599,6 +601,26 @@ internal sealed partial class ZigLowering
     private bool TryFoldTypeInfoValue(Item expr, out CExpr value)
     {
         value = null!;
+        // `info.attrs.@"const"` (zig 0.17-dev's `std.builtin.Type.Pointer.Attributes`; std.json.static's
+        // `if (ptrInfo.attrs.@"const")`, task #213): the answers the older `is_const` / `is_volatile` give.
+        if (expr.Content is Zig.Field { Arg0.Content: Zig.Field { Arg2: var attrsTok } attrsField } attrField
+            && Tok(attrsTok) == "attrs" && TryEvalTypeInfo(attrsField.Arg0, out var attrInfo) && attrInfo.Tag == "pointer")
+        {
+            var attrPointee = attrInfo.Type.Unqualified switch
+            {
+                CType.Pointer p => p.Pointee,
+                CType.Slice s => s.Element,
+                _ => CType.Void,
+            };
+            value = Tok(attrField.Arg2) switch
+            {
+                "const" => new LitBool(attrPointee.IsConst) { Type = CType.Bool },
+                "volatile" => new LitBool((attrPointee.Quals & TypeQual.Volatile) != 0) { Type = CType.Bool },
+                var other => throw new IrUnsupportedException(
+                    $"zig `@typeInfo({attrInfo.Type.Describe()}).pointer.attrs.{other}` is not modeled (only `const` and `volatile`)"),
+            };
+            return true;
+        }
         if (expr.Content is not Zig.Field f || !TryEvalTypeInfo(f.Arg0, out var info)) { return false; }
         var field = Tok(f.Arg2);
         // `@typeInfo(P).pointer` / `info.pointer` is the union's PAYLOAD step, not a value field
@@ -1013,6 +1035,55 @@ internal sealed partial class ZigLowering
     /// generic, never demand a field the type does not have, and never fail to compile. That is the
     /// whole point of the fold: <c>switch (@typeInfo(T))</c> is how std asks "which kind is T", and
     /// every non-taken arm is written for a different kind.</summary>
+    /// <summary>Is <paramref name="expr"/> <c>info.sentinel()</c> over a folded <c>@typeInfo</c> payload (see
+    /// <see cref="TryTypeInfoSentinel"/>)?</summary>
+    private bool IsTypeInfoSentinelCall(Item expr)
+    {
+        while (expr.Content is Zig.Grouped g) { expr = g.Arg1; }
+        return expr.Content is Zig.CallNoArgs { Arg0.Content: Zig.Field { Arg2: var methodTok } receiver }
+            && Tok(methodTok) == "sentinel" && TryEvalTypeInfo(receiver.Arg0, out _);
+    }
+
+    /// <summary><c>info.sentinel()</c> over a folded <c>@typeInfo</c> pointer or array payload, as a comptime optional
+    /// (task #213): the spelled sentinel (<see cref="ZigSentinel"/>), or null for a type spelled without one. The lowered
+    /// type erases a sentinel, so a type whose spelling is not in reach (no type argument, alias or struct field spelled it)
+    /// is a loud cut rather than a guess; so is a sentinel that is not an integer.</summary>
+    private bool TryTypeInfoSentinel(Item expr, out (bool HasValue, long Value, CType Inner) info)
+    {
+        info = default;
+        if (expr.Content is not Zig.CallNoArgs { Arg0.Content: Zig.Field { Arg2: var methodTok } receiver }
+            || Tok(methodTok) != "sentinel"
+            || !TryEvalTypeInfo(receiver.Arg0, out var typeInfo) || typeInfo.Tag is not ("pointer" or "array"))
+        {
+            return false;
+        }
+        var element = typeInfo.Type.Unqualified switch
+        {
+            CType.Pointer p => p.Pointee,
+            CType.Slice s => s.Element,
+            CType.Array a => a.Element,
+            _ => CType.Void,
+        };
+        switch (typeInfo.Sentinel)
+        {
+            case null:
+                throw new IrUnsupportedException(
+                    $"zig `@typeInfo({typeInfo.Type.Describe()}).{typeInfo.Tag}.sentinel()`: dotcc erases a sentinel in the "
+                    + "lowered type, and nothing that spelled this one is in reach (a type argument, a type alias or a struct "
+                    + "field spelled `[:0]T` or `[]T` carries it)");
+            case { HasSentinel: false }:
+                info = (false, 0, element.Unqualified);
+                return true;
+            case { Value: long sentinel }:
+                info = (true, sentinel, element.Unqualified);
+                return true;
+            default:
+                throw new IrUnsupportedException(
+                    $"zig `@typeInfo({typeInfo.Type.Describe()}).{typeInfo.Tag}.sentinel()`: a sentinel that is not an integer "
+                    + "is not modeled");
+        }
+    }
+
     /// <summary>The tag an enum literal names: <c>.int</c>, and the keyword-named <c>.undefined</c> / <c>.null</c> (the
     /// same record, spelled by its token); null for any other node.</summary>
     private static string? EnumLitName(Item lit) => lit.Content is Zig.EnumLit el ? Tok(el.Arg1) : null;

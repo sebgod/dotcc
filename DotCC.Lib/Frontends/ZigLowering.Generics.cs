@@ -124,8 +124,10 @@ internal sealed partial class ZigLowering
     /// travels with the seed because the lowered type cannot carry it: dotcc widens `uN`/`iN` to the
     /// smallest standard width, so `u21` and `u32` are the same `CType`. See
     /// <see cref="_declaredIntBits"/> for why this rides alongside the type rather than on it. A pointer's spelled size
-    /// class (<see cref="PointerSizeOfTypeArg"/>) travels the same way, in <c>PointerSize</c>.</summary>
-    private readonly record struct TypeSeed(string Name, CType Type, int? DeclaredBits, string? PointerSize = null)
+    /// class (<see cref="PointerSizeOfTypeArg"/>) travels the same way, in <c>PointerSize</c>, and a pointer, slice or
+    /// array's spelled sentinel (<see cref="SentinelOfTypeArg"/>, task #213) in <c>Sentinel</c>.</summary>
+    private readonly record struct TypeSeed(string Name, CType Type, int? DeclaredBits, string? PointerSize = null,
+        ZigSentinel? Sentinel = null)
     {
         /// <summary>The name, type and declared width: the three parts most seed sites read (the pointer size class is
         /// read by name where it matters).</summary>
@@ -493,7 +495,8 @@ internal sealed partial class ZigLowering
                     // So does a pointer's spelled size class (task #150): `*T` and `[*]T` lower to one CType.
                     var fnSeedType = argScope.LowerType(argItems[i]).Unqualified;
                     typeSeeds.Add(new TypeSeed(g.Params[i].Name, fnSeedType, argScope.DeclaredBitsOfTypeArg(argItems[i]),
-                                               fnSeedType is CType.Pointer ? argScope.PointerSizeOfTypeArg(argItems[i]) : null));
+                                               fnSeedType is CType.Pointer ? argScope.PointerSizeOfTypeArg(argItems[i]) : null,
+                                               fnSeedType is CType.Pointer or CType.Slice or CType.Array ? argScope.SentinelOfTypeArg(argItems[i]) : null));
                     break;
                 // An `anytype` bound to a `comptime_int` (`log2(pos_max)` in std.math.IntFittingRange) is comptime:
                 // zig instantiates per VALUE, and `@TypeOf(x)` is `comptime_int`, so it is a value seed here.
@@ -537,11 +540,12 @@ internal sealed partial class ZigLowering
             SetDeclaredIntBits(name, bits);
         }
         // A pointer seed's size class too (task #150); a seed without one clears the name's, as the drain-time seeding does.
-        var ptrSizeShadows = new List<(string name, string? prev)>();
+        var ptrSizeShadows = new List<(string name, string? prev, ZigSentinel? prevSentinel)>();
         foreach (var seed in typeSeeds)
         {
-            ptrSizeShadows.Add((seed.Name, _declaredPtrSize.GetValueOrDefault(seed.Name)));
+            ptrSizeShadows.Add((seed.Name, _declaredPtrSize.GetValueOrDefault(seed.Name), _declaredSentinel.GetValueOrDefault(seed.Name)));
             SetDeclaredPtrSize(seed.Name, seed.PointerSize);
+            SetDeclaredSentinel(seed.Name, seed.Sentinel);
         }
         // Seed each inferred `anytype` type (shadow-saved) so a signature spelled `@TypeOf(param)` (a
         // return type or a later parameter) resolves through TypeOfBuiltin — the param is not yet an
@@ -864,6 +868,7 @@ internal sealed partial class ZigLowering
             for (var i = ptrSizeShadows.Count - 1; i >= 0; i--)
             {
                 SetDeclaredPtrSize(ptrSizeShadows[i].name, ptrSizeShadows[i].prev);
+                SetDeclaredSentinel(ptrSizeShadows[i].name, ptrSizeShadows[i].prevSentinel);
             }
             // Restore the `anytype` seeds (W5) — the instance BODY resolves each such param through its
             // in-scope symbol (declared with the inferred type in `runtimeParams`), so the seed is only
@@ -1254,13 +1259,29 @@ internal sealed partial class ZigLowering
     /// instances, which is also what zig means (they ARE different types). Every STANDARD spelling
     /// declares exactly its lowered width, so this is byte-identical to <see cref="MangleType"/>
     /// there — no existing instance name changes.</summary>
+    /// <summary>The mangled-name suffix of a spelled sentinel: <c>_s0</c> for <c>[:0]</c>, <c>_sn1</c> for a negative one,
+    /// <c>_sx</c> for one that is not an integer; empty when there is none.</summary>
+    private static string SentinelMangle(ZigSentinel? sentinel) => sentinel switch
+    {
+        { HasSentinel: true, Value: long v } => v < 0
+            ? "_sn" + (-v).ToString(System.Globalization.CultureInfo.InvariantCulture)
+            : "_s" + v.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        { HasSentinel: true } => "_sx",
+        _ => "",
+    };
+
     private static string MangleTypeSeed(TypeSeed seed)
     {
         // A many-item or C pointer is a different type from the single-item pointer it lowers alike to (task #150); a
         // single-item or unspelled one keeps the plain name, so no existing instance name changes.
         if (seed.Type.Unqualified is CType.Pointer && seed.PointerSize is "many" or "c")
         {
-            return MangleType(seed.Type) + "_" + seed.PointerSize;
+            return MangleType(seed.Type) + "_" + seed.PointerSize + SentinelMangle(seed.Sentinel);
+        }
+        // `[:0]u8` is not `[]u8` (task #213): a spelled sentinel keys its own instance; none keeps the plain name.
+        if (seed.Sentinel is { HasSentinel: true })
+        {
+            return MangleType(seed.Type) + SentinelMangle(seed.Sentinel);
         }
         if (seed.DeclaredBits is { } bits
             && seed.Type.Unqualified is CType.Prim { Integer: true, Name: not "_Bool" } p
@@ -1567,7 +1588,8 @@ internal sealed partial class ZigLowering
                     // A pointer argument's spelled size class rides too (task #150: `Rev([*]const u8)` is `.many` inside).
                     var typeSeedType = argScope.LowerType(argItems[i]).Unqualified;
                     typeSeeds.Add(new TypeSeed(info.Params[i].Name, typeSeedType, argScope.DeclaredBitsOfTypeArg(argItems[i]),
-                                               typeSeedType is CType.Pointer ? argScope.PointerSizeOfTypeArg(argItems[i]) : null));
+                                               typeSeedType is CType.Pointer ? argScope.PointerSizeOfTypeArg(argItems[i]) : null,
+                                               typeSeedType is CType.Pointer or CType.Slice or CType.Array ? argScope.SentinelOfTypeArg(argItems[i]) : null));
                 }
                 finally
                 {
@@ -1593,11 +1615,12 @@ internal sealed partial class ZigLowering
             SetDeclaredIntBits(name, bits);
         }
         // A pointer seed's size class too (task #150); a seed without one clears the name's, as the drain-time seeding does.
-        var ptrSizeShadows = new List<(string name, string? prev)>();
+        var ptrSizeShadows = new List<(string name, string? prev, ZigSentinel? prevSentinel)>();
         foreach (var seed in typeSeeds)
         {
-            ptrSizeShadows.Add((seed.Name, _declaredPtrSize.GetValueOrDefault(seed.Name)));
+            ptrSizeShadows.Add((seed.Name, _declaredPtrSize.GetValueOrDefault(seed.Name), _declaredSentinel.GetValueOrDefault(seed.Name)));
             SetDeclaredPtrSize(seed.Name, seed.PointerSize);
+            SetDeclaredSentinel(seed.Name, seed.Sentinel);
         }
         var paramTypeSeedCount = typeShadows.Count;   // the body's own type aliases append after these
         try
@@ -1949,6 +1972,7 @@ internal sealed partial class ZigLowering
             for (var i = ptrSizeShadows.Count - 1; i >= 0; i--)
             {
                 SetDeclaredPtrSize(ptrSizeShadows[i].name, ptrSizeShadows[i].prev);
+                SetDeclaredSentinel(ptrSizeShadows[i].name, ptrSizeShadows[i].prevSentinel);
             }
         }
     }

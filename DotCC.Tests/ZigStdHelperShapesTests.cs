@@ -6626,4 +6626,47 @@ public sealed class ZigStdHelperShapesTests
         // Task #212: zig instantiates the prong once per variant; dotcc asks for the variants to be listed.
         ex.Message.ShouldContain("zig `inline else =>` in a switch over the tagged union 'U' is not supported yet (list the variants)");
     }
+
+    [Fact]
+    public void A_sentinel_type_argument_keys_its_own_instance_and_folds_its_sentinel()
+    {
+        var cs = EmitZig("""
+            fn sentinelOf(comptime T: type) u8 {
+                switch (@typeInfo(T)) {
+                    .pointer => |p| {
+                        if (p.sentinel()) |s| return s + 1;
+                        return 100;
+                    },
+                    else => return 0,
+                }
+            }
+            pub fn main() u8 {
+                return sentinelOf([:0]u8) + sentinelOf([]u8);
+            }
+            """);
+        // Task #213: `[:0]u8` and `[]u8` lower to one slice type but are different zig types, so each keys its own
+        // instance, and each folds `sentinel()` from what it spelled.
+        cs.ShouldContain("sentinelOf____unsigned_char_s0()");
+        cs.ShouldContain("sentinelOf____unsigned_char()");
+        cs.ShouldContain("return (byte)(0 + 1);");
+        cs.ShouldContain("return 100;");
+    }
+
+    [Fact]
+    public void The_sentinel_of_a_type_no_spelling_describes_is_a_loud_cut()
+    {
+        var ex = Should.Throw<Exception>(() => EmitZig("""
+            fn sent(x: anytype) u8 {
+                const info = @typeInfo(@TypeOf(x)).pointer;
+                if (info.sentinel()) |s| return s;
+                return 1;
+            }
+            pub fn main() u8 {
+                const a: []const u8 = "hi";
+                return sent(a);
+            }
+            """));
+        // Task #213: dotcc erases a sentinel in the lowered type; with no spelling in reach it does not guess.
+        ex.Message.ShouldContain("dotcc erases a sentinel in the lowered type, and nothing that spelled this one is in reach");
+    }
 }

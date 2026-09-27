@@ -7879,6 +7879,25 @@ public sealed class ZigOracleTests
             "    for (&buf, 0..) |*b, i| b.* = @truncate(i * 3);\n" +
             "    return @truncate(last(buf[0..]) + last(buf[0..30]));\n" +
             "}\n", 156, "" },
+        // Task #213 (std.json.static.innerParse): `@typeInfo(T).pointer.sentinel()` / `.array.sentinel()` from the spelled type.
+        new object[] { "typeinfo_sentinel_from_spelling",
+            "fn sentinelOf(comptime T: type) u8 {\n" +
+            "    switch (@typeInfo(T)) {\n" +
+            "        .pointer => |p| {\n" +
+            "            if (p.sentinel()) |s| return s + 1;\n" +
+            "            return 100;\n" +
+            "        },\n" +
+            "        .array => |a| {\n" +
+            "            if (a.sentinel()) |s| return s + 1;\n" +
+            "            return 50;\n" +
+            "        },\n" +
+            "        else => return 0,\n" +
+            "    }\n" +
+            "}\n" +
+            "const Z = [:0]const u8;\n" +
+            "pub fn main() u8 {\n" +
+            "    return sentinelOf([:0]u8) + sentinelOf([]u8) + sentinelOf([*:'\\n']const u8) + sentinelOf([2:7]u8) + sentinelOf([3]u8) + sentinelOf(Z);\n" +
+            "}\n", 171, "" },
         // Task #212 (std.json.static): `inline .a, .b => |x| …` over a tagged union, each variant bound at its own payload type.
         new object[] { "inline_union_prong_per_variant_capture",
             "const Tok = union(enum) {\n" +
@@ -10164,6 +10183,53 @@ public sealed class ZigOracleTests
             "    const c = H.hash(4, \"ALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUF\");\n" +
             "    return @truncate((a ^ b ^ c) >> 5);\n" +
             "}\n", 34);
+
+    // Task #213: a struct field's spelled sentinel reaches `@typeInfo(T).pointer.sentinel()` through `field_types` (a zig
+    // 0.17-dev API, so this runs against the local zig rather than as a CI oracle row).
+    [Fact]
+    public void Dotcc_matches_zig_field_types_sentinel() =>
+        MatchesZigWithRealStd("field_types_sentinel",
+            "const S = struct { plain: []const u8, zstr: [:0]const u8, nl: [:'\\n']const u8, bytes: [4]u8 };\n" +
+            "fn sentinelOf(comptime T: type) u8 {\n" +
+            "    switch (@typeInfo(T)) {\n" +
+            "        .pointer => |p| {\n" +
+            "            if (p.sentinel()) |s| return s + 1;\n" +
+            "            return 100;\n" +
+            "        },\n" +
+            "        .array => |a| {\n" +
+            "            if (a.sentinel()) |s| return s + 1;\n" +
+            "            return 50;\n" +
+            "        },\n" +
+            "        else => return 0,\n" +
+            "    }\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var total: u8 = 0;\n" +
+            "    inline for (@typeInfo(S).@\"struct\".field_types) |T| total +%= sentinelOf(T);\n" +
+            "    return total +% sentinelOf([:0]u8) *% 2;\n" +
+            "}\n", 164);
+
+    // Task #213: zig 0.17-dev's `@typeInfo(T).pointer.attrs.@"const"` (the older `is_const`).
+    [Fact]
+    public void Dotcc_matches_zig_pointer_attrs_const() =>
+        MatchesZigWithRealStd("pointer_attrs_const",
+            "fn describe(comptime T: type) u8 {\n" +
+            "    switch (@typeInfo(T)) {\n" +
+            "        .pointer => |ptrInfo| {\n" +
+            "            switch (ptrInfo.size) {\n" +
+            "                .slice => {\n" +
+            "                    if (ptrInfo.attrs.@\"const\") return 7;\n" +
+            "                    return 3;\n" +
+            "                },\n" +
+            "                else => return 4,\n" +
+            "            }\n" +
+            "        },\n" +
+            "        else => return 5,\n" +
+            "    }\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return describe([]const u8) + describe([]const u16) * 10 + describe(u8) * 20;\n" +
+            "}\n", 177);
 
     // Task #202 (with #199 and #201): std.Io.Reader from real std over a fixed buffer. `fixed` is `@constCast(buffer)`, a
     // `Limit` argument is the decl literal `.limited(n)`, and the error switches in `take*` capture the error they return.

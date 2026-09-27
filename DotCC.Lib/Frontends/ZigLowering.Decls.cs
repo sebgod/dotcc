@@ -451,7 +451,7 @@ internal sealed partial class ZigLowering
             foreach (var rootFn in rootGraph.RootFunctionTargetNames()) { _symbols.Reserve(rootFn); }
         }
         _symbols.EnterScope();
-        var ptrSizeShadows = new List<(string name, string? prev)>();
+        var ptrSizeShadows = new List<(string name, string? prev, ZigSentinel? prevSentinel)>();
         // Seed comptime-TYPE parameters (wall-plan W3b): `T ↦ concrete` into _typeAliases, shadow-saved
         // so a colliding outer/sibling alias name is restored at body exit — the instance body then
         // resolves `T` (in a local type / cast / @sizeOf(T)) to the concrete type through LowerTypeName.
@@ -470,8 +470,9 @@ internal sealed partial class ZigLowering
             // So does a pointer's size class; a seed without one CLEARS the name's, so a stale class never answers.
             foreach (var seed in typeSeeds)
             {
-                ptrSizeShadows.Add((seed.Name, _declaredPtrSize.GetValueOrDefault(seed.Name)));
+                ptrSizeShadows.Add((seed.Name, _declaredPtrSize.GetValueOrDefault(seed.Name), _declaredSentinel.GetValueOrDefault(seed.Name)));
                 SetDeclaredPtrSize(seed.Name, seed.PointerSize);
+                SetDeclaredSentinel(seed.Name, seed.Sentinel);
             }
         }
         // Seed comptime-value parameters BEFORE the runtime params + body (wall-plan W3a): a fresh
@@ -544,6 +545,7 @@ internal sealed partial class ZigLowering
         for (int i = ptrSizeShadows.Count - 1; i >= 0; i--)
         {
             SetDeclaredPtrSize(ptrSizeShadows[i].name, ptrSizeShadows[i].prev);
+            SetDeclaredSentinel(ptrSizeShadows[i].name, ptrSizeShadows[i].prevSentinel);
         }
         for (int i = stringShadows.Count - 1; i >= 0; i--)
         {
@@ -605,6 +607,19 @@ internal sealed partial class ZigLowering
                 _ => ((string?)null, null, false),
             };
             if (attr.Item1 is { } attrField) { _shared.StructFieldAttrs[(name, attrField)] = (attr.Item2, attr.Item3, this); }
+            // Its spelled sentinel, for `field_types` (task #213): the lowered type erases it.
+            var spelled = fd.Content switch
+            {
+                Zig.StructField f => (Tok(f.Arg0), f.Arg2),
+                Zig.StructFieldDefault f => (Tok(f.Arg0), f.Arg2),
+                Zig.StructFieldAligned f => (Tok(f.Arg0), f.Arg2),
+                Zig.StructFieldAlignedDefault f => (Tok(f.Arg0), f.Arg2),
+                _ => ((string?)null, (Item?)null),
+            };
+            if (spelled is ({ } sentinelField, { } fieldType) && SentinelOfTypeArg(fieldType) is { } fieldSentinel)
+            {
+                _shared.StructFieldSentinels[(name, sentinelField)] = fieldSentinel;
+            }
         }
         var fields = new List<StructField>();
         foreach (var fd in fieldItems)

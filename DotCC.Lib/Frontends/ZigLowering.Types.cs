@@ -178,6 +178,7 @@ internal sealed partial class ZigLowering
             SetDeclaredIntBits(name, DeclaredBitsOfTypeArg(rhs));
             // `const Ptr = @TypeOf(pointer);`: a pointer's spelled size class rides it the same way (task #119).
             SetDeclaredPtrSize(name, aliasType.Unqualified is CType.Pointer ? PointerSizeOfTypeArg(rhs) : null);
+            SetDeclaredSentinel(name, aliasType.Unqualified is CType.Pointer or CType.Slice or CType.Array ? SentinelOfTypeArg(rhs) : null);
             // A body's own alias is also what an in-function struct's methods close over (task #124).
             if (_currentFnName.Length > 0) { _bodyTypeAliases.Add(name); }
             return true;

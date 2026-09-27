@@ -84,4 +84,53 @@ internal sealed partial class ZigLowering
     {
         if (size is { } s) { _valuePtrSize[sym] = s; }
     }
+
+    /// <summary>A pointer, slice or array type's SENTINEL as its spelling gives it (task #213, <c>@typeInfo(T).pointer.sentinel()</c>).
+    /// dotcc erases the sentinel in the lowered type (<c>[:0]u8</c> is the slice <c>[]u8</c> is), so like the size class it
+    /// rides alongside: <see cref="HasSentinel"/> false for a type spelled without one (<c>[]const u8</c>), true with the
+    /// integer <see cref="Value"/> for <c>[:0]T</c> / <c>[:s]T</c> / <c>[N:s]T</c>, and a null value for a sentinel that is
+    /// not an integer (<c>[*:null]?*T</c>). A type no spelling describes has no <see cref="ZigSentinel"/> at all.</summary>
+    internal sealed record ZigSentinel(bool HasSentinel, long? Value);
+
+    /// <summary>Each type-binding name → the sentinel of the type bound to it, set and cleared alongside
+    /// <see cref="_declaredPtrSize"/> (a type alias, a generic's type seed, a comptime <c>field_types</c> capture).</summary>
+    private readonly Dictionary<string, ZigSentinel> _declaredSentinel = new(System.StringComparer.Ordinal);
+
+    /// <summary>Set or clear a type-binding name's sentinel (see <see cref="_declaredSentinel"/>).</summary>
+    private void SetDeclaredSentinel(string name, ZigSentinel? sentinel)
+    {
+        if (sentinel is { } s) { _declaredSentinel[name] = s; } else { _declaredSentinel.Remove(name); }
+    }
+
+    /// <summary>The sentinel a pointer, slice or array TYPE's AST spells (see <see cref="ZigSentinel"/>), or null when the
+    /// spelling does not say: a name bound to a type answers what its binding recorded.</summary>
+    private ZigSentinel? SentinelOfTypeArg(Item typeAst) => typeAst.Content switch
+    {
+        Zig.Grouped g => SentinelOfTypeArg(g.Arg1),
+        Zig.TySlice or Zig.TySliceConst or Zig.TySliceAlign or Zig.TySliceConstAlign
+            or Zig.TyPointer or Zig.TyPtrConst or Zig.TyPointerAlign or Zig.TyPtrConstAlign
+            or Zig.TyManyPtr or Zig.TyManyPtrConst or Zig.TyManyPtrAlign or Zig.TyManyPtrConstAlign
+            or Zig.TyCPtr or Zig.TyCPtrConst or Zig.TyArray => new ZigSentinel(false, null),
+        Zig.TySentSlice or Zig.TySentSliceConst or Zig.TySentPtr or Zig.TySentPtrConst => new ZigSentinel(true, 0),
+        Zig.TySentSliceExpr s           => SpelledSentinel(s.Arg2),
+        Zig.TySentSliceConstExpr s      => SpelledSentinel(s.Arg2),
+        Zig.TySentSliceAlignExpr s      => SpelledSentinel(s.Arg2),
+        Zig.TySentSliceConstAlignExpr s => SpelledSentinel(s.Arg2),
+        Zig.TySentPtrExpr p             => SpelledSentinel(p.Arg3),
+        Zig.TySentPtrConstExpr p        => SpelledSentinel(p.Arg3),
+        Zig.TySentArray a               => SpelledSentinel(a.Arg3),
+        Zig.Ident id => _declaredSentinel.GetValueOrDefault(Tok(id.Arg0)),
+        _ => null,
+    };
+
+    /// <summary>A spelled sentinel expression's value: an integer the const evaluator folds, else a sentinel that is not
+    /// an integer (<c>null</c> for an optional-pointer element), which a fold of it rejects.</summary>
+    private ZigSentinel SpelledSentinel(Item sentinelExpr)
+    {
+        using (EnterThrowawayHoist())
+        {
+            try { return new ZigSentinel(true, _ir.ConstEval(LowerExpr(sentinelExpr))); }
+            catch (IrUnsupportedException) { return new ZigSentinel(true, null); }
+        }
+    }
 }

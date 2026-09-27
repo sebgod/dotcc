@@ -40,7 +40,7 @@ internal sealed partial class ZigLowering
     /// undone after the copy. <c>null</c> means "the name was not bound in that domain" — no
     /// separate presence flag is needed, since neither map can hold a null.</summary>
     private readonly record struct ComptimeCaptureShadow(
-        string Name, CExpr? Value, string? Text, CType? Alias, int? Bits, ZigFieldAttr? Attr);
+        string Name, CExpr? Value, string? Text, CType? Alias, int? Bits, ZigFieldAttr? Attr, ZigSentinel? Sentinel);
 
     /// <summary>Each name bound to one <c>field_attrs</c> entry by a comptime <c>for</c> capture (task #108), whose member
     /// reads fold (<see cref="FieldAttrMember"/>). Name-keyed and shadow-saved like the other capture domains.</summary>
@@ -108,9 +108,11 @@ internal sealed partial class ZigLowering
             _comptimeStrings.TryGetValue(name, out var prevText) ? prevText : null,
             _typeAliases.TryGetValue(name, out var prevAlias) ? prevAlias : null,
             _declaredIntBits.TryGetValue(name, out var prevBits) ? prevBits : null,
-            _comptimeAttrs.TryGetValue(name, out var prevAttr) ? prevAttr : null);
+            _comptimeAttrs.TryGetValue(name, out var prevAttr) ? prevAttr : null,
+            _declaredSentinel.GetValueOrDefault(name));
 
         _comptimeAttrs.Remove(name);
+        _declaredSentinel.Remove(name);
         _comptimeValues.Remove(name);
         _comptimeStrings.Remove(name);
         _typeAliases.Remove(name);
@@ -124,6 +126,7 @@ internal sealed partial class ZigLowering
         else if (list.Types is { } types)
         {
             _typeAliases[name] = types[k];
+            SetDeclaredSentinel(name, list.TypeSentinels?[k]);
         }
         else if (list.Attrs is { } attrs)
         {
@@ -150,6 +153,7 @@ internal sealed partial class ZigLowering
         if (shadow.Alias is { } a) { _typeAliases[shadow.Name] = a; } else { _typeAliases.Remove(shadow.Name); }
         if (shadow.Attr is { } fa) { _comptimeAttrs[shadow.Name] = fa; } else { _comptimeAttrs.Remove(shadow.Name); }
         SetDeclaredIntBits(shadow.Name, shadow.Bits);
+        SetDeclaredSentinel(shadow.Name, shadow.Sentinel);
     }
 
     /// <summary>Unroll an <c>inline for</c> over one or more index-parallel comptime lists: for each
