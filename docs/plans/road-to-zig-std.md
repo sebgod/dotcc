@@ -990,6 +990,20 @@ vector length feeds TYPES.
   lowered. On the way: function-local aliases of a module or its types (`const H = std.hash.Wyhash;`, task #181), and
   on the C side a narrowing store of a constant expression (task #182). Real-std differentials
   `Dotcc_matches_zig_std_hash_xxhash3` / `_long` / `_streaming`, `Dotcc_matches_zig_std_function_local_aliases`.
+- **More entry points RUN from real std, == zig (2026-09-27, tasks #183 to #193)**: std.math's isPowerOfTwo /
+  ceilPowerOfTwo / log2_int / lcm / mulWide (the comptime interpreter runs `@ctz` at its declared width and reads a
+  lowered `@min` / `@max`, #183); std.crypto's Sha1 and Blake2s256 (an array stored through a `*[N]T` copies into the
+  array; it had rebound the pointer, a silent miscompile, #184); std.math's float queries (isNan, isInf, floatMax,
+  copysign, approxEqAbs, signbit: a value switch as a comparison operand, and a comptime_int call whose callee opens
+  with a `comptime { … }` check, #187 / #189); the std.unicode utf8 / utf16 round trip (vector `@truncate` lane by lane,
+  #188); std.PriorityDequeue (a reified generic's methods lower only when referenced, so an unreferenced `dump` never
+  pulls in std.debug, #190); std.Uri.parse (a destructure hoists an `orelse return` fallback, #192); and std.Treap (a
+  `comptime compareFn: anytype` type argument, `T.Node` of an instance another module reified, pointer `orelse` over
+  element reads and calls, `[N]?*T` copies, #193). On the way: an `if` choosing a type name or an inline container at
+  top level (std.Io.Terminal's WindowsApi, #191), a call to a module's `@compileError` tombstone raising its message
+  (#186), and array parameters passed by reference recorded as a divergence (#185). Real-std differentials
+  `Dotcc_matches_zig_std_math_misc`, `_crypto_sha1_blake2s`, `_math_float_queries`, `_unicode_utf16_round_trip`,
+  `_priority_dequeue`, `_uri_parse`, `_treap`.
 - **T6 (backlog)** arm64 hosts: verify and complete the `Arm` intrinsics → `std.Target.aarch64` mapping when this runs on
   arm64 (the maintainer's request, 2026-09-24; tracked in `docs/plans/deferred.md`, target identity).
 
