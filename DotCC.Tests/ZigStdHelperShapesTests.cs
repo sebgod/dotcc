@@ -6389,6 +6389,31 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_value_if_can_end_in_else_return()
+    {
+        var cs = EmitZig("""
+            const E = error{Oom};
+            fn pick(opt: ?u8, growable: bool) E!u8 {
+                const v: u8 = if (opt) |x| x else if (growable) 40 else return error.Oom;
+                return v + 2;
+            }
+            pub fn main() u8 {
+                return pick(null, true) catch 0;
+            }
+            """);
+        // Task #200 (std.heap.MemoryPool.create): the early return is hoisted into the capture-if's else branch, where it
+        // runs only when that branch is taken (task #203), not ahead of the whole statement.
+        cs.ShouldContain("""
+                        else
+                        {
+                            if (Cond.B((Cond.B(growable) ? 0 : 1)))
+                                return ErrUnion<byte>.Err(1);
+                            __ifcap0 = 40;
+                        }
+            """.Replace("\r\n", "\n"));
+    }
+
+    [Fact]
     public void The_right_operand_of_and_keeps_its_hoist_inside_the_short_circuit()
     {
         var cs = EmitZig("""

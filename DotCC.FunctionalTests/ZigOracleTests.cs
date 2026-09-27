@@ -7879,6 +7879,55 @@ public sealed class ZigOracleTests
             "    for (&buf, 0..) |*b, i| b.* = @truncate(i * 3);\n" +
             "    return @truncate(last(buf[0..]) + last(buf[0..30]));\n" +
             "}\n", 156, "" },
+        // Task #200 (std.heap.MemoryPool.create): a value `if` whose else arm is `return`, nested in a capture-if else.
+        new object[] { "value_if_else_return",
+            "const E = error{Oom};\n" +
+            "fn pick(opt: ?u8, growable: bool) E!u8 {\n" +
+            "    const v: u8 = if (opt) |x| x else if (growable) 40 else return error.Oom;\n" +
+            "    return v + 2;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = pick(null, true) catch 0;\n" +
+            "    const b = pick(null, false) catch 7;\n" +
+            "    const c = pick(3, false) catch 0;\n" +
+            "    return a + b - c - 2;\n" +
+            "}\n", 42, "" },
+        // Task #200: `if (c) v else return e` as a switch-expression arm; a `try` arm and an `orelse return` if-arm.
+        new object[] { "switch_arm_if_else_return",
+            "const E = error{Oom};\n" +
+            "var calls: u8 = 0;\n" +
+            "fn f(x: u8) E!u8 {\n" +
+            "    calls += 1;\n" +
+            "    if (x == 0) return error.Oom;\n" +
+            "    return x;\n" +
+            "}\n" +
+            "fn sw(k: u8) E!u8 {\n" +
+            "    const v: u8 = switch (k) {\n" +
+            "        0 => 40,\n" +
+            "        1 => if (k == 1) 1 else return error.Oom,\n" +
+            "        else => try f(k),\n" +
+            "    };\n" +
+            "    return v + 2;\n" +
+            "}\n" +
+            "fn tern(k: u8, opt: ?u8) E!u8 {\n" +
+            "    const a: u8 = if (k == 0) 5 else try f(k);\n" +
+            "    const b: u8 = if (opt) |x| x else try f(0);\n" +
+            "    return a + b;\n" +
+            "}\n" +
+            "fn orelseArm(k: u8, opt: ?u8) u8 {\n" +
+            "    const w: u8 = if (k > 3) 9 else opt orelse return 11;\n" +
+            "    return w;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = sw(0) catch 0; // 42, no call\n" +
+            "    const b = sw(1) catch 0; // 3\n" +
+            "    const c = sw(5) catch 0; // 7, one call\n" +
+            "    const d = tern(0, 4) catch 0; // 9, no call\n" +
+            "    const e = tern(2, null) catch 1; // f(2) then f(0) errors: 1, two calls\n" +
+            "    const g = orelseArm(5, null); // 9\n" +
+            "    const h = orelseArm(1, null); // 11\n" +
+            "    return a + b + c + d + e + g + h + calls * 10 - 60;\n" +
+            "}\n", 52, "" },
         // Task #202 (std.Io.Reader): prong captures on an error switch, in a `catch |err| switch` and a while-else.
         new object[] { "error_switch_prong_captures",
             "const E = error{ A, B, C };\n" +
@@ -7980,6 +8029,41 @@ public sealed class ZigOracleTests
             "pub fn main() u8 {\n" +
             "    return andRhs(false, null) + andRhs(true, null) + orRhs(true, null) + orRhs(false, 9);\n" +
             "}\n", 28, "" },
+        // Tasks #200 / #203: an `orelse` / `catch` fallback that hoists (`if (g) 5 else return 6`, a labeled block) runs only when taken.
+        new object[] { "fallback_operand_keeps_its_hoist",
+            "const E = error{Bad};\n" +
+            "var hits: u8 = 0;\n" +
+            "fn f(x: u8) E!u8 {\n" +
+            "    if (x == 0) return error.Bad;\n" +
+            "    return x;\n" +
+            "}\n" +
+            "fn orelseIf(opt: ?u8, g: bool) u8 {\n" +
+            "    const v: u8 = opt orelse (if (g) 5 else return 6);\n" +
+            "    return v;\n" +
+            "}\n" +
+            "fn catchIf(x: u8, g: bool) u8 {\n" +
+            "    const v: u8 = f(x) catch (if (g) 7 else return 8);\n" +
+            "    return v;\n" +
+            "}\n" +
+            "fn catchOrelse(x: u8, opt: ?u8) u8 {\n" +
+            "    const v: u8 = f(x) catch (opt orelse return 9);\n" +
+            "    return v;\n" +
+            "}\n" +
+            "fn catchBlock(x: u8) u8 {\n" +
+            "    const v = f(x) catch blk: {\n" +
+            "        hits += 1;\n" +
+            "        break :blk 10;\n" +
+            "    };\n" +
+            "    return v;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var s: u8 = 0;\n" +
+            "    s += orelseIf(1, false) + orelseIf(null, true) + orelseIf(null, false); // 1 + 5 + 6\n" +
+            "    s += catchIf(2, false) + catchIf(0, true) + catchIf(0, false); // 2 + 7 + 8\n" +
+            "    s += catchOrelse(3, null) + catchOrelse(0, 30) + catchOrelse(0, null); // 3 + 30 + 9\n" +
+            "    s += catchBlock(4) + catchBlock(0); // 4 + 10\n" +
+            "    return s + hits * 10; // 85 + 10\n" +
+            "}\n", 95, "" },
         // Task #203: the result temp of a value `if` / switch whose arm hoists takes the arms' peer type.
         new object[] { "hoisted_arm_result_peer_type",
             "fn wide(c: bool, opt: ?u64) u64 {\n" +

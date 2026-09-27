@@ -2057,6 +2057,8 @@ internal sealed partial class ZigLowering
             case Zig.SwitchExprTrailing s: return LowerSwitchExpr(s.Arg2, s.Arg5, sink);
             case Zig.IfExprReturnThen ir when sink is not null:
                 return LowerIfReturnThen(ir.Arg2, ir.Arg5, ir.Arg7, sink);
+            case Zig.IfExprElseReturn er when sink is not null:
+                return LowerIfElseReturn(er.Arg2, er.Arg4, er.Arg7, sink);
             // `comptime switch` / `comptime if` in value position: the inner form, whose comptime-known
             // subject already selects one arm at lowering time.
             case Zig.ComptimeSwitchExpr c: return LowerExprSink(c.Arg1, sink);

@@ -997,6 +997,9 @@ productions:
       # `return if (self.hasLen(1)) return self.firstUnchecked() else null;`). `return` is not in FIRST(RhsExpr),
       # so the arm is its own production rather than a `return` expression everywhere.
       - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', 'return', Expr, 'else', RhsExpr], action: ifExprReturnThen }
+      # Its mirror, the ELSE arm returning (std.heap.MemoryPool.create's `… else if (growable) x else return
+      # error.OutOfMemory;`, task #200); `return` is not in FIRST(RhsExpr), so after `else` the split is one token.
+      - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', RhsExpr, 'else', 'return', Expr], action: ifExprElseReturn }
       # An `if` choosing between two inline container TYPES (a type const's RHS, folded at lowering time).
       - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', TypeArm, 'else', TypeArm], action: ifExprTypeArms }
       # One arm a type NAME, the other an inline container (std.Io.Terminal's `pub const WindowsApi = if (!is_windows)

@@ -249,6 +249,8 @@ internal sealed partial class ZigLowering
             }
             case Zig.IfExprReturnThen ir:
                 return LowerIfReturnThen(ir.Arg2, ir.Arg5, ir.Arg7, null);
+            case Zig.IfExprElseReturn er:
+                return LowerIfElseReturn(er.Arg2, er.Arg4, er.Arg7, null);
             // Value-position captured `if` — `if (opt) |x| thenE else elseE` (S4a). The payload binds
             // `x` in the then-branch, so a pure ternary can't express it; it hoists (ANF) to a result
             // temp assigned by a real `if`. See LowerIfCaptureExpr.
