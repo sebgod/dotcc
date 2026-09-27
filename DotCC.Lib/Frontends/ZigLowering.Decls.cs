@@ -1520,22 +1520,39 @@ internal sealed partial class ZigLowering
         var members = new List<FieldInit>();
         var written = new HashSet<string>(System.StringComparer.Ordinal);
         var arrayInits = new List<(string Name, CType.Array Type, Item Value)>();
-        foreach (var fiItem in fieldInitItems)
+        // A later field that hoists spills the earlier impure ones ahead of itself (task #195). Only when nothing impure
+        // precedes the literal in its statement: then spilling reorders nothing.
+        var outerSpill = _siblingSpill;
+        var spill = _hoist is { } spillBuffer && !savedImpure ? new SiblingSpillFrame(outerSpill, spillBuffer, members) : null;
+        if (spill is not null) { _siblingSpill = spill; }
+        try
         {
-            var fi = (Zig.FieldInit)fiItem.Content!;   // FieldInit -> '.' IDENT '=' Expr
-            var fname = Tok(fi.Arg1);
-            var ftype = _ir.StructFieldType(named, fname)
-                ?? throw new IrUnsupportedException($"struct '{named.Name}' has no field '{fname}'");
-            written.Add(fname);   // set before the array check, so the defaults pass doesn't re-add it
-            // An array field with a real value (task #78) is filled after the literal, below, when the position hoists.
-            if (ftype.Unqualified is CType.Array arrField && _hoist is not null && !IsZeroArrayValue(fi.Arg3))
+            foreach (var fiItem in fieldInitItems)
             {
-                arrayInits.Add((fname, arrField, fi.Arg3));
-                continue;
+                var fi = (Zig.FieldInit)fiItem.Content!;   // FieldInit -> '.' IDENT '=' Expr
+                var fname = Tok(fi.Arg1);
+                var ftype = _ir.StructFieldType(named, fname)
+                    ?? throw new IrUnsupportedException($"struct '{named.Name}' has no field '{fname}'");
+                written.Add(fname);   // set before the array check, so the defaults pass doesn't re-add it
+                // An array field with a real value (task #78) is filled after the literal, below, when the position hoists.
+                if (ftype.Unqualified is CType.Array arrField && _hoist is not null && !IsZeroArrayValue(fi.Arg3))
+                {
+                    arrayInits.Add((fname, arrField, fi.Arg3));
+                    continue;
+                }
+                if (IsInlineArrayMember(named.Name, fname, ftype, fi.Arg3)) { continue; }
+                // Within the frame the watermark counts this field alone; an earlier field's impurity is held in the frame.
+                if (spill is not null) { _hoistImpureSeen = false; }
+                members.Add(new FieldInit(fname, ftype, LowerExprSink(fi.Arg3, ftype)));
+                if (spill is not null && _hoistImpureSeen) { spill.ImpureUnspilled.Add(members.Count - 1); }
             }
-            if (IsInlineArrayMember(named.Name, fname, ftype, fi.Arg3)) { continue; }
-            members.Add(new FieldInit(fname, ftype, LowerExprSink(fi.Arg3, ftype)));
         }
+        finally
+        {
+            _siblingSpill = outerSpill;
+        }
+        // What is still held back is still unsequenced: the watermark says so again for the rest of the statement.
+        if (spill is not null) { _hoistImpureSeen = spill.ImpureUnspilled.Count > 0; }
         // Materialize a declared default (`field: T = expr`, std S9) for any field OMITTED from the
         // literal — Zig fills it from the field's default. Fields with NO default that are omitted keep
         // C#'s zero-init (a documented leniency; Zig would require them to be set).

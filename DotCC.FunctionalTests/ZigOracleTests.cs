@@ -7879,6 +7879,55 @@ public sealed class ZigOracleTests
             "    for (&buf, 0..) |*b, i| b.* = @truncate(i * 3);\n" +
             "    return @truncate(last(buf[0..]) + last(buf[0..30]));\n" +
             "}\n", 156, "" },
+        // Task #195 (std.SemanticVersion.parse): a later struct-literal field hoists an `orelse return` after an earlier call.
+        new object[] { "struct_field_order_with_hoisted_fallback",
+            "const It = struct {\n" +
+            "    parts: []const u8,\n" +
+            "    i: usize = 0,\n" +
+            "    fn next(it: *It) ?u8 {\n" +
+            "        if (it.i >= it.parts.len) return null;\n" +
+            "        defer it.i += 1;\n" +
+            "        return it.parts[it.i];\n" +
+            "    }\n" +
+            "};\n" +
+            "const V = struct { a: u8, b: u8, c: u8 };\n" +
+            "fn num(x: u8) !u8 {\n" +
+            "    if (x > 9) return error.Big;\n" +
+            "    return x;\n" +
+            "}\n" +
+            "fn parse(parts: []const u8) !V {\n" +
+            "    var it = It{ .parts = parts };\n" +
+            "    const v = V{\n" +
+            "        .a = try num(it.next() orelse 0),\n" +
+            "        .b = try num(it.next() orelse return error.Short),\n" +
+            "        .c = try num(it.next() orelse return error.Short),\n" +
+            "    };\n" +
+            "    return v;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const v = parse(&.{ 4, 2, 7 }) catch return 1;\n" +
+            "    const short = if (parse(&.{ 1, 2 })) |_| @as(u8, 0) else |_| @as(u8, 50);\n" +
+            "    return v.a * 10 + v.b * 3 + v.c + short;\n" +
+            "}\n", 103, "" },
+        // Task #195 (std.SemanticVersion.order): `const v: ?u8 = x catch |err| switch (err) { error.A => null, … };`.
+        new object[] { "catch_switch_null_prong_optional_result",
+            "const E = error{ Bad, Big };\n" +
+            "fn parse(x: u8) E!u8 {\n" +
+            "    if (x == 0) return error.Bad;\n" +
+            "    if (x > 200) return error.Big;\n" +
+            "    return x;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var total: u8 = 0;\n" +
+            "    for ([_]u8{ 5, 0, 7 }) |x| {\n" +
+            "        const v: ?u8 = parse(x) catch |err| switch (err) {\n" +
+            "            error.Bad => null,\n" +
+            "            error.Big => unreachable,\n" +
+            "        };\n" +
+            "        total += if (v) |n| n else 30;\n" +
+            "    }\n" +
+            "    return total;\n" +
+            "}\n", 42, "" },
         // Task #193 (std.Treap): a pointer `orelse` over element reads, a `[2]?*Node` array copy, and `orelse unreachable`.
         new object[] { "pointer_orelse_elements_and_pointer_array_copy",
             "const Node = struct {\n" +
@@ -9714,6 +9763,22 @@ public sealed class ZigOracleTests
             "    const c = H.hash(4, \"ALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUFQBMXITEPALWHSDOZKVGRCNYJUF\");\n" +
             "    return @truncate((a ^ b ^ c) >> 5);\n" +
             "}\n", 34);
+
+    // Task #195: std.SemanticVersion.parse / order / Range.includesVersion from real std. parse's struct literal hoists
+    // a later field's `orelse return` behind the earlier field's call; order's `?usize` catch switch has a `null` prong.
+    [Fact]
+    public void Dotcc_matches_zig_std_semantic_version() =>
+        MatchesZigWithRealStd("semantic_version",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = std.SemanticVersion.parse(\"1.2.3\") catch return 1;\n" +
+            "    const b = std.SemanticVersion.parse(\"1.10.0-alpha.1+build.5\") catch return 2;\n" +
+            "    const o = std.SemanticVersion.order(a, b);\n" +
+            "    const r: std.SemanticVersion.Range = .{ .min = a, .max = b };\n" +
+            "    const mid = std.SemanticVersion.parse(\"1.5.0\") catch return 3;\n" +
+            "    const inc = r.includesVersion(mid);\n" +
+            "    return @truncate(a.major + a.minor * 10 + b.minor * 3 + @as(usize, @intFromEnum(o)) * 50 + @as(usize, @intFromBool(inc)) * 7 + b.pre.?.len);\n" +
+            "}\n", 115);
 
     // Task #193: std.Treap from real std (getEntryFor, Entry.set, inorderIterator, getMin). Its
     // `comptime compareFn: anytype` binds the user's comparator, `T.Node` resolves in treap.zig, and the pointer

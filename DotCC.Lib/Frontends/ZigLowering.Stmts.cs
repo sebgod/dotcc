@@ -945,7 +945,7 @@ internal sealed partial class ZigLowering
                     return new Seq(new List<CStmt>());
                 }
                 return new DeclStmt(new List<LocalDecl> { new(psym, payload) });
-            });
+            }, resultSink: declared);
         }
         // `const v = a catch |e| b;` / `const v = a catch <side-effecting>;` (Milestone N, part 3) —
         // a capturing or side-effecting catch needs a statement context (the fallback runs only on
@@ -5574,8 +5574,10 @@ internal sealed partial class ZigLowering
     /// function — incl. <c>return error.X</c>). On the success path the unwrapped payload is consumed
     /// by <paramref name="bind"/> (a decl initializer binds it; an expression-statement passes null
     /// and discards it). Emitted as <c>{ var __cf = a; if (Cond.B(&lt;none/error&gt;)) { return …; }
-    /// [bind(payload)] }</c>.</summary>
-    private CStmt LowerControlFlowFallback(Item lhsItem, bool isCatch, string? capture, Item arm, Func<CExpr, CStmt>? bind)
+    /// [bind(payload)] }</c>. <paramref name="resultSink"/> is the declared type of what binds the result, when there is
+    /// one: an OPTIONAL there types a value arm's result (see below).</summary>
+    private CStmt LowerControlFlowFallback(Item lhsItem, bool isCatch, string? capture, Item arm, Func<CExpr, CStmt>? bind,
+        CType? resultSink = null)
     {
         var lhs = LowerExpr(lhsItem);
         // An optional dotcc already folded to its compile-time VALUE (std.unicode's `std.simd.suggestVectorLength(u16) orelse
@@ -5660,6 +5662,16 @@ internal sealed partial class ZigLowering
         // switch (e) { error.OutOfMemory => { …; return; } };` in array_list) yields no value: it is a
         // statement switch on the failure path, so its prongs may be void blocks.
         var voidSwitch = arm.Content is Zig.FbSwitch && bind is null && payload.Type.Unqualified.Equals(CType.Void);
+        // The value arm's result is at the RESULT type, which zig takes from the result location: `const lnum: ?usize =
+        // parseUnsigned(…) catch |err| switch (err) { error.InvalidCharacter => null, … };` (std.SemanticVersion.order,
+        // task #195) is a `?usize` whose prong may be `null`, not the `usize` payload. Only an optional sink over the payload
+        // widens it; any other declared type keeps the payload's (the binding coerces it as before).
+        if (resultSink?.Unqualified is CType.Optional { Inner: var sinkInner }
+            && sinkInner.Unqualified.Equals(payload.Type.Unqualified)
+            && arm.Content is Zig.FbSwitch or Zig.FbLabeled)
+        {
+            payload = new Cast(resultSink, payload) { Type = resultSink };
+        }
         Symbol? switchResult = arm.Content is Zig.FbSwitch or Zig.FbLabeled && !voidSwitch
             ? _symbols.Declare(new Symbol { Name = "__cfv" + _anfTempCounter++, Kind = SymKind.Var, Type = payload.Type })
             : null;
@@ -5816,6 +5828,8 @@ internal sealed partial class ZigLowering
             throw new IrUnsupportedException(
                 $"zig `{what}` in a sub-expression can't be hoisted past an earlier side-effecting operand in the same statement — bind it to a `const` first");
         }
+        // An earlier field of an enclosing struct literal, held back (task #195), goes into the buffer first.
+        SpillHeldSiblings(buf);
         return buf;
     }
 
