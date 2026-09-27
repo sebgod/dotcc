@@ -1534,6 +1534,8 @@ internal sealed partial class ZigLowering
                 var ftype = _ir.StructFieldType(named, fname)
                     ?? throw new IrUnsupportedException($"struct '{named.Name}' has no field '{fname}'");
                 written.Add(fname);   // set before the array check, so the defaults pass doesn't re-add it
+                // A zero-length array field (`.data = .{}`, task #197) has no storage to fill.
+                if (ftype.Unqualified is CType.Array { Count: 0 }) { continue; }
                 // An array field with a real value (task #78) is filled after the literal, below, when the position hoists.
                 if (ftype.Unqualified is CType.Array arrField && _hoist is not null && !IsZeroArrayValue(fi.Arg3))
                 {

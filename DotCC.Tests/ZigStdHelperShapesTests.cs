@@ -6220,4 +6220,43 @@ public sealed class ZigStdHelperShapesTests
         // Task #194: neither operand has a length (zig: "unknown copy length").
         ex.Message.ShouldContain("at least one of dest and source must have a length");
     }
+
+    [Fact]
+    public void A_zero_length_array_field_has_no_storage()
+    {
+        var cs = EmitZig("""
+            const Header = struct {
+                kind: u8,
+                len: u8,
+                data: [0]u8,
+            };
+            pub fn main() u8 {
+                var h = Header{ .kind = 40, .len = 2, .data = .{} };
+                h.len += @sizeOf(Header);
+                return h.kind + h.len - @sizeOf(Header);
+            }
+            """);
+        // Task #197: zig's `data: [0]u8` (the flexible-array idiom) had emitted `fixed byte data[0]`, which C# rejects
+        // (CS1665). It has no storage, so it is left out and its literal init stores nothing. zig returns 42.
+        cs.ShouldContain("unsafe struct Header" + "\n{\n    public byte kind;\n    public byte len;\n}");
+    }
+
+    [Fact]
+    public void Reading_a_zero_length_array_field_is_not_supported_yet()
+    {
+        var ex = Should.Throw<CompileException>(() => EmitZig("""
+            const Header = struct {
+                kind: u8,
+                data: [0]u8,
+            };
+            pub fn main() u8 {
+                var h = Header{ .kind = 42, .data = .{} };
+                const p: [*]u8 = &h.data;
+                _ = p;
+                return h.kind + @as(u8, @intCast(h.data.len));
+            }
+            """));
+        // Task #197: its address is the byte after the fields before it, which only zig's layout fixes. zig returns 42.
+        ex.Message.ShouldContain("zero-length array field `data` has no storage");
+    }
 }
