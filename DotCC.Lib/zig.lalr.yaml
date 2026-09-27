@@ -1388,10 +1388,15 @@ productions:
       - { lhs: Primary, rhs: ['false'],             action: falseLit }
       - { lhs: Primary, rhs: [CHAR],                action: charLit }
       - { lhs: Primary, rhs: ['.', IDENT],          action: enumLit }
-      # `.undefined` / `.null` — the `std.builtin.Type` tags named after keywords (auto_hash's
-      # `switch (@typeInfo(Key)) { .undefined, .null, … }`). After `.` the keyword is a clean shift.
-      - { lhs: Primary, rhs: ['.', 'undefined'],    action: enumLitUndefined }
-      - { lhs: Primary, rhs: ['.', 'null'],         action: enumLitNull }
+      # `.undefined` / `.null` / `.true` / `.false`: tags named after zig's primitive VALUES, which are plain names after
+      # `.` (auto_hash's `switch (@typeInfo(Key)) { .undefined, .null, … }`, std.json's Token and TokenType members, task
+      # #207). After `.` the keyword is a clean shift. They build the same `enumLit` record as `.name`, so every
+      # enum-literal site reads the spelling from the token (a dedicated record per keyword reached only the sites that
+      # knew it: `.null` as a union value was unsupported).
+      - { lhs: Primary, rhs: ['.', 'undefined'],    action: enumLit }
+      - { lhs: Primary, rhs: ['.', 'null'],         action: enumLit }
+      - { lhs: Primary, rhs: ['.', 'true'],         action: enumLit }
+      - { lhs: Primary, rhs: ['.', 'false'],        action: enumLit }
       # Anonymous struct literal `.{ … }` (Milestone D1). The leading `.` is the SAME token
       # as enumLit's; they split cleanly on the next symbol (`{` → struct literal, IDENT →
       # enum literal). An empty `.{}` zero-inits the (sink-typed) struct.
@@ -1715,17 +1720,22 @@ productions:
     rules:
       - { lhs: EnumFields, rhs: [EnumMember, EnumFields], action: enumFieldsCons }
       - { lhs: EnumFields, rhs: [EnumMember],              action: enumFieldsOne }
+      # The one field that may omit its comma is the LAST (task #207): as a member it could be followed by another member,
+      # which put every member-starting token into FOLLOW(Expr) (`enum { a = x orelse break :l <next member> }`). With
+      # `true` / `false` / `null` as member names that made `orelse break :l true` a shift/reduce conflict, settled by
+      # precedence toward the value-less break (std.Treap's `orelse break :rotate_right true` stopped parsing). Here a
+      # comma-less field is followed only by `}`. Same record as before, so the member walk is unchanged.
+      - { lhs: EnumFields, rhs: [EnumField],               action: enumMemberFieldLast }
 
   # One enum-body member: a value field (a bare name = auto-increment from the previous starting at
-  # 0, or `name = value` const-Expr), with its own optional trailing comma; a method; or a const. A
-  # value field carries the comma here so `,` never leaks into the list recursion, and a method/const
+  # 0, or `name = value` const-Expr) with its comma (only the last field may omit it, as `EnumFields -> EnumField`
+  # above); a method; or a const. A value field carries the comma here so `,` never leaks into the list recursion, and a method/const
   # self-terminates — so `,` ∉ FOLLOW(EnumMember) and `derivation: none` is conflict-free (the same
   # reasoning as a struct's Member). Member starts are disjoint: IDENT (field) / `fn` / `const`/`var`
   # / `pub`.
   - derivation: none
     rules:
       - { lhs: EnumMember, rhs: [EnumField, ','], action: enumMemberField }
-      - { lhs: EnumMember, rhs: [EnumField],       action: enumMemberFieldLast }
       - { lhs: EnumMember, rhs: [FnDef],           action: enumMemberMethod }
       - { lhs: EnumMember, rhs: ['pub', FnDef],    action: enumMemberPubMethod }
       - { lhs: EnumMember, rhs: ['inline', FnDef],        action: enumMemberInlineMethod }
@@ -1744,6 +1754,11 @@ productions:
   - derivation: none
     rules:
       - { lhs: EnumField, rhs: [IDENT],            action: enumField }
+      # `true` / `false` / `null` as enum member names (std.json.TokenType, task #207): zig's primitive values are plain
+      # names in a container's field list; dotcc lexes them as keywords, so the field admits them by name.
+      - { lhs: EnumField, rhs: ['true'],           action: enumField }
+      - { lhs: EnumField, rhs: ['false'],          action: enumField }
+      - { lhs: EnumField, rhs: ['null'],           action: enumField }
       - { lhs: EnumField, rhs: [IDENT, '=', Expr], action: enumFieldInit }
 
   # ===== tagged-union body (Milestone D3 + D2/D3-leftovers methods) =====
@@ -1789,6 +1804,9 @@ productions:
       # container's field list. dotcc lexes them as keywords, so the variant admits them by name.
       - { lhs: UnionVariant, rhs: ['undefined'],       action: unionVariantVoid }
       - { lhs: UnionVariant, rhs: ['null'],            action: unionVariantVoid }
+      # `true,` / `false,` likewise (std.json.Token's void variants, task #207).
+      - { lhs: UnionVariant, rhs: ['true'],            action: unionVariantVoid }
+      - { lhs: UnionVariant, rhs: ['false'],           action: unionVariantVoid }
 
   # Anonymous struct literal `.{ .f = v, … }` — Zig's result-located init, where the type
   # is inferred from the sink (a typed `const`/`var`, a `return`, a field's declared type).
