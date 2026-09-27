@@ -202,6 +202,24 @@ public static class ZigMath
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static float Rem(float a, float b) => a % b;
 
+    /// <summary><c>@rem(a, b)</c> of <c>f128</c> floats (task #214): the truncated remainder, C's <c>fmodl</c>.</summary>
+    public static Float128 Rem(Float128 a, Float128 b) => Float128.Fmod(a, b);
+
+    /// <summary><c>@mod(a, b)</c> of <c>f128</c> floats: the floored remainder, taking the sign of the divisor.</summary>
+    public static Float128 Mod(Float128 a, Float128 b)
+    {
+        var r = Float128.Fmod(a, b);
+        return !Float128.IsZero(r) && Float128.IsNegative(r) != Float128.IsNegative(b) ? r + b : r;
+    }
+
+    /// <summary><c>@min(a, b)</c> of <c>f128</c> floats: a NaN operand yields the other one, as zig's does.</summary>
+    public static Float128 Min(Float128 a, Float128 b)
+        => Float128.IsNaN(a) ? b : Float128.IsNaN(b) ? a : a < b ? a : b;
+
+    /// <summary><c>@max(a, b)</c> of <c>f128</c> floats: a NaN operand yields the other one, as zig's does.</summary>
+    public static Float128 Max(Float128 a, Float128 b)
+        => Float128.IsNaN(a) ? b : Float128.IsNaN(b) ? a : a > b ? a : b;
+
     /// <summary><c>@divFloor(a, b)</c> — division rounding toward negative infinity (unlike C#'s <c>/</c>,
     /// toward zero). For non-negative operands the two coincide.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -291,6 +309,19 @@ public static class ZigMath
 
     /// <summary>Zig's <c>@round</c> on an f32 (see <see cref="RoundAway(double)"/>).</summary>
     public static float RoundAway(float x) => System.MathF.Round(x, System.MidpointRounding.AwayFromZero);
+
+    /// <summary>Zig's <c>@round</c> on an f128 (task #214): half away from zero, where <see cref="Float128.Round"/> rounds
+    /// ties to even (C's <c>rintl</c>). <c>x - trunc(x)</c> is exact, so the half is decided without rounding; a NaN or an
+    /// infinity is its own result.</summary>
+    public static Float128 RoundAway(Float128 x)
+    {
+        var whole = Float128.Truncate(x);
+        if (Float128.Abs(x - whole) >= (Float128)0.5)
+        {
+            return Float128.IsNegative(x) ? whole - Float128.One : whole + Float128.One;
+        }
+        return whole;
+    }
 
     /// <summary>Zig's <c>@exp2</c>: 2 raised to <paramref name="x"/>.</summary>
     public static double Exp2(double x) => System.Math.Pow(2.0, x);

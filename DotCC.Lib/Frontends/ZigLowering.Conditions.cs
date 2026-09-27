@@ -367,9 +367,9 @@ internal sealed partial class ZigLowering
     /// compile-time number types, which dotcc never binds a type parameter to.</summary>
     private static bool IsComptimeNumberTypeName(Item item)
         => item.Content is Zig.Ident id && Tok(id.Arg0) is "comptime_int" or "comptime_float";
-    /// <summary>True for a zig primitive type name dotcc does not lower (<c>f16</c>, <c>f80</c>, <c>f128</c>,
+    /// <summary>True for a zig primitive type name dotcc does not lower (<c>f16</c>, <c>f80</c>,
     /// <c>c_longdouble</c>, the zero-width <c>u0</c> / <c>i0</c>): a comparison against one still answers, since no
     /// lowered type is it (std.bit_set's <c>if (MaskInt == u0) return;</c>).</summary>
     private static bool IsUnmodeledPrimitiveType(Item item)
-        => item.Content is Zig.Ident id && Tok(id.Arg0) is "f16" or "f80" or "f128" or "c_longdouble" or "u0" or "i0";
+        => item.Content is Zig.Ident id && Tok(id.Arg0) is "f16" or "f80" or "c_longdouble" or "u0" or "i0";
 }

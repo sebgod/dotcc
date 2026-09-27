@@ -1636,11 +1636,16 @@ internal sealed partial class ZigLowering
     /// <summary>Lower a Zig float literal: strip <c>_</c> separators, and convert a hex float
     /// (<c>0x1.8p3</c>, no C# syntax) to a round-trippable decimal via the shared
     /// <see cref="EmitHelpers.LowerHexFloat"/>. A decimal float passes through (C# accepts it
-    /// verbatim, typed <c>double</c> here). Zig has no <c>f</c>/<c>l</c> literal suffix.</summary>
+    /// verbatim, typed <c>double</c> here). Zig has no <c>f</c>/<c>l</c> literal suffix. A hex float
+    /// <c>double</c> cannot hold exactly (more than 53 significand bits, for an <c>f128</c> sink, task #214)
+    /// is spelled as its exact decimal instead, which C# and <see cref="Binary128Literal"/> each round once.</summary>
     private static string LowerZigFloat(string raw)
     {
         var t = raw.Replace("_", "");
-        return t.Length > 2 && t[0] == '0' && t[1] is 'x' or 'X' ? EmitHelpers.LowerHexFloat(t) : t;
+        if (!(t.Length > 2 && t[0] == '0' && t[1] is 'x' or 'X')) { return t; }
+        return Binary128Literal.TryParseHex(t, out var m, out var e2) && !Binary128Literal.FitsDouble(m, e2)
+            ? Binary128Literal.ExactDecimal(m, e2)
+            : EmitHelpers.LowerHexFloat(t);
     }
 
     /// <summary>Rewrite a quoted Zig string lexeme's byte escapes for the SHARED (C) string decoder (task #134). Zig and C
@@ -1767,6 +1772,9 @@ internal sealed partial class ZigLowering
             "usize" => CType.ULong,  // LP64: pointer-width unsigned (== size_t)
             "f32" => CType.Float,
             "f64" => CType.Double,
+            // IEEE binary128 (std.json.static's sliceToInt parses an integer spelled as a float as `f128`, task #214): the
+            // C front end's `_Float128`, backed by the runtime's software `Float128`.
+            "f128" => CType.Float128,
             // C-ABI types for `extern fn` libc FFI (LP64, matching dotcc's __LP64__ trio:
             // `c_long`/`c_ulong` are 8 bytes). These map onto the same well-known prims the
             // C frontend uses, so RenderType + the coercion tables already cover them.
