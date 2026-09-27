@@ -1808,10 +1808,16 @@ internal sealed partial class ZigLowering
     }
 
     /// <summary>The container a DECL LITERAL at <paramref name="sink"/> looks its member up in — the sink's
-    /// struct/union name — or null when the sink is not a zig container (an enum sink resolves a bare
-    /// <c>.member</c> as a tag instead, and a curated std type models its own literals).</summary>
-    private static string? DeclLiteralContainer(CType? sink)
-        => sink?.Unqualified is CType.Named { Name: var name } && name is not (FbaTypeName or ArenaTypeName) ? name : null;
+    /// struct/union/enum name — or null when the sink is not a zig container (a curated std type models its own
+    /// literals). An enum sink resolves a bare <c>.member</c> as a tag before this is asked.</summary>
+    private static string? DeclLiteralContainer(CType? sink) => sink?.Unqualified switch
+    {
+        CType.Named { Name: var name } when name is not (FbaTypeName or ArenaTypeName) => name,
+        // An enum with functions (std.Io.Limit's `.limited(n)`, task #201): a decl-literal CALL is its function, as for a
+        // struct. A bare `.member` at an enum sink is matched earlier, as the member.
+        CType.Enum { Name: var enumName } => enumName,
+        _ => null,
+    };
 
     /// <summary>Lower a decl-literal CALL <c>.name(args)</c> at a sink of container type
     /// <paramref name="container"/>: zig resolves <c>name</c> as a declaration of the RESULT type, so this
