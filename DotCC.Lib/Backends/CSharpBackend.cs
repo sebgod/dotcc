@@ -885,7 +885,9 @@ internal sealed class CSharpBackend
             case For fr:
                 var init = fr.Init switch
                 {
-                    DeclStmt d => DeclInline(d),
+                    // A for-init that declares no automatic object (a `static` local's
+                    // storage is a DotCcGlobals field) leaves the clause empty.
+                    DeclStmt { Decls.Count: > 0 } d => DeclInline(d),
                     ExprStmt e => Expr(e.Expr),
                     _ => "",
                 };

@@ -256,34 +256,18 @@ internal sealed partial class IrBuilder
                 _pendingAttrNodiscard = null;
                 break;
             case C.FuncDef d: BuildFuncDef(d.Arg0, d.Arg1); break;
-            case C.ExternFnDef d: BuildFuncDef(d.Arg1, d.Arg2); break;
             // A header-defined file-scope variable (chibi sexp.h's `static const
             // unsigned char sexp_uvector_sizes[] = {…};`) re-arrives once per TU
             // that includes the header. An identical re-definition is the same
             // object — the first build's field + file-scope binding serve every
             // TU, so skip it (mirrors BuildFuncDef's static-inline dedup; see
             // AlreadySeenTopLevel for the per-TU-state caveat).
-            case C.GlobalDeclList g when !DeclaresFunction(g.Arg1) && AlreadySeenTopLevel(fn):
+            case C.GlobalDeclList g when StorageClassOf(g.Arg0) is null or SpecKw.Static
+                    && !DeclaresFunction(g.Arg1) && AlreadySeenTopLevel(fn):
                 break;
-            case C.GlobalStaticDeclList g when !DeclaresFunction(g.Arg2) && AlreadySeenTopLevel(fn):
-                break;
-            // File-scope object declarations, any declarator in any position (scalar,
-            // struct, array, fn-ptr, fn-ptr table): plain and `static` lower
-            // identically (internal linkage is a no-op for a never-exported variable).
-            case C.GlobalDeclList g: BuildGlobalDecls(g.Arg0, g.Arg1, Storage.Static, internalLinkage: false); break;
-            case C.GlobalStaticDeclList g:
-                RejectRegisterWith(g.Arg1);
-                BuildGlobalDecls(g.Arg1, g.Arg2, Storage.Static, internalLinkage: true);
-                break;
-            // `extern T x…;` declares the names + types for resolution but emits no
-            // storage: the definition lives in another TU (dotcc whole-program model).
-            case C.ExternVarDecl g:
-                RejectRegisterWith(g.Arg1);
-                BuildGlobalDecls(g.Arg1, g.Arg2, Storage.Extern, internalLinkage: false);
-                break;
-            // `typedef T d1, d2…;`: each declarator names an alias of its full type,
-            // which ResolveType's TypeName case then sees through everywhere.
-            case C.TypedefDecl t: RejectRegisterWith(t.Arg1); BuildTypedefs(t.Arg1, t.Arg2); break;
+            // File-scope declarations, any declarator in any position (scalar, struct,
+            // array, fn-ptr, fn-ptr table), dispatched on the storage class.
+            case C.GlobalDeclList g: BuildFileScopeDecl(g.Arg0, g.Arg1); break;
             // A declaration with no declarators: `struct Node { … };`, `struct
             // Node;`, `enum { A, B };`. Resolving the type defines what it declares.
             case C.TagDecl t: BuildTagDecl(t.Arg0); break;
@@ -312,6 +296,25 @@ internal sealed partial class IrBuilder
     /// <c>static const</c> tables) the two are indistinguishable.</summary>
     private bool AlreadySeenTopLevel(Item fn) => !_seenTopLevelDefs.Add(fn.ToString());
 
+    /// <summary>A file-scope declaration with declarators, dispatched on the storage
+    /// class its Type carries (<see cref="CheckDeclSpecs(Item)"/>): <c>typedef</c> names
+    /// an alias per declarator, which ResolveType's TypeName case then sees through
+    /// everywhere; <c>extern</c> declares the names and types for resolution but emits
+    /// no storage (the definition lives in another TU, dotcc's whole-program model);
+    /// a plain or <c>static</c> declaration defines (internal linkage is a no-op for a
+    /// never-exported variable, so both lower to a <c>DotCcGlobals</c> field).</summary>
+    private void BuildFileScopeDecl(Item typeItem, Item listItem)
+    {
+        switch (CheckDeclSpecs(typeItem))
+        {
+            case SpecKw.Typedef: BuildTypedefs(typeItem, listItem); break;
+            case SpecKw.Extern: BuildGlobalDecls(typeItem, listItem, Storage.Extern, internalLinkage: false); break;
+            case SpecKw.Static: BuildGlobalDecls(typeItem, listItem, Storage.Static, internalLinkage: true); break;
+            case SpecKw.Auto: BuildGlobalDecls(typeItem, listItem, Storage.Auto, internalLinkage: false); break;
+            default: BuildGlobalDecls(typeItem, listItem, Storage.Static, internalLinkage: false); break;
+        }
+    }
+
     /// <summary>File-scope declaration. A function declarator declares a function (a
     /// prototype; <paramref name="internalLinkage"/> for <c>static</c>); every other
     /// declarator becomes a <c>DotCcGlobals</c> field (codegen emits <c>public static
@@ -327,6 +330,12 @@ internal sealed partial class IrBuilder
         var isRegister = DeclaresRegister(typeItem);
         WalkDeclList(typeItem, listItem, d =>
         {
+            if (storage == Storage.Auto)
+            {
+                // `auto` gives automatic storage duration, which nothing at file scope
+                // has (C11 6.9p2); gcc's error. It lowers as a plain declaration.
+                Diagnostics.Add(new Diagnostic(Severity.Error, $"file-scope declaration of '{d.Name}' specifies 'auto'", SrcPos.From(d.At), _file));
+            }
             if (d.Type is CType.Func { IsFunctionType: true } fnType)
             {
                 if (isRegister) { InvalidFunctionStorage(d); }
@@ -341,7 +350,7 @@ internal sealed partial class IrBuilder
                 _gate?.Report($"file-scope declaration of '{name}' specifies 'register'", d.At.Position.Line);
                 Diagnostics.Add(new Diagnostic(Severity.Error, $"register name not specified for '{name}'", SrcPos.From(d.At), _file));
             }
-            var declStorage = storage;
+            var declStorage = storage == Storage.Auto ? Storage.Static : storage;
             if (storage == Storage.Extern && d.Init is not null)
             {
                 Diagnostics.Add(new Diagnostic(Severity.Warning, $"'{name}' initialized and declared 'extern'", SrcPos.From(d.At), _file));
@@ -652,9 +661,12 @@ internal sealed partial class IrBuilder
     {
         _sawNoreturnSpec = false;
         _sawInlineSpec = false;
-        if (DeclaresRegister(FnSigType(fnSig)))
+        // A function definition is `extern` or `static` (C11 6.9.1p4); gcc's wording,
+        // an error for `register` and `typedef` and a warning for `auto`.
+        if (CheckDeclSpecs(FnSigType(fnSig)) is { } storage and (SpecKw.Register or SpecKw.Typedef or SpecKw.Auto))
         {
-            Diagnostics.Add(new Diagnostic(Severity.Error, "function definition declared 'register'", SrcPos.From(fnSig), _file));
+            Diagnostics.Add(new Diagnostic(storage == SpecKw.Auto ? Severity.Warning : Severity.Error,
+                $"function definition declared '{Spelling(storage)}'", SrcPos.From(fnSig), _file));
         }
         var sig = ExtractFnSig(fnSig);
         // A definition means this name is no longer a pure prototype → not an import.
@@ -810,24 +822,20 @@ internal sealed partial class IrBuilder
 
     private FnSig ExtractFnSig(Item it) => it.Content switch
     {
-        C.FnSig n => new(ResolveType(n.Arg0), Tok(n.Arg1), BuildParams(n.Arg3, out var v0), v0, false),
-        C.FnSigNoArgs n => new(ResolveType(n.Arg0), Tok(n.Arg1), new(), false, false),
-        C.FnSigStatic n => new(ResolveType(n.Arg1), Tok(n.Arg2), BuildParams(n.Arg4, out var v1), v1, true),
-        C.FnSigStaticNoArgs n => new(ResolveType(n.Arg1), Tok(n.Arg2), new(), false, true),
+        C.FnSig n => new(ResolveType(n.Arg0), Tok(n.Arg1), BuildParams(n.Arg3, out var v0), v0, DeclaresStatic(n.Arg0)),
+        C.FnSigNoArgs n => new(ResolveType(n.Arg0), Tok(n.Arg1), new(), false, DeclaresStatic(n.Arg0)),
         // Parenthesized declarator name `T (name)(args)` — identical to
         // `T name(args)`; the parens are pure grouping around the name (public
         // headers wrap API names so a same-named function-like macro can't expand
         // at the declaration). Name is Arg2, the param list Arg5.
-        C.FnSigParen n => new(ResolveType(n.Arg0), Tok(n.Arg2), BuildParams(n.Arg5, out var vp), vp, false),
-        C.FnSigParenNoArgs n => new(ResolveType(n.Arg0), Tok(n.Arg2), new(), false, false),
-        C.FnSigStaticParen n => new(ResolveType(n.Arg1), Tok(n.Arg3), BuildParams(n.Arg6, out var vsp), vsp, true),
-        C.FnSigStaticParenNoArgs n => new(ResolveType(n.Arg1), Tok(n.Arg3), new(), false, true),
+        C.FnSigParen n => new(ResolveType(n.Arg0), Tok(n.Arg2), BuildParams(n.Arg5, out var vp), vp, DeclaresStatic(n.Arg0)),
+        C.FnSigParenNoArgs n => new(ResolveType(n.Arg0), Tok(n.Arg2), new(), false, DeclaresStatic(n.Arg0)),
         // Function returning a function pointer: `Ret (*name(params))(fnPtrParams)`
         // (e.g. <signal.h>'s `void (*signal(int, void(*)(int)))(int)`). The result
         // type is the function-pointer `Ret (*)(fnPtrParams)`; name + params are the
         // outer declarator's.
-        C.FnSigRetFnPtr n => new(FnPtrType(n.Arg0, n.Arg9), Tok(n.Arg3), BuildParams(n.Arg5, out var vr), vr, false),
-        C.FnSigRetFnPtrNoArgs n => new(FnPtrType(n.Arg0, null), Tok(n.Arg3), BuildParams(n.Arg5, out var vrn), vrn, false),
+        C.FnSigRetFnPtr n => new(FnPtrType(n.Arg0, n.Arg9), Tok(n.Arg3), BuildParams(n.Arg5, out var vr), vr, DeclaresStatic(n.Arg0)),
+        C.FnSigRetFnPtrNoArgs n => new(FnPtrType(n.Arg0, null), Tok(n.Arg3), BuildParams(n.Arg5, out var vrn), vrn, DeclaresStatic(n.Arg0)),
         _ => throw new IrUnsupportedException(TypeName(it.Content)),
     };
 
@@ -847,22 +855,26 @@ internal sealed partial class IrBuilder
                 // alias like chibi's `sexp_abi_identifier_t`) decays to a
                 // pointer exactly like the explicit `T name[]` forms below
                 // (C99 §6.7.5.3p7 applies through a typedef too).
-                case C.Param p: acc.Add(new(DecayParam(ResolveType(p.Arg0)), Tok(p.Arg1)) { IsRegister = DeclaresRegister(p.Arg0) }); break;
-                case C.ParamUnnamed p: acc.Add(new(DecayParam(ResolveType(p.Arg0)), "_p" + unnamed++)); break;
-                case C.ParamArrayUnsized p: acc.Add(new(new CType.Pointer(ResolveType(p.Arg0)), Tok(p.Arg1))); break;
-                case C.ParamArraySized p: acc.Add(new(new CType.Pointer(ResolveType(p.Arg0)), Tok(p.Arg1))); break;
+                case C.Param p:
+                    CheckParamSpecs(p.Arg0, Tok(p.Arg1));
+                    acc.Add(new(DecayParam(ResolveType(p.Arg0)), Tok(p.Arg1)) { IsRegister = DeclaresRegister(p.Arg0) });
+                    break;
+                case C.ParamUnnamed p: CheckParamSpecs(p.Arg0, null); acc.Add(new(DecayParam(ResolveType(p.Arg0)), "_p" + unnamed++)); break;
+                case C.ParamArrayUnsized p: CheckParamSpecs(p.Arg0, Tok(p.Arg1)); acc.Add(new(new CType.Pointer(ResolveType(p.Arg0)), Tok(p.Arg1))); break;
+                case C.ParamArraySized p: CheckParamSpecs(p.Arg0, Tok(p.Arg1)); acc.Add(new(new CType.Pointer(ResolveType(p.Arg0)), Tok(p.Arg1))); break;
                 // Function-pointer parameter: `Ret (*name)(paramTypes)` and its
                 // `(*const name)` / `(**name)` forms.
                 case C.ParamFnPtrDecl p:
                 {
                     var (name, type) = FnPtrDeclarator(ResolveType(p.Arg0), p.Arg1, p.Arg2);
+                    CheckParamSpecs(p.Arg0, name);
                     acc.Add(new(type, name));
                     break;
                 }
                 // A parameter of function type is a pointer to that function
                 // (C11 6.7.6.3p8): `Ret name(paramTypes)`, `Ret (name)(paramTypes)`.
-                case C.ParamFnType p: acc.Add(new(FnPtrTailType(ResolveType(p.Arg0), p.Arg2), Tok(p.Arg1))); break;
-                case C.ParamParenFnType p: acc.Add(new(FnPtrTailType(ResolveType(p.Arg0), p.Arg4), Tok(p.Arg2))); break;
+                case C.ParamFnType p: CheckParamSpecs(p.Arg0, Tok(p.Arg1)); acc.Add(new(FnPtrTailType(ResolveType(p.Arg0), p.Arg2), Tok(p.Arg1))); break;
+                case C.ParamParenFnType p: CheckParamSpecs(p.Arg0, Tok(p.Arg2)); acc.Add(new(FnPtrTailType(ResolveType(p.Arg0), p.Arg4), Tok(p.Arg2))); break;
                 default: throw new IrUnsupportedException(TypeName(it.Content));
             }
         }
@@ -996,6 +1008,7 @@ internal sealed partial class IrBuilder
                 // reserves its bits (a zero width starts a fresh storage unit); it
                 // is no accessible member and positional initializers skip it.
                 case C.StructMemberList sm:
+                    CheckMemberSpecs(sm.Arg0);
                     WalkDeclList(sm.Arg0, sm.Arg1,
                         d => fields.Add(new StructField(d.Name, MemberDeclaratorType(d, m))),
                         (name, type, width) => fields.Add(new StructField(name, type, BitFieldWidth(width))));
@@ -1006,7 +1019,7 @@ internal sealed partial class IrBuilder
                 // recorded so `parent.inner` routes through it), or a nested tag
                 // definition. A NAMED nested aggregate (`struct {…} m;`) is an
                 // ordinary member list whose Type is the tag definition.
-                case C.MemberTagDecl mt: BuildMemberTagDecl(mt.Arg0, owner, fields, m); break;
+                case C.MemberTagDecl mt: CheckMemberSpecs(mt.Arg0); BuildMemberTagDecl(mt.Arg0, owner, fields, m); break;
                 default: throw new IrUnsupportedException(TypeName(m.Content));
             }
         }
@@ -1166,7 +1179,7 @@ internal sealed partial class IrBuilder
         // `_Atomic T` / `_Atomic(T)` (C11). Codegen lowers reads/writes of an atomic
         // scalar lvalue to seq-cst Atomic.Load/Store/*Fetch (Interlocked-backed).
         C.TypeAtomic t => AtomicType(ResolveType(t.Arg1), it),
-        C.TypeAtomicParen t => AtomicType(ResolveType(t.Arg2), it),
+        C.TypeAtomicParen t => AtomicType(TypeNameType(t.Arg2, TypeNameSite.SpecifierQualifierList), it),
         // `_Alignas(Type) T` / `_Alignas(constexpr) T` (C11 §6.7.5) — the
         // alignment specifier is ACCEPTED + IGNORED (a C# field/local has no
         // controllable alignment; same no-op treatment as Zig's `align(N)`).
@@ -1191,20 +1204,17 @@ internal sealed partial class IrBuilder
         C.TypeEnumDef t => DefineEnum(it, Tok(t.Arg1), null, t.Arg3),
         C.TypeEnumAnonDef t => DefineEnum(it, null, null, t.Arg2),
         C.TypeEnumDefTyped t => DefineEnum(it, Tok(t.Arg1), t.Arg3, t.Arg5),
-        // Function specifiers and the storage classes that are Type prefixes (C11
-        // 6.7.1, 6.7.4): each is recorded for the enclosing declaration
-        // (RecordDeclSpec), then dropped from the type. `register` is read
-        // structurally where it matters (DeclaresRegister).
-        C.TypeInline t => DeclSpec("inline", t.Arg1, it),
-        C.TypeNoreturn t => DeclSpec("_Noreturn", t.Arg1, it),
-        C.TypeThreadLocal t => DeclSpec("_Thread_local", t.Arg1, it),
-        C.TypeConstexpr t => DeclSpec("constexpr", t.Arg1, it),
-        C.TypeRegister t => ResolveType(t.Arg1),
+        // Storage classes and function specifiers, a Type prefix or suffix (C11
+        // 6.7.1, 6.7.4): dropped from the type. The declaration reads its storage
+        // class structurally (DeclSpecsOf); the ones with a lowering of their own
+        // are recorded for the enclosing declaration (RecordDeclSpec).
+        C.TypeDeclSpec t => DeclSpec(t.Arg0, t.Arg1),
+        C.TypeDeclSpecPost t => DeclSpec(t.Arg1, t.Arg0),
         // C23 `typeof(expr)` / `typeof(type)` — the expr form reads the operand's
         // synthesized CType (qualifiers dropped, as `typeof_unqual` does); the type
         // form unwraps to that type. The expr isn't evaluated (only its type taken).
         C.TypeofExpr t => BuildExpr(t.Arg2).Type.Unqualified,
-        C.TypeofType t => ResolveType(t.Arg2),
+        C.TypeofType t => TypeNameType(t.Arg2, TypeNameSite.Typeof),
         // A function-pointer type `Ret (*)(params)` — abstract declarator (a cast
         // target, a typedef target, a sizeof operand): lowers to CType.Func.
         C.TypeFnPtr t => FnPtrType(t.Arg0, t.Arg5),
@@ -1241,57 +1251,242 @@ internal sealed partial class IrBuilder
         _symbols.Resolve(name) is { Kind: SymKind.Typedef } local ? local.Type
         : _typedefs.TryGetValue(name, out var t) ? t : new CType.Named(name);
 
-    /// <summary>Resolve a specifier-prefixed type (<c>inline T</c>, <c>_Thread_local
-    /// T</c>, …): record <paramref name="spec"/> for the enclosing declaration, then
-    /// the type is <paramref name="inner"/>'s.</summary>
-    private CType DeclSpec(string spec, Item inner, Item it)
+    /// <summary>Resolve a specifier-prefixed or -suffixed type (<c>static T</c>,
+    /// <c>T inline</c>, …): the type is <paramref name="inner"/>'s. A specifier with a
+    /// lowering of its own is recorded for the enclosing declaration; the storage
+    /// classes are read structurally from the declaration's Type instead.</summary>
+    private CType DeclSpec(Item spec, Item inner)
     {
-        RecordDeclSpec(spec, SrcPos.From(it));
+        var kw = SpecOf(spec);
+        if (kw is SpecKw.Inline or SpecKw.Noreturn or SpecKw.ThreadLocal or SpecKw.Constexpr)
+        {
+            RecordDeclSpec(Spelling(kw), SrcPos.From(spec));
+        }
         return ResolveType(inner);
     }
 
-    /// <summary>Whether a declaration's Type carries the <c>register</c> storage class.
-    /// It is a Type prefix, and the Type group reduces a prefix before a following
-    /// <c>*</c> or qualifier, so it sits anywhere in the qualifier and pointer chain
-    /// (<c>register int *p</c> is <c>(register int) *</c>).</summary>
-    private static bool DeclaresRegister(Item typeItem)
+    /// <summary>A storage-class specifier (C11 6.7.1, C23 <c>constexpr</c>) or function
+    /// specifier (6.7.4).</summary>
+    private enum SpecKw { Typedef, Extern, Static, Auto, Register, ThreadLocal, Constexpr, Inline, Noreturn }
+
+    /// <summary>The specifier a <c>DeclSpec</c> item spells.</summary>
+    private static SpecKw SpecOf(Item spec) => spec.Content switch
     {
+        C.SpecTypedef => SpecKw.Typedef,
+        C.SpecExtern => SpecKw.Extern,
+        C.SpecStatic => SpecKw.Static,
+        C.SpecAuto => SpecKw.Auto,
+        C.SpecRegister => SpecKw.Register,
+        C.SpecThreadLocal => SpecKw.ThreadLocal,
+        C.SpecConstexpr => SpecKw.Constexpr,
+        C.SpecInline => SpecKw.Inline,
+        C.SpecNoreturn => SpecKw.Noreturn,
+        _ => throw new IrUnsupportedException(TypeName(spec.Content)),
+    };
+
+    /// <summary>A specifier's keyword, as diagnostics name it.</summary>
+    private static string Spelling(SpecKw kw) => kw switch
+    {
+        SpecKw.Typedef => "typedef",
+        SpecKw.Extern => "extern",
+        SpecKw.Static => "static",
+        SpecKw.Auto => "auto",
+        SpecKw.Register => "register",
+        SpecKw.ThreadLocal => "_Thread_local",
+        SpecKw.Constexpr => "constexpr",
+        SpecKw.Inline => "inline",
+        _ => "_Noreturn",
+    };
+
+    /// <summary>Whether a specifier is one of the storage classes of which a
+    /// declaration takes at most one (C11 6.7.1p2; <c>_Thread_local</c> may join
+    /// <c>static</c> or <c>extern</c>, and C23's <c>constexpr</c> has its own rules).</summary>
+    private static bool IsStorageClass(SpecKw kw) =>
+        kw is SpecKw.Typedef or SpecKw.Extern or SpecKw.Static or SpecKw.Auto or SpecKw.Register;
+
+    /// <summary>One specifier on a declaration's Type spine. <c>AfterPointer</c>: a
+    /// <c>*</c> precedes it (<c>int *static p</c>), which C's grammar does not allow
+    /// (the qualifiers of a pointer are its only specifiers).</summary>
+    private readonly record struct SpecSite(SpecKw Kw, Item At, bool AfterPointer);
+
+    /// <summary>The storage-class and function specifiers of a declaration's Type, in
+    /// source order, read structurally: each is a DeclSpec prefix or suffix anywhere in
+    /// the qualifier chain, and since the Type group reduces a prefix before a
+    /// following <c>*</c>, a declaration's specifiers sit below its pointers
+    /// (<c>static int *p</c> is <c>(static int) *</c>). An abstract function-pointer
+    /// type carries its return type's (<c>static int (*)(void)</c>).</summary>
+    private static List<SpecSite> DeclSpecsOf(Item typeItem)
+    {
+        var acc = new List<SpecSite>();
+        void MarkAfterPointer()
+        {
+            for (var i = 0; i < acc.Count; i++) { acc[i] = acc[i] with { AfterPointer = true }; }
+        }
         var it = typeItem;
         while (true)
         {
             switch (it.Content)
             {
-                case C.TypeRegister: return true;
-                case C.TypePtr t: it = t.Arg0; break;
-                case C.TypePtrQualConst t: it = t.Arg0; break;
-                case C.TypePtrQualVolatile t: it = t.Arg0; break;
-                case C.TypePtrQualRestrict t: it = t.Arg0; break;
+                case C.TypeDeclSpec t: acc.Add(new(SpecOf(t.Arg0), t.Arg0, false)); it = t.Arg1; break;
+                case C.TypeDeclSpecPost t: acc.Add(new(SpecOf(t.Arg1), t.Arg1, false)); it = t.Arg0; break;
+                case C.TypePtr t: MarkAfterPointer(); it = t.Arg0; break;
+                case C.TypePtrQualConst t: MarkAfterPointer(); it = t.Arg0; break;
+                case C.TypePtrQualVolatile t: MarkAfterPointer(); it = t.Arg0; break;
+                case C.TypePtrQualRestrict t: MarkAfterPointer(); it = t.Arg0; break;
                 case C.TypeConstPost t: it = t.Arg0; break;
                 case C.TypeVolatilePost t: it = t.Arg0; break;
                 case C.TypeConstPre t: it = t.Arg1; break;
                 case C.TypeVolatile t: it = t.Arg1; break;
                 case C.TypeAtomic t: it = t.Arg1; break;
-                case C.TypeInline t: it = t.Arg1; break;
-                case C.TypeNoreturn t: it = t.Arg1; break;
-                case C.TypeThreadLocal t: it = t.Arg1; break;
-                case C.TypeConstexpr t: it = t.Arg1; break;
                 case C.TypeAlignasType t: it = t.Arg4; break;
                 case C.TypeAlignasExpr t: it = t.Arg4; break;
-                default: return false;
+                case C.TypeFnPtr t: it = t.Arg0; break;
+                case C.TypeFnPtrNoArgs t: it = t.Arg0; break;
+                default:
+                    acc.Sort((a, b) => SrcPos.From(a.At).Line != SrcPos.From(b.At).Line
+                        ? SrcPos.From(a.At).Line.CompareTo(SrcPos.From(b.At).Line)
+                        : SrcPos.From(a.At).Column.CompareTo(SrcPos.From(b.At).Column));
+                    return acc;
             }
         }
     }
 
-    /// <summary>Reject <c>register</c> alongside a declaration-level storage class
-    /// (<c>static</c>, <c>extern</c>, <c>typedef</c>, <c>auto</c>): one storage class
-    /// per declaration (C11 6.7.1p2), gcc's wording.</summary>
-    private void RejectRegisterWith(Item typeItem)
+    /// <summary>The storage class a declaration's Type carries, or null for none (the
+    /// first, when there are several, which <see cref="CheckDeclSpecs(Item)"/> rejects).</summary>
+    private static SpecKw? StorageClassOf(Item typeItem)
     {
-        if (DeclaresRegister(typeItem))
+        foreach (var s in DeclSpecsOf(typeItem))
+        {
+            if (IsStorageClass(s.Kw)) { return s.Kw; }
+        }
+        return null;
+    }
+
+    /// <summary>Whether a declaration's Type carries the <c>register</c> storage class.</summary>
+    private static bool DeclaresRegister(Item typeItem) => DeclSpecsOf(typeItem).Exists(s => s.Kw == SpecKw.Register);
+
+    /// <summary>Whether a declaration's Type carries the <c>static</c> storage class
+    /// (internal linkage for a function).</summary>
+    private static bool DeclaresStatic(Item typeItem) => DeclSpecsOf(typeItem).Exists(s => s.Kw == SpecKw.Static);
+
+    /// <summary>The first storage-class or function specifier of a Type in source
+    /// order, if any.</summary>
+    private static SpecSite? FirstDeclSpec(Item typeItem) =>
+        DeclSpecsOf(typeItem) is [var first, ..] ? first : null;
+
+    /// <summary><see cref="CheckDeclSpecs(Item, out bool)"/> when the caller needs
+    /// only the storage class.</summary>
+    private SpecKw? CheckDeclSpecs(Item typeItem) => CheckDeclSpecs(typeItem, out _);
+
+    /// <summary>Check a declaration's specifiers the way gcc does and return its storage
+    /// class (null for none, or when <paramref name="multiple"/>): no specifier after a
+    /// <c>*</c>, no storage class twice (a function specifier may repeat, C11 6.7.4),
+    /// and at most one storage class, <c>_Thread_local</c> aside, which may join
+    /// <c>static</c> or <c>extern</c> (C11 6.7.1p2; gcc names that pairing).</summary>
+    private SpecKw? CheckDeclSpecs(Item typeItem, out bool multiple)
+    {
+        SpecKw? storage = null;
+        var seen = new HashSet<SpecKw>();
+        var threadLocal = false;
+        multiple = false;
+        foreach (var s in DeclSpecsOf(typeItem))
+        {
+            if (s.AfterPointer)
+            {
+                Diagnostics.Add(new Diagnostic(Severity.Error,
+                    $"expected identifier or '(' before '{Spelling(s.Kw)}'", SrcPos.From(s.At), _file));
+                continue;
+            }
+            if (!seen.Add(s.Kw))
+            {
+                if (s.Kw is not (SpecKw.Inline or SpecKw.Noreturn))
+                {
+                    Diagnostics.Add(new Diagnostic(Severity.Error, $"duplicate '{Spelling(s.Kw)}'", SrcPos.From(s.At), _file));
+                }
+                continue;
+            }
+            if (s.Kw == SpecKw.ThreadLocal) { threadLocal = true; }
+            else if (IsStorageClass(s.Kw))
+            {
+                if (storage is null) { storage = s.Kw; }
+                else { multiple = true; }
+            }
+        }
+        if (threadLocal && storage is { } other and (SpecKw.Typedef or SpecKw.Auto or SpecKw.Register))
+        {
+            Diagnostics.Add(new Diagnostic(Severity.Error,
+                $"'_Thread_local' used with '{Spelling(other)}'", SrcPos.From(typeItem), _file));
+            return null;
+        }
+        if (multiple)
         {
             Diagnostics.Add(new Diagnostic(Severity.Error,
                 "multiple storage classes in declaration specifiers", SrcPos.From(typeItem), _file));
+            return null;
         }
+        return storage;
+    }
+
+    /// <summary>A parameter's specifiers (C11 6.7.6.3p2): <c>register</c> is its only
+    /// storage class, and a function specifier is meaningless there; gcc's error and
+    /// warning.</summary>
+    private void CheckParamSpecs(Item typeItem, string? name)
+    {
+        CheckDeclSpecs(typeItem, out var multiple);
+        var reported = multiple;
+        foreach (var s in DeclSpecsOf(typeItem))
+        {
+            if (s.Kw is SpecKw.Inline or SpecKw.Noreturn)
+            {
+                Diagnostics.Add(new Diagnostic(Severity.Warning,
+                    $"{(name is null ? "unnamed parameter" : $"parameter '{name}'")} declared '{Spelling(s.Kw)}'", SrcPos.From(s.At), _file));
+            }
+            else if (s.Kw != SpecKw.Register && !reported)
+            {
+                Diagnostics.Add(new Diagnostic(Severity.Error,
+                    name is null ? "storage class specified for unnamed parameter" : $"storage class specified for parameter '{name}'",
+                    SrcPos.From(s.At), _file));
+                reported = true;
+            }
+        }
+    }
+
+    /// <summary>A member declaration takes a specifier-qualifier list (C11 6.7.2.1p1):
+    /// a storage class or function specifier there is gcc's parse error.</summary>
+    private void CheckMemberSpecs(Item typeItem)
+    {
+        if (FirstDeclSpec(typeItem) is { } s)
+        {
+            Diagnostics.Add(new Diagnostic(Severity.Error,
+                $"expected specifier-qualifier-list before '{Spelling(s.Kw)}'", SrcPos.From(s.At), _file));
+        }
+    }
+
+    /// <summary>Where a type name (C11 6.7.7) appears, for gcc's wording when it
+    /// carries a storage class or function specifier.</summary>
+    private enum TypeNameSite { Cast, Sizeof, Alignof, Typeof, SpecifierQualifierList }
+
+    /// <summary>Resolve a type name (C11 6.7.7): it takes a specifier-qualifier list, so
+    /// a storage class or function specifier in it is gcc's error for the
+    /// <paramref name="site"/> (a storage class in a cast, <c>sizeof</c> or
+    /// <c>_Alignof</c> is named as such; anything else is a parse error there).</summary>
+    private CType TypeNameType(Item typeItem, TypeNameSite site)
+    {
+        if (FirstDeclSpec(typeItem) is { } s)
+        {
+            var kw = Spelling(s.Kw);
+            var fnSpec = s.Kw is SpecKw.Inline or SpecKw.Noreturn;
+            var msg = site switch
+            {
+                TypeNameSite.Cast when !fnSpec => "storage class specifier in cast",
+                TypeNameSite.Sizeof when !fnSpec => "storage class specifier in 'sizeof'",
+                TypeNameSite.Alignof when !fnSpec => "storage class specifier in '_Alignof'",
+                TypeNameSite.SpecifierQualifierList => $"expected specifier-qualifier-list before '{kw}'",
+                _ => $"expected expression before '{kw}'",
+            };
+            Diagnostics.Add(new Diagnostic(Severity.Error, msg, SrcPos.From(s.At), _file));
+        }
+        return ResolveType(typeItem);
     }
 
     /// <summary>A function declared with a storage class it cannot have
@@ -1305,12 +1500,8 @@ internal sealed partial class IrBuilder
     {
         C.FnSig n => n.Arg0,
         C.FnSigNoArgs n => n.Arg0,
-        C.FnSigStatic n => n.Arg1,
-        C.FnSigStaticNoArgs n => n.Arg1,
         C.FnSigParen n => n.Arg0,
         C.FnSigParenNoArgs n => n.Arg0,
-        C.FnSigStaticParen n => n.Arg1,
-        C.FnSigStaticParenNoArgs n => n.Arg1,
         C.FnSigRetFnPtr n => n.Arg0,
         C.FnSigRetFnPtrNoArgs n => n.Arg0,
         _ => throw new IrUnsupportedException(TypeName(fnSig.Content)),
@@ -1370,7 +1561,7 @@ internal sealed partial class IrBuilder
     private CExpr FoldAlignof(C.AlignofType a, Item it)
     {
         Gate(2011, "_Alignof", it);
-        var align = AlignOfConst(ResolveType(a.Arg2));
+        var align = AlignOfConst(TypeNameType(a.Arg2, TypeNameSite.Alignof));
         return new LitInt(align.ToString(System.Globalization.CultureInfo.InvariantCulture), align) { Type = CType.SizeT };
     }
 
@@ -1404,7 +1595,7 @@ internal sealed partial class IrBuilder
             switch (assoc.Content)
             {
                 case C.GenericAssocType a:
-                    typed.Add((ResolveType(a.Arg0).Unqualified, a.Arg2, assoc));
+                    typed.Add((TypeNameType(a.Arg0, TypeNameSite.SpecifierQualifierList).Unqualified, a.Arg2, assoc));
                     break;
                 case C.GenericAssocDefault a:
                     if (defaultArm is not null)
@@ -1479,7 +1670,7 @@ internal sealed partial class IrBuilder
     {
         Gate(2011, "_Alignas", it);
         var t = ResolveType(inner);
-        CheckAlignasStrictEnough(AlignOfConst(ResolveType(operandType)), t, it);
+        CheckAlignasStrictEnough(AlignOfConst(TypeNameType(operandType, TypeNameSite.SpecifierQualifierList)), t, it);
         return t;
     }
 
@@ -1662,15 +1853,11 @@ internal sealed partial class IrBuilder
             case C.Block: return BuildBlock(it);
             case C.BlockEmpty: return BuildBlock(it);
             case C.StmtDecl d: return BuildDeclStmt(d.Arg0) with { Pos = pos };
-            case C.StmtStaticDecl s: return BuildStmtStaticDecl(s) with { Pos = pos };
-            case C.StmtExternDecl s: BuildBlockExternDecls(s.Arg1, s.Arg2); return EmptyStmt(pos);
             // Block-scope declarations with no declarators (`struct cD { … };`
-            // inside a function body) and block-scope typedefs. A type has no
-            // storage: dotcc hoists a tag definition into the top-level type section
-            // (deduped by tag, exactly as at file scope) and the statement emits
-            // nothing; a typedef name lives in the block's scope.
+            // inside a function body). A type has no storage: dotcc hoists a tag
+            // definition into the top-level type section (deduped by tag, exactly as
+            // at file scope) and the statement emits nothing.
             case C.StmtTagDecl s: BuildTagDecl(s.Arg0); return EmptyStmt(pos);
-            case C.StmtTypedefDecl s: BuildTypedefs(s.Arg1, s.Arg2); return EmptyStmt(pos);
             // Block-scope `_Static_assert(expr[, "msg"]);` — compile-time only,
             // evaluated exactly like the file-scope forms; a holding assertion
             // emits nothing. The message-less arity gates C23.
@@ -2042,11 +2229,9 @@ internal sealed partial class IrBuilder
     /// <c>StmtDecl.Arg0</c>; dispatch on it.</summary>
     private CStmt BuildDeclStmt(Item it) => it.Content switch
     {
-        C.Decl => BuildDecl(it),
-        // `auto x = E;` (C23 type inference) and `auto Type x …` (redundant
-        // pre-C23 storage class). See BuildDeclAutoInfer / BuildDeclList.
+        C.Decl d => BuildBlockDecl(d.Arg0, d.Arg1, forInit: false),
+        // `auto x = E;` (C23 type inference). See BuildDeclAutoInfer.
         C.DeclAutoInfer d => BuildDeclAutoInfer(d),
-        C.DeclAutoStorage d => AutoDeclList(d),
         // Pointer-to-array `T (*p)[N]` [= init] — a row pointer (multi-dim machinery).
         C.DeclPtrToArr d => BuildPtrToArr(d.Arg0, d.Arg3, d.Arg5, null),
         C.DeclPtrToArrInit d => BuildPtrToArr(d.Arg0, d.Arg3, d.Arg5, d.Arg7),
@@ -2059,20 +2244,44 @@ internal sealed partial class IrBuilder
     /// become two fields of the SAME <c>DotCcGlobals</c> class.</summary>
     private int _staticLocalSeq;
 
+    /// <summary>A block-scope declaration with declarators, dispatched on the storage
+    /// class its Type carries (<see cref="CheckDeclSpecs(Item)"/>): <c>static</c> locals,
+    /// <c>extern</c> references to file-scope names, block-scope typedefs, and plain /
+    /// <c>auto</c> / <c>register</c> locals. A <c>for</c> loop's initial declaration
+    /// (<paramref name="forInit"/>) may declare only auto and register objects (C11
+    /// 6.8.5p3); gcc accepts the others with a pedantic warning, as dotcc does.</summary>
+    private CStmt BuildBlockDecl(Item typeItem, Item listItem, bool forInit)
+    {
+        switch (CheckDeclSpecs(typeItem))
+        {
+            case SpecKw.Static: return BuildStaticLocals(typeItem, listItem, forInit);
+            case SpecKw.Extern:
+                BuildBlockExternDecls(typeItem, listItem, forInit);
+                return new DeclStmt(System.Array.Empty<LocalDecl>());
+            case SpecKw.Typedef:
+                BuildTypedefs(typeItem, listItem, forInit);
+                return new DeclStmt(System.Array.Empty<LocalDecl>());
+            default: return BuildDeclList(typeItem, listItem);
+        }
+    }
+
     /// <summary>A function-scope <c>static</c> local (<c>static int counter = 0;</c>).
     /// Its storage is program-lifetime, so it lowers to a once-initialized static
     /// field of <c>DotCcGlobals</c> (a <see cref="GlobalVar"/> with a mangled,
     /// program-unique name); references resolve to that field via an alias symbol
     /// in the function's scope. The statement itself emits nothing.</summary>
-    private CStmt BuildStmtStaticDecl(C.StmtStaticDecl n)
+    private CStmt BuildStaticLocals(Item typeItem, Item listItem, bool forInit)
     {
-        RejectRegisterWith(n.Arg1);
-        WalkDeclList(n.Arg1, n.Arg2, d =>
+        WalkDeclList(typeItem, listItem, d =>
         {
             if (d.Type is CType.Func { IsFunctionType: true })
             {
                 InvalidFunctionStorage(d);
                 return;
+            }
+            if (forInit)
+            {
+                _gate?.Report($"declaration of static variable '{d.Name}' in 'for' loop initial declaration", d.At.Position.Line);
             }
             var csName = $"{_symbols.Escape(d.Name)}__s{_staticLocalSeq++}";
             if (d.Type.Unqualified is CType.Array arr)
@@ -2094,24 +2303,16 @@ internal sealed partial class IrBuilder
         return new DeclStmt(System.Array.Empty<LocalDecl>());
     }
 
-    /// <summary>The redundant pre-C23 storage class form <c>auto int z;</c>: a plain
-    /// block-scope declaration, which may not also say <c>register</c>.</summary>
-    private CStmt AutoDeclList(C.DeclAutoStorage d)
-    {
-        RejectRegisterWith(d.Arg1);
-        return BuildDeclList(d.Arg1, d.Arg2);
-    }
-
-    private CStmt BuildDecl(Item declItem)
+    /// <summary>A <c>for</c> loop's initial declaration (C99 6.8.5p3).</summary>
+    private CStmt BuildForInitDecl(Item declItem)
     {
         if (declItem.Content is not C.Decl decl) { throw new IrUnsupportedException(TypeName(declItem.Content)); }
-        return BuildDeclList(decl.Arg0, decl.Arg1);
+        return BuildBlockDecl(decl.Arg0, decl.Arg1, forInit: true);
     }
 
-    /// <summary>Build a <c>Type DeclItemList</c> declaration into a
-    /// <see cref="DeclStmt"/>. Shared by the plain form (<c>int x, y;</c>) and the
-    /// redundant pre-C23 storage-class form (<c>auto int z;</c>), which differ
-    /// only in the dropped <c>auto</c> keyword.</summary>
+    /// <summary>Build a <c>Type DeclItemList</c> block-scope declaration of automatic
+    /// objects (<c>int x, y;</c>, <c>auto int z;</c>, <c>register int r;</c>) into a
+    /// <see cref="DeclStmt"/>.</summary>
     private CStmt BuildDeclList(Item typeItem, Item listItem)
     {
         // Most declarations are all-scalar → one DeclStmt (the historical shape).
@@ -2261,7 +2462,7 @@ internal sealed partial class IrBuilder
         // Decl=Arg3, ForCond=Arg5, ForPost=Arg7, body=Arg9 (see legacy StmtForDecl).
         _symbols.EnterScope();
         Gate(1999, "for-loop initializer declaration", s.Arg3);
-        var init = BuildDecl(s.Arg3);
+        var init = BuildForInitDecl(s.Arg3);
         var cond = BuildForCond(s.Arg5);
         var post = BuildForPost(s.Arg7);
         var body = BuildStmt(s.Arg9);
@@ -2371,7 +2572,7 @@ internal sealed partial class IrBuilder
             C.LitTrue => new LitInt("1", 1) { Type = CType.Int },
             C.LitFalse => new LitInt("0", 0) { Type = CType.Int },
             C.LitNullptr => new NullPtr { Type = new CType.Pointer(CType.Void) },
-            C.SizeofType s => new SizeOfExpr(ResolveType(s.Arg2)) { Type = CType.SizeT },
+            C.SizeofType s => new SizeOfExpr(TypeNameType(s.Arg2, TypeNameSite.Sizeof)) { Type = CType.SizeT },
             // `sizeof expr` — the operand isn't evaluated, only its type measured.
             C.SizeofExpr s => new SizeOfExpr(BuildExpr(s.Arg1).Type) { Type = CType.SizeT },
             // `_Alignof(Type)` (C11 §6.5.3.4) — folds immediately to the layout
@@ -2382,15 +2583,15 @@ internal sealed partial class IrBuilder
             C.GenericSelect g => BuildGenericSelect(g, it),
             C.OffsetofExpr o => BuildOffsetof(o),
             // `va_arg(ap, T)` — special syntax (its 2nd operand is a type).
-            C.VaArgExpr v => new VaArgGet(BuildExpr(v.Arg2), ResolveType(v.Arg4)) { Type = ResolveType(v.Arg4) },
+            C.VaArgExpr v => BuildVaArg(v),
             C.Call c => BuildCall(c.Arg0, c.Arg2),
             C.CallNoArgs c => BuildCall(c.Arg0, null),
             // C99/C23 compound literals — (T){…} struct/scalar, (T[]){…} array,
             // designated, and the C23 empty form.
-            C.CompoundLit c => Gated(1999, "compound literals", c.Arg1, BuildCompoundLit(c.Arg1, c.Arg4)),
-            C.CompoundLitEmpty c => Gated(2023, "empty initializer", c.Arg1, BuildCompoundLitEmpty(c.Arg1)),
-            C.CompoundLitArr c => Gated(1999, "compound literals", c.Arg1, BuildArrayCompoundLit(c.Arg1, c.Arg2, c.Arg5)),
-            C.CompoundLitArrImplicit c => Gated(1999, "compound literals", c.Arg1, BuildArrayCompoundLit(c.Arg1, null, c.Arg6)),
+            C.CompoundLit c => Gated(1999, "compound literals", c.Arg1, BuildCompoundLit(CompoundLitType(c.Arg1), c.Arg4)),
+            C.CompoundLitEmpty c => Gated(2023, "empty initializer", c.Arg1, BuildCompoundLitEmpty(CompoundLitType(c.Arg1))),
+            C.CompoundLitArr c => Gated(1999, "compound literals", c.Arg1, BuildArrayCompoundLit(CompoundLitType(c.Arg1), c.Arg2, c.Arg5)),
+            C.CompoundLitArrImplicit c => Gated(1999, "compound literals", c.Arg1, BuildArrayCompoundLit(CompoundLitType(c.Arg1), null, c.Arg6)),
             C.CommaOp => BuildCommaOp(it),
             _ => throw new IrUnsupportedException(TypeName(it.Content)),
         };
@@ -2455,9 +2656,16 @@ internal sealed partial class IrBuilder
     }
 
 
+    /// <summary><c>va_arg(ap, T)</c>: its second operand is a type name.</summary>
+    private CExpr BuildVaArg(C.VaArgExpr v)
+    {
+        var type = TypeNameType(v.Arg4, TypeNameSite.SpecifierQualifierList);
+        return new VaArgGet(BuildExpr(v.Arg2), type) { Type = type };
+    }
+
     private CExpr BuildCast(C.Cast c)
     {
-        var target = ResolveType(c.Arg1);
+        var target = TypeNameType(c.Arg1, TypeNameSite.Cast);
         var operand = BuildExpr(c.Arg3);
         // `(void)X` — C# has no void cast and the value is discarded; carry the
         // operand through typed void so a statement position emits `X;`.
@@ -2905,7 +3113,7 @@ internal sealed partial class IrBuilder
     /// null-pointer idiom in codegen, matching the .NET blittable layout.</summary>
     private CExpr BuildOffsetof(C.OffsetofExpr n)
     {
-        var structType = ResolveType(n.Arg2);
+        var structType = TypeNameType(n.Arg2, TypeNameSite.SpecifierQualifierList);
         var path = CollectOffsetofPath(n.Arg4);
         // Record the FINAL member's declared type (a neutral fact); the backend
         // decides whether its layout makes the member's access self-addressing.

@@ -200,17 +200,21 @@ internal sealed partial class IrBuilder
     /// declares the function; an object declarator refers to the file-scope object of
     /// that name for the rest of the block (declared as an extern if none is known
     /// yet). Nothing is emitted.</summary>
-    private void BuildBlockExternDecls(Item typeItem, Item listItem)
+    private void BuildBlockExternDecls(Item typeItem, Item listItem, bool forInit)
     {
-        RejectRegisterWith(typeItem);
         _sawNoreturnSpec = false;
         _sawInlineSpec = false;
         WalkDeclList(typeItem, listItem, d =>
         {
             if (d.Type is CType.Func { IsFunctionType: true } fnType)
             {
+                if (forInit) { ForInitNonVariable(d); }
                 DeclareFunctionDeclarator(d, fnType, internalLinkage: false);
                 return;
+            }
+            if (forInit)
+            {
+                _gate?.Report($"declaration of 'extern' variable '{d.Name}' in 'for' loop initial declaration", d.At.Position.Line);
             }
             if (d.Init is not null)
             {
@@ -446,6 +450,8 @@ internal sealed partial class IrBuilder
     {
         C.TypeStruct or C.TypeUnion or C.TypeEnum
             or C.TypeStructDef or C.TypeUnionDef or C.TypeEnumDef or C.TypeEnumAnonDef or C.TypeEnumDefTyped => true,
+        C.TypeDeclSpec q => DeclaresTag(q.Arg1),
+        C.TypeDeclSpecPost q => DeclaresTag(q.Arg0),
         C.TypeConstPre q => DeclaresTag(q.Arg1),
         C.TypeConstPost q => DeclaresTag(q.Arg0),
         C.TypeVolatile q => DeclaresTag(q.Arg1),
@@ -458,14 +464,34 @@ internal sealed partial class IrBuilder
     /// declares. One that declares nothing gets gcc's warnings.</summary>
     private void BuildTagDecl(Item typeItem)
     {
+        CheckDeclSpecs(typeItem);
         ResolveType(typeItem);
-        if (typeItem.Content is C.TypeStructAnonDef or C.TypeUnionAnonDef)
+        var core = typeItem;
+        while (core.Content is C.TypeDeclSpec or C.TypeDeclSpecPost)
+        {
+            core = core.Content switch { C.TypeDeclSpec pre => pre.Arg1, C.TypeDeclSpecPost post => post.Arg0, _ => core };
+        }
+        if (core.Content is C.TypeStructAnonDef or C.TypeUnionAnonDef)
         {
             Diagnostics.Add(new Diagnostic(Severity.Warning, "unnamed struct/union that defines no instances", SrcPos.From(typeItem), _file));
+            return;
         }
-        else if (!DeclaresTag(typeItem))
+        if (!DeclaresTag(core))
         {
             Diagnostics.Add(new Diagnostic(Severity.Warning, "useless type name in empty declaration", SrcPos.From(typeItem), _file));
+            return;
+        }
+        // A declaration that declares only a tag has no object for a specifier to
+        // apply to (C11 6.7p2); gcc's diagnostics.
+        foreach (var s in DeclSpecsOf(typeItem))
+        {
+            var (severity, msg) = s.Kw switch
+            {
+                SpecKw.Inline or SpecKw.Noreturn => (Severity.Error, $"'{Spelling(s.Kw)}' in empty declaration"),
+                SpecKw.ThreadLocal or SpecKw.Constexpr => (Severity.Warning, $"useless '{Spelling(s.Kw)}' in empty declaration"),
+                _ => (Severity.Warning, "useless storage class specifier in empty declaration"),
+            };
+            Diagnostics.Add(new Diagnostic(severity, msg, SrcPos.From(s.At), _file));
         }
     }
 
@@ -495,13 +521,14 @@ internal sealed partial class IrBuilder
     /// <summary><c>typedef T d1, d2…;</c> at file or block scope: each declarator
     /// names an alias of its full type (C11 6.7.8). An anonymous tag definition is
     /// named after the first declarator when that is a plain name.</summary>
-    private void BuildTypedefs(Item typeItem, Item listItem)
+    private void BuildTypedefs(Item typeItem, Item listItem, bool forInit = false)
     {
         _anonTagHint = CountLiteralStars(typeItem) == 0 ? FirstPlainDeclarator(listItem) : null;
         try
         {
             WalkDeclList(typeItem, listItem, d =>
             {
+                if (forInit) { ForInitNonVariable(d); }
                 if (d.Init is not null) { throw new IrUnsupportedException($"typedef '{d.Name}' is initialized"); }
                 if (d.VlaDims is not null) { throw new IrUnsupportedException($"typedef '{d.Name}': a variably modified typedef is not supported"); }
                 DeclareTypedef(d.Name, d.Type);
@@ -512,6 +539,11 @@ internal sealed partial class IrBuilder
             _anonTagHint = null;
         }
     }
+
+    /// <summary>A <c>for</c> loop's initial declaration declares something other than
+    /// an object (a typedef or a function, C11 6.8.5p3): gcc's pedantic warning.</summary>
+    private void ForInitNonVariable(Declarator d) =>
+        _gate?.Report($"declaration of non-variable '{d.Name}' in 'for' loop initial declaration", d.At.Position.Line);
 
     /// <summary>The name of a declarator list's first declarator when it is a plain
     /// identifier (no pointer, array or function part), else null.</summary>

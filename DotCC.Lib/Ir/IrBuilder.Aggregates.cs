@@ -606,6 +606,27 @@ internal sealed partial class IrBuilder
 
     // ---- compound literals (C99 / C23) -----------------------------------
 
+    /// <summary>A compound literal's type name. C23 lets it take a storage class
+    /// (<c>static</c>, <c>constexpr</c>, <c>register</c>, 6.5.2.5p5), which would give
+    /// the object a lifetime dotcc does not model yet: a loud cut. A function specifier
+    /// is gcc's parse error.</summary>
+    private Item CompoundLitType(Item typeItem)
+    {
+        if (FirstDeclSpec(typeItem) is { } s)
+        {
+            if (s.Kw is SpecKw.Inline or SpecKw.Noreturn)
+            {
+                Diagnostics.Add(new Diagnostic(Severity.Error,
+                    $"expected expression before '{Spelling(s.Kw)}'", SrcPos.From(s.At), _file));
+            }
+            else
+            {
+                throw new IrUnsupportedException($"a compound literal declared '{Spelling(s.Kw)}' (C23 6.5.2.5)");
+            }
+        }
+        return typeItem;
+    }
+
     /// <summary>A struct/union (or scalar) compound literal <c>(T){ … }</c> — an
     /// unnamed object usable in any expression position. A struct lowers to a
     /// <see cref="StructInit"/> (<c>new T { … }</c>); a scalar/pointer/enum to a
