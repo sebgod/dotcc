@@ -499,6 +499,43 @@ public sealed partial class CompilerTests
         finally { File.Delete(src); }
     }
 
+    [Fact]
+    public void Bitfield_declarator_lists_pack_like_separate_declarations()
+    {
+        // GH #241: bit-fields are declarators, so a member declaration lists
+        // several (CPython's `signed int A: 1, B:2, C:3, D:2;`), mixes them with
+        // ordinary and pointer declarators, and carries unnamed padding.
+        var src = WriteTemp("""
+            struct F { signed int A: 1, B: 2, C: 3, D: 2; };
+            struct M { unsigned lo: 4, : 4, hi: 4; int count, *where; };
+            int main() { struct F f; f.C = -3; struct M m; m.hi = 5; return f.C + m.hi; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("public int A {");
+            emitted.ShouldContain("public int D {");
+            emitted.ShouldNotContain("__bf1");              // F's 8 bits and M's 12 share one unit each
+            emitted.ShouldContain("public uint hi {");
+            emitted.ShouldContain("(__bf0 >> 8)");           // hi sits after lo and the 4-bit padding
+            emitted.ShouldContain("public int count;");
+            emitted.ShouldContain("public int* where;");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Bitfield_outside_a_struct_is_an_error()
+    {
+        var src = WriteTemp("int f(void) { int x : 3; return 0; }");
+        try
+        {
+            Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { src }))
+                .Message.ShouldContain("bit-field 'x' outside a struct or union");
+        }
+        finally { File.Delete(src); }
+    }
+
     // ---- nested-brace aggregate initializers ----------------------------
 
     [Fact]

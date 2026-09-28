@@ -1135,19 +1135,13 @@ productions:
   - derivation: none
     rules:
       # A plain member is a full multi-declarator list: `int x;`, `int a, b;`,
-      # `struct CallInfo *previous, *next;` (per-declarator `*`s via DeclItemTail).
-      # Reuses the same DeclItemList as block/file-scope declarations. Conflict-
-      # free with the bitfield/array forms below: after `Type ID`, `:`/`[` shift
-      # those, while `;`/`,` stay on the DeclItem path (neither is in FOLLOW).
+      # `struct CallInfo *previous, *next;` (per-declarator `*`s via DeclItemTail),
+      # bit-fields included (`signed int A: 1, B: 2;`, `unsigned : 4, x : 4;` —
+      # the bit-field declarators are DeclItems, see there). Reuses the same
+      # DeclItemList as block/file-scope declarations. Conflict-free with the
+      # array forms below: after `Type ID`, `[` shifts those, while `;`/`,`/`:`
+      # stay on the DeclItem path.
       - { lhs: Member, rhs: [Type, DeclItemList, ';'], action: structMemberList }
-      # Bit-fields `Type ID : width ;` and anonymous padding `Type : width ;`.
-      # C# has no bit-fields; dotcc lowers a named bit-field to a FULL field of
-      # the declared type (the width is dropped — see structBitField), and an
-      # anonymous bit-field (padding) to nothing. After `Type ID`, lookahead `:`
-      # selects the bit-field over the plain member (`;`); after a bare `Type`,
-      # `:` selects the anonymous form.
-      - { lhs: Member, rhs: [Type, ID, ':', E, ';'], action: structBitField }
-      - { lhs: Member, rhs: [Type, ':', E, ';'],     action: structAnonBitField }
       # Array members. Sized `T name[N];` (C89) and the flexible array member
       # `T name[];` (C99 — an incomplete array as the last member, sized at
       # malloc time). Both lower to a C# fixed-size buffer `public fixed T
@@ -1340,6 +1334,14 @@ productions:
     rules:
       - { lhs: DeclItem, rhs: [ID], action: declItem }
       - { lhs: DeclItem, rhs: [ID, '=', E], action: declItemInit }
+      # A bit-field declarator `name : width` and an unnamed one `: width`
+      # (padding), C11 6.7.2.1. As DeclItems they take part in declarator lists
+      # like any other (`signed int A: 1, B: 2;`, `int a: 3, b, *p;`); they mean
+      # something only in a struct or union member list, and the binder rejects
+      # one anywhere else. After `ID`, `:` selects the bit-field (it is not in
+      # FOLLOW(DeclItem)); a `:` right after the list's Type starts the unnamed form.
+      - { lhs: DeclItem, rhs: [ID, ':', E], action: declItemBitField }
+      - { lhs: DeclItem, rhs: [':', E], action: declItemAnonBitField }
       # A function-pointer declarator `(*name)(params)` [= E] (also `(*const name)…`)
       # in first or tail position, at every scope (see FnPtrName).
       - { lhs: DeclItem, rhs: [FnPtrName, FnPtrTail],         action: declItemFnPtr }
