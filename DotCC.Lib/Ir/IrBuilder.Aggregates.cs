@@ -499,6 +499,75 @@ internal sealed partial class IrBuilder
         return new ArrayValue(arr.FlatElement, FlattenArray(node, full: false)) { Type = arr };
     }
 
+    /// <summary>Split a static object's initializer at its flexible array member (GH
+    /// #246): the struct part stays the initializer and the member's elements become the
+    /// <see cref="FlexibleTail"/> the backend stores after it. gcc accepts this GNU
+    /// extension with a -pedantic warning; a flexible member initialized inside a
+    /// nested aggregate is its error.</summary>
+    private (CExpr? Init, FlexibleTail? Tail) SplitFlexibleInit(CExpr? init, SrcPos pos)
+    {
+        if (init is not StructInit si)
+        {
+            foreach (var inner in NestedValues(init)) { CheckNestedFlexibleInit(inner, pos); }
+            return (init, null);
+        }
+        FlexibleTail? tail = null;
+        var members = new List<FieldInit>(si.Members.Count);
+        foreach (var m in si.Members)
+        {
+            if (m.FieldType.Unqualified is CType.Array { Count: null } && m.Value is ArrayValue av)
+            {
+                if (av.Elems.Count > 0)
+                {
+                    _gate?.Report("initialization of a flexible array member", pos.Line);
+                    tail = new FlexibleTail(m.Name, av.Element, av.Elems);
+                }
+                continue;
+            }
+            CheckNestedFlexibleInit(m.Value, pos);
+            members.Add(m);
+        }
+        return (si with { Members = members }, tail);
+    }
+
+    /// <summary>An automatic object's initializer may not give its flexible array
+    /// member elements (only static storage can hold them); gcc's error.</summary>
+    private void CheckNoFlexibleInit(CExpr? init, SrcPos pos)
+    {
+        if (init is StructInit si && si.Members.Any(IsFlexibleInit))
+        {
+            Diagnostics.Add(new Diagnostic(Severity.Error, "non-static initialization of a flexible array member", pos, _file));
+            return;
+        }
+        foreach (var inner in NestedValues(init)) { CheckNestedFlexibleInit(inner, pos); }
+    }
+
+    /// <summary>A flexible array member given elements by <paramref name="value"/>, the
+    /// initializer of a nested aggregate (a struct member or array element), which has
+    /// no room for them, or by any aggregate nested in it; gcc's error.</summary>
+    private void CheckNestedFlexibleInit(CExpr value, SrcPos pos)
+    {
+        if (value is StructInit si && si.Members.Any(IsFlexibleInit))
+        {
+            Diagnostics.Add(new Diagnostic(Severity.Error, "initialization of flexible array member in a nested context", pos, _file));
+            return;
+        }
+        foreach (var inner in NestedValues(value)) { CheckNestedFlexibleInit(inner, pos); }
+    }
+
+    /// <summary>The initializers of an aggregate initializer's subobjects (none for a
+    /// scalar or an absent one).</summary>
+    private static IEnumerable<CExpr> NestedValues(CExpr? init) => init switch
+    {
+        StructInit s => s.Members.Select(m => m.Value),
+        ArrayValue a => a.Elems,
+        _ => Enumerable.Empty<CExpr>(),
+    };
+
+    /// <summary>A member initializer that gives a flexible array member elements.</summary>
+    private static bool IsFlexibleInit(FieldInit m) =>
+        m.FieldType.Unqualified is CType.Array { Count: null } && m.Value is ArrayValue { Elems.Count: > 0 };
+
     /// <summary>A subobject value as IR: a nested node lowered, an expression as is.</summary>
     private CExpr LowerSlot(object value) => value switch
     {
@@ -636,7 +705,9 @@ internal sealed partial class IrBuilder
         var type = ResolveType(typeItem);
         if ((type.Unqualified as CType.Named)?.Name is { } canonical && _structFields.ContainsKey(canonical))
         {
-            return BuildStructPositional(type, ParseInitList(initListItem));
+            var lit = BuildStructPositional(type, ParseInitList(initListItem));
+            CheckNoFlexibleInit(lit, SrcPos.From(initListItem));
+            return lit;
         }
         var items = ParseInitList(initListItem);
         if (items is [InitVal one]) { return new Cast(type, one.Value) { Type = type }; }

@@ -574,9 +574,11 @@ internal sealed partial class IrBuilder
     /// <summary>The type a declarator gives a struct or union member. An array member's
     /// bounds must be constant (codegen: a <c>fixed</c> buffer for a primitive element,
     /// an [InlineArray] wrapper otherwise; a multi-dimensional one strides through its
-    /// nested type); a C99 flexible array member <c>T name[]</c> is modeled as one
-    /// element (the struct-hack convention: the member exists and access over-indexes
-    /// into the tail). A member takes no initializer.</summary>
+    /// nested type). A C99 flexible array member <c>T name[]</c> keeps its incomplete
+    /// array type and a GNU zero-length one <c>T name[0]</c> its zero extent: neither
+    /// has storage of its own, the layout model places it after the members before it
+    /// (aligned to its element), and an access is its address in the object (GH #246).
+    /// A member takes no initializer.</summary>
     private CType MemberDeclaratorType(Declarator d, Item member)
     {
         if (d.Init is not null)
@@ -592,8 +594,11 @@ internal sealed partial class IrBuilder
         }
         if (d.Type.Unqualified is not CType.Array arr) { return d.Type; }
         if (d.VlaDims is not null) { throw new IrUnsupportedException("non-constant struct array bound"); }
-        if (arr.Count is not null) { return d.Type; }
-        Gate(1999, "flexible array member", member);
-        return arr with { Count = 1 };
+        if (arr.Count is 0)
+        {
+            _gate?.Report($"ISO C forbids zero-size array '{d.Name}'", d.At.Position.Line);
+        }
+        if (arr.Count is null) { Gate(1999, "flexible array member", member); }
+        return d.Type;
     }
 }

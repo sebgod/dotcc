@@ -1517,9 +1517,9 @@ public sealed partial class CompilerTests
     [Fact]
     public void Array_members_lower_to_fixed_buffers()
     {
-        // Sized `T name[N];` (C89) and the C99 flexible array member `T name[];`
-        // both lower to a C# fixed-size buffer. The FAM uses [1] (over-allocates
-        // by one element — the malloc idiom stays safe).
+        // A sized `T name[N];` (C89) lowers to a C# fixed-size buffer. The C99
+        // flexible array member `T name[];` has no storage (GH #246): it is left
+        // out, and the struct keeps C's size through the layout model.
         var src = WriteTemp("""
             struct Vec { int len; int data[]; };
             struct Grid { int rows; int cells[4]; };
@@ -1528,7 +1528,7 @@ public sealed partial class CompilerTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("public fixed int data[1];");    // FAM → [1]
+            emitted.ShouldContain("LayoutKind.Sequential, Size = 4)]\nunsafe struct Vec\n{\n    public int len;\n}");  // FAM left out
             emitted.ShouldContain("public fixed int cells[4];");   // sized
         }
         finally { File.Delete(src); }
