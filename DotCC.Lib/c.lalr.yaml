@@ -481,6 +481,8 @@ symbols:
   - FnPtrArrOpen   # 196 non-terminal: `(*name[])` / `(*const name[])`, a size-from-init fn-ptr array
   - Designation    # 197 non-terminal: a designator list `.v.Name.id` / `[2].x` before an initializer's `=`
   - Designator     # 198 non-terminal: one `.member` or `[index]` step of a Designation
+  - ArrDeclarator  # 199 non-terminal: an array declarator `name[N]…`, `name[]`, `name[][N]…`, `(name[N])`
+  - BraceInit      # 200 non-terminal: a brace-enclosed initializer `{ InitList }` / `{ }`
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -653,24 +655,14 @@ productions:
       - { lhs: FnPtrQuals, rhs: [FnPtrQuals, 'const'],    action: fnPtrQualsConst }
       - { lhs: FnPtrQuals, rhs: [FnPtrQuals, 'volatile'], action: fnPtrQualsVolatile }
       - { lhs: FnPtrQuals, rhs: [FnPtrQuals, 'restrict'], action: fnPtrQualsRestrict }
-      # File-scope arrays of function pointers (callback / dispatch tables):
-      # `Ret (*name[N])(params) [= {…}];` / `Ret (*name[])(params) = {…};`, plain or
-      # `static`. They lower exactly like the typedef'd spelling.
-      - { lhs: Fn, rhs: [Type, FnPtrArr, FnPtrTail, ';'],                                  action: globalFnPtrArr }
-      - { lhs: Fn, rhs: [Type, FnPtrArr, FnPtrTail, '=', '{', InitList, '}', ';'],          action: globalFnPtrArrInit }
-      - { lhs: Fn, rhs: [Type, FnPtrArrOpen, FnPtrTail, '=', '{', InitList, '}', ';'],      action: globalFnPtrArrInitImplicit }
-      - { lhs: Fn, rhs: ['static', Type, FnPtrArr, FnPtrTail, ';'],                         action: globalStaticFnPtrArr }
-      - { lhs: Fn, rhs: ['static', Type, FnPtrArr, FnPtrTail, '=', '{', InitList, '}', ';'], action: globalStaticFnPtrArrInit }
-      - { lhs: Fn, rhs: ['static', Type, FnPtrArrOpen, FnPtrTail, '=', '{', InitList, '}', ';'], action: globalStaticFnPtrArrInitImplicit }
-      # File-scope variable declarations: `int x;`, `int x = E;`, and
-      # the multi-declarator forms `int a, b;` / `int a = 1, b = 2;`
-      # / `int a, b = 5;` at top level. Real C needs these for globals
-      # (e.g. <setjmp.h>'s `jmp_buf env;` shared between the setjmp site
-      # and the longjmp caller). Lowered to one `static unsafe Type name`
-      # (or `= E`) per declarator inside `DotCcGlobals`. Reuses the same
-      # `DeclItemList` non-terminal that block-level `Decl` uses, so the
-      # comma-separated init-declarator semantics stay in lockstep
-      # between file-scope and block-scope declarations.
+      # File-scope object declarations: `Type` then any init-declarator list
+      # (`int x;`, `int a = 1, *p, buf[N] = "…", (*fn)(int);`, `struct P o = { … };`,
+      # `Ret (*tab[])(int) = { … };`). Each declarator lowers to a `DotCcGlobals`
+      # field: a scalar / struct as a `static unsafe T name [= init]`, an array as a
+      # pinned, rooted managed array behind a `T*` (Libc.GlobalArray*), so the
+      # subscript / sizeof machinery of block-scope `stackalloc` arrays applies. The
+      # same `DeclItemList` as block scope, struct members and `static` locals, so
+      # every declarator works in every position.
       - { lhs: Fn, rhs: [Type, DeclItemList, ';'], action: globalDeclList }
       # File-scope `static T x;` — internal linkage + static storage duration.
       # In dotcc's single-program model internal-vs-external linkage is a no-op
@@ -689,73 +681,6 @@ productions:
       - { lhs: Fn, rhs: ['extern', FnSig, ';'],              action: externFnProto }
       - { lhs: Fn, rhs: ['extern', FnSig, Block],            action: externFnDef }
       - { lhs: Fn, rhs: ['extern', Type, DeclItemList, ';'], action: externVarDecl }
-
-      # File-scope ARRAY declarations. A C file-scope array has static storage
-      # duration and decays to a pointer; dotcc lowers each to a `T*` field in
-      # DotCcGlobals backed by a pinned, rooted managed array (Libc.GlobalArray*),
-      # so the SAME `T*` shape + subscript / sizeof machinery that block-scope
-      # `stackalloc` arrays use applies (the global's CType is recorded in
-      # _globalArrayInfo). These mirror the block-scope `Decl → Type ID …` array
-      # forms but emit a global field instead of a stackalloc local.
-      # Conflict-free with `globalDeclList` (`Type DeclItemList ;`) and `FnSig`:
-      # after `Type ID` a `[` lookahead enters these forms, while `,`/`;`/`=`
-      # stays on the DeclItem path and `(` goes to FnSig (`[` ∉ FOLLOW(DeclItem)).
-      # The `[ ]` (implicit size) vs `ArrDims` (`[ E ]…`, sized) split mirrors the
-      # block-scope grammar exactly; after `… = `, `{` selects the brace form and
-      # a STRING the char-array-from-string form.
-      - { lhs: Fn, rhs: [Type, ID, ArrDims, ';'],                           action: globalArr }
-      - { lhs: Fn, rhs: [Type, ID, '[', ']', ';'],                          action: globalArrIncomplete }
-      - { lhs: Fn, rhs: [Type, ID, ArrDims, '=', '{', InitList, '}', ';'],  action: globalArrInit }
-      - { lhs: Fn, rhs: [Type, ID, '[', ']', '=', '{', InitList, '}', ';'], action: globalArrInitImplicit }
-      - { lhs: Fn, rhs: [Type, ID, ArrDims, '=', StringSeq, ';'],           action: globalCharArrStrSized }
-      - { lhs: Fn, rhs: [Type, ID, '[', ']', '=', StringSeq, ';'],          action: globalCharArrStr }
-      # char16_t file-scope array from a u"…" literal (→ pinned char[] / GlobalArrayFrom).
-      - { lhs: Fn, rhs: [Type, ID, ArrDims, '=', U16StringSeq, ';'],        action: globalU16CharArrStrSized }
-      - { lhs: Fn, rhs: [Type, ID, '[', ']', '=', U16StringSeq, ';'],       action: globalU16CharArrStr }
-      # wchar_t file-scope array from an L"…" literal (same shapes, 16-bit decode).
-      - { lhs: Fn, rhs: [Type, ID, ArrDims, '=', WStringSeq, ';'],          action: globalWCharArrStrSized }
-      - { lhs: Fn, rhs: [Type, ID, '[', ']', '=', WStringSeq, ';'],         action: globalWCharArrStr }
-      # char32_t file-scope array from a U"…" literal (same shapes, 32-bit decode).
-      - { lhs: Fn, rhs: [Type, ID, ArrDims, '=', U32StringSeq, ';'],        action: globalU32CharArrStrSized }
-      - { lhs: Fn, rhs: [Type, ID, '[', ']', '=', U32StringSeq, ';'],       action: globalU32CharArrStr }
-      # char8_t file-scope array from a u8"…" literal (same shapes, UTF-8 byte decode).
-      - { lhs: Fn, rhs: [Type, ID, ArrDims, '=', U8StringSeq, ';'],         action: globalU8CharArrStrSized }
-      - { lhs: Fn, rhs: [Type, ID, '[', ']', '=', U8StringSeq, ';'],        action: globalU8CharArrStr }
-      # `static` file-scope arrays — internal linkage is a no-op (never exported),
-      # so each lowers identically to its plain counterpart; `static` is consumed.
-      - { lhs: Fn, rhs: ['static', Type, ID, ArrDims, ';'],                           action: globalStaticArr }
-      - { lhs: Fn, rhs: ['static', Type, ID, '[', ']', ';'],                          action: globalStaticArrIncomplete }
-      - { lhs: Fn, rhs: ['static', Type, ID, ArrDims, '=', '{', InitList, '}', ';'],  action: globalStaticArrInit }
-      - { lhs: Fn, rhs: ['static', Type, ID, '[', ']', '=', '{', InitList, '}', ';'], action: globalStaticArrInitImplicit }
-      - { lhs: Fn, rhs: ['static', Type, ID, ArrDims, '=', StringSeq, ';'],           action: globalStaticCharArrStrSized }
-      - { lhs: Fn, rhs: ['static', Type, ID, '[', ']', '=', StringSeq, ';'],          action: globalStaticCharArrStr }
-      - { lhs: Fn, rhs: ['static', Type, ID, ArrDims, '=', U16StringSeq, ';'],         action: globalStaticU16CharArrStrSized }
-      - { lhs: Fn, rhs: ['static', Type, ID, '[', ']', '=', U16StringSeq, ';'],        action: globalStaticU16CharArrStr }
-      - { lhs: Fn, rhs: ['static', Type, ID, ArrDims, '=', WStringSeq, ';'],           action: globalStaticWCharArrStrSized }
-      - { lhs: Fn, rhs: ['static', Type, ID, '[', ']', '=', WStringSeq, ';'],          action: globalStaticWCharArrStr }
-      - { lhs: Fn, rhs: ['static', Type, ID, ArrDims, '=', U32StringSeq, ';'],         action: globalStaticU32CharArrStrSized }
-      - { lhs: Fn, rhs: ['static', Type, ID, '[', ']', '=', U32StringSeq, ';'],        action: globalStaticU32CharArrStr }
-      - { lhs: Fn, rhs: ['static', Type, ID, ArrDims, '=', U8StringSeq, ';'],          action: globalStaticU8CharArrStrSized }
-      - { lhs: Fn, rhs: ['static', Type, ID, '[', ']', '=', U8StringSeq, ';'],         action: globalStaticU8CharArrStr }
-      # File-scope `static T x = { … };` — static struct/union AGGREGATE init, the
-      # file-scope twin of stmtStaticStructInit. Same emitter (a once-initialised
-      # DotCcGlobals field), just no name mangling. Disjoint from the array forms
-      # (no ArrDims / `[ ]`) and from `static Type DeclItemList ;` (the `{` after
-      # `=`), like the block-scope rule.
-      - { lhs: Fn, rhs: ['static', Type, ID, '=', '{', InitList, '}', ';'], action: globalStaticStructInit }
-      # The non-static spelling (`struct pt origin = { 0, 0 };`) and the C23 empty
-      # initializer at file scope (`T g = {};` → zero). After `Type ID =`, a `{`
-      # selects these over the DeclItemList `ID = E` form.
-      - { lhs: Fn, rhs: [Type, ID, '=', '{', InitList, '}', ';'], action: globalStructInit }
-      - { lhs: Fn, rhs: [Type, ID, '=', '{', '}', ';'],           action: globalEmptyInit }
-      - { lhs: Fn, rhs: ['static', Type, ID, '=', '{', '}', ';'], action: globalStaticEmptyInit }
-      # `extern` array DECLARATIONS — declare without defining (the storage lives
-      # in another TU), so emit no field; just register the name's type so same-TU
-      # references resolve. Sized and incomplete forms (the latter is lua.h's
-      # `extern const char lua_ident[];`). No init form (extern + init is a
-      # definition, vanishingly rare — left unsupported).
-      - { lhs: Fn, rhs: ['extern', Type, ID, ArrDims, ';'],  action: externArr }
-      - { lhs: Fn, rhs: ['extern', Type, ID, '[', ']', ';'], action: externArrIncomplete }
 
       # `_Static_assert(expr, "msg");` (C11) and `_Static_assert(expr);`
       # (C23, message optional). File-scope form. Compile-time only — no
@@ -1058,48 +983,13 @@ productions:
       # matches C convention and C# requirement.
       - { lhs: Stmt, rhs: ['switch', '(', Expr, ')', Block], action: stmtSwitch }
       - { lhs: Stmt, rhs: [Decl, ';'],                    action: stmtDecl }
-      # Block-scope `static T x;` / `static T x = C;` — static storage
-      # duration, function-local visibility. Lowers to a mangled static field
-      # in DotCcGlobals (one instance, persists across calls), with uses inside
-      # the function rewritten to the mangled name. Scalars + plain (no-init)
-      # structs via `Type DeclItemList`.
+      # Block-scope `static T x…;` — static storage duration, function-local
+      # visibility, any init-declarator list (scalars, arrays such as lookup tables
+      # `static const lu_byte tab[] = {…}`, struct aggregates `static const expdesc
+      # ef = {…}`, fn-ptr tables). Each declarator lowers like its file-scope
+      # counterpart (a DotCcGlobals field, a pinned array for an array) under a
+      # program-unique mangled name, with uses inside the function resolving to it.
       - { lhs: Stmt, rhs: ['static', Type, DeclItemList, ';'], action: stmtStaticDecl }
-      # Block-scope `static` ARRAYS. A local static array has the SAME static
-      # storage duration as a file-scope array, so each lowers identically to
-      # its `globalStatic*` file-scope counterpart — a pinned global field in
-      # DotCcGlobals (`Libc.GlobalArray*`) under a mangled name — with in-function
-      # uses rewritten to the mangled name (via `_fnStatics`, same as the scalar
-      # case). Common as read-only lookup tables (`static const lu_byte tab[] =
-      # {…}`). Disjoint from `static Type DeclItemList ;` on the `[` lookahead
-      # after the name (DeclItemList has no array suffix), exactly like the
-      # file-scope pair `globalStaticDeclList` / `globalStaticArr*`.
-      - { lhs: Stmt, rhs: ['static', Type, ID, ArrDims, ';'],                           action: stmtStaticArr }
-      # Block-scope `static` arrays of function pointers: the static-local
-      # counterparts of the file-scope globalStaticFnPtrArr* forms (a mangled pinned
-      # array + an alias symbol). A static-local scalar fn-ptr is a DeclItem.
-      - { lhs: Stmt, rhs: ['static', Type, FnPtrArr, FnPtrTail, ';'],                         action: stmtStaticFnPtrArr }
-      - { lhs: Stmt, rhs: ['static', Type, FnPtrArr, FnPtrTail, '=', '{', InitList, '}', ';'], action: stmtStaticFnPtrArrInit }
-      - { lhs: Stmt, rhs: ['static', Type, FnPtrArrOpen, FnPtrTail, '=', '{', InitList, '}', ';'], action: stmtStaticFnPtrArrInitImplicit }
-      - { lhs: Stmt, rhs: ['static', Type, ID, ArrDims, '=', '{', InitList, '}', ';'],  action: stmtStaticArrInit }
-      - { lhs: Stmt, rhs: ['static', Type, ID, '[', ']', '=', '{', InitList, '}', ';'], action: stmtStaticArrInitImplicit }
-      - { lhs: Stmt, rhs: ['static', Type, ID, ArrDims, '=', StringSeq, ';'],           action: stmtStaticCharArrStrSized }
-      - { lhs: Stmt, rhs: ['static', Type, ID, '[', ']', '=', StringSeq, ';'],          action: stmtStaticCharArrStr }
-      - { lhs: Stmt, rhs: ['static', Type, ID, ArrDims, '=', U16StringSeq, ';'],         action: stmtStaticU16CharArrStrSized }
-      - { lhs: Stmt, rhs: ['static', Type, ID, '[', ']', '=', U16StringSeq, ';'],        action: stmtStaticU16CharArrStr }
-      - { lhs: Stmt, rhs: ['static', Type, ID, ArrDims, '=', WStringSeq, ';'],           action: stmtStaticWCharArrStrSized }
-      - { lhs: Stmt, rhs: ['static', Type, ID, '[', ']', '=', WStringSeq, ';'],          action: stmtStaticWCharArrStr }
-      - { lhs: Stmt, rhs: ['static', Type, ID, ArrDims, '=', U32StringSeq, ';'],         action: stmtStaticU32CharArrStrSized }
-      - { lhs: Stmt, rhs: ['static', Type, ID, '[', ']', '=', U32StringSeq, ';'],        action: stmtStaticU32CharArrStr }
-      - { lhs: Stmt, rhs: ['static', Type, ID, ArrDims, '=', U8StringSeq, ';'],           action: stmtStaticU8CharArrStrSized }
-      - { lhs: Stmt, rhs: ['static', Type, ID, '[', ']', '=', U8StringSeq, ';'],          action: stmtStaticU8CharArrStr }
-      # Block-scope `static T x = { … };` — a static struct/union AGGREGATE
-      # initializer (Lua's `static const expdesc ef = {VKINT, {0}, NO_JUMP,
-      # NO_JUMP}`). Like the static-array forms, lowers to a once-initialised
-      # mangled field in DotCcGlobals. Disjoint from `static Type DeclItemList ;`
-      # (scalar `= E`) on the `{` lookahead after `=` — a DeclItem init `= E`
-      # can't start with `{`, so `= {` unambiguously selects this rule. Nested
-      # braces (a union/struct-typed field's init) are handled in the emitter.
-      - { lhs: Stmt, rhs: ['static', Type, ID, '=', '{', InitList, '}', ';'], action: stmtStaticStructInit }
       # Block-scope (local) AGGREGATE TYPE DEFINITIONS — `struct Tag { … };`,
       # `union Tag { … };`, `enum Tag { … };` (and the C23 fixed-underlying-type
       # `enum Tag : Type { … };`) used as a STATEMENT. C lets a type be defined
@@ -1151,31 +1041,15 @@ productions:
     rules:
       # A plain member is a full multi-declarator list: `int x;`, `int a, b;`,
       # `struct CallInfo *previous, *next;` (per-declarator `*`s via DeclItemTail),
-      # bit-fields included (`signed int A: 1, B: 2;`, `unsigned : 4, x : 4;` —
-      # the bit-field declarators are DeclItems, see there). Reuses the same
-      # DeclItemList as block/file-scope declarations. Conflict-free with the
-      # array forms below: after `Type ID`, `[` shifts those, while `;`/`,`/`:`
-      # stay on the DeclItem path.
+      # bit-fields (`signed int A: 1, B: 2;`, `unsigned : 4, x : 4;`), arrays
+      # (`char rawmode[6], *m;`, multi-dimensional `T grid[N][M]`, the C99 flexible
+      # array member `T name[];`), function pointers and arrays of them. Reuses the
+      # same DeclItemList as block/file-scope declarations; a declarator that makes
+      # no sense in a member (an initializer) is a binder error. An array member
+      # lowers to a C# `fixed` buffer (primitive element) or an [InlineArray]
+      # wrapper, multi-dim flattened with `s.grid[i][j]` striding; a FAM uses [1]
+      # (the `malloc(sizeof(S)+n*sizeof(T))` idiom over-allocates by one element).
       - { lhs: Member, rhs: [Type, DeclItemList, ';'], action: structMemberList }
-      # Array members. Sized `T name[N];` (C89) and the flexible array member
-      # `T name[];` (C99 — an incomplete array as the last member, sized at
-      # malloc time). Both lower to a C# fixed-size buffer `public fixed T
-      # name[N];` (the FAM uses [1], which over-allocates by one element — the
-      # `malloc(sizeof(S)+n*sizeof(T))` idiom stays safe). Fixed buffers allow
-      # only primitive element types (struct/pointer/_Bool elements fail loudly).
-      # After `Type ID [`, a `]` selects the FAM, an `E` the sized form. The sized
-      # form uses ArrDims (`[E]` or `[E][E]…`), so a MULTI-DIMENSIONAL member
-      # `T grid[N][M];` parses too — it flattens to one `fixed T grid[N*M]` /
-      # `[InlineArray(N*M)]` and `s.grid[i][j]` rewrites to flat striding (the same
-      # machinery block-scope multi-dim arrays use).
-      - { lhs: Member, rhs: [Type, ID, ArrDims, ';'],     action: structArrMember }
-      - { lhs: Member, rhs: [Type, ID, '[', ']', ';'],    action: structFlexArrMember }
-      # Function-pointer members `Ret (*name)(params);` (ubiquitous in callback
-      # tables / vtables, as in chibi's `struct sigaction { void (*sa_handler)(int); … }`)
-      # are DeclItems of the `Type DeclItemList ;` member form, so comma lists
-      # (`int (*get)(void), (*set)(int);`) work too. An array-of-fn-ptrs member
-      # `Ret (*name[N])(params);` (an ops table embedded in a struct) has its own form.
-      - { lhs: Member, rhs: [Type, FnPtrArr, FnPtrTail, ';'],  action: structFnPtrArrMember }
       # Nested aggregate members. All four forms carry a MemberMark (epsilon)
       # right after the `{` to snapshot where the inner fields begin, so a
       # consumer can isolate them from the parent's. The NAMED-vs-anonymous split
@@ -1235,10 +1109,12 @@ productions:
 
   - derivation: none
     rules:
-      # Multi-declarator: `Type x` / `Type x = E` / `Type x, y` / `Type x = 1, y = 2`.
-      # Single-declarator forms are the special case where DeclItemList has
-      # one element. The Type prefix is shared across all comma-separated
-      # items, matching real C (where `int x, y;` declares two `int`s).
+      # A block-scope declaration: `Type` then an init-declarator list, any
+      # declarator in any position (`int x = 1, *p, buf[N], (*fn)(int);`,
+      # `char s[] = "…";`, `struct P o = { … };`, `int m[2][3] = { … };`). The Type
+      # prefix is shared across all comma-separated items, matching real C (where
+      # `int x, y;` declares two `int`s). A scalar lowers to a C# local, an array to
+      # a `stackalloc` (a runtime extent too, VLA-style), a struct to `new T { … }`.
       - { lhs: Decl, rhs: [Type, DeclItemList], action: decl }
       # `auto` declarations (block scope). C23 type inference `auto x = E;` →
       # C# `var` (a plain ID after `auto`); pre-C23 storage-class `auto int x …`
@@ -1247,67 +1123,6 @@ productions:
       # with a plain ID.
       - { lhs: Decl, rhs: ['auto', ID, '=', E],       action: declAutoInfer }
       - { lhs: Decl, rhs: ['auto', Type, DeclItemList], action: declAutoStorage }
-      # Stack-allocated array: `int arr[N]`. Lowers to `int* arr = stackalloc int[N]`
-      # so subscript and pointer arithmetic both work naturally in C# `unsafe`
-      # blocks. Size must be a compile-time constant or an int expression
-      # — same constraint C and C# both enforce. Kept as a single-declarator
-      # rule because the lowering rewrites the type (T → T*) and the
-      # initializer (= stackalloc) — doesn't compose with peers in one decl.
-      # `int arr[N]` (1-D) and `int a[D1][D2]…` (multi-dim). ArrDims collects
-      # the dimensions; the visitor flattens a multi-dim array to a single
-      # `stackalloc`. Conflict-free with the `… '[' E ']' '=' '{' … }'` init
-      # forms below: `=` is not in FOLLOW(ArrDims), so at `Type ID [ E ]` the
-      # parser shifts `=` (init form) or reduces ArrDims (`[`/`;`/`,` lookahead).
-      - { lhs: Decl, rhs: [Type, ID, ArrDims], action: declArr }
-      # Array with aggregate initializer: `int arr[N] = {1, 2, 3}` (sized) or
-      # `int arr[] = {1, 2, 3}` (size derived from init). Both lower to
-      # `T* arr = stackalloc T[]{ 1, 2, 3 }`. We reuse ArgList for the brace
-      # contents — it's a comma-separated expression list, which is exactly
-      # the same shape.
-      # Array with a brace initializer. The sized form uses ArrDims, so it covers
-      # 1-D AND multi-dimensional / nested initializers (`int m[2][3] = {{…},{…}}`,
-      # and struct arrays `struct P pts[2] = {{…},{…}}`); the visitor flattens a
-      # scalar multi-dim init (with C's per-dimension zero-fill) or maps each
-      # group to `new T{…}` for a struct array. The implicit-size `[]` form is
-      # 1-D (size derived from the initializer).
-      - { lhs: Decl, rhs: [Type, ID, ArrDims, '=', '{', InitList, '}'], action: declArrInit }
-      - { lhs: Decl, rhs: [Type, ID, '[', ']', '=', '{', InitList, '}'], action: declArrInitImplicit }
-      # `char s[] = "…"` / `char s[N] = "…"` — char array initialized from a
-      # string literal (C89). Decodes the string to bytes and stackalloc's a
-      # MUTABLE copy (a bare string literal is a pinned read-only RVA; a char[]
-      # is writable). StringSeq → adjacent literals concatenate; the sized form
-      # zero-pads to N. Conflict-free with the `{ … }` forms above: after `=`,
-      # `{` → brace init, a STRING → these. Sized form via ArrDims (shares the
-      # dim reduction with declArrInit).
-      - { lhs: Decl, rhs: [Type, ID, '[', ']', '=', StringSeq],  action: declCharArrStr }
-      - { lhs: Decl, rhs: [Type, ID, ArrDims, '=', StringSeq],   action: declCharArrStrSized }
-      # char16_t block-scope array from a u"…" literal (→ char* stackalloc copy).
-      - { lhs: Decl, rhs: [Type, ID, '[', ']', '=', U16StringSeq], action: declU16CharArrStr }
-      - { lhs: Decl, rhs: [Type, ID, ArrDims, '=', U16StringSeq],  action: declU16CharArrStrSized }
-      # wchar_t block-scope array from an L"…" literal (→ char* stackalloc copy).
-      - { lhs: Decl, rhs: [Type, ID, '[', ']', '=', WStringSeq], action: declWCharArrStr }
-      - { lhs: Decl, rhs: [Type, ID, ArrDims, '=', WStringSeq],  action: declWCharArrStrSized }
-      # char32_t block-scope array from a U"…" literal (→ uint* stackalloc copy).
-      - { lhs: Decl, rhs: [Type, ID, '[', ']', '=', U32StringSeq], action: declU32CharArrStr }
-      - { lhs: Decl, rhs: [Type, ID, ArrDims, '=', U32StringSeq],  action: declU32CharArrStrSized }
-      # char8_t block-scope array from a u8"…" literal (→ byte* stackalloc copy).
-      - { lhs: Decl, rhs: [Type, ID, '[', ']', '=', U8StringSeq], action: declU8CharArrStr }
-      - { lhs: Decl, rhs: [Type, ID, ArrDims, '=', U8StringSeq],  action: declU8CharArrStrSized }
-      # Struct aggregate initializer: `Point p = {1, 2};`. The visitor looks
-      # up the struct's field names from a side map populated by StructDef /
-      # TypedefStruct / UnionDef, then emits `Point p = new Point { x = 1,
-      # y = 2 };` — C# requires named members in object initializers (no
-      # positional form). Single-declarator only (like declArr*) since the
-      # lowering rewrites the initializer shape.
-      - { lhs: Decl, rhs: [Type, ID, '=', '{', InitList, '}'], action: declStructInit }
-      # A block-scope function-pointer variable `int (*fp)(int) [= E];` is a
-      # DeclItem (FnPtrName + FnPtrTail) of `Type DeclItemList`, so it composes with
-      # other declarators (`int (*p)(int) = f, (*q)(int), n;`). Lowers to a C#
-      # `delegate*<args…, ret>` local. Arrays of function pointers:
-      # `Ret (*name[N])(params) [= {…}]` / `Ret (*name[])(params) = {…}`.
-      - { lhs: Decl, rhs: [Type, FnPtrArr, FnPtrTail],                            action: declFnPtrArr }
-      - { lhs: Decl, rhs: [Type, FnPtrArr, FnPtrTail, '=', '{', InitList, '}'],    action: declFnPtrArrInit }
-      - { lhs: Decl, rhs: [Type, FnPtrArrOpen, FnPtrTail, '=', '{', InitList, '}'], action: declFnPtrArrInitImplicit }
       # Pointer-to-array declarator: `int (*p)[3] [= E];` — p is a pointer to an
       # array of 3 (e.g. a row pointer into a 2-D array). Same `( * ID )` shape as
       # the fn-ptr declarator but with `[dims]` instead of `(params)` after the
@@ -1316,16 +1131,6 @@ productions:
       # machinery); `sizeof` of it is the pointer size.
       - { lhs: Decl, rhs: [Type, '(', '*', ID, ')', ArrDims],          action: declPtrToArr }
       - { lhs: Decl, rhs: [Type, '(', '*', ID, ')', ArrDims, '=', E],  action: declPtrToArrInit }
-      # Designated initializer (C99): `Point p = { .x = 1, .y = 2 };`. The
-      # user names the fields directly — no _structFields lookup needed at
-      # emit time. LALR(1)-distinguished from the positional form by the
-      # leading `.` after `{`.
-      # Empty initializer (C23): `T x = {};` / `T a[N] = {};` — zero-initialize.
-      # Conflict-free with the `{ … }` forms above: after `= {`, a `}` lookahead
-      # selects these (InitList/MemberInitList both require ≥1 element). Scalars/
-      # structs lower to `= default`; sized arrays to a zeroed `stackalloc`.
-      - { lhs: Decl, rhs: [Type, ID, '=', '{', '}'],          action: declEmptyInit }
-      - { lhs: Decl, rhs: [Type, ID, ArrDims, '=', '{', '}'], action: declArrEmptyInit }
 
   # ArrDims — one or more `[ E ]` array dimensions, left-recursive.
   - derivation: leftmost
@@ -1349,6 +1154,17 @@ productions:
     rules:
       - { lhs: DeclItem, rhs: [ID], action: declItem }
       - { lhs: DeclItem, rhs: [ID, '=', E], action: declItemInit }
+      # A brace-enclosed initializer (C11 6.7.9) for a struct, union or scalar
+      # (`struct P o = { 1, .y = 2 };`, `int n = { 5 };`, C23 `T x = {};`). An E
+      # never starts with `{`, so the split after `=` is one token.
+      - { lhs: DeclItem, rhs: [ID, '=', BraceInit], action: declItemBraceInit }
+      # An array declarator (see ArrDeclarator) in first or tail position, with no
+      # initializer, a braced one, or an expression (a string literal `char s[] =
+      # "…"`; any other expression is a binder error, C's constraint). After the
+      # name, `[` is not in FOLLOW(DeclItem), so `ID` alone and `ID [` never compete.
+      - { lhs: DeclItem, rhs: [ArrDeclarator],                 action: declItemArr }
+      - { lhs: DeclItem, rhs: [ArrDeclarator, '=', E],         action: declItemArrInit }
+      - { lhs: DeclItem, rhs: [ArrDeclarator, '=', BraceInit], action: declItemArrBraceInit }
       # A bit-field declarator `name : width` and an unnamed one `: width`
       # (padding), C11 6.7.2.1. As DeclItems they take part in declarator lists
       # like any other (`signed int A: 1, B: 2;`, `int a: 3, b, *p;`); they mean
@@ -1361,18 +1177,37 @@ productions:
       # in first or tail position, at every scope (see FnPtrName).
       - { lhs: DeclItem, rhs: [FnPtrName, FnPtrTail],         action: declItemFnPtr }
       - { lhs: DeclItem, rhs: [FnPtrName, FnPtrTail, '=', E], action: declItemFnPtrInit }
+      # An array of function pointers (a callback / dispatch table): `Ret
+      # (*name[N])(params) [= {…}]`, `Ret (*name[])(params) = {…}`. After `( * ID`,
+      # `)` selects FnPtrName and `[` these.
+      - { lhs: DeclItem, rhs: [FnPtrArr, FnPtrTail],                     action: declItemFnPtrArr }
+      - { lhs: DeclItem, rhs: [FnPtrArr, FnPtrTail, '=', BraceInit],     action: declItemFnPtrArrInit }
+      - { lhs: DeclItem, rhs: [FnPtrArrOpen, FnPtrTail, '=', BraceInit], action: declItemFnPtrArrOpenInit }
       # A tail (non-first) init-declarator: a plain DeclItem, or one or more `*`
       # prefixes adding pointer levels onto the shared base type. The emitter
       # computes the tail's type as stripStars(Type) + Stars*'*'.
       - { lhs: DeclItemTail, rhs: [DeclItem],          action: declItemTailPlain }
       - { lhs: DeclItemTail, rhs: ['*', DeclItemTail], action: declItemTailPtr }
-      # An ARRAY declarator in tail (post-comma) position — `char *str=NULL,
-      # numbuf[LEN];` (chibi's sexp.c). Tail-only: a FIRST-position array has
-      # its own Stmt/Fn productions, and adding `DeclItem → ID ArrDims` there
-      # would collide with them. Composes with the `*` prefix rule (`int *a,
-      # *c[5];`). No initializer form (a brace-init array tail stays a loud
-      # parse error).
-      - { lhs: DeclItemTail, rhs: [ID, ArrDims],       action: declItemTailArr }
+
+  # An array declarator: `name[N]…` (constant bounds, or a runtime extent that
+  # block scope lowers VLA-style), `name[]` (sized from the initializer, an `extern`
+  # declaration, a flexible array member), `name[][N]…` (only the outermost bound
+  # omitted, C11 6.7.6.2), and a parenthesized one `(name[N])` (CPython's
+  # `PyObject *(values[N])`). After `name [`, a `]` selects the open forms and an
+  # E the sized one; after `name [ ]`, a `[` continues into the inner bounds.
+  - derivation: none
+    rules:
+      - { lhs: ArrDeclarator, rhs: [ID, ArrDims],           action: arrDeclSized }
+      - { lhs: ArrDeclarator, rhs: [ID, '[', ']'],          action: arrDeclOpen }
+      - { lhs: ArrDeclarator, rhs: [ID, '[', ']', ArrDims], action: arrDeclOpenRows }
+      - { lhs: ArrDeclarator, rhs: ['(', ArrDeclarator, ')'], action: arrDeclParen }
+
+  # A brace-enclosed initializer, `{ … }` or the C23 empty `{ }` (InitList needs
+  # at least one element, so a `}` right after `{` selects the empty form).
+  - derivation: none
+    rules:
+      - { lhs: BraceInit, rhs: ['{', InitList, '}'], action: braceInit }
+      - { lhs: BraceInit, rhs: ['{', '}'],           action: braceInitEmpty }
 
   # (The MemberInitList / MemberInit symbols are retired: a `.field =` designator is
   # an InitElem, so struct designators work in every brace-initializer position and

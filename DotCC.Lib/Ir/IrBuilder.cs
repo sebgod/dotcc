@@ -260,79 +260,15 @@ internal sealed partial class IrBuilder
             // object — the first build's field + file-scope binding serve every
             // TU, so skip it (mirrors BuildFuncDef's static-inline dedup; see
             // AlreadySeenTopLevel for the per-TU-state caveat).
-            case C.GlobalDeclList or C.GlobalStaticDeclList
-                or C.GlobalArr or C.GlobalStaticArr
-                or C.GlobalArrInit or C.GlobalStaticArrInit
-                or C.GlobalArrInitImplicit or C.GlobalStaticArrInitImplicit
-                or C.GlobalCharArrStr or C.GlobalCharArrStrSized
-                or C.GlobalStaticCharArrStr or C.GlobalStaticCharArrStrSized
-                or C.GlobalU16CharArrStr or C.GlobalU16CharArrStrSized
-                or C.GlobalStaticU16CharArrStr or C.GlobalStaticU16CharArrStrSized
-                or C.GlobalWCharArrStr or C.GlobalWCharArrStrSized
-                or C.GlobalStaticWCharArrStr or C.GlobalStaticWCharArrStrSized
-                or C.GlobalU32CharArrStr or C.GlobalU32CharArrStrSized
-                or C.GlobalStaticU32CharArrStr or C.GlobalStaticU32CharArrStrSized
-                or C.GlobalU8CharArrStr or C.GlobalU8CharArrStrSized
-                or C.GlobalStaticU8CharArrStr or C.GlobalStaticU8CharArrStrSized
-                or C.GlobalStaticStructInit or C.GlobalStructInit or C.GlobalEmptyInit or C.GlobalStaticEmptyInit
-                or C.GlobalFnPtrArr or C.GlobalFnPtrArrInit or C.GlobalFnPtrArrInitImplicit
-                or C.GlobalStaticFnPtrArr or C.GlobalStaticFnPtrArrInit
-                or C.GlobalStaticFnPtrArrInitImplicit when AlreadySeenTopLevel(fn):
+            case C.GlobalDeclList or C.GlobalStaticDeclList when AlreadySeenTopLevel(fn):
                 break;
+            // File-scope object declarations, any declarator in any position (scalar,
+            // struct, array, fn-ptr, fn-ptr table): plain and `static` lower
+            // identically (internal linkage is a no-op for a never-exported variable).
             case C.GlobalDeclList g: BuildGlobalDecls(g.Arg0, g.Arg1, Storage.Static); break;
-            // Raw (un-typedef'd) file-scope arrays of function pointers. (A scalar
-            // fn-ptr is a DeclItem of the globalDeclList forms above.)
-            case C.GlobalFnPtrArr g: { var a = FnPtrArrParts(g.Arg0, g.Arg1, g.Arg2); BuildGlobalArr(a.Elem, a.Name, a.Dims, null, null); break; }
-            case C.GlobalFnPtrArrInit g: { var a = FnPtrArrParts(g.Arg0, g.Arg1, g.Arg2); BuildGlobalArr(a.Elem, a.Name, a.Dims, g.Arg5, null); break; }
-            case C.GlobalFnPtrArrInitImplicit g: { var a = FnPtrArrParts(g.Arg0, g.Arg1, g.Arg2); BuildGlobalArr(a.Elem, a.Name, null, g.Arg5, null); break; }
-            case C.GlobalStaticFnPtrArr g: { var a = FnPtrArrParts(g.Arg1, g.Arg2, g.Arg3); BuildGlobalArr(a.Elem, a.Name, a.Dims, null, null); break; }
-            case C.GlobalStaticFnPtrArrInit g: { var a = FnPtrArrParts(g.Arg1, g.Arg2, g.Arg3); BuildGlobalArr(a.Elem, a.Name, a.Dims, g.Arg6, null); break; }
-            case C.GlobalStaticFnPtrArrInitImplicit g: { var a = FnPtrArrParts(g.Arg1, g.Arg2, g.Arg3); BuildGlobalArr(a.Elem, a.Name, null, g.Arg6, null); break; }
             case C.GlobalStaticDeclList g: BuildGlobalDecls(g.Arg1, g.Arg2, Storage.Static); break;
-            // File-scope arrays — pinned global backing store (plain and `static`
-            // lower identically; internal linkage is a no-op for a never-exported
-            // variable). Sized, brace-initialized, and implicit-`[]` forms.
-            case C.GlobalArr g: BuildGlobalArr(g.Arg0, g.Arg1, g.Arg2, null, null); break;
-            case C.GlobalStaticArr g: BuildGlobalArr(g.Arg1, g.Arg2, g.Arg3, null, null); break;
-            case C.GlobalArrInit g: BuildGlobalArr(g.Arg0, g.Arg1, g.Arg2, g.Arg5, null); break;
-            case C.GlobalStaticArrInit g: BuildGlobalArr(g.Arg1, g.Arg2, g.Arg3, g.Arg6, null); break;
-            case C.GlobalArrInitImplicit g: BuildGlobalArr(g.Arg0, g.Arg1, null, g.Arg6, null); break;
-            case C.GlobalStaticArrInitImplicit g: BuildGlobalArr(g.Arg1, g.Arg2, null, g.Arg7, null); break;
-            // File-scope char arrays from a string literal.
-            case C.GlobalCharArrStr g: BuildGlobalCharArr(g.Arg0, g.Arg1, g.Arg5, null, null); break;
-            case C.GlobalCharArrStrSized g: BuildGlobalCharArr(g.Arg0, g.Arg1, g.Arg4, g.Arg2, null); break;
-            case C.GlobalStaticCharArrStr g: BuildGlobalCharArr(g.Arg1, g.Arg2, g.Arg6, null, null); break;
-            case C.GlobalStaticCharArrStrSized g: BuildGlobalCharArr(g.Arg1, g.Arg2, g.Arg5, g.Arg3, null); break;
-            // char16_t file-scope arrays from a u"…" literal (same shapes, u16 decode).
-            case C.GlobalU16CharArrStr g: BuildGlobalCharArr(g.Arg0, g.Arg1, g.Arg5, null, null, wide: true); break;
-            case C.GlobalU16CharArrStrSized g: BuildGlobalCharArr(g.Arg0, g.Arg1, g.Arg4, g.Arg2, null, wide: true); break;
-            case C.GlobalStaticU16CharArrStr g: BuildGlobalCharArr(g.Arg1, g.Arg2, g.Arg6, null, null, wide: true); break;
-            case C.GlobalStaticU16CharArrStrSized g: BuildGlobalCharArr(g.Arg1, g.Arg2, g.Arg5, g.Arg3, null, wide: true); break;
-            // wchar_t file-scope arrays from an L"…" literal (same shapes, 16-bit decode).
-            case C.GlobalWCharArrStr g: BuildGlobalCharArr(g.Arg0, g.Arg1, g.Arg5, null, null, wide: true); break;
-            case C.GlobalWCharArrStrSized g: BuildGlobalCharArr(g.Arg0, g.Arg1, g.Arg4, g.Arg2, null, wide: true); break;
-            case C.GlobalStaticWCharArrStr g: BuildGlobalCharArr(g.Arg1, g.Arg2, g.Arg6, null, null, wide: true); break;
-            case C.GlobalStaticWCharArrStrSized g: BuildGlobalCharArr(g.Arg1, g.Arg2, g.Arg5, g.Arg3, null, wide: true); break;
-            // char32_t file-scope arrays from a U"…" literal (same shapes, 32-bit decode).
-            case C.GlobalU32CharArrStr g: BuildGlobalCharArr(g.Arg0, g.Arg1, g.Arg5, null, null, wide: true); break;
-            case C.GlobalU32CharArrStrSized g: BuildGlobalCharArr(g.Arg0, g.Arg1, g.Arg4, g.Arg2, null, wide: true); break;
-            case C.GlobalStaticU32CharArrStr g: BuildGlobalCharArr(g.Arg1, g.Arg2, g.Arg6, null, null, wide: true); break;
-            case C.GlobalStaticU32CharArrStrSized g: BuildGlobalCharArr(g.Arg1, g.Arg2, g.Arg5, g.Arg3, null, wide: true); break;
-            // char8_t file-scope arrays from a u8"…" literal (same shapes, UTF-8 byte decode).
-            case C.GlobalU8CharArrStr g: BuildGlobalCharArr(g.Arg0, g.Arg1, g.Arg5, null, null, wide: true); break;
-            case C.GlobalU8CharArrStrSized g: BuildGlobalCharArr(g.Arg0, g.Arg1, g.Arg4, g.Arg2, null, wide: true); break;
-            case C.GlobalStaticU8CharArrStr g: BuildGlobalCharArr(g.Arg1, g.Arg2, g.Arg6, null, null, wide: true); break;
-            case C.GlobalStaticU8CharArrStrSized g: BuildGlobalCharArr(g.Arg1, g.Arg2, g.Arg5, g.Arg3, null, wide: true); break;
-            // `extern T a[N];` / `extern T a[];` — declaration only (storage elsewhere).
-            case C.ExternArr g: BuildExternArr(g.Arg1, g.Arg2, g.Arg3); break;
-            case C.ExternArrIncomplete g: BuildExternArr(g.Arg1, g.Arg2, null); break;
-            // `static T x = { … };` at file scope — a once-initialised struct/union field.
-            case C.GlobalStaticStructInit g: BuildGlobalStructInit(g.Arg1, g.Arg2, g.Arg5); break;
-            case C.GlobalStructInit g: BuildGlobalStructInit(g.Arg0, g.Arg1, g.Arg4); break;
-            case C.GlobalEmptyInit g: Gate(2023, "empty initializer", g.Arg1); BuildGlobalEmptyInit(g.Arg0, g.Arg1); break;
-            case C.GlobalStaticEmptyInit g: Gate(2023, "empty initializer", g.Arg2); BuildGlobalEmptyInit(g.Arg1, g.Arg2); break;
-            // `extern T x;` declares the name + type for resolution but emits no
-            // field — the definition lives in another TU (dotcc whole-program model).
+            // `extern T x…;` declares the names + types for resolution but emits no
+            // storage: the definition lives in another TU (dotcc whole-program model).
             case C.ExternVarDecl g: BuildGlobalDecls(g.Arg1, g.Arg2, Storage.Extern); break;
             // `typedef <type> <name>;` — record name → underlying type. Resolution
             // (ResolveType's TypeName case) then sees through it everywhere.
@@ -388,40 +324,70 @@ internal sealed partial class IrBuilder
     /// <c>static const</c> tables) the two are indistinguishable.</summary>
     private bool AlreadySeenTopLevel(Item fn) => !_seenTopLevelDefs.Add(fn.ToString());
 
-    /// <summary>File-scope variable declaration. Each declarator becomes a
-    /// <c>DotCcGlobals</c> field (codegen emits <c>public static unsafe T name</c>);
-    /// an <c>extern</c> one is registered for resolution only (no field).</summary>
+    /// <summary>File-scope object declaration. Each declarator becomes a
+    /// <c>DotCcGlobals</c> field (codegen emits <c>public static unsafe T name</c>; an
+    /// array, a pinned array behind a <c>T*</c>). An <c>extern</c> declaration is
+    /// registered for resolution only (no field), unless it has an initializer, which
+    /// makes it a definition (C11 6.9.2p1; gcc warns).</summary>
     private void BuildGlobalDecls(Item typeItem, Item listItem, Storage storage)
     {
         _sawThreadLocalSpec = false; // consumed below: set by THIS declaration's spec resolution
         _sawConstexprSpec = false;   // same discipline
-        WalkDeclList(typeItem, listItem, (name, initItem, type) =>
+        WalkDeclList(typeItem, listItem, d =>
         {
-            // A file-scope array has its own productions (pinned GlobalArray
-            // lowering); an array TAIL here would silently become a plain field.
-            if (type.Unqualified is CType.Array)
+            var name = d.Name;
+            var declStorage = storage;
+            if (storage == Storage.Extern && d.Init is not null)
             {
-                throw new IrUnsupportedException("array declarator in a file-scope multi-declarator list (split it into its own declaration)");
+                Diagnostics.Add(new Diagnostic(Severity.Warning, $"'{name}' initialized and declared 'extern'", SrcPos.From(d.At), _file));
+                declStorage = Storage.Static;
+            }
+            if (d.Type.Unqualified is CType.Array arr)
+            {
+                if (_sawConstexprSpec)
+                {
+                    throw new IrUnsupportedException(
+                        $"'{name}': only integer constexpr objects are supported (float/pointer/struct/array constexpr is not built yet)");
+                }
+                if (_sawThreadLocalSpec)
+                {
+                    throw new IrUnsupportedException($"'{name}': a _Thread_local array is not supported");
+                }
+                if (declStorage == Storage.Extern)
+                {
+                    // Storage lives elsewhere: register the name so same-TU references
+                    // resolve. A sized extent keeps the array type for `sizeof`; an open
+                    // one (`extern const char lua_ident[];`) decays to a pointer.
+                    _symbols.Declare(new Symbol
+                    {
+                        Name = name, Kind = SymKind.Var, Storage = Storage.Extern, IsGlobal = true,
+                        Type = arr.Count is null ? new CType.Pointer(arr.Element) : arr,
+                    });
+                    return;
+                }
+                BuildStaticArray(d, arr, csName: null);
+                _definedGlobalNames.Add(name); // a real definition — satisfies any extern decl
+                return;
             }
             var sym = _symbols.Declare(new Symbol
             {
-                Name = name, Kind = SymKind.Var, Storage = storage, IsGlobal = true,
+                Name = name, Kind = SymKind.Var, Storage = declStorage, IsGlobal = true,
                 // A constexpr object is const-qualified (C23 §6.7.1p5 implies it),
                 // so the standard write-to-const error covers assignments.
-                Type = _sawConstexprSpec ? type.WithQuals(TypeQual.Const) : type,
+                Type = _sawConstexprSpec ? d.Type.WithQuals(TypeQual.Const) : d.Type,
                 IsThreadLocal = _sawThreadLocalSpec,
                 IsConstexpr = _sawConstexprSpec,
             });
-            if (storage != Storage.Extern)
+            if (declStorage != Storage.Extern)
             {
                 _definedGlobalNames.Add(name); // a real definition — satisfies any extern decl
                 CExpr? gInit = null;
-                if (initItem is { } ii) { gInit = BuildExpr(ii); EnsureNotEmbed(gInit); CheckQualifierDiscard(gInit, sym.Type, SrcPos.From(ii), "initialization"); }
+                if (d.Init is { } ii) { gInit = BuildInitValue(sym.Type, ii); CheckQualifierDiscard(gInit, sym.Type, SrcPos.From(ii), "initialization"); }
                 PropagateNativeCallConv(sym, gInit);
                 // A .NET [ThreadStatic] initializer runs on the FIRST thread only,
                 // so C's "every thread starts at the initial value" holds only for
                 // the zero/default value .NET gives every thread's slot anyway.
-                if (sym.IsThreadLocal && gInit is not null && ConstEval(gInit) is not 0)
+                if (sym.IsThreadLocal && gInit is not null and not DefaultLit && ConstEval(gInit) is not 0)
                 {
                     Diagnostics.Add(new Diagnostic(Severity.Error,
                         $"'{name}': a non-zero-initialized _Thread_local is not supported (a .NET [ThreadStatic] initializer runs only on the first thread)",
@@ -1040,7 +1006,7 @@ internal sealed partial class IrBuilder
                 // is no accessible member and positional initializers skip it.
                 case C.StructMemberList sm:
                     WalkDeclList(sm.Arg0, sm.Arg1,
-                        (name, _, type) => fields.Add(new StructField(name, type)),
+                        d => fields.Add(new StructField(d.Name, MemberDeclaratorType(d, m))),
                         (name, type, width) => fields.Add(new StructField(name, type, BitFieldWidth(width))));
                     break;
                 // C11 anonymous struct/union member — its fields are promoted into
@@ -1055,33 +1021,6 @@ internal sealed partial class IrBuilder
                 case C.NamedNestedUnion nm: AddNamedNested(null, nm.Arg3, Tok(nm.Arg5), fields, isUnion: true); break;
                 case C.NamedNestedTaggedStruct nm: AddNamedNested(Tok(nm.Arg1), nm.Arg4, Tok(nm.Arg6), fields, isUnion: false); break;
                 case C.NamedNestedTaggedUnion nm: AddNamedNested(Tok(nm.Arg1), nm.Arg4, Tok(nm.Arg6), fields, isUnion: true); break;
-                // `T name[N]…;` — a fixed-size array member (codegen: a `fixed`
-                // buffer for a primitive element, an [InlineArray] wrapper for a
-                // non-primitive one). Multi-dimensional bounds give a nested array
-                // type so `s.m[i][j]` strides; bounds must be constant expressions.
-                case C.StructArrMember sm:
-                {
-                    var dims = TryConstDims(sm.Arg2) ?? throw new IrUnsupportedException("non-constant struct array bound");
-                    fields.Add(new StructField(Tok(sm.Arg1), MakeArrayType(ResolveType(sm.Arg0), dims)));
-                    break;
-                }
-                // C99 flexible array member `T name[];` — over-allocated at malloc
-                // time. Model as a 1-element array (the struct-hack [1] convention),
-                // so the member exists and access over-indexes into the tail.
-                case C.StructFlexArrMember sm:
-                    Gate(1999, "flexible array member", m);
-                    fields.Add(new StructField(Tok(sm.Arg1), new CType.Array(ResolveType(sm.Arg0), 1)));
-                    break;
-                // `Ret (*name[N])(params);`: an array-of-fn-ptrs member. (A scalar
-                // fn-ptr member is a DeclItem of structMemberList.)
-                case C.StructFnPtrArrMember sm:
-                {
-                    var a = FnPtrArrParts(sm.Arg0, sm.Arg1, sm.Arg2);
-                    var dims = a.Dims is { } di ? TryConstDims(di) : null;
-                    fields.Add(new StructField(Tok(a.Name), MakeArrayType(a.Elem,
-                        dims ?? throw new IrUnsupportedException("non-constant struct array bound"))));
-                    break;
-                }
                 default: throw new IrUnsupportedException(TypeName(m.Content));
             }
         }
@@ -1189,11 +1128,11 @@ internal sealed partial class IrBuilder
     }
 
     /// <summary>A fn-ptr array declarator (<c>FnPtrArr</c> / <c>FnPtrArrOpen</c>) over the
-    /// return type item and tail: its name, its dimensions (null for <c>[]</c>), and the
+    /// return type and tail: its name, its dimensions (null for <c>[]</c>), and the
     /// element type (const-qualified for <c>*const</c>).</summary>
-    private (Item Name, Item? Dims, CType Elem) FnPtrArrParts(Item retItem, Item arrItem, Item tailItem)
+    private (Item Name, Item? Dims, CType Elem) FnPtrArrParts(CType ret, Item arrItem, Item tailItem)
     {
-        CType elem = FnPtrTailType(ResolveType(retItem), tailItem);
+        CType elem = FnPtrTailType(ret, tailItem);
         CType Q(Item quals) => QualsHaveConst(quals) ? elem.WithQuals(TypeQual.Const) : elem;
         return arrItem.Content switch
         {
@@ -1203,12 +1142,6 @@ internal sealed partial class IrBuilder
             C.FnPtrArrOpenQual a => (a.Arg3, null, Q(a.Arg2)),
             _ => throw new IrUnsupportedException(TypeName(arrItem.Content)),
         };
-    }
-
-    private ArrayDecl BuildFnPtrArrDecl(Item retItem, Item arrItem, Item tailItem, Item? initItem)
-    {
-        var a = FnPtrArrParts(retItem, arrItem, tailItem);
-        return BuildArrDecl(a.Elem, a.Name, a.Dims, initItem, implicitSize: a.Dims is null);
     }
 
     /// <summary>C's dlsym idiom, <c>int (*fn)(int) = (int(*)(int))dlsym(h, "add");</c>:
@@ -1694,26 +1627,6 @@ internal sealed partial class IrBuilder
             case C.BlockEmpty: return BuildBlock(it);
             case C.StmtDecl d: return BuildDeclStmt(d.Arg0) with { Pos = pos };
             case C.StmtStaticDecl s: return BuildStmtStaticDecl(s) with { Pos = pos };
-            case C.StmtStaticStructInit s: return BuildStmtStaticStructInit(s) with { Pos = pos };
-            // Block-scope `static` arrays — pinned global storage under a mangled
-            // name (same static storage duration as a file-scope array).
-            case C.StmtStaticArr s: return BuildStaticLocalArr(s.Arg1, s.Arg2, s.Arg3, null) with { Pos = pos };
-            case C.StmtStaticFnPtrArr s: { var a = FnPtrArrParts(s.Arg1, s.Arg2, s.Arg3); return BuildStaticLocalArr(a.Elem, a.Name, a.Dims, null) with { Pos = pos }; }
-            case C.StmtStaticFnPtrArrInit s: { var a = FnPtrArrParts(s.Arg1, s.Arg2, s.Arg3); return BuildStaticLocalArr(a.Elem, a.Name, a.Dims, s.Arg6) with { Pos = pos }; }
-            case C.StmtStaticFnPtrArrInitImplicit s: { var a = FnPtrArrParts(s.Arg1, s.Arg2, s.Arg3); return BuildStaticLocalArr(a.Elem, a.Name, null, s.Arg6) with { Pos = pos }; }
-            case C.StmtStaticArrInit s: return BuildStaticLocalArr(s.Arg1, s.Arg2, s.Arg3, s.Arg6) with { Pos = pos };
-            case C.StmtStaticArrInitImplicit s: return BuildStaticLocalArr(s.Arg1, s.Arg2, null, s.Arg7) with { Pos = pos };
-            // Block-scope `static char a[] = "…"` / sized — pinned global char array.
-            case C.StmtStaticCharArrStr s: return BuildStaticLocalCharArr(s.Arg1, s.Arg2, s.Arg6, null) with { Pos = pos };
-            case C.StmtStaticCharArrStrSized s: return BuildStaticLocalCharArr(s.Arg1, s.Arg2, s.Arg5, s.Arg3) with { Pos = pos };
-            case C.StmtStaticU16CharArrStr s: return BuildStaticLocalCharArr(s.Arg1, s.Arg2, s.Arg6, null, wide: true) with { Pos = pos };
-            case C.StmtStaticU16CharArrStrSized s: return BuildStaticLocalCharArr(s.Arg1, s.Arg2, s.Arg5, s.Arg3, wide: true) with { Pos = pos };
-            case C.StmtStaticWCharArrStr s: return BuildStaticLocalCharArr(s.Arg1, s.Arg2, s.Arg6, null, wide: true) with { Pos = pos };
-            case C.StmtStaticWCharArrStrSized s: return BuildStaticLocalCharArr(s.Arg1, s.Arg2, s.Arg5, s.Arg3, wide: true) with { Pos = pos };
-            case C.StmtStaticU32CharArrStr s: return BuildStaticLocalCharArr(s.Arg1, s.Arg2, s.Arg6, null, wide: true) with { Pos = pos };
-            case C.StmtStaticU32CharArrStrSized s: return BuildStaticLocalCharArr(s.Arg1, s.Arg2, s.Arg5, s.Arg3, wide: true) with { Pos = pos };
-            case C.StmtStaticU8CharArrStr s: return BuildStaticLocalCharArr(s.Arg1, s.Arg2, s.Arg6, null, wide: true) with { Pos = pos };
-            case C.StmtStaticU8CharArrStrSized s: return BuildStaticLocalCharArr(s.Arg1, s.Arg2, s.Arg5, s.Arg3, wide: true) with { Pos = pos };
             // Block-scope aggregate TYPE definitions (`struct cD { … };` inside a
             // function body — the block-scope enum forms are handled below). A
             // type has no storage, so C allows this; dotcc hoists the definition
@@ -2101,32 +2014,9 @@ internal sealed partial class IrBuilder
         // pre-C23 storage class). See BuildDeclAutoInfer / BuildDeclList.
         C.DeclAutoInfer d => BuildDeclAutoInfer(d),
         C.DeclAutoStorage d => BuildDeclList(d.Arg1, d.Arg2),
-        // `char s[] = "hi";` (implicit size) / `char buf[N] = "hi";` (explicit, zero-padded).
-        C.DeclCharArrStr d => BuildDeclCharArrStr(d.Arg0, d.Arg1, null, d.Arg5),
-        C.DeclCharArrStrSized d => BuildDeclCharArrStr(d.Arg0, d.Arg1, CharArrSize(d.Arg2), d.Arg4),
-        C.DeclU16CharArrStr d => BuildDeclCharArrStr(d.Arg0, d.Arg1, null, d.Arg5, wide: true),
-        C.DeclU16CharArrStrSized d => BuildDeclCharArrStr(d.Arg0, d.Arg1, CharArrSize(d.Arg2), d.Arg4, wide: true),
-        C.DeclWCharArrStr d => BuildDeclCharArrStr(d.Arg0, d.Arg1, null, d.Arg5, wide: true),
-        C.DeclWCharArrStrSized d => BuildDeclCharArrStr(d.Arg0, d.Arg1, CharArrSize(d.Arg2), d.Arg4, wide: true),
-        C.DeclU32CharArrStr d => BuildDeclCharArrStr(d.Arg0, d.Arg1, null, d.Arg5, wide: true),
-        C.DeclU32CharArrStrSized d => BuildDeclCharArrStr(d.Arg0, d.Arg1, CharArrSize(d.Arg2), d.Arg4, wide: true),
-        C.DeclU8CharArrStr d => BuildDeclCharArrStr(d.Arg0, d.Arg1, null, d.Arg5, wide: true),
-        C.DeclU8CharArrStrSized d => BuildDeclCharArrStr(d.Arg0, d.Arg1, CharArrSize(d.Arg2), d.Arg4, wide: true),
-        C.DeclStructInit d => BuildDeclStructInit(d),
-        // `T x = {};` — C23 empty initializer (zero value).
-        C.DeclEmptyInit d => Gated(2023, "empty initializer", d.Arg1, BuildLocalInit(d.Arg1, ResolveType(d.Arg0), new DefaultLit { Type = ResolveType(d.Arg0) })),
-        C.DeclArr d => BuildArrDecl(d.Arg0, d.Arg1, d.Arg2, null, implicitSize: false),
-        C.DeclArrEmptyInit d => BuildArrDecl(d.Arg0, d.Arg1, d.Arg2, null, implicitSize: false),
-        C.DeclArrInit d => BuildArrDecl(d.Arg0, d.Arg1, d.Arg2, d.Arg5, implicitSize: false),
-        C.DeclArrInitImplicit d => BuildArrDecl(d.Arg0, d.Arg1, null, d.Arg6, implicitSize: true),
         // Pointer-to-array `T (*p)[N]` [= init] — a row pointer (multi-dim machinery).
         C.DeclPtrToArr d => BuildPtrToArr(d.Arg0, d.Arg3, d.Arg5, null),
         C.DeclPtrToArrInit d => BuildPtrToArr(d.Arg0, d.Arg3, d.Arg5, d.Arg7),
-        // Local array of function pointers: `Ret (*name[N])(params)` [= {…}]. (A
-        // scalar fn-ptr local is a DeclItem.)
-        C.DeclFnPtrArr d => BuildFnPtrArrDecl(d.Arg0, d.Arg1, d.Arg2, null),
-        C.DeclFnPtrArrInit d => BuildFnPtrArrDecl(d.Arg0, d.Arg1, d.Arg2, d.Arg5),
-        C.DeclFnPtrArrInitImplicit d => BuildFnPtrArrDecl(d.Arg0, d.Arg1, d.Arg2, d.Arg5),
         _ => throw new IrUnsupportedException(TypeName(it.Content)),
     };
 
@@ -2143,70 +2033,25 @@ internal sealed partial class IrBuilder
     /// in the function's scope. The statement itself emits nothing.</summary>
     private CStmt BuildStmtStaticDecl(C.StmtStaticDecl n)
     {
-        WalkDeclList(n.Arg1, n.Arg2, (name, initItem, type) =>
+        WalkDeclList(n.Arg1, n.Arg2, d =>
         {
-            // A static-local ARRAY has its own production (pinned GlobalArray
-            // lowering under a mangled name); an array tail here would silently
-            // become a plain static field.
-            if (type.Unqualified is CType.Array)
+            var csName = $"{_symbols.Escape(d.Name)}__s{_staticLocalSeq++}";
+            if (d.Type.Unqualified is CType.Array arr)
             {
-                throw new IrUnsupportedException("array declarator in a static-local multi-declarator list (split it into its own declaration)");
+                BuildStaticArray(d, arr, csName);
+                return;
             }
             var sym = new Symbol
             {
-                Name = name, Kind = SymKind.Var, Type = type,
-                Storage = Storage.Static, IsGlobal = true,
-                TargetName = $"{_symbols.Escape(name)}__s{_staticLocalSeq++}",
+                Name = d.Name, Kind = SymKind.Var, Type = d.Type,
+                Storage = Storage.Static, IsGlobal = true, TargetName = csName,
             };
             CExpr? slInit = null;
-            if (initItem is { } ii) { slInit = BuildExpr(ii); EnsureNotEmbed(slInit); CheckQualifierDiscard(slInit, sym.Type, SrcPos.From(ii), "initialization"); }
+            if (d.Init is { } ii) { slInit = BuildInitValue(sym.Type, ii); CheckQualifierDiscard(slInit, sym.Type, SrcPos.From(ii), "initialization"); }
             PropagateNativeCallConv(sym, slInit);
             Globals.Add(new GlobalVar(sym, slInit));
             _symbols.DeclareAlias(sym);
         });
-        return new DeclStmt(System.Array.Empty<LocalDecl>());
-    }
-
-    /// <summary>File-scope <c>T x = {};</c> (C23): a zero-initialized field.</summary>
-    private void BuildGlobalEmptyInit(Item typeItem, Item nameItem)
-    {
-        var type = ResolveType(typeItem);
-        var sym = _symbols.Declare(new Symbol
-        {
-            Name = Tok(nameItem), Kind = SymKind.Var, Type = type, Storage = Storage.Static, IsGlobal = true,
-        });
-        _definedGlobalNames.Add(sym.Name);
-        Globals.Add(new GlobalVar(sym, new DefaultLit { Type = type }));
-    }
-
-    /// <summary>File-scope <c>static T x = { … };</c> — a once-initialised
-    /// <c>DotCcGlobals</c> field with a positional aggregate initializer.</summary>
-    private void BuildGlobalStructInit(Item typeItem, Item nameItem, Item initListItem)
-    {
-        var type = ResolveType(typeItem);
-        var init = BuildAggregateInit(type, initListItem);
-        var sym = _symbols.Declare(new Symbol
-        {
-            Name = Tok(nameItem), Kind = SymKind.Var, Type = type, Storage = Storage.Static, IsGlobal = true,
-        });
-        Globals.Add(new GlobalVar(sym, init));
-    }
-
-    /// <summary>Block-scope <c>static T x = { … };</c> — like a global aggregate
-    /// init, but with a program-unique mangled name and an alias symbol so the
-    /// function body's references resolve to the hoisted field.</summary>
-    private CStmt BuildStmtStaticStructInit(C.StmtStaticStructInit n)
-    {
-        var type = ResolveType(n.Arg1);
-        var init = BuildAggregateInit(type, n.Arg5);
-        var sym = new Symbol
-        {
-            Name = Tok(n.Arg2), Kind = SymKind.Var, Type = type,
-            Storage = Storage.Static, IsGlobal = true,
-            TargetName = $"{_symbols.Escape(Tok(n.Arg2))}__s{_staticLocalSeq++}",
-        };
-        Globals.Add(new GlobalVar(sym, init));
-        _symbols.DeclareAlias(sym);
         return new DeclStmt(System.Array.Empty<LocalDecl>());
     }
 
@@ -2234,42 +2079,29 @@ internal sealed partial class IrBuilder
             if (scalars.Count > 0) { stmts.Add(new DeclStmt(scalars.ToArray())); scalars.Clear(); }
         }
         _sawConstexprSpec = false; // consumed below (C23 allows block-scope constexpr)
-        WalkDeclList(typeItem, listItem, (name, initItem, type) =>
+        WalkDeclList(typeItem, listItem, d =>
         {
-            if (type.Unqualified is CType.Array)
+            if (d.Type.Unqualified is CType.Array arr)
             {
                 if (_sawConstexprSpec)
                 {
                     throw new IrUnsupportedException(
-                        $"'{name}': only integer constexpr objects are supported (float/pointer/struct/array constexpr is not built yet)");
+                        $"'{d.Name}': only integer constexpr objects are supported (float/pointer/struct/array constexpr is not built yet)");
                 }
-                // Same lowering as a standalone fixed-size array decl: the symbol
-                // keeps the (possibly nested) array type so sizeof/the length idiom
-                // resolve; the stackalloc extent is the flattened product.
-                var total = 1;
-                var elem = type.Unqualified;
-                while (elem is CType.Array a)
-                {
-                    total *= a.Count ?? throw new IrUnsupportedException("unsized array in a multi-declarator tail");
-                    elem = a.Element;
-                }
-                var asym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = type, Storage = Storage.Auto });
                 Flush();
-                stmts.Add(new ArrayDecl(asym, elem,
-                    new LitInt(total.ToString(System.Globalization.CultureInfo.InvariantCulture), total) { Type = CType.Int },
-                    null));
+                stmts.Add(BuildLocalArray(d, arr));
                 return;
             }
             var sym = _symbols.Declare(new Symbol
             {
-                Name = name, Kind = SymKind.Var, Storage = Storage.Auto,
+                Name = d.Name, Kind = SymKind.Var, Storage = Storage.Auto,
                 // const-qualified for the same write-to-const coverage as the
                 // file-scope form.
-                Type = _sawConstexprSpec ? type.WithQuals(TypeQual.Const) : type,
+                Type = _sawConstexprSpec ? d.Type.WithQuals(TypeQual.Const) : d.Type,
                 IsConstexpr = _sawConstexprSpec,
             });
             CExpr? sInit = null;
-            if (initItem is { } ii) { sInit = BuildExpr(ii); EnsureNotEmbed(sInit); CheckQualifierDiscard(sInit, sym.Type, SrcPos.From(ii), "initialization"); }
+            if (d.Init is { } ii) { sInit = BuildInitValue(sym.Type, ii); CheckQualifierDiscard(sInit, sym.Type, SrcPos.From(ii), "initialization"); }
             PropagateNativeCallConv(sym, sInit);
             if (sym.IsConstexpr) { BindConstexpr(sym, sInit, SrcPos.From(typeItem)); }
             scalars.Add(new LocalDecl(sym, sInit));
@@ -2290,89 +2122,6 @@ internal sealed partial class IrBuilder
         EnsureNotEmbed(init);
         var sym = _symbols.Declare(new Symbol { Name = Tok(n.Arg1), Kind = SymKind.Var, Type = init.Type, Storage = Storage.Auto });
         return new DeclStmt(new[] { new LocalDecl(sym, init) });
-    }
-
-    /// <summary>Walk a comma-separated init-declarator list, invoking
-    /// <paramref name="add"/> with each declarator's (name, initializer?, type).
-    /// The FIRST declarator's <c>*</c>s were greedily folded into
-    /// <paramref name="baseType"/> by the grammar's <c>Type → Type *</c> rule;
-    /// each subsequent declarator rebuilds its type from the pointer-stripped
-    /// element plus its own <c>*</c>s (so <c>int *a, b;</c> ⇒ a:int*, b:int).
-    /// Shared by local (<see cref="BuildDecl"/>) and file-scope declarations, and by
-    /// struct / union member lists, which alone pass <paramref name="addBitField"/>
-    /// (name, type, width item; the name is empty for an unnamed bit-field): a
-    /// bit-field declarator anywhere else is an error.</summary>
-    private void WalkDeclList(Item typeItem, Item listItem, Action<string, Item?, CType> add,
-        Action<string, CType, Item>? addBitField = null)
-    {
-        var baseType = ResolveType(typeItem);
-        // Peel only the LITERAL trailing `*`s (the `Type → Type *` rule greedily
-        // folded them into baseType, but they bind to the FIRST declarator alone) —
-        // subsequent declarators rebuild from the stripped element plus their own
-        // `*`s (`int *a, b` ⇒ a:int*, b:int). Pointer-ness that came from a typedef
-        // base (`BoxPtr p, q` ⇒ both Box*) is NOT a literal star and stays in
-        // `element`, so every declarator keeps it.
-        var litStars = CountLiteralStars(typeItem);
-        var element = baseType;
-        for (var i = 0; i < litStars && element is CType.Pointer p; i++) { element = p.Pointee; }
-        void BitField(string name, Item width, CType type, Item at)
-        {
-            if (addBitField is null)
-            {
-                Diagnostics.Add(new Diagnostic(Severity.Error,
-                    name.Length == 0 ? "unnamed bit-field outside a struct or union" : $"bit-field '{name}' outside a struct or union",
-                    SrcPos.From(at), _file));
-                return;
-            }
-            addBitField(name, type, width);
-        }
-        void WalkTail(Item it, int stars)
-        {
-            switch (it.Content)
-            {
-                // `DeclItemTail → * DeclItemTail` (declItemTailPtr) — its child is
-                // itself a DeclItemTail, so it can be a further `*` level OR the
-                // terminal `DeclItemTailPlain` wrapping the DeclItem. Both recurse,
-                // accumulating the star count (`int *a, *b;` → b:int*).
-                case C.DeclItemTailPtr p: WalkTail(p.Arg1, stars + 1); break;
-                case C.DeclItemTailPlain t: WalkTail(t.Arg0, stars); break;
-                case C.DeclItem di: add(Tok(di.Arg0), null, WrapPtr(element, stars)); break;
-                case C.DeclItemInit di: add(Tok(di.Arg0), di.Arg2, WrapPtr(element, stars)); break;
-                case C.DeclItemBitField bf: BitField(Tok(bf.Arg0), bf.Arg2, WrapPtr(element, stars), bf.Arg0); break;
-                case C.DeclItemAnonBitField ab: BitField("", ab.Arg1, WrapPtr(element, stars), ab.Arg0); break;
-                case C.DeclItemFnPtr fp: { var (n, t) = FnPtrDeclarator(WrapPtr(element, stars), fp.Arg0, fp.Arg1); add(n, null, t); break; }
-                case C.DeclItemFnPtrInit fp: { var (n, t) = FnPtrDeclarator(WrapPtr(element, stars), fp.Arg0, fp.Arg1); add(n, fp.Arg3, t); break; }
-                // `…, name[N]` — an array declarator in tail position. The type is
-                // an array OF the star-wrapped element (`int *a, *c[5];` → c is an
-                // array of int*); the consumer decides the lowering (local →
-                // ArrayDecl/stackalloc, struct member → fixed buffer).
-                case C.DeclItemTailArr a:
-                    add(Tok(a.Arg0), null, MakeArrayType(WrapPtr(element, stars),
-                        TryConstDims(a.Arg1) ?? throw new IrUnsupportedException("non-constant array bound in a multi-declarator tail")));
-                    break;
-                default: throw new IrUnsupportedException(TypeName(it.Content));
-            }
-        }
-        void Walk(Item it)
-        {
-            switch (it.Content)
-            {
-                case C.DeclItemListCons c: Walk(c.Arg0); Walk(c.Arg2); break;
-                case C.DeclItemListOne o: Walk(o.Arg0); break;
-                case C.DeclItem di: add(Tok(di.Arg0), null, baseType); break;
-                case C.DeclItemInit di: add(Tok(di.Arg0), di.Arg2, baseType); break;
-                case C.DeclItemBitField bf: BitField(Tok(bf.Arg0), bf.Arg2, baseType, bf.Arg0); break;
-                case C.DeclItemAnonBitField ab: BitField("", ab.Arg1, baseType, ab.Arg0); break;
-                // `Ret (*name)(params) [= E]`: the list's base type is the RETURN type.
-                case C.DeclItemFnPtr fp: { var (n, t) = FnPtrDeclarator(baseType, fp.Arg0, fp.Arg1); add(n, null, t); break; }
-                case C.DeclItemFnPtrInit fp: { var (n, t) = FnPtrDeclarator(baseType, fp.Arg0, fp.Arg1); add(n, fp.Arg3, t); break; }
-                case C.DeclItemTailPlain t: WalkTail(t.Arg0, 0); break;
-                case C.DeclItemTailPtr t: WalkTail(t.Arg1, 1); break;
-                case C.DeclItemTailArr: WalkTail(it, 0); break;
-                default: throw new IrUnsupportedException(TypeName(it.Content));
-            }
-        }
-        Walk(listItem);
     }
 
     private static CType WrapPtr(CType t, int stars)
@@ -2402,59 +2151,6 @@ internal sealed partial class IrBuilder
         }
     }
 
-    /// <summary>A local array declaration. Lowers to a C# <c>stackalloc</c>. A
-    /// constant dimension types the symbol as <see cref="CType.Array"/> (so
-    /// <c>sizeof(arr)</c> and the array-length idiom resolve); a runtime extent
-    /// (VLA-ish) decays to a pointer. Multi-dimensional arrays are deferred.</summary>
-    private ArrayDecl BuildArrDecl(Item typeItem, Item nameItem, Item? dimsItem, Item? initItem, bool implicitSize)
-        => BuildArrDecl(ResolveType(typeItem), nameItem, dimsItem, initItem, implicitSize);
-
-    private ArrayDecl BuildArrDecl(CType elem, Item nameItem, Item? dimsItem, Item? initItem, bool implicitSize)
-    {
-        var name = Tok(nameItem);
-        var dims = dimsItem is { } di ? TryConstDims(di) : null;
-
-        CType arrType;
-        CExpr? countExpr = null;
-        List<CExpr>? inits = null;
-        if (initItem is { } ii)
-        {
-            // Brace-initialized — the array interpreter resolves designators,
-            // struct elements, and per-dimension zero-fill into a dense list; a
-            // multi-dim array flattens to one stackalloc of product(dims). The
-            // symbol keeps the NESTED array type so a[i][j] strides correctly.
-            inits = BuildArrayElems(elem, dims, ParseInitList(ii));
-            arrType = dims is { Count: >= 1 } ? MakeArrayType(elem, dims) : new CType.Array(elem, inits.Count);
-        }
-        else if (dims is { Count: >= 1 })
-        {
-            // Fixed-size, no initializer (C# zero-fills a stackalloc). A multi-dim
-            // array flattens to one stackalloc of the product; sizeof(arr) and the
-            // array-length idiom read the dimensions off the nested array type.
-            var total = 1;
-            foreach (var d in dims) { total *= d; }
-            arrType = MakeArrayType(elem, dims);
-            countExpr = new LitInt(total.ToString(System.Globalization.CultureInfo.InvariantCulture), total) { Type = CType.Int };
-        }
-        else if (dimsItem is { } di2 && BuildArrDims(di2) is { Count: 1 } runtimeDims)
-        {
-            // Runtime extent (VLA) — C arrays decay to a pointer in value context.
-            arrType = new CType.Pointer(elem);
-            countExpr = runtimeDims[0];
-        }
-        else if (dimsItem is { })
-        {
-            throw new IrUnsupportedException("multi-dimensional array with a non-constant dimension");
-        }
-        else
-        {
-            arrType = new CType.Pointer(elem);
-        }
-
-        var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = arrType, Storage = Storage.Auto });
-        return new ArrayDecl(sym, elem, countExpr, inits);
-    }
-
     /// <summary>Collect the dimension expressions of an <c>ArrDims</c> node,
     /// outer→inner.</summary>
     private List<CExpr> BuildArrDims(Item it)
@@ -2471,24 +2167,6 @@ internal sealed partial class IrBuilder
         }
         Walk(it);
         return dims;
-    }
-
-    /// <summary><c>struct Point p = {3, 4};</c> — a local declaration with a
-    /// positional aggregate initializer. Types the symbol as the struct and
-    /// builds a <see cref="StructInit"/> from the brace list.</summary>
-    private CStmt BuildDeclStructInit(C.DeclStructInit n)
-    {
-        var type = ResolveType(n.Arg0);
-        return BuildLocalInit(n.Arg1, type, BuildAggregateInit(type, n.Arg4));
-    }
-
-    /// <summary>Declare a single block local of <paramref name="type"/> with an
-    /// already-built initializer, as a one-declarator <see cref="DeclStmt"/>.</summary>
-    private DeclStmt BuildLocalInit(Item nameItem, CType type, CExpr init)
-    {
-        EnsureNotEmbed(init);
-        var sym = _symbols.Declare(new Symbol { Name = Tok(nameItem), Kind = SymKind.Var, Type = type, Storage = Storage.Auto });
-        return new DeclStmt(new[] { new LocalDecl(sym, init) });
     }
 
     /// <summary>Reject a <c>#embed</c> that reached a scalar / non-brace-array
@@ -3255,18 +2933,6 @@ internal sealed partial class IrBuilder
         return new LitU32Str(segs) { Type = new CType.Array(CType.Char32, units.Count + 1) };
     }
 
-    /// <summary>The constant array bound of a char-array string declarator's
-    /// <c>ArrDims</c> (single dimension, constant-folded).</summary>
-    private int CharArrSize(Item arrDims)
-    {
-        var dims = BuildArrDims(arrDims);
-        if (dims.Count != 1 || ConstEval(dims[0]) is not { } n)
-        {
-            throw new IrUnsupportedException("char-array string init with a non-constant or multi-dimensional bound");
-        }
-        return (int)n;
-    }
-
     /// <summary>Collect adjacent string-literal segments (raw quoted lexemes) of a
     /// <c>StringSeq</c>, in source order.</summary>
     private List<string> CollectStrSegments(Item strSeq)
@@ -3318,50 +2984,6 @@ internal sealed partial class IrBuilder
         }
         Walk(strSeq);
         return segs;
-    }
-
-    /// <summary>Decode a char-array string initializer's literal to its element
-    /// values (excluding the NUL the caller appends), picking the width from how the
-    /// literal was spelled and the array's element type: a narrow <c>"…"</c> decodes
-    /// to UTF-8 bytes; a wide literal decodes to UTF-16 code units, except a
-    /// <c>char32_t</c> element decodes the <c>U"…"</c> to UTF-32 code units (one per
-    /// Unicode scalar). Shared by the block-scope / file-scope / static-local char
-    /// array builders so all three route char32_t identically.</summary>
-    private List<int> WideArrValues(CType elem, Item strSeqItem, bool wide)
-    {
-        if (!wide) { return DotCC.EmitHelpers.StringByteValues(CollectStrSegments(strSeqItem)); }
-        // A wide-prefixed literal (u/U/L/u8): strip the prefix, then decode by the
-        // element width — char32_t = 32-bit code units, char8_t = UTF-8 bytes (like
-        // a narrow string), else 16-bit (char16_t / wchar_t).
-        var segs = CollectWideStrSegments(strSeqItem);
-        return elem switch
-        {
-            CType.Prim { Name: "char32_t" } => DotCC.EmitHelpers.StringU32Values(segs),
-            CType.Prim { Name: "char8_t" } => DotCC.EmitHelpers.StringByteValues(segs),
-            _ => DotCC.EmitHelpers.StringU16Values(segs),
-        };
-    }
-
-    /// <summary><c>char s[] = "hi";</c> — a mutable char array initialised from a
-    /// string. Lowers to a byte stackalloc of the decoded bytes plus the NUL;
-    /// an explicit size zero-pads (or, exact-fit, may drop the NUL — C's rule).</summary>
-    private CStmt BuildDeclCharArrStr(Item typeItem, Item nameItem, int? explicitSize, Item strSeqItem, bool wide = false)
-    {
-        var elem = ResolveType(typeItem);
-        var bytes = WideArrValues(elem, strSeqItem, wide);
-        bytes.Add(0);                                   // NUL
-        var count = explicitSize ?? bytes.Count;
-        var inits = new List<CExpr>(count);
-        for (var i = 0; i < count; i++)
-        {
-            var v = i < bytes.Count ? bytes[i] : 0;     // zero-pad beyond the string
-            inits.Add(new LitInt(v.ToString(System.Globalization.CultureInfo.InvariantCulture), v) { Type = CType.Int });
-        }
-        var sym = _symbols.Declare(new Symbol
-        {
-            Name = Tok(nameItem), Kind = SymKind.Var, Type = new CType.Array(elem, count), Storage = Storage.Auto,
-        });
-        return new ArrayDecl(sym, elem, null, inits);
     }
 
     private CExpr BuildChr(C.Chr c)
