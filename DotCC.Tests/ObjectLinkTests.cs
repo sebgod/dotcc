@@ -161,11 +161,24 @@ public sealed class ObjectLinkTests : IDisposable
             .Message.ShouldContain("type 'P' is defined differently in 'b.o.cs' and 'a.o.cs'");
 
     [Fact]
+    public void Every_objects_array_storage_is_allocated_before_any_objects_initializers()
+    {
+        // `a.c` takes the address of an array `b.c` defines: the link places b's storage
+        // ahead of a's initializer, as the objects' own order would not.
+        var program = Link(
+            ("a.c", "extern int table[]; int *first = table; int main(void) { return *first; }"),
+            ("b.c", "int table[2] = { 5, 6 };"));
+        var table = program.IndexOf("int* table = Libc.GlobalArrayFrom<int>(new int[]{ 5, 6 });", StringComparison.Ordinal);
+        table.ShouldBeGreaterThanOrEqualTo(0);
+        program.IndexOf("int* first = table;", StringComparison.Ordinal).ShouldBeGreaterThan(table);
+    }
+
+    [Fact]
     public void An_object_of_another_format_asks_to_be_recompiled()
     {
         var obj = Objects(new[] { ("a.c", "int main(void) { return 0; }") })[0];
-        File.WriteAllText(obj, File.ReadAllText(obj).Replace("//!dotcc object 2", "//!dotcc object 1"));
+        File.WriteAllText(obj, File.ReadAllText(obj).Replace("//!dotcc object 3", "//!dotcc object 1"));
         Should.Throw<CompileException>(() => Compiler.LinkObjects(new[] { obj }))
-            .Message.ShouldContain("format 1; this dotcc links format 2");
+            .Message.ShouldContain("format 1; this dotcc links format 3");
     }
 }

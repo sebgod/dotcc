@@ -50,6 +50,19 @@ public static unsafe partial class Libc
         return PinAndRoot(arr);
     }
 
+    /// <summary>
+    /// Store <paramref name="init"/> into the global array storage at
+    /// <paramref name="dst"/>, allocated earlier by <see cref="GlobalArrayZeroed{T}"/>:
+    /// the second half of a file-scope array whose initializer takes other objects'
+    /// addresses, run once all static storage exists. Returns true, for the field
+    /// initializer that runs it.
+    /// </summary>
+    public static bool GlobalArrayFill<T>(T* dst, ReadOnlySpan<T> init) where T : unmanaged
+    {
+        init.CopyTo(new Span<T>(dst, init.Length));
+        return true;
+    }
+
     // Pinned delegate* arrays + their GCHandles (delegate* can't be a generic arg).
     private static readonly List<(GCHandle Handle, Array Arr)> _fnPtrArrays = new();
 

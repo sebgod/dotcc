@@ -35,6 +35,10 @@ public static partial class Compiler
     // no object defines the type.
     private const string FragOpaque = "//!!dotcc-obj opaque:";
     private const string FragGlobal = "//!!dotcc-obj global:";
+    // `storage:<name> <local|extern>`: the storage a global's field points at (an array's),
+    // which the link places before every object's globals, so any initializer can take
+    // its address.
+    private const string FragStorage = "//!!dotcc-obj storage:";
     private const string FragFn     = "//!!dotcc-obj fn:";
     // Import mode in separate compilation: `-l` is known only at LINK time, so each
     // fragment serializes its import CANDIDATES (proto-only, called, non-system,
@@ -54,9 +58,10 @@ public static partial class Compiler
     // (A file-based program's `#:property` directives precede it; otherwise it's
     // line 1.) Scan the first few lines for these.
     private const string MagicObject = "//!dotcc object";
-    // The object format this dotcc writes and links: 2 carries one record per definition,
-    // with its linkage (1 had one section of each kind, and no types).
-    private const string ObjectFormat = "2";
+    // The object format this dotcc writes and links: 3 carries one record per definition,
+    // with its linkage, and a global's storage apart from its initializer (2 had no
+    // storage records, 1 had one section of each kind and no types).
+    private const string ObjectFormat = "3";
 
     /// <summary>Emit a single translation unit as a `.cs` object fragment.</summary>
     public static string EmitObject(
@@ -107,6 +112,7 @@ public static partial class Compiler
                 Backends.LinkRecordKind.Type => FragType + r.Name,
                 Backends.LinkRecordKind.OpaqueType => FragOpaque + r.Name,
                 Backends.LinkRecordKind.Global => FragGlobal + r.Name + linkage,
+                Backends.LinkRecordKind.Storage => FragStorage + r.Name + linkage,
                 _ => FragFn + r.Name + linkage,
             }).Append('\n');
             sb.Append(r.Text);
@@ -151,6 +157,7 @@ public static partial class Compiler
         var opaqueTypes = new Dictionary<string, string>(StringComparer.Ordinal);
         var structDecls = new StringBuilder();
         var definedIn = new Dictionary<string, string>(StringComparer.Ordinal);
+        var storageText = new StringBuilder();
         var globalText = new StringBuilder();
         var functions = new StringBuilder();
         var errors = new List<string>();
@@ -180,6 +187,12 @@ public static partial class Compiler
                 if (record.StartsWith(FragOpaque, StringComparison.Ordinal))
                 {
                     opaqueTypes.TryAdd(record[FragOpaque.Length..], body);
+                    return;
+                }
+                if (record.StartsWith(FragStorage, StringComparison.Ordinal))
+                {
+                    // Its global's record, which follows, is the definition checked below.
+                    storageText.Append(body);
                     return;
                 }
                 if (record.StartsWith(FragType, StringComparison.Ordinal))
@@ -224,6 +237,7 @@ public static partial class Compiler
                 if (line.StartsWith(FragType, StringComparison.Ordinal)
                     || line.StartsWith(FragOpaque, StringComparison.Ordinal)
                     || line.StartsWith(FragGlobal, StringComparison.Ordinal)
+                    || line.StartsWith(FragStorage, StringComparison.Ordinal)
                     || line.StartsWith(FragFn, StringComparison.Ordinal))
                 {
                     Flush();
@@ -299,7 +313,7 @@ public static partial class Compiler
                 .ToList();
             if (survivors.Count > 0) { importsClass = RenderImportsClass(survivors, imports, libraryMode); }
         }
-        return BuildShell(mainArity, functions.ToString(), structDecls.ToString(), "", globalText.ToString(),
+        return BuildShell(mainArity, functions.ToString(), structDecls.ToString(), "", storageText.ToString() + globalText.ToString(),
                           emit, System.Array.Empty<EmitHelpers.Export>(), debugHeap, importsClass,
                           importsAreStatic: false, mainReturnsVoid: mainReturnsVoid,
                           mainReturnsErrUnion: mainReturnsErrUnion, mainErrPayloadIsVoid: mainErrPayloadIsVoid, pythonShim: pythonShim);

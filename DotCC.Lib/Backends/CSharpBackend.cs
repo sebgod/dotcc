@@ -31,8 +31,11 @@ internal sealed record CSharpBackendResult(
 
 /// <summary>What a <see cref="LinkRecord"/> defines. An <see cref="OpaqueType"/> is the
 /// placeholder of a struct this unit never completes: the linker keeps it only when no
-/// object defines the type.</summary>
-internal enum LinkRecordKind { Type, OpaqueType, Global, Function }
+/// object defines the type. A <see cref="Storage"/> record is the part of a global's
+/// definition that allocates the storage its field points at: the linker places every
+/// object's storage before any object's globals, so an initializer in one object can
+/// take the address of an array another object defines.</summary>
+internal enum LinkRecordKind { Type, OpaqueType, Global, Function, Storage }
 
 /// <summary>
 /// One definition an object file carries to the linker: its kind, the name it is emitted
@@ -138,12 +141,26 @@ internal sealed class CSharpBackend
         }
 
         // File-scope variables → public static fields of DotCcGlobals (the shell
-        // surfaces them by bare name via `using static DotCcGlobals;`).
+        // surfaces them by bare name via `using static DotCcGlobals;`). Static storage
+        // exists before any initializer runs, and an initializer names other objects
+        // only by address (C11 6.6p9), so the storage a field only points at (an
+        // array's, a flexible member's block) is allocated first, in `storage`, and every
+        // initializer that mentions an object runs after it, in `globals`: an address
+        // constant then sees its object's storage whatever order the objects are defined
+        // or linked in (parking_lot.c's `buckets[]` pointing into itself, import.c's
+        // `PyImport_Inittab = _PyImport_Inittab` defined in another object).
+        var storage = new StringBuilder();
         var globals = new StringBuilder();
         foreach (var g in unit.Globals)
         {
+            var storageStart = storage.Length;
             var globalStart = globals.Length;
             AppendGlobal(g);
+            if (storage.Length > storageStart)
+            {
+                records.Add(new LinkRecord(LinkRecordKind.Storage, g.Sym.TargetName, g.Sym.IsTuLocal,
+                    storage.ToString(storageStart, storage.Length - storageStart)));
+            }
             records.Add(new LinkRecord(LinkRecordKind.Global, g.Sym.TargetName, g.Sym.IsTuLocal,
                 globals.ToString(globalStart, globals.Length - globalStart)));
         }
@@ -184,7 +201,26 @@ internal sealed class CSharpBackend
             // property named like the C variable (as a per-thread one is).
             if (g.Flexible is { } flex)
             {
-                globals.Append(cg.FlexibleGlobal(g, flex, fieldType, initText));
+                cg.FlexibleGlobal(g, flex, fieldType, initText, storage, globals);
+                return;
+            }
+            // An array's field points at storage of its own: allocated with the other
+            // storage, and filled there too unless an element mentions an object, whose
+            // storage may not exist yet. That array is filled in initializer order instead.
+            if (g.Init is PinnedArray pa && !g.Sym.IsThreadLocal)
+            {
+                string Stored(string text) => nint ? $"(nint)({text})" : text;
+                if (pa.Elems is { } elems && elems.Any(MentionsObject))
+                {
+                    var count = elems.Count.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                    storage.Append($"    public static unsafe {fieldType} {g.Sym.TargetName} = {Stored(cg.ZeroedArrayText(pa.Element, count))};\n");
+                    var at = nint ? $"({cg.Cs(g.Sym.Type)}){g.Sym.TargetName}" : g.Sym.TargetName;
+                    globals.Append($"    internal static readonly bool __fill_{g.Sym.TargetName} = {cg.ArrayFillText(pa, at)};\n");
+                }
+                else
+                {
+                    storage.Append($"    public static unsafe {fieldType} {g.Sym.TargetName} = {initText};\n");
+                }
                 return;
             }
             if (g.Sym.IsThreadLocal) { globals.Append("    [ThreadStatic]\n"); }
@@ -249,7 +285,7 @@ internal sealed class CSharpBackend
             ? unit.Tests.Select(t => (t.Name, t.Sym.TargetName)).ToList()
             : null;
 
-        return new CSharpBackendResult(fns.ToString(), structs.ToString(), Aliases: "", globals.ToString(), mainArity, exports, mainReturnsVoid, mainReturnsErrUnion, mainErrPayloadIsVoid, tests, records);
+        return new CSharpBackendResult(fns.ToString(), structs.ToString(), Aliases: "", storage.ToString() + globals.ToString(), mainArity, exports, mainReturnsVoid, mainReturnsErrUnion, mainErrPayloadIsVoid, tests, records);
     }
 
     // ---- type declarations -----------------------------------------------
@@ -2754,12 +2790,7 @@ internal sealed class CSharpBackend
         var elemCs = Cs(pa.Element);
         if (pa.Elems is null)
         {
-            var count = pa.Count is { } c ? Expr(c) : "0";
-            // A pointer or function-pointer element can't be a type argument (CS0306);
-            // both are pointer-sized, so a zeroed nint block reinterprets cleanly.
-            return pa.Element.Unqualified is CType.Pointer or CType.Func
-                ? $"({elemCs}*)Libc.GlobalArrayZeroed<nint>({count})"
-                : $"Libc.GlobalArrayZeroed<{elemCs}>({count})";
+            return ZeroedArrayText(pa.Element, pa.Count is { } c ? Expr(c) : "0");
         }
         if (pa.Element.Unqualified is CType.Func)
         {
@@ -2794,6 +2825,67 @@ internal sealed class CSharpBackend
         }
         return $"Libc.GlobalArrayFrom<{elemCs}>(new {elemCs}[]{{ {vals} }})";
     }
+
+    /// <summary>A pinned, zeroed global array of <paramref name="count"/> elements of
+    /// <paramref name="element"/> type. A pointer or function-pointer element can't be a
+    /// type argument (CS0306); both are pointer-sized, so a zeroed <c>nint</c> block
+    /// reinterprets cleanly.</summary>
+    internal string ZeroedArrayText(CType element, string count)
+    {
+        var elemCs = Cs(element);
+        return element.Unqualified is CType.Pointer or CType.Func
+            ? $"({elemCs}*)Libc.GlobalArrayZeroed<nint>({count})"
+            : $"Libc.GlobalArrayZeroed<{elemCs}>({count})";
+    }
+
+    /// <summary>Store <paramref name="pa"/>'s elements into the array storage at
+    /// <paramref name="at"/>, allocated earlier by <see cref="ZeroedArrayText"/>: the
+    /// deferred half of a global array whose elements mention objects. A pointer or
+    /// function-pointer element goes through <c>nint</c>, as the storage does.</summary>
+    internal string ArrayFillText(PinnedArray pa, string at)
+    {
+        var prev = _staticInit;
+        _staticInit = true;
+        try
+        {
+            var elems = pa.Elems ?? [];
+            if (IsPointerType(pa.Element))
+            {
+                var ptrs = string.Join(", ", elems.Select(e => ArrayMemberElem(e, pa.Element)));
+                return $"Libc.GlobalArrayFill<nint>((nint*){at}, new nint[]{{ {ptrs} }})";
+            }
+            var elemCs = Cs(pa.Element);
+            var vals = string.Join(", ", elems.Select(e => Coerced(e, pa.Element)));
+            return $"Libc.GlobalArrayFill<{elemCs}>({at}, new {elemCs}[]{{ {vals} }})";
+        }
+        finally { _staticInit = prev; }
+    }
+
+    /// <summary>True when a static initializer mentions an object (a variable, not a
+    /// function or constant) anywhere: in C only by address (C11 6.6p9), so its storage
+    /// must exist before the initializer runs. Conservative: a node this does not know
+    /// counts as mentioning one, which only defers the initializer.</summary>
+    private static bool MentionsObject(CExpr e) => e switch
+    {
+        VarRef v => v.Sym.Type.Unqualified is not CType.Func,
+        LitInt or LitFloat or LitBool or LitStr or LitU16Str or LitU32Str or EnumConstRef or NullPtr or DefaultLit
+            or SizeOfExpr or OffsetOf or IrBuilder.EmbedData => false,
+        Paren p => MentionsObject(p.Inner),
+        ComptimeFold cf => MentionsObject(cf.Inner),
+        Cast c => MentionsObject(c.Operand),
+        BitCast bc => MentionsObject(bc.Operand),
+        Unary u => MentionsObject(u.Operand),
+        Binary b => MentionsObject(b.Left) || MentionsObject(b.Right),
+        CondExpr t => MentionsObject(t.Cond) || MentionsObject(t.Then) || MentionsObject(t.Else),
+        Index ix => MentionsObject(ix.Base) || MentionsObject(ix.Idx),
+        Member m => MentionsObject(m.Base),
+        CommaOp co => co.Items.Any(MentionsObject),
+        CommaSeq cs => cs.Items.Any(MentionsObject),
+        StructInit si => si.Members.Any(m => MentionsObject(m.Value)),
+        ArrayValue av => av.Elems.Any(MentionsObject),
+        PinnedArray pa => pa.Elems is { } es && es.Any(MentionsObject),
+        _ => true,
+    };
 
     /// <summary>An array element that lowers to a C# compile-time constant — the
     /// precondition for Roslyn to RVA-fold the backing <c>new T[]{…}</c> into the
@@ -2858,11 +2950,14 @@ internal sealed class CSharpBackend
 
     /// <summary>A static object whose initializer gives its flexible array member
     /// elements (GH #246): a zeroed native block sized for the struct and the elements
-    /// (at least the struct's size), filled once by a helper that stores the struct part
-    /// at its start and each element at the member's offset, and the C variable as a
-    /// ref-returning property over it, so reads, stores, <c>&amp;x</c> and member access
-    /// go through the reference.</summary>
-    private string FlexibleGlobal(GlobalVar g, FlexibleTail flex, string fieldType, string? initText)
+    /// (at least the struct's size), and the C variable as a ref-returning property over
+    /// it, so reads, stores, <c>&amp;x</c> and member access go through the reference; both
+    /// go to <paramref name="storage"/>. A helper stores the struct part at the block's
+    /// start and each element at the member's offset, called from a field in
+    /// <paramref name="globals"/>, since its values may take other objects'
+    /// addresses.</summary>
+    private void FlexibleGlobal(GlobalVar g, FlexibleTail flex, string fieldType, string? initText,
+        StringBuilder storage, StringBuilder globals)
     {
         var owner = g.Sym.Type.Unqualified as CType.Named
             ?? throw new IrUnsupportedException($"'{g.Sym.Name}': a flexible array member initializer for a non-struct");
@@ -2871,19 +2966,18 @@ internal sealed class CSharpBackend
         var size = System.Math.Max(_module?.SizeOfConst(g.Sym.Type) ?? 0, offset + elemSize * flex.Elems.Count);
         var mem = "__fam_" + g.Sym.TargetName;
         var elem = Cs(flex.Element);
-        var sb = new StringBuilder();
-        sb.Append($"    private static unsafe byte* {mem}_init()\n    {{\n");
-        sb.Append($"        var p = (byte*)System.Runtime.InteropServices.NativeMemory.AllocZeroed({size});\n");
-        if (initText is not null) { sb.Append($"        *({fieldType}*)p = {initText};\n"); }
-        sb.Append($"        var tail = ({elem}*)(p + {offset});\n");
+        storage.Append($"    private static readonly unsafe byte* {mem} = (byte*)System.Runtime.InteropServices.NativeMemory.AllocZeroed({size});\n");
+        storage.Append($"    public static unsafe ref {fieldType} {g.Sym.TargetName} => ref *({fieldType}*){mem};\n");
+        globals.Append($"    private static unsafe bool {mem}_init()\n    {{\n");
+        globals.Append($"        var p = {mem};\n");
+        if (initText is not null) { globals.Append($"        *({fieldType}*)p = {initText};\n"); }
+        globals.Append($"        var tail = ({elem}*)(p + {offset});\n");
         for (var i = 0; i < flex.Elems.Count; i++)
         {
-            sb.Append($"        tail[{i}] = {StaticInit(flex.Elems[i], flex.Element)};\n");
+            globals.Append($"        tail[{i}] = {StaticInit(flex.Elems[i], flex.Element)};\n");
         }
-        sb.Append("        return p;\n    }\n");
-        sb.Append($"    private static readonly unsafe byte* {mem} = {mem}_init();\n");
-        sb.Append($"    public static unsafe ref {fieldType} {g.Sym.TargetName} => ref *({fieldType}*){mem};\n");
-        return sb.ToString();
+        globals.Append("        return true;\n    }\n");
+        globals.Append($"    internal static readonly bool {mem}_filled = {mem}_init();\n");
     }
 
     /// <summary>One element of an array member's init span, coerced to the element
