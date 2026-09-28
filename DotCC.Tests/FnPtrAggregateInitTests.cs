@@ -29,6 +29,26 @@ public sealed class FnPtrAggregateInitTests
     }
 
     [Fact]
+    public void a_function_stored_into_a_void_pointer_converts_through_its_pointer_type()
+    {
+        // CPython's `{Py_tp_new, abc_data_new}` into `void *pfunc`: POSIX's function-to-`void*`
+        // conversion, implicit in C. C# converts a method group only to a function-pointer type.
+        var src = WriteTemp("""
+            typedef struct { int slot; void *pfunc; } Slot;
+            static int f(int x) { return x + 1; }
+            static Slot slots[] = { {1, f}, {0, 0} };
+            int main(void) { void *p = f; Slot s = { 2, f }; return (s.pfunc == p) + (slots[0].pfunc == p); }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("pfunc = (void*)(delegate*<int, int>)&f");
+            emitted.ShouldContain("void* p = (void*)(delegate*<int, int>)&f;");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void struct_array_element_decays_bare_fn_name()
     {
         var src = WriteTemp("""

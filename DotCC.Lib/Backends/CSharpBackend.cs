@@ -1461,6 +1461,15 @@ internal sealed class CSharpBackend
             text = $"({Cs(tgt)})({Sub(value, PUnary)})";
             return true;
         }
+        // A function stored into an object pointer (CPython's `{Py_tp_new, abc_new}` into a
+        // `void *pfunc` slot): POSIX's function-to-`void*` conversion, which C compilers do
+        // implicitly. C# converts a method group only to a function-pointer type, so the
+        // value goes through its own first, as an explicit `(void*)f` renders.
+        if (tgt is CType.Pointer && src is CType.Func)
+        {
+            text = $"({Cs(tgt)})({Cs(src)}){Sub(value, PUnary)}";
+            return true;
+        }
         // void* → T* (e.g. malloc's result): C# makes T*→void* implicit but requires
         // the reverse cast explicitly. Skip void*→void* (same type).
         if (tgt is CType.Pointer && src is CType.Pointer { Pointee: CType.VoidType }
