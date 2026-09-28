@@ -85,8 +85,8 @@ public sealed partial class CompilerTests
     {
         // C# has no hex-float literal, so dotcc parses `0xH.HpE` and emits the
         // decimal value: `0x1.8p3` = 1.5*2^3 = 12, `0x1p-1` = 0.5, `0x.8p1` = 1,
-        // `0x1.4p2f` = 5 (float). Integer-valued doubles are assigned to `double`
-        // locals so C# infers the type correctly without a trailing `.0`.
+        // `0x1.4p2f` = 5 (float). An integer-valued double keeps a `.0`: as an int
+        // literal, `0x1p0 / 3` would divide as integers.
         var src = WriteTemp("""
             int main() {
                 double a = 0x1.8p3;
@@ -99,11 +99,38 @@ public sealed partial class CompilerTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            // The typed IR emits integer-valued doubles without a trailing `.0`.
-            emitted.ShouldContain("double a = 12;");
+            emitted.ShouldContain("double a = 12.0;");
             emitted.ShouldContain("double b = 0.5;");
-            emitted.ShouldContain("double c = 1;");
+            emitted.ShouldContain("double c = 1.0;");
             emitted.ShouldContain("float d = 5f;");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Float_literals_are_csharp_real_literals()
+    {
+        // C allows an empty fraction; C# does not lex one (`1.e5` is a member access),
+        // and an integer-valued hex float is no real literal at all, so each is
+        // completed: a zero after the point, or `.0` when there is no point.
+        var src = WriteTemp("""
+            int main() {
+                double a = 0.;
+                double b = 1.e5;
+                float c = 2.f;
+                long double d = 3.L;
+                double e = 0x1p0 / 3;
+                return 0;
+            }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("double a = 0.0;");
+            emitted.ShouldContain("double b = 1.0e5;");
+            emitted.ShouldContain("float c = 2.0f;");
+            emitted.ShouldContain("double d = 3.0;");
+            emitted.ShouldContain("double e = 1.0 / 3;");
         }
         finally { File.Delete(src); }
     }

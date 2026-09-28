@@ -148,21 +148,45 @@ internal sealed class CSharpTarget : ITarget
 
     public string RenderFloatLit(LitFloat lit)
     {
+        var text = RealLiteral(lit.Text);
         // A `float`-typed literal without its suffix (a zig untyped literal at an `f32` sink: std.fmt.parse_float's
         // `[_]f32{ 1e0, 1e1, … }`) is spelled with `F`, since C# will not narrow a double literal (CS0664).
-        if (lit.Type?.Unqualified == CType.Float && lit.Text.Length > 0 && lit.Text[^1] is not ('f' or 'F'))
+        if (lit.Type?.Unqualified == CType.Float && text.Length > 0 && text[^1] is not ('f' or 'F'))
         {
-            return lit.Text + "F";
+            return text + "F";
         }
         // A binary128-typed literal (a zig untyped literal at an `f128` sink, task #214) is the binary128 nearest its
         // spelling: through `double` when that is exact, else from its bits, rounded at compile time.
         if (lit.Type?.Unqualified is CType.Float128Type)
         {
-            if (Binary128Literal.IsExactDouble(lit.Text)) { return "Float128.FromDouble(" + lit.Text + ")"; }
+            if (Binary128Literal.IsExactDouble(lit.Text)) { return "Float128.FromDouble(" + text + ")"; }
             var (hi, lo) = Binary128Literal.ToBits(lit.Text);
             return System.FormattableString.Invariant($"Float128.FromBits(new System.UInt128(0x{hi:X16}UL, 0x{lo:X16}UL))");
         }
-        return lit.Text;
+        return text;
+    }
+
+    /// <summary>
+    /// The neutral decimal spelling <paramref name="text"/> as a C# REAL literal. C# lexes a real literal only with a
+    /// digit after its point and only when it has a point, an exponent or a real suffix. So C's empty fraction takes a
+    /// zero (<c>1.</c>, and <c>1.e5</c>, which C# reads as a member access), and a spelling with neither point nor
+    /// exponent (a hex float's decimal, <c>0x1p0</c> as <c>1</c>) takes <c>.0</c>, since as an INT literal
+    /// <c>0x1p0 / 3</c> would divide as integers.
+    /// </summary>
+    private static string RealLiteral(string text)
+    {
+        var suffix = text.Length > 0 && text[^1] is 'f' or 'F' ? 1 : 0;
+        var body = text[..^suffix];
+        var dot = body.IndexOf('.');
+        if (dot >= 0 && (dot + 1 == body.Length || body[dot + 1] is 'e' or 'E'))
+        {
+            body = body.Insert(dot + 1, "0");
+        }
+        else if (dot < 0 && suffix == 0 && body.Length > 0 && char.IsAsciiDigit(body[^1]) && body.IndexOfAny(['e', 'E']) < 0)
+        {
+            body += ".0";
+        }
+        return body + text[^suffix..];
     }
 
     /// <summary>Map a C primitive (keyed on its canonical C name) to the C# type it
