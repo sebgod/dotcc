@@ -172,6 +172,49 @@ public static unsafe partial class Libc
     [DllImport("libc", EntryPoint = "getrusage", SetLastError = true)]
     private static extern int PosixGetrusage(int who, void* usage);
 
+    /// <summary>The Linux resource numbers <c>&lt;sys/resource.h&gt;</c> defines, 0 (RLIMIT_CPU) to 9
+    /// (RLIMIT_AS).</summary>
+    private const int RlimitCount = 10;
+
+    /// <summary><c>getrlimit(resource, rlim)</c> — a resource's soft and hard limit into
+    /// <c>struct rlimit</c> (two <c>rlim_t</c>). Forwards to <c>getrlimit(2)</c> on Linux, whose
+    /// resource numbers the header uses. Elsewhere no per-process limit exists, so both are
+    /// RLIM_INFINITY; an unknown resource fails EINVAL.</summary>
+    public static int getrlimit(int resource, void* rlim)
+    {
+        if (OperatingSystem.IsLinux())
+        {
+            if (PosixGetrlimit(resource, rlim) == 0) { return 0; }
+            errno = Marshal.GetLastPInvokeError();
+            return -1;
+        }
+        if ((uint)resource >= RlimitCount) { errno = EINVAL; return -1; }
+        if (rlim == null) { errno = EFAULT; return -1; }
+        ((ulong*)rlim)[0] = ulong.MaxValue;
+        ((ulong*)rlim)[1] = ulong.MaxValue;
+        return 0;
+    }
+
+    /// <summary><c>setrlimit(resource, rlim)</c> — forwards to <c>setrlimit(2)</c> on Linux. Elsewhere
+    /// a limit cannot be imposed, so it fails EPERM (EINVAL for an unknown resource).</summary>
+    public static int setrlimit(int resource, void* rlim)
+    {
+        if (OperatingSystem.IsLinux())
+        {
+            if (PosixSetrlimit(resource, rlim) == 0) { return 0; }
+            errno = Marshal.GetLastPInvokeError();
+            return -1;
+        }
+        errno = (uint)resource >= RlimitCount ? EINVAL : EPERM;
+        return -1;
+    }
+
+    [DllImport("libc", EntryPoint = "getrlimit", SetLastError = true)]
+    private static extern int PosixGetrlimit(int resource, void* rlim);
+
+    [DllImport("libc", EntryPoint = "setrlimit", SetLastError = true)]
+    private static extern int PosixSetrlimit(int resource, void* rlim);
+
     [DllImport("kernel32.dll")]
     private static extern IntPtr GetCurrentProcess();
 
@@ -214,6 +257,42 @@ public static unsafe partial class Libc
 
     /// <inheritdoc cref="fcntl(int, int, int)"/>
     public static int fcntl(int fd, int cmd, ulong arg) => 0;
+
+    // ---- <sys/random.h> ----------------------------------------------------
+
+    /// <summary><c>getrandom(buf, buflen, flags)</c> (glibc <c>&lt;sys/random.h&gt;</c>): fills
+    /// <paramref name="buflen"/> bytes from the host's cryptographically secure generator, which is
+    /// seeded from boot and never blocks, so every flag is satisfied at once. Returns the count
+    /// filled, or -1 with <c>EINVAL</c> for an unknown flag.</summary>
+    public static long getrandom(void* buf, ulong buflen, uint flags)
+    {
+        if ((flags & ~7u) != 0) { errno = EINVAL; return -1; }
+        FillRandom((byte*)buf, buflen);
+        return (long)buflen;
+    }
+
+    /// <summary><c>getentropy(buffer, length)</c> (POSIX 2024 / glibc): fills at most 256 bytes from
+    /// the same generator as <see cref="getrandom"/>; a longer request fails with <c>EIO</c>, as
+    /// POSIX has it.</summary>
+    public static int getentropy(void* buffer, ulong length)
+    {
+        if (length > 256) { errno = EIO; return -1; }
+        FillRandom((byte*)buffer, length);
+        return 0;
+    }
+
+    /// <summary>Fill <paramref name="length"/> bytes at <paramref name="p"/> from
+    /// <c>RandomNumberGenerator</c>, a span of at most <c>int.MaxValue</c> bytes at a time.</summary>
+    private static void FillRandom(byte* p, ulong length)
+    {
+        while (length > 0)
+        {
+            var n = (int)System.Math.Min(length, (ulong)int.MaxValue);
+            System.Security.Cryptography.RandomNumberGenerator.Fill(new System.Span<byte>(p, n));
+            p += n;
+            length -= (ulong)n;
+        }
+    }
 
     // ---- <poll.h> ----------------------------------------------------------
 

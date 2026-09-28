@@ -19,9 +19,21 @@ typedef struct { void *__handle; } DIR;
 
 struct dirent {
     char           d_name[256];   /* offset 0 — the entry name (see note) */
-    unsigned long  d_ino;
-    unsigned char  d_type;
+    unsigned long  d_ino;         /* 0: .NET does not report inode numbers */
+    unsigned char  d_type;        /* a DT_* value below */
 };
+
+/* d_type values (Linux's). readdir reports a directory, a regular file or a
+   symbolic link, as .NET's enumeration tells them apart (anything else, a
+   device or a socket, reads as a regular file); "." and ".." are DT_DIR. */
+#define DT_UNKNOWN 0
+#define DT_FIFO    1
+#define DT_CHR     2
+#define DT_DIR     4
+#define DT_BLK     6
+#define DT_REG     8
+#define DT_LNK     10
+#define DT_SOCK    12
 
 DIR *opendir(const char *name);
 struct dirent *readdir(DIR *dirp);

@@ -1,0 +1,4 @@
+getrandom: 32 1
+nonblock: 32
+getentropy: 0 1
+too long: -1 1

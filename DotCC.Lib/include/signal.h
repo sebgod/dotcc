@@ -76,6 +76,10 @@ struct sigaction {
 #define SA_SIGINFO  0x00000004
 #define SA_RESTART  0x10000000
 #define SA_NODEFER  0x40000000
+/* Run the handler on the alternate signal stack. dotcc has no sigaltstack(),
+   so no stack is ever set up and the flag changes nothing, as on a thread
+   that set up none. */
+#define SA_ONSTACK  0x08000000
 #define SIG_BLOCK   0
 #define SIG_UNBLOCK 1
 #define SIG_SETMASK 2

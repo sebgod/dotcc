@@ -82,11 +82,25 @@ int pipe(int *pipefd);
    (real OS pids); fork/exec/wait have no .NET primitive and fail. */
 int getpid(void);
 int getppid(void);
+/* getentropy() is <sys/random.h>'s (DotCC.Libc.PosixLib), which glibc also declares here. */
+int getentropy(void *buffer, unsigned long length);
 unsigned int sleep(unsigned int seconds);
+/* No signal interrupts a wait on .NET, so pause() never returns. */
+int pause(void);
 int fork(void);
 int execvp(const char *file, char *const argv[]);
 int execv(const char *path, char *const argv[]);
 unsigned int alarm(unsigned int seconds);
 void _exit(int status);
+
+/* Configuration values (POSIX sysconf), with Linux's names for them. The
+   clock tick is the unit of times() (<sys/times.h>); any name not listed
+   fails EINVAL. */
+#define _SC_CLK_TCK           2
+#define _SC_PAGESIZE          30
+#define _SC_PAGE_SIZE         _SC_PAGESIZE
+#define _SC_NPROCESSORS_CONF  83
+#define _SC_NPROCESSORS_ONLN  84
+long sysconf(int name);
 
 #endif /* _UNISTD_H */

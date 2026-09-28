@@ -38,6 +38,20 @@ double difftime(time_t end, time_t beginning);
 #define TIME_UTC 1
 int timespec_get(struct timespec* ts, int base);
 
+/* POSIX clocks (clock_gettime / clock_getres), with Linux's ids.
+   CLOCK_REALTIME is UTC since the epoch; CLOCK_MONOTONIC counts from an
+   arbitrary fixed point and never steps; CLOCK_PROCESS_CPUTIME_ID is the
+   process's user plus system CPU time. A thread's own CPU time is not
+   available, so CLOCK_THREAD_CPUTIME_ID fails EINVAL, as any unknown clock
+   does. */
+typedef int clockid_t;
+#define CLOCK_REALTIME           0
+#define CLOCK_MONOTONIC          1
+#define CLOCK_PROCESS_CPUTIME_ID 2
+#define CLOCK_THREAD_CPUTIME_ID  3
+int clock_gettime(clockid_t clk, struct timespec* ts);
+int clock_getres(clockid_t clk, struct timespec* res);
+
 /* Calendar conversions. gmtime/localtime/asctime/ctime return a pointer
    into a reused static buffer (overwritten by the next call). */
 struct tm* gmtime(time_t* timer);
