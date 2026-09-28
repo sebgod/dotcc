@@ -15,7 +15,26 @@ namespace DotCC;
 /// </summary>
 internal static class Program
 {
+    /// <summary>The stack the compile runs on. The binder, backend and parse-tree
+    /// printing recurse as deep as the program nests, and a C initializer list or
+    /// <c>else if</c> chain nests as deep as it is long (CPython's unicodetype_db.h
+    /// tables run to thousands of elements), far past the default 1 MB. Reserved,
+    /// not committed: only the depth a compile reaches costs memory.</summary>
+    private const int CompileStackBytes = 512 * 1024 * 1024;
+
+    /// <summary>Run <see cref="MainOnLargeStack"/> on a thread with
+    /// <see cref="CompileStackBytes"/> of stack.</summary>
     public static int Main(string[] args)
+    {
+        var exit = 0;
+        var worker = new System.Threading.Thread(() => exit = MainOnLargeStack(args), CompileStackBytes);
+        worker.Start();
+        worker.Join();
+        return exit;
+    }
+
+    /// <summary>The CLI proper: parse the arguments and run the compile.</summary>
+    private static int MainOnLargeStack(string[] args)
     {
         Console.OutputEncoding = Encoding.UTF8;
 
