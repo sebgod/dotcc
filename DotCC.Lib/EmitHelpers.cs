@@ -398,6 +398,36 @@ internal static class EmitHelpers
 
     // ---- hexadecimal floating constants ---------------------------------
 
+    /// <summary>The value of the C integer constant <paramref name="raw"/> (C11 6.4.4.1):
+    /// decimal, hex (<c>0x</c>), octal (a leading <c>0</c>) or binary (C23 <c>0b</c>), with
+    /// digit separators and a <c>u</c>/<c>l</c> suffix. False when it is not one, or when it
+    /// overflows 64 bits.</summary>
+    internal static bool TryParseIntConstant(string raw, out ulong value)
+    {
+        value = 0;
+        var end = raw.Length;
+        while (end > 0 && raw[end - 1] is 'u' or 'U' or 'l' or 'L') { end--; }
+        var digits = raw[..end].Replace("'", "");
+        if (digits.Length == 0) { return false; }
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        if (digits.Length > 2 && digits[0] == '0' && digits[1] is 'x' or 'X')
+        {
+            return ulong.TryParse(digits.AsSpan(2), System.Globalization.NumberStyles.AllowHexSpecifier, inv, out value);
+        }
+        var (start, radix) = digits.Length > 2 && digits[0] == '0' && digits[1] is 'b' or 'B' ? (2, 2)
+            : digits.Length > 1 && digits[0] == '0' ? (1, 8)
+            : (0, 10);
+        for (var i = start; i < digits.Length; i++)
+        {
+            var d = digits[i] - '0';
+            if (d < 0 || d >= radix) { return false; }
+            var next = unchecked(value * (ulong)radix + (ulong)d);
+            if (value > (ulong.MaxValue - (ulong)d) / (ulong)radix) { return false; }
+            value = next;
+        }
+        return true;
+    }
+
     /// <summary>Parse a hexadecimal floating constant (<c>0xH.HHp±E</c>, C99 / Zig
     /// <c>0x1.8p3</c>) to its exact binary value and render it as a round-trippable C#
     /// decimal literal (C# has no hex-float syntax). The optional trailing C suffix
