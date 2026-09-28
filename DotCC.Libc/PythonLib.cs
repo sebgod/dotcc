@@ -9,15 +9,15 @@ using System.Text;
 namespace DotCC.Libc;
 
 /// <summary>
-/// The CPython <b>Limited API (abi3)</b> behind dotcc's synthetic <c>&lt;Python.h&gt;</c>
-/// — "pretend to be CPython" so a C extension module (a <c>PyInit_&lt;name&gt;</c>, its
+/// The CPython <b>Limited API (abi3)</b> behind dotcc's synthetic <c>&lt;Python.h&gt;</c>:
+/// "pretend to be CPython" so a C extension module (a <c>PyInit_&lt;name&gt;</c>, its
 /// <c>PyMethodDef</c> table, <c>PyArg_ParseTuple</c> / <c>Py_BuildValue</c>, the error
 /// indicator, …) compiles with dotcc and runs on .NET against a managed object model
 /// instead of libpython (docs/FRONTEND-IDEAS.md #1).
 /// </summary>
 /// <remarks>
 /// <para><b>Handles, not addresses.</b> A <c>PyObject*</c> is an opaque handle into a
-/// managed table (slot index + 1, shifted left 4 — non-NULL, never dereferenced). This is
+/// managed table (slot index + 1, shifted left 4; non-NULL, never dereferenced). This is
 /// what the Limited API buys: <c>PyObject</c> is opaque and <c>Py_INCREF</c> is a
 /// function call, so no extension depends on an object layout. <see cref="_object"/> is
 /// the empty runtime struct <c>struct _object</c> resolves to (the <c>struct tm</c>
@@ -26,7 +26,7 @@ namespace DotCC.Libc;
 /// borrowed vs. stolen references follow the CPython documentation per function, and an
 /// object is released (its slot recycled, its children decref'd) when the count reaches
 /// zero. Singletons and built-in type objects are immortal. There is no cycle collector,
-/// so a reference cycle leaks — as does a module and its functions (each function holds
+/// so a reference cycle leaks, as does a module and its functions (each function holds
 /// its module, as in CPython; extension modules are never unloaded there either).</para>
 /// <para><b>Values.</b> <c>int</c> is a 64-bit <c>long</c> (no arbitrary precision);
 /// <c>float</c> a <c>double</c>; <c>str</c> a .NET <c>string</c> (UTF-8 at the C boundary,
@@ -35,13 +35,13 @@ namespace DotCC.Libc;
 /// tuple of those, or an identity-hashed object (module, type, function).</para>
 /// <para><b>Scope.</b> Single-phase init (<c>PyModule_Create</c>), calling conventions
 /// <c>METH_VARARGS</c> (± <c>METH_KEYWORDS</c>), <c>METH_NOARGS</c>, <c>METH_O</c>. No
-/// <c>METH_FASTCALL</c>, multi-phase init, heap types, bytes/buffer protocol, or GIL —
+/// <c>METH_FASTCALL</c>, multi-phase init, heap types, bytes/buffer protocol, or GIL;
 /// the shim is single-threaded (the error indicator is per-thread, like CPython's).</para>
 /// <para><b>Hosting.</b> <see cref="PyHost"/> is the managed side: import a module from
-/// its <c>PyInit_*</c> function pointer and call into it with .NET values — the seam a
+/// its <c>PyInit_*</c> function pointer and call into it with .NET values. This is the seam a
 /// managed Python runtime (IronPython or a dotcc Python front-end) would sit on.</para>
 /// <para>The header's <c>PyModuleDef</c>/<c>PyMethodDef</c> bodies are read through
-/// <see cref="PyModuleDefView"/>/<see cref="PyMethodDefView"/> — keep those layouts in
+/// <see cref="PyModuleDefView"/>/<see cref="PyMethodDefView"/>; keep those layouts in
 /// sync with <c>DotCC.Lib/include/Python.h</c>.</para>
 /// </remarks>
 public static unsafe partial class Libc
@@ -86,9 +86,9 @@ public static unsafe partial class Libc
         internal const int METH_VARARGS = 0x1, METH_KEYWORDS = 0x2, METH_NOARGS = 0x4, METH_O = 0x8;
         internal const long Immortal = long.MaxValue / 2;
 
-        internal sealed class Obj
+        internal sealed class Obj(object v)
         {
-            public object V = null!;
+            public object V = v;
             public long Refs;
             public int Slot;
             public byte* Utf8;
@@ -238,7 +238,7 @@ public static unsafe partial class Libc
 
         internal static nint New(object v)
         {
-            var o = new Obj { V = v, Refs = 1 };
+            var o = new Obj(v) { Refs = 1 };
             int slot;
             if (FreeSlots.Count > 0)
             {
@@ -620,7 +620,7 @@ public static unsafe partial class Libc
 
         /// <summary>A structural key for dict lookup (Python equality: 1 == 1.0 == True).
         /// False + TypeError set for an unhashable value.</summary>
-        internal static bool TryKey(nint h, out object key)
+        internal static bool TryKey(nint h, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out object? key)
         {
             switch (V(h))
             {
@@ -636,14 +636,15 @@ public static unsafe partial class Libc
                     var parts = new object[t.Items.Length];
                     for (int i = 0; i < parts.Length; i++)
                     {
-                        if (!TryKey(t.Items[i], out parts[i])) { key = null!; return false; }
+                        if (!TryKey(t.Items[i], out var part)) { key = null; return false; }
+                        parts[i] = part;
                     }
                     key = new TupleKey(parts);
                     return true;
                 }
                 case ListV or DictV:
                     Raise(TypeError, $"unhashable type: '{TypeName(h)}'");
-                    key = null!;
+                    key = null;
                     return false;
                 default:
                     key = Get(h); // identity hash (modules, types, functions, exceptions)
@@ -651,7 +652,7 @@ public static unsafe partial class Libc
             }
         }
 
-        /// <summary>d[key] = val — both borrowed (the dict takes its own references).</summary>
+        /// <summary>d[key] = val, both borrowed (the dict takes its own references).</summary>
         internal static bool DictSet(nint dict, nint key, nint val)
         {
             var d = (DictV)V(dict);
@@ -673,16 +674,20 @@ public static unsafe partial class Libc
         }
 
         /// <summary>d[key] as a borrowed reference, or 0 when missing / unhashable (with
-        /// the lookup error cleared — PyDict_GetItem suppresses errors).</summary>
+        /// the lookup error cleared, since PyDict_GetItem suppresses errors).</summary>
         internal static nint DictGet(nint dict, nint key)
         {
             var d = (DictV)V(dict);
             var saved = Err;
             Err = 0;
-            bool ok = TryKey(key, out var k);
-            if (!ok) { SetErr(0); }
+            if (!TryKey(key, out var k))
+            {
+                SetErr(0);
+                Err = saved;
+                return 0;
+            }
             Err = saved;
-            return ok && d.Index.TryGetValue(k, out int at) ? d.Vals[at] : 0;
+            return d.Index.TryGetValue(k, out int at) ? d.Vals[at] : 0;
         }
 
         internal static nint DictGetString(nint dict, string key)
@@ -734,7 +739,7 @@ public static unsafe partial class Libc
             }
         }
 
-        /// <summary>callable(*args, **kwargs) — <paramref name="args"/> a tuple,
+        /// <summary>callable(*args, **kwargs), with <paramref name="args"/> a tuple,
         /// <paramref name="kwargs"/> a dict or 0; both borrowed. New reference or 0.</summary>
         internal static nint Call(nint callable, nint args, nint kwargs)
         {
@@ -2074,7 +2079,7 @@ public static unsafe partial class Libc
         /// <summary>The object's current reference count.</summary>
         public static long RefCount(nint obj) => PyRt.Get(obj).Refs;
 
-        /// <summary>Live (non-immortal) objects in the table — a leak probe.</summary>
+        /// <summary>Live (non-immortal) objects in the table, a leak probe.</summary>
         public static int LiveObjects => PyRt.Live;
 
         /// <summary>Convert the pending Python exception (or a SystemError when none is set)

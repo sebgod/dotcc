@@ -1,5 +1,5 @@
 /* A tiny host for the spam extension (spam.c): "import" it by calling
-   PyInit_spam, then drive it through the same C-API a real interpreter uses —
+   PyInit_spam, then drive it through the same C-API a real interpreter uses:
    attribute lookup, calls with positional and keyword arguments built by
    Py_BuildValue, repr() of each result, and the raised exception's qualified
    type name + message on failure. Plain Limited-API C: built against real

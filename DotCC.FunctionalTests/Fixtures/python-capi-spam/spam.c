@@ -1,4 +1,4 @@
-/* spam — the CPython docs' canonical extension module ("Extending Python with
+/* spam: the CPython docs' canonical extension module ("Extending Python with
    C or C++"), grown into a small tour of the Limited API: every calling
    convention the shim offers (METH_VARARGS, METH_VARARGS|METH_KEYWORDS,
    METH_NOARGS, METH_O), PyArg_ParseTuple / PyArg_ParseTupleAndKeywords /

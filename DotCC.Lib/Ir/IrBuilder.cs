@@ -1050,7 +1050,7 @@ internal sealed partial class IrBuilder
                     Gate(1999, "flexible array member", m);
                     fields.Add(new StructField(Tok(sm.Arg1), new CType.Array(ResolveType(sm.Arg0), 1)));
                     break;
-                // `Ret (*name[N])(params);` — an array-of-fn-ptrs member. (A scalar
+                // `Ret (*name[N])(params);`: an array-of-fn-ptrs member. (A scalar
                 // fn-ptr member is a DeclItem of structMemberList.)
                 case C.StructFnPtrArrMember sm:
                 {
@@ -1156,7 +1156,7 @@ internal sealed partial class IrBuilder
     };
 
     /// <summary>Whether a <c>FnPtrQuals</c> run (the qualifiers after a declarator's
-    /// <c>*</c>) includes <c>const</c> — the pointer itself is then read-only.
+    /// <c>*</c>) includes <c>const</c> (the pointer itself is then read-only).
     /// <c>volatile</c> / <c>restrict</c> have no C# model and are accepted.</summary>
     private static bool QualsHaveConst(Item quals) => quals.Content switch
     {
@@ -1167,7 +1167,7 @@ internal sealed partial class IrBuilder
         _ => throw new IrUnsupportedException(TypeName(quals.Content)),
     };
 
-    /// <summary>A <c>FnPtrName</c> — <c>(*name)</c> / <c>(*quals name)</c> — as the
+    /// <summary>A <c>FnPtrName</c> (<c>(*name)</c> / <c>(*quals name)</c>) as the
     /// fn-ptr type over <paramref name="ret"/> (const-qualified for <c>*const</c>).</summary>
     private (string Name, CType Type) FnPtrDeclarator(CType ret, Item nameItem, Item tailItem)
     {
@@ -1203,10 +1203,10 @@ internal sealed partial class IrBuilder
         return BuildArrDecl(a.Elem, a.Name, a.Dims, initItem, implicitSize: a.Dims is null);
     }
 
-    /// <summary>C's dlsym idiom — <c>int (*fn)(int) = (int(*)(int))dlsym(h, "add");</c>:
+    /// <summary>C's dlsym idiom, <c>int (*fn)(int) = (int(*)(int))dlsym(h, "add");</c>:
     /// a native-convention initializer (<c>CType.Func.IsNativeCallConv</c>, set at the
     /// cast of a dlsym call) makes the declared fn-ptr native too, so calls through it
-    /// use <c>delegate* unmanaged[Cdecl]</c>. Calls render unchanged — C# picks the calli
+    /// use <c>delegate* unmanaged[Cdecl]</c>. Calls render unchanged; C# picks the calli
     /// convention from the variable's type.</summary>
     private static void PropagateNativeCallConv(Symbol sym, CExpr? init)
     {
@@ -2159,7 +2159,7 @@ internal sealed partial class IrBuilder
         return new DeclStmt(System.Array.Empty<LocalDecl>());
     }
 
-    /// <summary>File-scope <c>T x = {};</c> (C23) — a zero-initialized field.</summary>
+    /// <summary>File-scope <c>T x = {};</c> (C23): a zero-initialized field.</summary>
     private void BuildGlobalEmptyInit(Item typeItem, Item nameItem)
     {
         var type = ResolveType(typeItem);
@@ -2336,7 +2336,7 @@ internal sealed partial class IrBuilder
                 case C.DeclItemListOne o: Walk(o.Arg0); break;
                 case C.DeclItem di: add(Tok(di.Arg0), null, baseType); break;
                 case C.DeclItemInit di: add(Tok(di.Arg0), di.Arg2, baseType); break;
-                // `Ret (*name)(params) [= E]` — the list's base type is the RETURN type.
+                // `Ret (*name)(params) [= E]`: the list's base type is the RETURN type.
                 case C.DeclItemFnPtr fp: { var (n, t) = FnPtrDeclarator(baseType, fp.Arg0, fp.Arg1); add(n, null, t); break; }
                 case C.DeclItemFnPtrInit fp: { var (n, t) = FnPtrDeclarator(baseType, fp.Arg0, fp.Arg1); add(n, fp.Arg3, t); break; }
                 case C.DeclItemTailPlain t: WalkTail(t.Arg0, 0); break;

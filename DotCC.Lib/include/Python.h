@@ -1,12 +1,12 @@
 #ifndef Py_PYTHON_H
 #define Py_PYTHON_H
 
-/* dotcc's <Python.h> — a "pretend to be CPython" header for building C
+/* dotcc's <Python.h>: a "pretend to be CPython" header for building C
    extension modules against the stable ABI (the Limited API / abi3). Only the
    Limited API is offered: PyObject is OPAQUE and every refcount operation is a
    function call, so an extension never depends on an object layout. The
    runtime half is DotCC.Libc/PythonLib.cs, which implements this surface over
-   a managed object model (a handle table — a PyObject* is a handle, never a
+   a managed object model (a handle table: a PyObject* is a handle, never a
    real address; see docs/FRONTEND-IDEAS.md #1).
 
    Model notes (where this header deliberately differs from CPython's):
@@ -14,7 +14,7 @@
      version, steering `#ifdef Py_LIMITED_API` code onto its abi3 path.
    - `struct _object` has no body here: it is the runtime's opaque
      Libc._object (the same pattern as <time.h>'s struct tm), so
-     `sizeof(PyObject)` and `o->ob_refcnt` do not compile — as abi3 intends.
+     `sizeof(PyObject)` and `o->ob_refcnt` do not compile, as abi3 intends.
    - PyTypeObject is an alias of PyObject (types are objects in the handle
      table); PyType_* and Py_TYPE take / return the same handle type.
    - Single-phase init only: PyModule_Create. A PyModuleDef with m_slots
