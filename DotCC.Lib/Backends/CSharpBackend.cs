@@ -172,10 +172,10 @@ internal sealed class CSharpBackend
             // Unsafe.AsPointer / Volatile.* accept it (CS0306) — the init pointer
             // value is cast to nint, reads cast back. (Backend decision from the
             // abstract AddressTaken fact.)
-            var nint = NintStorage(g.Sym);
+            var nint = cg.NintStorage(g.Sym);
             var fieldType = nint ? "nint" : cg.Cs(g.Sym.Type);
             string? initText = g.Init is { } i
-                ? nint ? $"(nint)({cg.StaticInit(i, g.Sym.Type)})" : cg.StaticInit(i, g.Sym.Type)
+                ? nint ? cg.NintValue(cg.StaticInit(i, g.Sym.Type), i) : cg.StaticInit(i, g.Sym.Type)
                 : null;
             // C11 `_Thread_local` / Zig `threadlocal` — thread storage duration:
             // every thread gets its own slot, zeroed by [ThreadStatic]. A non-zero
@@ -1484,13 +1484,25 @@ internal sealed class CSharpBackend
     /// static field (CS0212), so the slot is an <c>nint</c>. The <see cref="Symbol.IsGlobal"/>
     /// guard scopes this to file-scope/function-static fields: locals are emitted as real
     /// pointers (no moveable-field/Unsafe constraints apply), so an address-taken local —
-    /// which now also carries the neutral fact — must NOT be reinterpreted as <c>nint</c>.</summary>
-    private static bool NintStorage(Symbol s) => s.AddressTaken && s.IsGlobal && s.Type.IsPointerLowered;
+    /// which now also carries the neutral fact — must NOT be reinterpreted as <c>nint</c>.
+    /// In an object, a pointer global with external linkage is always an <c>nint</c> slot:
+    /// whether some unit takes its address (genobject.c's <c>&amp;PyExc_GeneratorExit</c>, a
+    /// global exceptions.c defines) is a whole-program fact no one object knows, and every
+    /// object must agree on the field's type.</summary>
+    private bool NintStorage(Symbol s) => s is { IsGlobal: true, Kind: SymKind.Var } && s.Type.IsPointerLowered
+        && (s.AddressTaken || _module is { IsObject: true } && !s.IsTuLocal && !s.FromSystemHeader);
+
+    /// <summary>The text of a pointer value stored into an <c>nint</c> slot. A function designator
+    /// renders as a method group, which converts only to a function-pointer type (CS8812), so it
+    /// goes through its own first (myreadline.c's <c>PyOS_ReadlineFunctionPointer =
+    /// PyOS_StdioReadline</c>).</summary>
+    private string NintValue(string text, CExpr value)
+        => IsFunctionDesignator(value) ? $"(nint)({Cs(value.Type.Unqualified)})({text})" : $"(nint)({text})";
 
     /// <summary>True when an lvalue is a pointer global whose backing field codegen
     /// declared as <c>nint</c>; such a slot is reinterpreted directly, not through
     /// its address.</summary>
-    private static bool StoredAsNint(CExpr e) => e switch
+    private bool StoredAsNint(CExpr e) => e switch
     {
         VarRef v => NintStorage(v.Sym),
         Paren p => StoredAsNint(p.Inner),
@@ -2469,7 +2481,7 @@ internal sealed class CSharpBackend
                         var pstored = a.CompoundOp is { } pcop
                             ? $"({pty}){VolatileRead(slot)} {BinSym(pcop)} {Sub(a.Value, Prec(pcop) + 1)}"
                             : Coerced(a.Value, a.Target.Type);
-                        return ($"global::System.Threading.Volatile.Write(ref {slot}, (nint)({pstored}))", PPrimary);
+                        return ($"global::System.Threading.Volatile.Write(ref {slot}, {(a.CompoundOp is null ? NintValue(pstored, a.Value) : $"(nint)({pstored})")})", PPrimary);
                     }
                     if (!HasVolatileOverload(a.Target.Type) && a.CompoundOp is null)
                     {
@@ -2496,7 +2508,7 @@ internal sealed class CSharpBackend
                     var val = a.CompoundOp is { } cop
                         ? $"({pty}){lv} {BinSym(cop)} {Sub(a.Value, Prec(cop) + 1)}"
                         : Coerced(a.Value, a.Target.Type);
-                    return ($"{lv} = (nint)({val})", PAssign);
+                    return ($"{lv} = {(a.CompoundOp is null ? NintValue(val, a.Value) : $"(nint)({val})")}", PAssign);
                 }
             case Assign { CompoundOp: { } cop } a:
                 {
@@ -3450,8 +3462,11 @@ internal sealed class CSharpBackend
         // same-named external (BuildFuncDef). Falls back to the escaped raw name
         // for libc builtins / unresolved callees. A fn-ptr variable callee spells
         // like any other reference to it (a static local's mangled field, a
-        // type-shadowed global's DotCcGlobals qualification).
-        var target = c.CalleeSym is { Kind: SymKind.Var or SymKind.Param } v ? GlobalName(v)
+        // type-shadowed global's DotCcGlobals qualification). One stored as an nint slot
+        // (an external fn-pointer global in an object, CPython's PyOS_InputHook) is read
+        // back to its pointer type first.
+        var target = c.CalleeSym is { Kind: SymKind.Var or SymKind.Param } v
+                ? NintStorage(v) ? $"({Expr(new VarRef(v) { Type = v.Type, IsLValue = true })})" : GlobalName(v)
             : c.CalleeSym?.TargetName ?? DotCC.EmitHelpers.Id(c.Callee);
         return $"{target}({string.Join(", ", a)})";
     }
