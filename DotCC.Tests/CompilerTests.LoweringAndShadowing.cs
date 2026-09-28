@@ -116,6 +116,38 @@ public sealed partial class CompilerTests
         finally { File.Delete(src); }
     }
 
+    [Theory]
+    [InlineData("_Static_assert(MISSING_MAX > 0, \"m\");\nint main() { return 0; }", "'MISSING_MAX' undeclared here (not in a function)")]
+    [InlineData("int main() { _Static_assert(MISSING_MAX > 0, \"m\"); return 0; }", "'MISSING_MAX' undeclared (first use in this function)")]
+    public void Static_assert_names_an_undeclared_identifier(string source, string message)
+    {
+        // GH #248: a header's missing macro reads as an unknown name in the
+        // assertion, which gcc reports as undeclared before "not constant".
+        var src = WriteTemp(source);
+        try
+        {
+            var ex = Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { src }));
+            ex.Message.ShouldContain(message);
+            ex.Message.ShouldContain("expression in static assertion is not constant");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Ssize_max_is_the_largest_ssize_t()
+    {
+        // GH #248: POSIX's SSIZE_MAX (<limits.h>), which CPython's pyport.h reads.
+        var src = WriteTemp("""
+            #include <limits.h>
+            #include <sys/types.h>
+            _Static_assert(SSIZE_MAX == LONG_MAX, "ssize_t is long");
+            _Static_assert(sizeof(ssize_t) == sizeof(long), "LP64");
+            int main() { return 0; }
+            """);
+        try { Compiler.EmitCSharp(new[] { src }).ShouldContain("static unsafe int main()"); }
+        finally { File.Delete(src); }
+    }
+
     [Fact]
     public void Static_assert_folds_enum_constants_and_ternary()
     {

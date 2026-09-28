@@ -48,4 +48,8 @@
 #define LLONG_MAX  LONG_MAX
 #define ULLONG_MAX ULONG_MAX
 
+/* POSIX (<limits.h>, XBD): the largest ssize_t, which dotcc's <sys/types.h>
+   defines as `long` (LP64). CPython's pyport.h reads it for PY_SSIZE_T_MAX. */
+#define SSIZE_MAX  LONG_MAX
+
 #endif
