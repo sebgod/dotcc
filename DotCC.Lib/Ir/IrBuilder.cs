@@ -1018,8 +1018,18 @@ internal sealed partial class IrBuilder
             {
                 case C.MembersCons c: Member(c.Arg0); Member(c.Arg1); break;
                 case C.MembersOne o: Member(o.Arg0); break;
+                // A member declarator list, bit-fields included. A bit-field
+                // (`T name : W`) is packed with its consecutive same-size
+                // neighbours into one backing field (MSVC storage-unit layout) and
+                // read through a masked / sign-extended accessor property, so
+                // sizeof, offsets and value semantics match C. An unnamed one
+                // (`T : W`) keeps an empty name and its width so the packing
+                // reserves its bits (a zero width starts a fresh storage unit); it
+                // is no accessible member and positional initializers skip it.
                 case C.StructMemberList sm:
-                    WalkDeclList(sm.Arg0, sm.Arg1, (name, _, type) => fields.Add(new StructField(name, type)));
+                    WalkDeclList(sm.Arg0, sm.Arg1,
+                        (name, _, type) => fields.Add(new StructField(name, type)),
+                        (name, type, width) => fields.Add(new StructField(name, type, BitFieldWidth(width))));
                     break;
                 // C11 anonymous struct/union member — its fields are promoted into
                 // the parent. Held in a generated nested aggregate + a hidden field;
@@ -1060,33 +1070,16 @@ internal sealed partial class IrBuilder
                         dims ?? throw new IrUnsupportedException("non-constant struct array bound"))));
                     break;
                 }
-                // `T name : W;` — a bit-field. Codegen packs consecutive same-size
-                // bit-fields into one shared backing field (MSVC storage-unit layout)
-                // + a masked/sign-extended accessor property, so sizeof + offsets
-                // match C while reads/writes keep C's value semantics.
-                case C.StructBitField sm:
-                {
-                    var w = ConstEval(BuildExpr(sm.Arg3)) ?? throw new IrUnsupportedException("non-constant bit-field width");
-                    fields.Add(new StructField(Tok(sm.Arg1), ResolveType(sm.Arg0), (int)w));
-                    break;
-                }
-                // `T : W;` — an anonymous bit-field (padding). Kept in the field list
-                // with an empty name and its width so the backend's packing reserves
-                // its bits (and a zero width forces the next field onto a fresh
-                // storage unit); it produces no accessible member and is skipped by
-                // positional initializers.
-                case C.StructAnonBitField sm:
-                {
-                    var w = ConstEval(BuildExpr(sm.Arg2)) ?? throw new IrUnsupportedException("non-constant anonymous bit-field width");
-                    fields.Add(new StructField("", ResolveType(sm.Arg0), (int)w));
-                    break;
-                }
                 default: throw new IrUnsupportedException(TypeName(m.Content));
             }
         }
         Member(memberList);
         return fields;
     }
+
+    /// <summary>A bit-field's width: an integer constant expression.</summary>
+    private int BitFieldWidth(Item width)
+        => (int)(ConstEval(BuildExpr(width)) ?? throw new IrUnsupportedException("non-constant bit-field width"));
 
     /// <summary>Add a C11 anonymous struct/union member: build it as a generated
     /// nested aggregate type, add a hidden container field to the parent, and record
@@ -2290,8 +2283,12 @@ internal sealed partial class IrBuilder
     /// <paramref name="baseType"/> by the grammar's <c>Type → Type *</c> rule;
     /// each subsequent declarator rebuilds its type from the pointer-stripped
     /// element plus its own <c>*</c>s (so <c>int *a, b;</c> ⇒ a:int*, b:int).
-    /// Shared by local (<see cref="BuildDecl"/>) and file-scope declarations.</summary>
-    private void WalkDeclList(Item typeItem, Item listItem, Action<string, Item?, CType> add)
+    /// Shared by local (<see cref="BuildDecl"/>) and file-scope declarations, and by
+    /// struct / union member lists, which alone pass <paramref name="addBitField"/>
+    /// (name, type, width item; the name is empty for an unnamed bit-field): a
+    /// bit-field declarator anywhere else is an error.</summary>
+    private void WalkDeclList(Item typeItem, Item listItem, Action<string, Item?, CType> add,
+        Action<string, CType, Item>? addBitField = null)
     {
         var baseType = ResolveType(typeItem);
         // Peel only the LITERAL trailing `*`s (the `Type → Type *` rule greedily
@@ -2303,6 +2300,17 @@ internal sealed partial class IrBuilder
         var litStars = CountLiteralStars(typeItem);
         var element = baseType;
         for (var i = 0; i < litStars && element is CType.Pointer p; i++) { element = p.Pointee; }
+        void BitField(string name, Item width, CType type, Item at)
+        {
+            if (addBitField is null)
+            {
+                Diagnostics.Add(new Diagnostic(Severity.Error,
+                    name.Length == 0 ? "unnamed bit-field outside a struct or union" : $"bit-field '{name}' outside a struct or union",
+                    SrcPos.From(at), _file));
+                return;
+            }
+            addBitField(name, type, width);
+        }
         void WalkTail(Item it, int stars)
         {
             switch (it.Content)
@@ -2315,6 +2323,8 @@ internal sealed partial class IrBuilder
                 case C.DeclItemTailPlain t: WalkTail(t.Arg0, stars); break;
                 case C.DeclItem di: add(Tok(di.Arg0), null, WrapPtr(element, stars)); break;
                 case C.DeclItemInit di: add(Tok(di.Arg0), di.Arg2, WrapPtr(element, stars)); break;
+                case C.DeclItemBitField bf: BitField(Tok(bf.Arg0), bf.Arg2, WrapPtr(element, stars), bf.Arg0); break;
+                case C.DeclItemAnonBitField ab: BitField("", ab.Arg1, WrapPtr(element, stars), ab.Arg0); break;
                 case C.DeclItemFnPtr fp: { var (n, t) = FnPtrDeclarator(WrapPtr(element, stars), fp.Arg0, fp.Arg1); add(n, null, t); break; }
                 case C.DeclItemFnPtrInit fp: { var (n, t) = FnPtrDeclarator(WrapPtr(element, stars), fp.Arg0, fp.Arg1); add(n, fp.Arg3, t); break; }
                 // `…, name[N]` — an array declarator in tail position. The type is
@@ -2336,6 +2346,8 @@ internal sealed partial class IrBuilder
                 case C.DeclItemListOne o: Walk(o.Arg0); break;
                 case C.DeclItem di: add(Tok(di.Arg0), null, baseType); break;
                 case C.DeclItemInit di: add(Tok(di.Arg0), di.Arg2, baseType); break;
+                case C.DeclItemBitField bf: BitField(Tok(bf.Arg0), bf.Arg2, baseType, bf.Arg0); break;
+                case C.DeclItemAnonBitField ab: BitField("", ab.Arg1, baseType, ab.Arg0); break;
                 // `Ret (*name)(params) [= E]`: the list's base type is the RETURN type.
                 case C.DeclItemFnPtr fp: { var (n, t) = FnPtrDeclarator(baseType, fp.Arg0, fp.Arg1); add(n, null, t); break; }
                 case C.DeclItemFnPtrInit fp: { var (n, t) = FnPtrDeclarator(baseType, fp.Arg0, fp.Arg1); add(n, fp.Arg3, t); break; }
