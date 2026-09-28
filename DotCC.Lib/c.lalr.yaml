@@ -483,8 +483,9 @@ symbols:
   - Designator     # 198 non-terminal: one `.member` or `[index]` step of a Designation
   - ArrDeclarator  # 199 non-terminal: an array declarator `name[N]…`, `name[]`, `name[][N]…`, `(name[N])`
   - BraceInit      # 200 non-terminal: a brace-enclosed initializer `{ InitList }` / `{ }`
-  - 'register'     # 201 keyword (C89): storage class, a Type prefix (see typeRegister)
+  - 'register'     # 201 keyword (C89): storage class, a DeclSpec
   - ExternalDecls  # 202 non-terminal: a translation unit's external declarations, possibly none
+  - DeclSpec       # 203 non-terminal: a storage-class or function specifier, a Type prefix or suffix
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -507,18 +508,17 @@ productions:
       - { lhs: FnList, rhs: [Fn],          action: fnsOne }
 
   # A function definition's signature (`Fn → FnSig Block`); a prototype is an
-  # ordinary declaration whose declarator is a function declarator (DeclItem). The
-  # storage class × parameter-list combinations: `()` declares no parameter
-  # information (K&R), and `(void)` is a one-Param ParamList the binder reads as
-  # no parameters (C11 6.7.6.3p10), as in every parameter list. After the
-  # parameters, `{` selects a FnSig (a definition) and `;` / `,` a function
-  # declarator (FOLLOW(FnSig) is `{` alone).
+  # ordinary declaration whose declarator is a function declarator (DeclItem). A
+  # storage class or function specifier is part of the Type (DeclSpec), so
+  # `static inline T f()`, `inline static T f()` and `extern T f()` are all this
+  # shape. `()` declares no parameter information (K&R), and `(void)` is a
+  # one-Param ParamList the binder reads as no parameters (C11 6.7.6.3p10), as in
+  # every parameter list. After the parameters, `{` selects a FnSig (a
+  # definition) and `;` / `,` a function declarator (FOLLOW(FnSig) is `{` alone).
   - derivation: none
     rules:
       - { lhs: FnSig, rhs: [Type, ID, '(', ParamList, ')'],     action: fnSig }
       - { lhs: FnSig, rhs: [Type, ID, '(', ')'],                action: fnSigNoArgs }
-      - { lhs: FnSig, rhs: ['static', Type, ID, '(', ParamList, ')'], action: fnSigStatic }
-      - { lhs: FnSig, rhs: ['static', Type, ID, '(', ')'],            action: fnSigStaticNoArgs }
       # Parenthesized function-name declarator: `T (name)(args)` ≡ `T name(args)`.
       # The parens are pure grouping around the declarator name. Lua wraps every
       # public API name this way in lua.h prototypes — `LUA_API lua_State
@@ -529,8 +529,6 @@ productions:
       # lua_State *(lua_newstate)(…);` is the matching function declarator.)
       - { lhs: FnSig, rhs: [Type, '(', ID, ')', '(', ParamList, ')'], action: fnSigParen }
       - { lhs: FnSig, rhs: [Type, '(', ID, ')', '(', ')'],            action: fnSigParenNoArgs }
-      - { lhs: FnSig, rhs: ['static', Type, '(', ID, ')', '(', ParamList, ')'], action: fnSigStaticParen }
-      - { lhs: FnSig, rhs: ['static', Type, '(', ID, ')', '(', ')'],            action: fnSigStaticParenNoArgs }
       # Function returning a function pointer: `Type (*name(params))(trailing)`.
       # The `(*name(params))` is the declarator; `(trailing)` is the parameter
       # list of the returned function pointer. E.g. `void (*signal(int, void(*)(int)))(int)`.
@@ -560,13 +558,6 @@ productions:
       # declaration, followed by the caller's own `;`). Not an ISO C declaration;
       # gcc accepts it and warns under -pedantic, as dotcc does.
       - { lhs: Fn, rhs: [';'], action: fnEmpty }
-      # `typedef` is a storage class over an ordinary declarator list (C11 6.7.1):
-      # each declarator names an alias of its full type, so every declarator form
-      # works (`typedef int Color, *ColorPtr, Row[8], (*Cmp)(int, int);`), and a tag
-      # definition in the Type gives `typedef struct Foo { … } Foo;`, `typedef
-      # struct { … } Foo;`, `typedef enum { … } Mode;`. The TypeNameRewriter records
-      # each declarator's name as a typedef name, so later uses lex as TYPE_NAME.
-      - { lhs: Fn, rhs: ['typedef', Type, DeclItemList, ';'], action: typedefDecl }
       # The parameter tail of a raw (un-typedef'd) function-pointer declarator,
       # shared by the file-scope, array, static-local and array-member forms
       # below. `(void)` arrives as a one-Param ParamList, as everywhere else.
@@ -596,28 +587,19 @@ productions:
       - { lhs: FnPtrQuals, rhs: [FnPtrQuals, 'const'],    action: fnPtrQualsConst }
       - { lhs: FnPtrQuals, rhs: [FnPtrQuals, 'volatile'], action: fnPtrQualsVolatile }
       - { lhs: FnPtrQuals, rhs: [FnPtrQuals, 'restrict'], action: fnPtrQualsRestrict }
-      # File-scope object declarations: `Type` then any init-declarator list
-      # (`int x;`, `int a = 1, *p, buf[N] = "…", (*fn)(int);`, `struct P o = { … };`,
-      # `Ret (*tab[])(int) = { … };`). Each declarator lowers to a `DotCcGlobals`
-      # field: a scalar / struct as a `static unsafe T name [= init]`, an array as a
-      # pinned, rooted managed array behind a `T*` (Libc.GlobalArray*), so the
-      # subscript / sizeof machinery of block-scope `stackalloc` arrays applies. The
-      # same `DeclItemList` as block scope, struct members and `static` locals, so
-      # every declarator works in every position.
+      # File-scope declarations: `Type` then any init-declarator list (`int x;`,
+      # `int a = 1, *p, buf[N] = "…", (*fn)(int);`, `struct P o = { … };`, `Ret
+      # (*tab[])(int) = { … };`). The storage class is part of the Type (DeclSpec),
+      # and the binder dispatches on it: `typedef` names an alias per declarator
+      # (`typedef int Color, *ColorPtr, Row[8], (*Cmp)(int, int);`, `typedef struct
+      # Foo { … } Foo;`; the TypeNameRewriter records each name, so later uses lex
+      # as TYPE_NAME), `extern` declares without defining (the storage lives in
+      # another TU), and a plain or `static` object lowers to a `DotCcGlobals`
+      # field (a scalar / struct as a `static unsafe T name [= init]`, an array as a
+      # pinned, rooted managed array behind a `T*`, Libc.GlobalArray*). The same
+      # `DeclItemList` as block scope, struct members and `static` locals, so every
+      # declarator works in every position.
       - { lhs: Fn, rhs: [Type, DeclItemList, ';'], action: globalDeclList }
-      # File-scope `static T x;` — internal linkage + static storage duration.
-      # In dotcc's single-program model internal-vs-external linkage is a no-op
-      # for variables (they're never exported), so this lowers exactly like a
-      # plain global: a field in DotCcGlobals. The `static` keyword is consumed.
-      - { lhs: Fn, rhs: ['static', Type, DeclItemList, ';'], action: globalStaticDeclList }
-
-      # `extern` declarations DECLARE without defining (the definition or storage
-      # lives in another TU): an extern function prototype (`extern T f(args);`, a
-      # function declarator) or object (`extern T x;`) emits nothing. An extern
-      # function DEFINITION (`extern T f(args) { … }`) is a normal definition
-      # (extern is the default function linkage).
-      - { lhs: Fn, rhs: ['extern', FnSig, Block],            action: externFnDef }
-      - { lhs: Fn, rhs: ['extern', Type, DeclItemList, ';'], action: externVarDecl }
 
       # `_Static_assert(expr, "msg");` (C11) and `_Static_assert(expr);`
       # (C23, message optional). File-scope form. Compile-time only — no
@@ -745,22 +727,19 @@ productions:
       - { lhs: Type, rhs: [Type, 'const'],    action: typeConstPost }
       - { lhs: Type, rhs: ['volatile', Type], action: typeVolatile }
       - { lhs: Type, rhs: [Type, 'volatile'], action: typeVolatilePost }
-      # Function specifiers (C11 6.7.4: `inline`, `_Noreturn`) and the storage
-      # classes that are not declaration-level productions (`_Thread_local`,
-      # C23 `constexpr`, `register`) — Type PREFIXES for the same reason as the
-      # qualifiers: a prefix composes with every Type, where a TypeSpec could not
-      # absorb a typedef-name or a tag (`inline Table *f()`, Lua's
-      # `static inline OpCode g()`, `_Thread_local const struct S *p`,
-      # `register size_t n`). Each is recorded for the enclosing declaration and
-      # dropped from the type: `inline` → [MethodImpl(AggressiveInlining)],
-      # `_Noreturn` → [DoesNotReturn], `_Thread_local` → [ThreadStatic] (file scope
-      # only), `constexpr` binds the folded value (C23 6.7.1), `register` has no
-      # effect beyond C's constraints (no address, no file scope).
-      - { lhs: Type, rhs: ['inline', Type],        action: typeInline }
-      - { lhs: Type, rhs: ['_Noreturn', Type],     action: typeNoreturn }
-      - { lhs: Type, rhs: ['_Thread_local', Type], action: typeThreadLocal }
-      - { lhs: Type, rhs: ['constexpr', Type],     action: typeConstexpr }
-      - { lhs: Type, rhs: ['register', Type],      action: typeRegister }
+      # Storage classes and function specifiers (C11 6.7.1, 6.7.4): a DeclSpec
+      # before or after a Type, as the qualifiers are, since declaration
+      # specifiers come in any order (C11 6.7p1; `inline static T f()`, `const
+      # static int x`, `int static x`). A prefix composes with every Type, where a
+      # TypeSpec could not absorb a typedef-name or a tag (`static inline OpCode
+      # g()`, `_Thread_local const struct S *p`, `register size_t n`). The Type
+      # group reduces a prefix before a following `*`, so `static int *p` is
+      # `(static int) *`; a DeclSpec after a `*` (`int *static p`) parses and the
+      # binder rejects it. The binder reads the storage class structurally off the
+      # declaration's Type and dispatches on it; each specifier is dropped from the
+      # type itself.
+      - { lhs: Type, rhs: [DeclSpec, Type], action: typeDeclSpec }
+      - { lhs: Type, rhs: [Type, DeclSpec], action: typeDeclSpecPost }
       # `_Atomic T` (C11) — leading atomic qualifier, same Type-prefix shape as
       # `volatile`. Flags the Type atomic; the emitter lowers reads/writes of an
       # atomic lvalue to seq-cst Interlocked-backed access (see CSharpEmitter).
@@ -910,26 +889,21 @@ productions:
       # the switch block). User still writes `break;` per case clause —
       # matches C convention and C# requirement.
       - { lhs: Stmt, rhs: ['switch', '(', Expr, ')', Block], action: stmtSwitch }
+      # A block-scope declaration. Its storage class is part of the Type
+      # (DeclSpec), and the binder dispatches on it: `static T x…;` has static
+      # storage duration and function-local visibility (scalars, lookup tables
+      # `static const lu_byte tab[] = {…}`, struct aggregates, fn-ptr tables), each
+      # declarator lowering like its file-scope counterpart under a program-unique
+      # mangled name; `extern T x…;` (C11 6.2.2p4) refers to the file-scope object
+      # or function of that name, visible to the end of the block, and emits
+      # nothing; a block-scope `typedef` (CPython's ast_opt.c, getargs.c) names a
+      # type visible to the end of its block.
       - { lhs: Stmt, rhs: [Decl, ';'],                    action: stmtDecl }
-      # Block-scope `static T x…;` — static storage duration, function-local
-      # visibility, any init-declarator list (scalars, arrays such as lookup tables
-      # `static const lu_byte tab[] = {…}`, struct aggregates `static const expdesc
-      # ef = {…}`, fn-ptr tables). Each declarator lowers like its file-scope
-      # counterpart (a DotCcGlobals field, a pinned array for an array) under a
-      # program-unique mangled name, with uses inside the function resolving to it.
-      - { lhs: Stmt, rhs: ['static', Type, DeclItemList, ';'], action: stmtStaticDecl }
-      # Block-scope `extern T x…;` (C11 6.2.2p4): each declarator refers to the
-      # file-scope object or function of that name (a prototype for a function),
-      # visible to the end of the block; nothing is emitted.
-      - { lhs: Stmt, rhs: ['extern', Type, DeclItemList, ';'], action: stmtExternDecl }
       # Block-scope declarations with no declarators: a tag defined inside a
       # function body (Lua lstrlib's `struct cD { char c; union { LUAI_MAXALIGN; }
-      # u; };`) or forward-declared, and block-scope typedefs (CPython's ast_opt.c,
-      # getargs.c, modsupport.c). A type has no storage: dotcc hoists it into the
-      # top-level type section (deduped by tag) and the statement emits nothing; a
-      # block-scope typedef name is visible to the end of its block.
+      # u; };`) or forward-declared. A type has no storage: dotcc hoists it into the
+      # top-level type section (deduped by tag) and the statement emits nothing.
       - { lhs: Stmt, rhs: [Type, ';'],                          action: stmtTagDecl }
-      - { lhs: Stmt, rhs: ['typedef', Type, DeclItemList, ';'], action: stmtTypedefDecl }
       # Expression statement uses the full `Expr` tier so `a, b;` (comma
       # operator, result discarded) parses; the visitor splits it into
       # sequential statements.
@@ -982,6 +956,23 @@ productions:
       # `Type DeclItemList ;` member with a tag-definition Type.
       - { lhs: Member, rhs: [Type, ';'], action: memberTagDecl }
 
+  # Storage-class specifiers (C11 6.7.1, C23 `constexpr`) and function specifiers
+  # (6.7.4), each a Type prefix or suffix (typeDeclSpec). The binder reads them
+  # structurally from the declaration's Type: at most one storage class, except
+  # `_Thread_local` with `static` / `extern`; none in a type name, a member or
+  # (but `register`) a parameter.
+  - derivation: none
+    rules:
+      - { lhs: DeclSpec, rhs: ['typedef'],       action: specTypedef }
+      - { lhs: DeclSpec, rhs: ['extern'],        action: specExtern }
+      - { lhs: DeclSpec, rhs: ['static'],        action: specStatic }
+      - { lhs: DeclSpec, rhs: ['auto'],          action: specAuto }
+      - { lhs: DeclSpec, rhs: ['register'],      action: specRegister }
+      - { lhs: DeclSpec, rhs: ['_Thread_local'], action: specThreadLocal }
+      - { lhs: DeclSpec, rhs: ['constexpr'],     action: specConstexpr }
+      - { lhs: DeclSpec, rhs: ['inline'],        action: specInline }
+      - { lhs: DeclSpec, rhs: ['_Noreturn'],     action: specNoreturn }
+
   # EnumList / EnumItem — enumerator body for `enum Name { … }`.
   - derivation: leftmost
     rules:
@@ -1015,13 +1006,12 @@ productions:
       # `int x, y;` declares two `int`s). A scalar lowers to a C# local, an array to
       # a `stackalloc` (a runtime extent too, VLA-style), a struct to `new T { … }`.
       - { lhs: Decl, rhs: [Type, DeclItemList], action: decl }
-      # `auto` declarations (block scope). C23 type inference `auto x = E;` →
-      # C# `var` (a plain ID after `auto`); pre-C23 storage-class `auto int x …`
-      # → drop the `auto` (a type keyword / TYPE_NAME after `auto`). Disjoint
-      # via the lexer hack (ID vs TYPE_NAME) + the fact that a Type never starts
-      # with a plain ID.
+      # C23 type inference `auto x = E;` → C# `var` (a plain ID after `auto`). The
+      # storage-class `auto int x …` is the plain declaration above with an `auto`
+      # DeclSpec. Disjoint via the lexer hack (ID vs TYPE_NAME) + the fact that a
+      # Type never starts with a plain ID: after `auto`, an ID shifts here and a
+      # Type keyword or TYPE_NAME reduces the DeclSpec.
       - { lhs: Decl, rhs: ['auto', ID, '=', E],       action: declAutoInfer }
-      - { lhs: Decl, rhs: ['auto', Type, DeclItemList], action: declAutoStorage }
       # Pointer-to-array declarator: `int (*p)[3] [= E];` — p is a pointer to an
       # array of 3 (e.g. a row pointer into a 2-D array). Same `( * ID )` shape as
       # the fn-ptr declarator but with `[dims]` instead of `(params)` after the
