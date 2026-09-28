@@ -1132,6 +1132,13 @@ internal sealed partial class IrBuilder
 
         if (!_promoted.TryGetValue(owner, out var pm)) { _promoted[owner] = pm = new(StringComparer.Ordinal); }
         foreach (var f in innerFields) { pm[f.Name] = (hidden, nested); }
+        // The members an anonymous aggregate inside this one promotes are this one's too
+        // (C11 6.7.2.1p13 applies at every level): the first hop is through this hidden
+        // field, and `nested`'s own table takes the access the rest of the way.
+        if (_promoted.TryGetValue(nested, out var deeper))
+        {
+            foreach (var name in deeper.Keys) { pm[name] = (hidden, nested); }
+        }
     }
 
     /// <summary>The CType of <paramref name="field"/> read off the struct/union
