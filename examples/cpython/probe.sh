@@ -40,7 +40,7 @@ unit() {
   eval "set -- $extra"
   start=$SECONDS
   if timeout "$PROBE_TIMEOUT" dotnet "$DLL" --emit=obj -o "$OUT/cs/$name.cs" \
-       -I"$CFG" -I"$SRC/Include" -I"$SRC/Include/internal" -I"$SRC/Include/internal/mimalloc" \
+       -DNDEBUG -I"$CFG" -I"$SRC/Include" -I"$SRC/Include/internal" -I"$SRC/Include/internal/mimalloc" \
        "$@" "$SRC/$rel" > "$OUT/cs/$name.log" 2>&1 && [ -s "$OUT/cs/$name.cs" ]; then
     status=ok; first=""
   else
