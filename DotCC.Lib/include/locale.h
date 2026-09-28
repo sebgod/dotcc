@@ -25,7 +25,7 @@
    `n_sep_by_space`, `p_sign_posn`, `n_sign_posn` (plus the C99 `int_*` set). */
 
 #ifndef NULL
-#define NULL null
+#define NULL ((void *)0)
 #endif
 
 /* The six C-standard locale categories (7.4). Values are implementation-defined

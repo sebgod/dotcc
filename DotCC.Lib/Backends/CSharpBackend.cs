@@ -121,23 +121,35 @@ internal sealed class CSharpBackend
         var globals = new StringBuilder();
         foreach (var g in unit.Globals)
         {
-            // C11 `_Thread_local` / Zig `threadlocal` — thread storage duration:
-            // every thread gets its own zero-initialized slot. (The builder rejects
-            // a non-zero initializer — a [ThreadStatic] initializer runs on the
-            // first thread only, which would break C's per-thread-initial-value.)
-            if (g.Sym.IsThreadLocal) { globals.Append("    [ThreadStatic]\n"); }
             // A pointer/fn-ptr global whose address is taken is stored as `nint` so
             // Unsafe.AsPointer / Volatile.* accept it (CS0306) — the init pointer
             // value is cast to nint, reads cast back. (Backend decision from the
             // abstract AddressTaken fact.)
-            if (NintStorage(g.Sym))
+            var nint = NintStorage(g.Sym);
+            var fieldType = nint ? "nint" : cg.Cs(g.Sym.Type);
+            string? initText = g.Init is { } i
+                ? nint ? $"(nint)({cg.StaticInit(i, g.Sym.Type)})" : cg.StaticInit(i, g.Sym.Type)
+                : null;
+            // C11 `_Thread_local` / Zig `threadlocal` — thread storage duration:
+            // every thread gets its own slot, zeroed by [ThreadStatic]. A non-zero
+            // initial value cannot be a [ThreadStatic] field initializer (it runs on
+            // the first thread only), so the slot is set on each thread's first
+            // access, behind a ref-returning property named like the C variable:
+            // reads, stores, `&x` (Unsafe.AsPointer(ref x)) and `x++` all go
+            // through the reference unchanged.
+            if (g.PerThreadInit && initText is not null)
             {
-                var ninit = g.Init is { } i0 ? $" = (nint)({cg.StaticInit(i0, g.Sym.Type)})" : "";
-                globals.Append($"    public static unsafe nint {g.Sym.TargetName}{ninit};\n");
+                var slot = "__tls_" + g.Sym.TargetName;
+                globals.Append($"    [ThreadStatic] private static unsafe {fieldType} {slot};\n");
+                globals.Append($"    [ThreadStatic] private static bool {slot}_set;\n");
+                globals.Append($"    public static unsafe ref {fieldType} {g.Sym.TargetName}\n    {{\n        get\n        {{\n");
+                globals.Append($"            if (!{slot}_set) {{ {slot} = {initText}; {slot}_set = true; }}\n");
+                globals.Append($"            return ref {slot};\n        }}\n    }}\n");
                 continue;
             }
-            var init = g.Init is { } i ? " = " + cg.StaticInit(i, g.Sym.Type) : "";
-            globals.Append($"    public static unsafe {cg.Cs(g.Sym.Type)} {g.Sym.TargetName}{init};\n");
+            if (g.Sym.IsThreadLocal) { globals.Append("    [ThreadStatic]\n"); }
+            var init = initText is null ? "" : " = " + initText;
+            globals.Append($"    public static unsafe {fieldType} {g.Sym.TargetName}{init};\n");
         }
 
         // struct/union/enum type declarations → the top-level type-decls section.
@@ -327,7 +339,7 @@ internal sealed class CSharpBackend
         var unsigned64 = e.Underlying.Unqualified is CType.Prim { Integer: true, Signed: false, Bytes: 8 };
         foreach (var m in e.Members)
         {
-            sb.Append("    ").Append(DotCC.EmitHelpers.EnumMemberId(m.Name)).Append(" = ")
+            sb.Append("    ").Append(DotCC.EmitHelpers.Id(m.Name)).Append(" = ")
               .Append(unsigned64
                   ? unchecked((ulong)m.Value).ToString(System.Globalization.CultureInfo.InvariantCulture)
                   : m.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)).Append(",\n");
@@ -1371,6 +1383,14 @@ internal sealed class CSharpBackend
         return string.Join(", ", parts);
     }
 
+    /// <summary>A typed null pointer, parenthesized or not (NULL is <c>((void *)0)</c>).</summary>
+    private static bool IsNullPtr(CExpr e) => e switch
+    {
+        NullPtr => true,
+        Paren p => IsNullPtr(p.Inner),
+        _ => false,
+    };
+
     /// <summary>Coerce a call argument to its parameter type, falling back to the
     /// argument rendered at assignment precedence (so a bare comma operator can't
     /// be misread as an argument separator).</summary>
@@ -1390,7 +1410,8 @@ internal sealed class CSharpBackend
         // where a POINTER is expected (C# won't convert int 0 to a pointer).
         // A function pointer (bare CType.Func — lowered delegate*) is a pointer
         // for this purpose too: chibi's opcode tables store NULL handlers.
-        if (tgt is CType.Pointer or CType.Func && TryConstInt(value, out var z) && z == 0)
+        // A typed null pointer (NULL, C23 nullptr) is `null` in every pointer sink too.
+        if (tgt is CType.Pointer or CType.Func && (IsNullPtr(value) || TryConstInt(value, out var z) && z == 0))
         {
             text = "null";
             return true;
@@ -1950,7 +1971,7 @@ internal sealed class CSharpBackend
             {
                 var enumTy = Cs(ec.Sym.Type.Unqualified);
                 if (_typeShadowedGlobals.Contains(enumTy)) { enumTy = "global::" + enumTy; }
-                return ($"{enumTy}.{DotCC.EmitHelpers.EnumMemberId(ec.Sym.Name)}", PPostfix);
+                return ($"{enumTy}.{DotCC.EmitHelpers.Id(ec.Sym.Name)}", PPostfix);
             }
             // A bare function name used as a value decays to its address — C#
             // needs the explicit `&` to form a delegate* (C allows the bare name).

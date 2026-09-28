@@ -3,7 +3,9 @@
  * on emit. This exercises the must-match decl/reference pairs: keyword local
  * vars, a keyword function name + keyword parameter, a keyword call, and
  * keyword struct fields read through member access. (The struct *tag* is a
- * non-keyword — type-name escaping is a separate, deferred gap.) gcc accepts
+ * non-keyword — type-name escaping is a separate, deferred gap.) A local named
+ * `null` sits beside a real NULL, which is `((void *)0)` and so never spells the
+ * C# keyword itself (GH #247). gcc accepts
  * all of these verbatim, so the oracle confirms the @-escaped C# matches. */
 #include <stdio.h>
 
@@ -19,11 +21,13 @@ int object(int ref) {       /* C# keyword function name + parameter */
 int main(void) {
     int new = 10;               /* keyword local */
     int string = object(new);   /* keyword local + keyword call + keyword arg */
+    int null = 3;               /* keyword local, next to a real NULL */
+    int *none = NULL;
 
     struct rec ev;
     ev.new = new;               /* keyword member write */
     ev.lock = string;
 
-    printf("%d %d %d\n", new, string, ev.new + ev.lock);
+    printf("%d %d %d %d\n", new, string, ev.new + ev.lock, null + (none == NULL));
     return 0;
 }

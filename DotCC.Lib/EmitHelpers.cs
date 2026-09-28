@@ -46,12 +46,11 @@ internal static class EmitHelpers
         // `true` and `false` ARE escaped: they now lower to the integer
         // literals 1/0 (via <stdbool.h> and the c23 LitTrue/LitFalse path), so
         // the spelling `true`/`false` only ever reaches Visit(Var) as a real
-        // user identifier — safe to @-escape. `null` is still EXCLUDED: dotcc
-        // emits it as the bare C# `null` literal (the only expression that
-        // implicitly converts to any pointer type — see <stddef.h>'s
-        // `#define NULL null`), and a macro-supplied `null` is indistinguishable
-        // from a user variable named `null`, so a variable named `null` stays
-        // the lone residual edge. `default` IS escaped: it is never a C identifier (a C keyword), but
+        // user identifier — safe to @-escape. `null` is escaped for the same
+        // reason: `NULL` is C's `((void *)0)`, which binds to the NullPtr node the
+        // backend spells `null` directly, so the spelling only reaches here as a
+        // user identifier (or zig's std.builtin.Type `null` variant, GH #247).
+        // `default` IS escaped: it is never a C identifier (a C keyword), but
         // it is an ordinary ZIG name (std.builtin.SymbolVisibility's `default` member), and dotcc's
         // own value-init `default` is spelled directly, never through this escaper.
         "abstract", "as", "base", "bool", "break", "byte", "case", "catch", "default",
@@ -59,7 +58,7 @@ internal static class EmitHelpers
         "delegate", "do", "double", "else", "enum", "event", "explicit",
         "extern", "false", "finally", "fixed", "float", "for", "foreach",
         "goto", "if", "implicit", "in", "int", "interface", "internal", "is",
-        "lock", "long", "namespace", "new", "object", "operator", "out",
+        "lock", "long", "namespace", "new", "null", "object", "operator", "out",
         "override", "params", "private", "protected", "public", "readonly",
         "ref", "return", "sbyte", "sealed", "short", "sizeof", "stackalloc",
         "static", "string", "struct", "switch", "this", "throw", "true", "try",
@@ -76,10 +75,6 @@ internal static class EmitHelpers
     /// </summary>
     internal static string Id(string name) =>
         _csReservedKeywords.Contains(name) ? "@" + name : name;
-
-    /// <summary><see cref="Id"/> for an enum MEMBER, which is always emitted qualified (<c>Tag.@null</c>), so the one
-    /// name <see cref="Id"/> leaves bare for C's <c>NULL</c> is escaped too: std.builtin.Type's <c>null</c> variant.</summary>
-    internal static string EnumMemberId(string name) => name == "null" ? "@null" : Id(name);
 
     // ---- C string/char escape decoding ----------------------------------
     // One element of a decoded body: either a literal source character (to be

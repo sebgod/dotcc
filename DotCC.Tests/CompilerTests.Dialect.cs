@@ -481,13 +481,13 @@ public sealed partial class CompilerTests
     public void Nullptr_is_a_keyword_constant_under_c23()
     {
         // No <stddef.h> — under c23 `nullptr` is the null pointer constant,
-        // lowered to C# `null`. Assigned to `int*` the IR inserts a pointer
-        // cast so C# overload resolution is unambiguous: `(int*)(null)`.
+        // lowered to C# `null`, which a typed pointer sink takes as-is (the same
+        // node and emit as NULL, `((void *)0)`).
         var src = WriteTemp("int main() { int* p = nullptr; return 0; }");
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c23"));
-            emitted.ShouldContain("p = (int*)(null);");
+            emitted.ShouldContain("p = null;");
         }
         finally { File.Delete(src); }
     }

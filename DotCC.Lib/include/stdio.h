@@ -18,7 +18,7 @@
    resolve at C# overload-resolution time and so aren't re-declared. */
 
 #ifndef NULL
-#define NULL null
+#define NULL ((void *)0)
 #endif
 
 /* off_t — POSIX (<sys/types.h>), but glibc's <stdio.h> exposes it and

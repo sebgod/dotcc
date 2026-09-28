@@ -18,7 +18,7 @@
    (0-6, Sun=0), tm_yday (0-365), tm_isdst. */
 
 #ifndef NULL
-#define NULL null
+#define NULL ((void *)0)
 #endif
 
 typedef long time_t;

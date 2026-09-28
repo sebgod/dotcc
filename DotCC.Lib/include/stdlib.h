@@ -7,7 +7,7 @@
    arguments use plain `int` (dotcc's size_t stand-in). */
 
 #ifndef NULL
-#define NULL null
+#define NULL ((void *)0)
 #endif
 
 #define EXIT_SUCCESS 0
