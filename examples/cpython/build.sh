@@ -21,19 +21,20 @@ OUT="${BUILD_OUT:-$HERE/build}"
 JOBS="${BUILD_JOBS:-$(nproc)}"
 [ -f "$DLL" ] || { echo "build.sh: no dotcc build at $DLL" >&2; exit 2; }
 # The compiler proper is DotCC.Lib.dll beside the CLI; a fix there leaves dotcc.dll as it was.
-LIB="$(dirname "$DLL")/DotCC.Lib.dll"
-[ -f "$LIB" ] || LIB="$DLL"
+# (Not named LIB: csc and the MSVC linker read LIB as their library search path.)
+LIBDLL="$(dirname "$DLL")/DotCC.Lib.dll"
+[ -f "$LIBDLL" ] || LIBDLL="$DLL"
 [ -f "$SRC/Modules/config.c" ] || { echo "build.sh: no Modules/config.c (run generate.sh)" >&2; exit 2; }
 
 mkdir -p "$OUT/obj"
-export DLL LIB SRC OBJ="$OUT/obj" CFG="$HERE/include"
+export DLL LIBDLL SRC OBJ="$OUT/obj" CFG="$HERE/include"
 
 # One unit, "<group>|<path>|<flags>", to $OBJ/<path with / as __>.cs.
 unit() {
   local group rel extra name
   IFS='|' read -r group rel extra <<< "$1"
   name="${rel//\//__}"; name="${name%.c}"
-  if [ -s "$OBJ/$name.cs" ] && [ "$OBJ/$name.cs" -nt "$SRC/$rel" ] && [ "$OBJ/$name.cs" -nt "$DLL" ] && [ "$OBJ/$name.cs" -nt "$LIB" ]; then
+  if [ -s "$OBJ/$name.cs" ] && [ "$OBJ/$name.cs" -nt "$SRC/$rel" ] && [ "$OBJ/$name.cs" -nt "$DLL" ] && [ "$OBJ/$name.cs" -nt "$LIBDLL" ]; then
     return 0
   fi
   extra="${extra//@TREE@/$SRC}"
