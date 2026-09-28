@@ -84,11 +84,11 @@ public sealed class LineContinuationTests
         var src = WriteTemp("int main(void) { int a = 1 \\ 2; return a; }");
         try
         {
-            // A bare `\` (not a continuation, not in a literal) is an invalid
-            // token — dotcc reports it as a CompileException ("lex failed"),
-            // NOT an unhandled LALR.CC LexerException.
+            // A bare `\` (not a continuation, not in a literal) is a stray byte:
+            // gcc's "stray '\' in program", a CompileException, NOT an unhandled
+            // LALR.CC LexerException.
             Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { src }))
-                .Message.ShouldContain("lex failed");
+                .Message.ShouldContain("stray '\\' in program");
         }
         finally { File.Delete(src); }
     }

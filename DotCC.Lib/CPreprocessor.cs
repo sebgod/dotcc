@@ -178,7 +178,7 @@ internal sealed class CPreprocessor : C.IPreprocessor
     /// </summary>
     private Item[] LexMacroValue(string text)
     {
-        using var lex = BytesLexer.FromString(text, _lexerTable);
+        using var lex = Compiler.LexC(text, _lexerTable);
         var list = new List<Item>();
         while (lex.MoveNext()) { list.Add(lex.Current); }
         return list.ToArray();
@@ -290,7 +290,7 @@ internal sealed class CPreprocessor : C.IPreprocessor
             var initialLine = file.IsSynthetic
                 ? Ir.SrcPos.SyntheticLineBase
                 : 1;
-            using var subLexer = BytesLexer.FromString(source, _lexerTable, initialLine: initialLine);
+            using var subLexer = Compiler.LexC(source, _lexerTable, initialLine);
             using var subPreproc = WrapPreprocessor(subLexer);
             // Expand function-like macros WITHIN the include, mirroring the
             // top-level pipeline (where MacroExpander sits above the preprocessor).

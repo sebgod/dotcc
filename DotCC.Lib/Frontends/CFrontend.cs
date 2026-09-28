@@ -66,7 +66,7 @@ internal sealed class CFrontend : IFrontend
             if (includeDirs is not null) { embedDirs.AddRange(includeDirs); }
             var pre = new CPreprocessor(lexerTable, includeResolver, seededDefines, quiet, gate, embedDirs, embeds);
             pre.SetActiveFile(unitPath);
-            using var lexer = BytesLexer.FromString(source, lexerTable);
+            using var lexer = Compiler.LexC(source, lexerTable);
             // Directives and #if conditions (macro-replaced by the same engine
             // as the text); ordinary text passes through to MacroExpander.
             using var preproc = pre.WrapPreprocessor(lexer);
@@ -74,6 +74,10 @@ internal sealed class CFrontend : IFrontend
             // (a function-like invocation needs lookahead for its `(` and
             // arguments), after the preprocessor populated the macro table.
             using var macroExp = new MacroExpander(preproc, pre);
+            // StrayTokenGuard: a byte no lexer rule matched (a lone `'`, `@`) is a
+            // STRAY token, harmless in a skipped #if group or an unused macro body
+            // (C11 6.4p1); one that reaches here is gcc's "stray '@' in program".
+            using var strayGuard = new StrayTokenGuard(macroExp, unitPath);
             // DialectKeywordRewriter: dialect-aware keyword promotion (rule 2
             // of the gating model). Promotes identifier-spelled keywords
             // (e.g. C23 `bool`) onto their grammar terminal only when the
@@ -81,7 +85,7 @@ internal sealed class CFrontend : IFrontend
             // expansion (so an included header's `#define bool _Bool` wins and
             // the table simply doesn't fire) and BEFORE the typedef rewriter
             // (so e.g. `typedef bool MyBool;` under c23 sees `_Bool`).
-            using var dialectRewriter = new DialectKeywordRewriter(macroExp, activeDialect);
+            using var dialectRewriter = new DialectKeywordRewriter(strayGuard, activeDialect);
             // TypeNameRewriter: the C lexer hack. Promotes ID → TYPE_NAME for
             // any name previously bound by a `typedef`. Sits AFTER macro
             // expansion (so expanded names can also trigger typedef

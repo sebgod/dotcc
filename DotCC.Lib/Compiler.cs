@@ -298,7 +298,7 @@ public static partial class Compiler
             var source = SpliceLineContinuations(File.ReadAllText(unitPath));
             var pre = new CPreprocessor(lexerTable, resolver, seededDefines);
             pre.SetActiveFile(unitPath);
-            using var lexer = BytesLexer.FromString(source, lexerTable);
+            using var lexer = LexC(source, lexerTable);
             using var preproc = pre.WrapPreprocessor(lexer);
             // -E mode also routes through MacroExpander so function-like
             // macro expansion is visible in the dumped token stream.
@@ -308,7 +308,9 @@ public static partial class Compiler
                 while (macroExp.MoveNext())
                 {
                     var t = macroExp.Current;
-                    output.Write(t.Content is string s ? s : t.Content?.ToString());
+                    // A stray byte prints as itself, as gcc -E prints it.
+                    output.Write(t.ID == StraySymbol ? ((char)StrayTokenGuard.StrayByte(t)).ToString()
+                        : t.Content is string s ? s : t.Content?.ToString());
                     output.Write(' ');
                 }
             }
@@ -356,7 +358,7 @@ public static partial class Compiler
         var source = SpliceLineContinuations(File.ReadAllText(sourcePath));
         var pre = new CPreprocessor(lexerTable, resolver, seededDefines, quiet: true);
         pre.SetActiveFile(sourcePath);
-        var lexer = BytesLexer.FromString(source, lexerTable);
+        var lexer = LexC(source, lexerTable);
         var preproc = pre.WrapPreprocessor(lexer);
         using (lexer)
         using (preproc)
@@ -488,6 +490,21 @@ public static partial class Compiler
         if (userDefines is not null) { seeded.AddRange(userDefines); }
         return seeded.ToArray();
     }
+
+    /// <summary>The grammar's <c>STRAY</c> terminal: the symbol of a byte no lexer
+    /// rule matches (see <see cref="LexC"/>).</summary>
+    internal static readonly int StraySymbol = C.Definition.SymbolNames.Single(s => s.Name == "STRAY").ID;
+
+    /// <summary>
+    /// A lexer over C source. A byte no rule matches becomes a <c>STRAY</c> token and
+    /// scanning continues, C11 6.4p1's "each non-white-space character that cannot be
+    /// one of the above": a skipped <c>#if</c> group need only hold preprocessing
+    /// tokens, so an apostrophe there (<c>#error C 'size_t' …</c>) is no error, and
+    /// one that survives preprocessing is reported by <see cref="StrayTokenGuard"/>
+    /// with gcc's wording.
+    /// </summary>
+    internal static BytesLexer LexC(string source, IReadOnlyDictionary<string, LexRule[]> lexerTable, int initialLine = 1)
+        => BytesLexer.FromString(source, lexerTable, LexerErrorMode.EmitAndSkip, StraySymbol, initialLine: initialLine);
 
     /// <summary>
     /// C translation phase 2: splice out backslash-newline line continuations
