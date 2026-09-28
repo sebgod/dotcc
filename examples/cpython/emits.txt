@@ -126,6 +126,7 @@ Python/structmember.c
 Python/symtable.c
 Python/thread.c
 Python/traceback.c
+Python/tracemalloc.c
 Python/getopt.c
 Python/pystrcmp.c
 Python/pystrtod.c
