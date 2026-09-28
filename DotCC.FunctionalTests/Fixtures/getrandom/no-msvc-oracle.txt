@@ -1,0 +1,4 @@
+MSVC has no <sys/random.h> or <unistd.h>: getrandom() and getentropy() are glibc /
+POSIX calls (Windows has BCryptGenRandom instead), so the fixture cannot compile
+under cl.exe. The always-on functional run exercises dotcc's runtime on Windows, and
+the gcc oracle differential-tests it on Linux.
