@@ -46,6 +46,18 @@ internal sealed class DialectGate
             $"`{feature}` is a {EraName(introducedEra)} feature, not available under -std={_dialect.Name}{where}");
     }
 
+    /// <summary>
+    /// Record an ISO C conformance diagnostic that does not depend on the dialect
+    /// (gcc's <c>-Wpedantic</c> messages that hold under every <c>-std=</c>: "ISO C
+    /// forbids an empty translation unit"). <paramref name="line"/> is the source
+    /// line (0 = unknown).
+    /// </summary>
+    public void Report(string message, int line)
+    {
+        var where = line > 0 ? $" (line {Ir.SrcPos.DescribeLine(line)})" : "";
+        _diagnostics.Add(message + where);
+    }
+
     private static string EraName(int era) => era switch
     {
         1990 => "C90",

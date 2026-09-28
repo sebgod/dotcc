@@ -205,6 +205,11 @@ internal sealed partial class IrBuilder
     public void AddUnit(Item root, string file)
     {
         _file = file;
+        if (root.Content is C.TuEmpty)
+        {
+            _gate?.Report("ISO C forbids an empty translation unit", 0);
+            return;
+        }
         FlattenFns(root, BuildTopLevel);
     }
 
@@ -266,16 +271,23 @@ internal sealed partial class IrBuilder
             // struct, array, fn-ptr, fn-ptr table): plain and `static` lower
             // identically (internal linkage is a no-op for a never-exported variable).
             case C.GlobalDeclList g: BuildGlobalDecls(g.Arg0, g.Arg1, Storage.Static, internalLinkage: false); break;
-            case C.GlobalStaticDeclList g: BuildGlobalDecls(g.Arg1, g.Arg2, Storage.Static, internalLinkage: true); break;
+            case C.GlobalStaticDeclList g:
+                RejectRegisterWith(g.Arg1);
+                BuildGlobalDecls(g.Arg1, g.Arg2, Storage.Static, internalLinkage: true);
+                break;
             // `extern T x…;` declares the names + types for resolution but emits no
             // storage: the definition lives in another TU (dotcc whole-program model).
-            case C.ExternVarDecl g: BuildGlobalDecls(g.Arg1, g.Arg2, Storage.Extern, internalLinkage: false); break;
+            case C.ExternVarDecl g:
+                RejectRegisterWith(g.Arg1);
+                BuildGlobalDecls(g.Arg1, g.Arg2, Storage.Extern, internalLinkage: false);
+                break;
             // `typedef T d1, d2…;`: each declarator names an alias of its full type,
             // which ResolveType's TypeName case then sees through everywhere.
-            case C.TypedefDecl t: BuildTypedefs(t.Arg1, t.Arg2); break;
+            case C.TypedefDecl t: RejectRegisterWith(t.Arg1); BuildTypedefs(t.Arg1, t.Arg2); break;
             // A declaration with no declarators: `struct Node { … };`, `struct
             // Node;`, `enum { A, B };`. Resolving the type defines what it declares.
             case C.TagDecl t: BuildTagDecl(t.Arg0); break;
+            case C.FnEmpty: _gate?.Report("ISO C does not allow extra ';' outside of a function", fn.Position.Line); break;
             // `_Static_assert(expr[, "msg"]);` at file scope — a compile-time-only
             // assertion, EVALUATED here (C11 §6.7.10) via the unified comptime
             // interpreter. A holding assertion emits nothing; a zero or non-constant
@@ -312,14 +324,23 @@ internal sealed partial class IrBuilder
         _sawConstexprSpec = false;   // same discipline
         _sawNoreturnSpec = false;    // a function declarator's `_Noreturn` / `inline`
         _sawInlineSpec = false;
+        var isRegister = DeclaresRegister(typeItem);
         WalkDeclList(typeItem, listItem, d =>
         {
             if (d.Type is CType.Func { IsFunctionType: true } fnType)
             {
+                if (isRegister) { InvalidFunctionStorage(d); }
                 DeclareFunctionDeclarator(d, fnType, internalLinkage);
                 return;
             }
             var name = d.Name;
+            if (isRegister)
+            {
+                // A file-scope `register` object is a GNU global register variable,
+                // which needs an `asm("reg")` name dotcc does not model; gcc's errors.
+                _gate?.Report($"file-scope declaration of '{name}' specifies 'register'", d.At.Position.Line);
+                Diagnostics.Add(new Diagnostic(Severity.Error, $"register name not specified for '{name}'", SrcPos.From(d.At), _file));
+            }
             var declStorage = storage;
             if (storage == Storage.Extern && d.Init is not null)
             {
@@ -408,43 +429,47 @@ internal sealed partial class IrBuilder
     // function declaration (ApplyFnMarkers → Symbol.Nodiscard) and cleared on unwind.
     private string? _pendingAttrNodiscard;
 
-    /// <summary>Record the function/storage specifiers a resolved spec run may
-    /// carry — `_Noreturn` (gated C11) and `inline` for the enclosing function
+    /// <summary>Record one function/storage specifier prefix of the declaration
+    /// being built — `_Noreturn` (gated C11) and `inline` for the enclosing function
     /// symbol, `_Thread_local` (gated C11) for the enclosing file-scope variable
-    /// declaration. Shared by <see cref="ResolveSpecs"/> and
-    /// <see cref="SpecsThenName"/> so both the spec-multiset and the
-    /// typedef-name routes behave identically. A block-scope `_Thread_local`
-    /// (even `static _Thread_local`, which C allows) is a loud V1 rejection —
-    /// dotcc lowers thread-locals as file-scope [ThreadStatic] fields only.</summary>
-    private void RecordDeclSpecs(List<string> specs, SrcPos pos)
+    /// declaration, `constexpr` for the enclosing object. The flags are reset at
+    /// the start of each declaration, so a pair of prefixes sees the other's flag.
+    /// A block-scope `_Thread_local` (even `static _Thread_local`, which C allows)
+    /// is a loud V1 rejection — dotcc lowers thread-locals as file-scope
+    /// [ThreadStatic] fields only.</summary>
+    private void RecordDeclSpec(string spec, SrcPos pos)
     {
-        if (specs.Contains("_Noreturn")) { Gate(2011, "_Noreturn", pos); _sawNoreturnSpec = true; }
-        if (specs.Contains("inline")) { _sawInlineSpec = true; } // no gate — pre-C99 rejection is structural (rule 2)
-        if (specs.Contains("_Thread_local"))
+        switch (spec)
         {
-            Gate(2011, "_Thread_local", pos);
-            if (_symbols.AtFileScope) { _sawThreadLocalSpec = true; }
-            else
-            {
-                Diagnostics.Add(new Diagnostic(Severity.Error,
-                    "'_Thread_local' at block scope is not supported (dotcc lowers thread-locals as file-scope [ThreadStatic] fields only)",
-                    pos, _file));
-            }
-        }
-        if (specs.Contains("constexpr"))
-        {
-            // No Gate: the spelling only becomes a keyword via rule-2 promotion
-            // under -std=c23, so a pre-C23 dialect rejects structurally (the ID
-            // never reaches here). C23 §6.7.1p5 forbids combining with
-            // _Thread_local.
-            if (specs.Contains("_Thread_local"))
-            {
-                Diagnostics.Add(new Diagnostic(Severity.Error,
-                    "'constexpr' may not be used with '_Thread_local'", pos, _file));
-            }
-            _sawConstexprSpec = true;
+            case "_Noreturn": Gate(2011, "_Noreturn", pos); _sawNoreturnSpec = true; break;
+            case "inline": _sawInlineSpec = true; break; // no gate — pre-C99 rejection is structural (rule 2)
+            case "_Thread_local":
+                Gate(2011, "_Thread_local", pos);
+                if (_sawConstexprSpec) { ConstexprWithThreadLocal(pos); }
+                if (_symbols.AtFileScope) { _sawThreadLocalSpec = true; }
+                else
+                {
+                    Diagnostics.Add(new Diagnostic(Severity.Error,
+                        "'_Thread_local' at block scope is not supported (dotcc lowers thread-locals as file-scope [ThreadStatic] fields only)",
+                        pos, _file));
+                }
+                break;
+            case "constexpr":
+                // No Gate: the spelling only becomes a keyword via rule-2 promotion
+                // under -std=c23, so a pre-C23 dialect rejects structurally (the ID
+                // never reaches here). C23 §6.7.1p5 forbids combining with
+                // _Thread_local.
+                if (_sawThreadLocalSpec) { ConstexprWithThreadLocal(pos); }
+                _sawConstexprSpec = true;
+                break;
         }
     }
+
+    /// <summary>C23 6.7.1p5: <c>constexpr</c> does not combine with
+    /// <c>_Thread_local</c>.</summary>
+    private void ConstexprWithThreadLocal(SrcPos pos)
+        => Diagnostics.Add(new Diagnostic(Severity.Error,
+            "'constexpr' may not be used with '_Thread_local'", pos, _file));
 
     /// <summary>Bind a C23 <c>constexpr</c> object's compile-time value onto its
     /// symbol: the initializer must exist, fold via <see cref="ConstEval"/>, and be
@@ -636,6 +661,10 @@ internal sealed partial class IrBuilder
     {
         _sawNoreturnSpec = false;
         _sawInlineSpec = false;
+        if (DeclaresRegister(FnSigType(fnSig)))
+        {
+            Diagnostics.Add(new Diagnostic(Severity.Error, "function definition declared 'register'", SrcPos.From(fnSig), _file));
+        }
         var sig = ExtractFnSig(fnSig);
         // A definition means this name is no longer a pure prototype → not an import.
         _protoOnlyFuncs.Remove(sig.Name);
@@ -723,9 +752,13 @@ internal sealed partial class IrBuilder
         _currentRet = (funcSym.Type as CType.Func)?.Return; // drives return const-discard
         _symbols.EnterScope(); // parameter scope
         var paramSyms = new List<Symbol>(sig.Params.Count);
-        foreach (var (pType, pName) in sig.Params)
+        foreach (var p in sig.Params)
         {
-            paramSyms.Add(_symbols.Declare(new Symbol { Name = pName, Kind = SymKind.Param, Type = pType }));
+            paramSyms.Add(_symbols.Declare(new Symbol
+            {
+                Name = p.Name, Kind = SymKind.Param, Type = p.Type,
+                Storage = p.IsRegister ? Storage.Register : Storage.None,
+            }));
         }
         var built = BuildBlock(block);
         // Reject a setjmp in an unmodeled position BEFORE malloc-promote — it may re-clone
@@ -823,7 +856,7 @@ internal sealed partial class IrBuilder
                 // alias like chibi's `sexp_abi_identifier_t`) decays to a
                 // pointer exactly like the explicit `T name[]` forms below
                 // (C99 §6.7.5.3p7 applies through a typedef too).
-                case C.Param p: acc.Add(new(DecayParam(ResolveType(p.Arg0)), Tok(p.Arg1))); break;
+                case C.Param p: acc.Add(new(DecayParam(ResolveType(p.Arg0)), Tok(p.Arg1)) { IsRegister = DeclaresRegister(p.Arg0) }); break;
                 case C.ParamUnnamed p: acc.Add(new(DecayParam(ResolveType(p.Arg0)), "_p" + unnamed++)); break;
                 case C.ParamArrayUnsized p: acc.Add(new(new CType.Pointer(ResolveType(p.Arg0)), Tok(p.Arg1))); break;
                 case C.ParamArraySized p: acc.Add(new(new CType.Pointer(ResolveType(p.Arg0)), Tok(p.Arg1))); break;
@@ -1167,13 +1200,15 @@ internal sealed partial class IrBuilder
         C.TypeEnumDef t => DefineEnum(it, Tok(t.Arg1), null, t.Arg3),
         C.TypeEnumAnonDef t => DefineEnum(it, null, null, t.Arg2),
         C.TypeEnumDefTyped t => DefineEnum(it, Tok(t.Arg1), t.Arg3, t.Arg5),
-        // `TypeSpecList TYPE_NAME` — a function-specifier run (inline / _Noreturn)
-        // immediately preceding a typedef-name: `static inline Cell *bump(…)`,
-        // Lua's `l_sinline Table *gettable(…)`. The run contributes only its
-        // function-specifier facts, recorded for the enclosing function symbol:
-        // `inline` (→ [MethodImpl(AggressiveInlining)]) and `_Noreturn` (gated C11,
-        // → [DoesNotReturn]). The TYPE_NAME is the whole base type.
-        C.TypeSpecThenName t => SpecsThenName(t, it),
+        // Function specifiers and the storage classes that are Type prefixes (C11
+        // 6.7.1, 6.7.4): each is recorded for the enclosing declaration
+        // (RecordDeclSpec), then dropped from the type. `register` is read
+        // structurally where it matters (DeclaresRegister).
+        C.TypeInline t => DeclSpec("inline", t.Arg1, it),
+        C.TypeNoreturn t => DeclSpec("_Noreturn", t.Arg1, it),
+        C.TypeThreadLocal t => DeclSpec("_Thread_local", t.Arg1, it),
+        C.TypeConstexpr t => DeclSpec("constexpr", t.Arg1, it),
+        C.TypeRegister t => ResolveType(t.Arg1),
         // C23 `typeof(expr)` / `typeof(type)` — the expr form reads the operand's
         // synthesized CType (qualifiers dropped, as `typeof_unqual` does); the type
         // form unwraps to that type. The expr isn't evaluated (only its type taken).
@@ -1183,7 +1218,6 @@ internal sealed partial class IrBuilder
         // target, a typedef target, a sizeof operand): lowers to CType.Func.
         C.TypeFnPtr t => FnPtrType(t.Arg0, t.Arg5),
         C.TypeFnPtrNoArgs t => FnPtrType(t.Arg0, null),
-        C.TypeFnPtrVoid t => FnPtrType(t.Arg0, null),
         _ => throw new IrUnsupportedException(TypeName(it.Content)),
     };
 
@@ -1216,15 +1250,80 @@ internal sealed partial class IrBuilder
         _symbols.Resolve(name) is { Kind: SymKind.Typedef } local ? local.Type
         : _typedefs.TryGetValue(name, out var t) ? t : new CType.Named(name);
 
-    /// <summary>Resolve a `TypeSpecList TYPE_NAME` type: the run's surviving facts
-    /// are the function/storage specifiers (`_Noreturn`, `inline`,
-    /// `_Thread_local` — see <see cref="RecordDeclSpecs"/>); the typedef-name is
-    /// the whole base type.</summary>
-    private CType SpecsThenName(C.TypeSpecThenName t, Item it)
+    /// <summary>Resolve a specifier-prefixed type (<c>inline T</c>, <c>_Thread_local
+    /// T</c>, …): record <paramref name="spec"/> for the enclosing declaration, then
+    /// the type is <paramref name="inner"/>'s.</summary>
+    private CType DeclSpec(string spec, Item inner, Item it)
     {
-        RecordDeclSpecs(CollectSpecs(t.Arg0), SrcPos.From(it));
-        return ResolveTypeName(Tok(t.Arg1));
+        RecordDeclSpec(spec, SrcPos.From(it));
+        return ResolveType(inner);
     }
+
+    /// <summary>Whether a declaration's Type carries the <c>register</c> storage class.
+    /// It is a Type prefix, and the Type group reduces a prefix before a following
+    /// <c>*</c> or qualifier, so it sits anywhere in the qualifier and pointer chain
+    /// (<c>register int *p</c> is <c>(register int) *</c>).</summary>
+    private static bool DeclaresRegister(Item typeItem)
+    {
+        var it = typeItem;
+        while (true)
+        {
+            switch (it.Content)
+            {
+                case C.TypeRegister: return true;
+                case C.TypePtr t: it = t.Arg0; break;
+                case C.TypePtrQualConst t: it = t.Arg0; break;
+                case C.TypePtrQualVolatile t: it = t.Arg0; break;
+                case C.TypePtrQualRestrict t: it = t.Arg0; break;
+                case C.TypeConstPost t: it = t.Arg0; break;
+                case C.TypeVolatilePost t: it = t.Arg0; break;
+                case C.TypeConstPre t: it = t.Arg1; break;
+                case C.TypeVolatile t: it = t.Arg1; break;
+                case C.TypeAtomic t: it = t.Arg1; break;
+                case C.TypeInline t: it = t.Arg1; break;
+                case C.TypeNoreturn t: it = t.Arg1; break;
+                case C.TypeThreadLocal t: it = t.Arg1; break;
+                case C.TypeConstexpr t: it = t.Arg1; break;
+                case C.TypeAlignasType t: it = t.Arg4; break;
+                case C.TypeAlignasExpr t: it = t.Arg4; break;
+                default: return false;
+            }
+        }
+    }
+
+    /// <summary>Reject <c>register</c> alongside a declaration-level storage class
+    /// (<c>static</c>, <c>extern</c>, <c>typedef</c>, <c>auto</c>): one storage class
+    /// per declaration (C11 6.7.1p2), gcc's wording.</summary>
+    private void RejectRegisterWith(Item typeItem)
+    {
+        if (DeclaresRegister(typeItem))
+        {
+            Diagnostics.Add(new Diagnostic(Severity.Error,
+                "multiple storage classes in declaration specifiers", SrcPos.From(typeItem), _file));
+        }
+    }
+
+    /// <summary>A function declared with a storage class it cannot have
+    /// (<c>register</c> anywhere, <c>static</c> at block scope), gcc's wording.</summary>
+    private void InvalidFunctionStorage(Declarator d)
+        => Diagnostics.Add(new Diagnostic(Severity.Error,
+            $"invalid storage class for function '{d.Name}'", SrcPos.From(d.At), _file));
+
+    /// <summary>The Type item of a function definition's signature.</summary>
+    private static Item FnSigType(Item fnSig) => fnSig.Content switch
+    {
+        C.FnSig n => n.Arg0,
+        C.FnSigNoArgs n => n.Arg0,
+        C.FnSigStatic n => n.Arg1,
+        C.FnSigStaticNoArgs n => n.Arg1,
+        C.FnSigParen n => n.Arg0,
+        C.FnSigParenNoArgs n => n.Arg0,
+        C.FnSigStaticParen n => n.Arg1,
+        C.FnSigStaticParenNoArgs n => n.Arg1,
+        C.FnSigRetFnPtr n => n.Arg0,
+        C.FnSigRetFnPtrNoArgs n => n.Arg0,
+        _ => throw new IrUnsupportedException(TypeName(fnSig.Content)),
+    };
 
     private List<string> CollectSpecs(Item it)
     {
@@ -1256,10 +1355,6 @@ internal sealed partial class IrBuilder
         C.TsBool => "_Bool",
         C.TsFloat128 => "Float128",
         C.TsInt128 => "__int128",
-        C.TsInline => "inline",
-        C.TsNoreturn => "_Noreturn",
-        C.TsThreadLocal => "_Thread_local",
-        C.TsConstexpr => "constexpr",
         C.TsComplex => "_Complex",
         _ => throw new IrUnsupportedException(TypeName(spec)),
     };
@@ -1495,7 +1590,6 @@ internal sealed partial class IrBuilder
         { throw new DotCC.CompileException("`_Complex` requires a `float`, `double`, or `long double` base"); }
 
         // Dialect gates: type-spec features newer than the selected -std=.
-        RecordDeclSpecs(specs, pos);
         if (base_ == "_Bool") { Gate(1999, "_Bool", pos); }
         if (lng >= 2) { Gate(1999, "long long", pos); }
         if (isComplex) { Gate(1999, "_Complex", pos); }
@@ -1961,7 +2055,7 @@ internal sealed partial class IrBuilder
         // `auto x = E;` (C23 type inference) and `auto Type x …` (redundant
         // pre-C23 storage class). See BuildDeclAutoInfer / BuildDeclList.
         C.DeclAutoInfer d => BuildDeclAutoInfer(d),
-        C.DeclAutoStorage d => BuildDeclList(d.Arg1, d.Arg2),
+        C.DeclAutoStorage d => AutoDeclList(d),
         // Pointer-to-array `T (*p)[N]` [= init] — a row pointer (multi-dim machinery).
         C.DeclPtrToArr d => BuildPtrToArr(d.Arg0, d.Arg3, d.Arg5, null),
         C.DeclPtrToArrInit d => BuildPtrToArr(d.Arg0, d.Arg3, d.Arg5, d.Arg7),
@@ -1981,12 +2075,12 @@ internal sealed partial class IrBuilder
     /// in the function's scope. The statement itself emits nothing.</summary>
     private CStmt BuildStmtStaticDecl(C.StmtStaticDecl n)
     {
+        RejectRegisterWith(n.Arg1);
         WalkDeclList(n.Arg1, n.Arg2, d =>
         {
             if (d.Type is CType.Func { IsFunctionType: true })
             {
-                Diagnostics.Add(new Diagnostic(Severity.Error,
-                    $"invalid storage class for function '{d.Name}'", SrcPos.From(d.At), _file));
+                InvalidFunctionStorage(d);
                 return;
             }
             var csName = $"{_symbols.Escape(d.Name)}__s{_staticLocalSeq++}";
@@ -2007,6 +2101,14 @@ internal sealed partial class IrBuilder
             _symbols.DeclareAlias(sym);
         });
         return new DeclStmt(System.Array.Empty<LocalDecl>());
+    }
+
+    /// <summary>The redundant pre-C23 storage class form <c>auto int z;</c>: a plain
+    /// block-scope declaration, which may not also say <c>register</c>.</summary>
+    private CStmt AutoDeclList(C.DeclAutoStorage d)
+    {
+        RejectRegisterWith(d.Arg1);
+        return BuildDeclList(d.Arg1, d.Arg2);
     }
 
     private CStmt BuildDecl(Item declItem)
@@ -2035,12 +2137,14 @@ internal sealed partial class IrBuilder
         _sawConstexprSpec = false; // consumed below (C23 allows block-scope constexpr)
         _sawNoreturnSpec = false;
         _sawInlineSpec = false;
+        var isRegister = DeclaresRegister(typeItem);
         WalkDeclList(typeItem, listItem, d =>
         {
             // A block-scope function declaration (C11 6.2.2p5: external linkage)
             // declares the function for the rest of the block and emits nothing.
             if (d.Type is CType.Func { IsFunctionType: true } fnType)
             {
+                if (isRegister) { InvalidFunctionStorage(d); }
                 DeclareFunctionDeclarator(d, fnType, internalLinkage: false);
                 return;
             }
@@ -2057,7 +2161,7 @@ internal sealed partial class IrBuilder
             }
             var sym = _symbols.Declare(new Symbol
             {
-                Name = d.Name, Kind = SymKind.Var, Storage = Storage.Auto,
+                Name = d.Name, Kind = SymKind.Var, Storage = isRegister ? Storage.Register : Storage.Auto,
                 // const-qualified for the same write-to-const coverage as the
                 // file-scope form.
                 Type = _sawConstexprSpec ? d.Type.WithQuals(TypeQual.Const) : d.Type,
@@ -2590,6 +2694,12 @@ internal sealed partial class IrBuilder
         // has to re-derive it by walking the tree.
         if (op == UnOp.AddrOf && Unparen(oe) is VarRef { Sym: { Kind: SymKind.Var or SymKind.Param } sym })
         {
+            // C11 6.5.3.2p1: the operand of `&` may not be declared `register`.
+            if (sym.Storage == Storage.Register)
+            {
+                Diagnostics.Add(new Diagnostic(Severity.Error,
+                    $"address of register variable '{sym.Name}' requested", SrcPos.From(operand), _file));
+            }
             sym.AddressTaken = true;
         }
         CType t = op switch

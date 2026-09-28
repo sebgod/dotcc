@@ -202,6 +202,7 @@ internal sealed partial class IrBuilder
     /// yet). Nothing is emitted.</summary>
     private void BuildBlockExternDecls(Item typeItem, Item listItem)
     {
+        RejectRegisterWith(typeItem);
         _sawNoreturnSpec = false;
         _sawInlineSpec = false;
         WalkDeclList(typeItem, listItem, d =>
