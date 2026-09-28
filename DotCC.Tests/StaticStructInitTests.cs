@@ -37,9 +37,12 @@ public sealed class StaticStructInitTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            // Lowered to a once-init static field, mangled by function, and the
-            // body use rewrites to the mangled name.
-            emitted.ShouldContain("public static unsafe P p__s0 = new P { x = 10, y = 20 };");
+            // Lowered to a static field, mangled by function, built in place by a
+            // helper that runs in initialization order; the body use rewrites to the
+            // mangled name.
+            emitted.ShouldContain("public static unsafe P p__s0;");
+            emitted.ShouldContain("var __o = (P*)System.Runtime.CompilerServices.Unsafe.AsPointer(ref p__s0);\n        __o->x = 10;\n        __o->y = 20;\n");
+            emitted.ShouldContain("internal static readonly bool p__s0__filled = p__s0__init();");
             emitted.ShouldContain("p__s0.x");
         }
         finally { File.Delete(src); }
@@ -55,8 +58,9 @@ public sealed class StaticStructInitTests
             """);
         try
         {
-            Compiler.EmitCSharp(new[] { src })
-                .ShouldContain("public static unsafe P origin = new P { x = 3, y = 4 };");
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("public static unsafe P origin;");
+            emitted.ShouldContain("__o->x = 3;\n        __o->y = 4;\n");
         }
         finally { File.Delete(src); }
     }
@@ -64,8 +68,8 @@ public sealed class StaticStructInitTests
     [Fact]
     public void nested_brace_for_union_member_recurses_into_field_type()
     {
-        // `{7, {42}, -1}` — the `{42}` initializes the union member `u`'s first
-        // member; lowers to `u = new <synth union type> { i = 42 }`.
+        // `{7, {42}, -1}`: the `{42}` initializes the union member `u`'s first
+        // member, stored in place through the static object's storage.
         var src = WriteTemp("""
             struct T { int kind; union { int i; float f; } u; int extra; };
             int f(void) { static const struct T t = {7, {42}, -1}; return t.kind + t.u.i + t.extra; }
@@ -74,9 +78,9 @@ public sealed class StaticStructInitTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("kind = 7");
-            emitted.ShouldContain("{ i = 42 }");   // the union's first member
-            emitted.ShouldContain("extra = -1");
+            emitted.ShouldContain("__o->kind = 7;");
+            emitted.ShouldContain("__o->u.i = 42;");   // the union's first member
+            emitted.ShouldContain("__o->extra = -1;");
         }
         finally { File.Delete(src); }
     }

@@ -40,8 +40,8 @@ public sealed class AnonUnionDeclTests
             emitted.ShouldContain("LayoutKind.Explicit");
             emitted.ShouldContain("unsafe struct __Anon0");
             emitted.ShouldContain("FieldOffset(0)]\n    public int dummy;");
-            // brace init targets the first union member
-            emitted.ShouldContain("new __Anon0 { dummy = 0x04030201 }");
+            // brace init targets the first union member, stored in place
+            emitted.ShouldContain("__o->dummy = 0x04030201;");
         }
         finally { File.Delete(src); }
     }
