@@ -130,11 +130,12 @@ public static partial class Compiler
         bool mainReturnsErrUnion = false,
         bool mainErrPayloadIsVoid = false,
         bool testMode = false,
-        IReadOnlyList<(string Name, string FnName)>? tests = null)
+        IReadOnlyList<(string Name, string FnName)>? tests = null,
+        bool pythonShim = false)
     {
         if (emit == EmitMode.SharedLib)
         {
-            return BuildLibraryShell(emittedFnList, structDecls, usingAliases, globals, exports, importsClass, importsAreStatic);
+            return BuildLibraryShell(emittedFnList, structDecls, usingAliases, globals, exports, importsClass, importsAreStatic, pythonShim);
         }
         // Import mode: surface the import table by bare name and splice it into the
         // type-decls section. A GOT (-l) table is bound before main; static [DllImport]
@@ -146,7 +147,7 @@ public static partial class Compiler
         // Embedded DotCC.Libc runtime block — spliced into the heredoc
         // below so the emitted .cs is self-contained even without a
         // <PackageReference Include="DotCC.Libc"> in scope.
-        var runtimeBlock = _runtimeBlock.Value;
+        var runtimeBlock = RuntimeBlock(pythonShim);
         var header = emit == EmitMode.File ? "#:property AllowUnsafeBlocks=true\n\n" : string.Empty;
         // -fsanitize=address: flip the checked debug heap on before any user
         // code (or the embedded runtime) allocates, so every malloc/free
@@ -373,7 +374,8 @@ public static partial class Compiler
         string globals,
         IReadOnlyList<EmitHelpers.Export> exports,
         string importsClass = "",
-        bool importsAreStatic = false)
+        bool importsAreStatic = false,
+        bool pythonShim = false)
     {
         // Import mode in a -shared lib: surface the table by bare name and splice it. A
         // GOT table binds in a static constructor (no entry point here); static [DllImport]
@@ -384,7 +386,7 @@ public static partial class Compiler
         // library and exe shells share the same set of stdlib functions;
         // only the framing (DotCcLib + DotCcExports vs. top-level
         // statements + `main`) differs.
-        var runtimeBlock = _runtimeBlock.Value;
+        var runtimeBlock = RuntimeBlock(pythonShim);
         // Visitor emits user fns as `static unsafe T name(...)` — class-member
         // default is private, which would block DotCcExports from calling
         // them. Promote to `public static unsafe …`. DotCcLib itself is

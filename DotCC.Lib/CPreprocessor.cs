@@ -230,6 +230,7 @@ internal sealed class CPreprocessor : C.IPreprocessor
             throw new CompileException(
                 $"{_currentlyIncluding}:{line}: fatal error: '{name}' file not found");
         }
+        if (file.IsSynthetic) { _resolver.IncludedBuiltins.Add(name); }
         // Dependency tracking (-MD/-MMD): record every disk file once, in
         // first-seen order, BEFORE the pragma-once / include-guard
         // short-circuits below, so a header that's pulled in many times is

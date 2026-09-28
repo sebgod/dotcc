@@ -59,6 +59,11 @@ public static partial class Compiler
         private readonly Dictionary<string, bool> _exists = new(PathComparer);
         private readonly Dictionary<string, string> _content = new(PathComparer);
 
+        /// <summary>The embedded headers this compile has included, by name: the runtime
+        /// splices a header's optional C# piece (the <c>&lt;Python.h&gt;</c> shim) only
+        /// when some unit includes it.</summary>
+        internal HashSet<string> IncludedBuiltins { get; } = new(StringComparer.Ordinal);
+
         /// <summary>Resolve against <paramref name="includeDirs"/> (command-line
         /// order, duplicates dropped) and then <paramref name="builtins"/> (embedded
         /// header name to content).</summary>

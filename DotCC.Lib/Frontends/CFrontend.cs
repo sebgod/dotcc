@@ -176,6 +176,7 @@ internal sealed class CFrontend : IFrontend
             foreach (var d in gate.Diagnostics) { Console.Error.WriteLine("dotcc: warning: " + d); }
         }
         irBuilder.PublishImportAnalysis();
+        irBuilder.Module.UsesPythonShim = includeResolver.IncludedBuiltins.Contains("Python.h");
         return irBuilder.Module;
     }
 }

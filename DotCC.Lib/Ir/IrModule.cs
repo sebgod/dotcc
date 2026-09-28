@@ -40,6 +40,11 @@ internal sealed partial class IrModule
     /// renders in full rather than trimmed to what this unit's own code uses.</summary>
     public bool IsObject { get; set; }
 
+    /// <summary>True when a unit included dotcc's synthetic <c>&lt;Python.h&gt;</c>: the program
+    /// links the runtime's abi3 shim (<c>PythonLib</c>). CPython itself, whose own headers
+    /// shadow the synthetic one, defines those names and gets no shim.</summary>
+    public bool UsesPythonShim { get; set; }
+
     /// <summary>The struct and union tags the program's own sources name. One never completed is
     /// only ever pointed at (C11 6.7.2.3: an incomplete type), and the backend gives it an empty
     /// placeholder so the pointers have a type, unless it is in <see cref="RuntimeTags"/>.</summary>
