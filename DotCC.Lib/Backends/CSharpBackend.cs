@@ -1383,6 +1383,24 @@ internal sealed class CSharpBackend
         : lv.Type.IsVolatile ? (VolatileRead(bare), PPrimary)
         : (bare, barePrec);
 
+    /// <summary>Whether <paramref name="b"/> is unsigned <c>+</c>, <c>-</c> or <c>*</c> over constants whose
+    /// exact result leaves the type's range: C wraps it (C11 6.2.5p9), where C# rejects the
+    /// constant's overflow in its checked folding (CS0220).</summary>
+    private static bool UnsignedConstantWraps(Binary b)
+    {
+        if (b.Op is not (BinOp.Add or BinOp.Sub or BinOp.Mul)
+            || b.Type.Unqualified is not CType.Prim { Integer: true, Signed: false, Bytes: var bytes }
+            || !FoldConst(b.Left, out var l) || !FoldConst(b.Right, out var r))
+        {
+            return false;
+        }
+        var mask = bytes >= 8 ? ulong.MaxValue : (1UL << (bytes * 8)) - 1;
+        var ul = (Int128)(unchecked((ulong)l) & mask);
+        var ur = (Int128)(unchecked((ulong)r) & mask);
+        var exact = b.Op switch { BinOp.Add => ul + ur, BinOp.Sub => ul - ur, _ => ul * ur };
+        return exact < 0 || exact > mask;
+    }
+
     /// <summary>The <c>Atomic.*Fetch</c> helper for a compound assignment / step
     /// that returns the NEW value (C's <c>x op= n</c> result). Throws for an
     /// operator with no lock-free primitive.</summary>
@@ -1503,6 +1521,20 @@ internal sealed class CSharpBackend
         return string.Join(", ", parts);
     }
 
+    /// <summary>An expression with its redundant parentheses peeled.</summary>
+    private static CExpr Unparen(CExpr e) => e is Paren p ? Unparen(p.Inner) : e;
+
+    /// <summary>A function named as a value (<c>f</c> or <c>&amp;f</c>, parenthesized or not), which
+    /// renders as a method group: a comparison pins it to its own function-pointer type
+    /// (<c>tp-&gt;tp_iternext != &amp;_PyObject_NextNotImplemented</c>).</summary>
+    private static bool IsFunctionDesignator(CExpr e) => e switch
+    {
+        VarRef { Sym.Kind: SymKind.Func } => true,
+        Unary { Op: UnOp.AddrOf, Operand: VarRef { Sym.Kind: SymKind.Func } } => true,
+        Paren p => IsFunctionDesignator(p.Inner),
+        _ => false,
+    };
+
     /// <summary>A typed null pointer, parenthesized or not (NULL is <c>((void *)0)</c>).</summary>
     private static bool IsNullPtr(CExpr e) => e switch
     {
@@ -1557,6 +1589,21 @@ internal sealed class CSharpBackend
         if (tgt is CType.Pointer && src is CType.Func)
         {
             text = $"({Cs(tgt)})({Cs(src)}){Sub(value, PUnary)}";
+            return true;
+        }
+        // A function pointer into one of another type (dynload_shlib.c stores a dlsym'd native
+        // pointer into a `dl_funcptr`): C converts between function pointer types with a cast; the
+        // value only ever travels, so C# gets the explicit pointer conversion.
+        if (tgt is CType.Func && src is CType.Func && !IsFunctionDesignator(value) && Cs(tgt) != Cs(src))
+        {
+            text = $"({Cs(tgt)})({Expr(value)})";
+            return true;
+        }
+        // void* into a function pointer (CPython's `freefunc f = PyType_GetSlot(tp, Py_tp_free);`):
+        // gcc converts it, warning only under -pedantic; C# needs the explicit pointer cast.
+        if (tgt is CType.Func && src is CType.Pointer { Pointee: CType.VoidType })
+        {
+            text = $"({Cs(tgt)})({Expr(value)})";
             return true;
         }
         // void* → T* (e.g. malloc's result): C# makes T*→void* implicit but requires
@@ -2439,6 +2486,11 @@ internal sealed class CSharpBackend
                             rhs = CoercionCast(a.Value, tt);
                         }
                     }
+                    // C# takes a shift count as an int (`accum >>= remshift` with an unsigned count).
+                    if (cop is BinOp.Shl or BinOp.Shr && a.Value.Type.Unqualified is not CType.Prim { Name: "int" })
+                    {
+                        rhs = $"(int)({Expr(a.Value)})";
+                    }
                     return ($"{Sub(a.Target, PUnary)} {BinSym(cop)}= {rhs}", PAssign);
                 }
             case Assign a:
@@ -2489,7 +2541,12 @@ internal sealed class CSharpBackend
                 return ($"unchecked(0UL - {Sub(DecayEnum(u.Operand), PUnary)})", PPrimary);
             case UnOp.Neg when Cs(u.Operand.Type.Unqualified) is "uint":
                 return ($"unchecked(0u - {Sub(DecayEnum(u.Operand), PUnary)})", PPrimary);
-            case UnOp.Neg: return ($"-{Sub(DecayEnum(u.Operand), PUnary)}", PUnary);
+            case UnOp.Neg:
+            {
+                // `-(-5)` must not render `--5`, a decrement.
+                var negated = Sub(DecayEnum(u.Operand), PUnary);
+                return (negated.StartsWith('-') ? $"-({negated})" : $"-{negated}", PUnary);
+            }
             case UnOp.BitNot: return ($"~{Sub(DecayEnum(u.Operand), PUnary)}", PUnary);
             // &fn where fn is a function already decays to `&fn` in the VarRef
             // case — don't emit a second `&`.
@@ -2510,6 +2567,10 @@ internal sealed class CSharpBackend
             // compile (CS0306).
             case UnOp.AddrOf when u.Operand is VarRef { Sym.IsGlobal: true } arrGlobal && arrGlobal.Type.Unqualified is CType.Array:
                 return ($"({Cs(u.Type)}){Render(arrGlobal).Text}", PUnary);
+            // &global.ptrField — Unsafe.AsPointer cannot take a pointer type argument (CS0306), so the
+            // address is the field's through a pointer to the struct that holds it.
+            case UnOp.AddrOf when RootsAtGlobal(u.Operand) && IsPointerType(u.Operand.Type) && Unparen(u.Operand) is Member { Arrow: false } pm:
+                return ($"({Cs(u.Type)})&(({Cs(pm.Base.Type)}*)System.Runtime.CompilerServices.Unsafe.AsPointer(ref {BareLValue(pm.Base)}))->{DotCC.EmitHelpers.Id(pm.Field)}", PUnary);
             case UnOp.AddrOf when RootsAtGlobal(u.Operand):
                 return ($"({Cs(u.Type)})System.Runtime.CompilerServices.Unsafe.AsPointer(ref {BareLValue(u.Operand)})", PUnary);
             // &<rvalue> — the address of a materialized temporary: a C compound literal
@@ -2595,6 +2656,13 @@ internal sealed class CSharpBackend
                     // right children (`a - (b - c)`) keep their grouping.
                     var p = Prec(b.Op);
                     var (l, r) = ReconcileOperands(b.Left, b.Right, p, p + 1);
+                    // Unsigned arithmetic wraps (C11 6.2.5p9), but C# folds a constant operation in
+                    // checked mode and rejects the overflow (CS0220): longobject.c's
+                    // `(unsigned long)0 - (unsigned long)LONG_MIN`.
+                    if (UnsignedConstantWraps(b))
+                    {
+                        return ($"unchecked({l} {BinSym(b.Op)} {r})", PPrimary);
+                    }
                     return ($"{l} {BinSym(b.Op)} {r}", p);
                 }
         }
@@ -2649,13 +2717,7 @@ internal sealed class CSharpBackend
     /// type is supplied — a comparison has none, so cast it to its own function-
     /// pointer type. Every other operand passes through unchanged.</summary>
     private string CmpOperand(CExpr e, int p)
-    {
-        var inner = e;
-        while (inner is Paren pp) { inner = pp.Inner; }
-        return inner is VarRef { Sym.Kind: SymKind.Func }
-            ? $"({Cs(inner.Type)})({Sub(e, PUnary)})"
-            : Sub(e, p);
-    }
+        => IsFunctionDesignator(e) ? $"({Cs(e.Type)})({Sub(e, PUnary)})" : Sub(e, p);
 
     private string ReconcileOne(CExpr e, string from, string to, int p) =>
         from == to || CsImplicitInt(from, to) ? Sub(e, p) : CoercionCast(e, to);
@@ -2683,6 +2745,12 @@ internal sealed class CSharpBackend
     /// <see cref="IsConstExpr"/> flag alone.</summary>
     private (string, int) RenderCast(Cast c)
     {
+        // A null pointer converted to an integer is 0 (C11 6.3.2.3p6 leaves the value to the
+        // implementation, 0 on every target dotcc models; obmalloc.c's `(uintptr_t)NULL`).
+        if (c.Target.Unqualified is CType.Prim { Integer: true } && IsNullPtr(c.Operand))
+        {
+            return ($"({Cs(c.Target.Unqualified)})0", PUnary);
+        }
         // A C cast of a function designator — `(sexp_proc3)fn`, `(sexp)&fn`,
         // chibi's opcode tables — reaches C# as a METHOD-GROUP cast, which only
         // converts to the function's exactly-matching delegate* type (CS8757 on
@@ -3236,6 +3304,28 @@ internal sealed class CSharpBackend
 
     private string CallText(Call c)
     {
+        if (c.CalleeSym is { FromSystemHeader: true } && c.Type.Unqualified is CType.Pointer { Pointee: var pointee }
+            && pointee.Unqualified is CType.Named { Name: var owned } && ProgramDefinesType(owned))
+        {
+            return $"(({Cs(c.Type.Unqualified)}){RuntimeCallText(c)})";
+        }
+        return RuntimeCallText(c);
+    }
+
+    /// <summary>The struct and union names the program itself emits, which the runtime cannot name.</summary>
+    private HashSet<string>? _programTypes;
+
+    /// <summary>Whether the program defines <paramref name="name"/> (a <c>struct dirent</c> or
+    /// <c>DIR</c> that <c>&lt;dirent.h&gt;</c> declares with a body), rather than the runtime.</summary>
+    private bool ProgramDefinesType(string name)
+    {
+        _programTypes ??= new HashSet<string>(_module?.Types.Select(t => t.Name) ?? [], StringComparer.Ordinal);
+        return _programTypes.Contains(name);
+    }
+
+    /// <summary>A call's text, before any cast of its result.</summary>
+    private string RuntimeCallText(Call c)
+    {
         if (LowerAtomicCall(c) is { } atomic) { return atomic; }
         if (LowerVaCall(c) is { } va) { return va; }
         // Coerce each argument to its parameter type (C's implicit conversion at
@@ -3259,6 +3349,9 @@ internal sealed class CSharpBackend
             if (c.ParamTypes is { } vpts && i < vpts.Count && IsVoidParam(vpts[i])) { continue; }   // erased (see Func)
             a.Add(c.ParamTypes is { } pts && i < pts.Count
                 ? CoercedArg(c.Args[i], pts[i])
+                // A function in a variadic tail (Py_BuildValue's "O&" converter) travels as a
+                // pointer: a VaArg converts from void*, never from a method group.
+                : c.Args[i].Type.Unqualified is CType.Func ? CoercedArg(c.Args[i], new CType.Pointer(CType.Void))
                 : Sub(DecayEnum(c.Args[i]), PAssign));
         }
         if (IsPrintfFamily(c.Callee) || IsScanfFamily(c.Callee))

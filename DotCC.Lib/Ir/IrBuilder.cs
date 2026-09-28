@@ -3069,6 +3069,9 @@ internal sealed partial class IrBuilder
             },
             _ => oe.Type,
         };
+        // `*fp` designates the function, which converts straight back to the pointer
+        // (C11 6.5.3.2p4, 6.3.2.1p4): `iternext = *tp->tp_iternext;` stores `fp` itself.
+        if (op == UnOp.Deref && IsFuncPtr(oe.Type)) { return oe; }
         return new Unary(op, oe) { Type = t, IsLValue = op == UnOp.Deref };
     }
 
