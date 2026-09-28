@@ -479,6 +479,8 @@ symbols:
   - FnPtrQuals     # 194 non-terminal: the qualifiers after a fn-ptr declarator's `*`
   - FnPtrArr       # 195 non-terminal: `(*name[N])` / `(*const name[N])`, a sized fn-ptr array
   - FnPtrArrOpen   # 196 non-terminal: `(*name[])` / `(*const name[])`, a size-from-init fn-ptr array
+  - Designation    # 197 non-terminal: a designator list `.v.Name.id` / `[2].x` before an initializer's `=`
+  - Designator     # 198 non-terminal: one `.member` or `[index]` step of a Designation
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -1391,21 +1393,26 @@ productions:
     rules:
       - { lhs: InitElem, rhs: [E],                  action: initElemExpr }
       - { lhs: InitElem, rhs: ['{', InitList, '}'], action: initElemNest }
-      # Array designator (C99): `[index] = value` inside an array initializer,
-      # e.g. `int a[5] = {[2] = 9, [4] = 1}`. Conflict-free: `[` can't begin an
-      # expression, so the lookahead after `{`/`,` cleanly picks this over the
-      # positional `E` element. The emitter builds a dense, zero-filled array;
-      # 1-D constant-index scalar arrays only (nested/struct designators fail
-      # loudly). Distinct from struct designators (`.field =`, MemberInitList).
-      - { lhs: InitElem, rhs: ['[', E, ']', '=', E], action: initElemDesignated }
-      # Member designator (C99): `.field = value` / `.field = { … }` inside a struct /
-      # union initializer, in ANY brace-initializer position (block scope, file scope,
-      # static, compound literal, nested aggregate) and mixed with positional elements
-      # (`{ 1, "x", .last = 9 }`: the next positional element follows the designated
-      # member). `.` can't begin an expression, and an E never starts with `{`, so both
-      # forms are conflict-free.
-      - { lhs: InitElem, rhs: ['.', ID, '=', E],                  action: initElemMember }
-      - { lhs: InitElem, rhs: ['.', ID, '=', '{', InitList, '}'], action: initElemMemberNest }
+      # A designated element (C99, C11 6.7.9): a designator list, `=`, then a value
+      # or a braced list, in ANY brace-initializer position and mixed with
+      # positional elements. A designation is a path to the subobject it
+      # initializes: `.field`, `[index]`, or a chain of them (`.op.code = NOP`,
+      # `.v.Name.id = x`, `[3].x = 1`, `[i][j] = 0`); the next positional element
+      # continues after the designated subobject. Conflict-free: neither `[` nor
+      # `.` can begin an expression, and after a Designator only another `[`/`.`
+      # or the `=` can follow.
+      - { lhs: InitElem, rhs: [Designation, '=', E],                  action: initElemDesig }
+      - { lhs: InitElem, rhs: [Designation, '=', '{', InitList, '}'], action: initElemDesigNest }
+
+  - derivation: leftmost
+    rules:
+      - { lhs: Designation, rhs: [Designator],              action: designationOne }
+      - { lhs: Designation, rhs: [Designation, Designator], action: designationCons }
+
+  - derivation: none
+    rules:
+      - { lhs: Designator, rhs: ['[', E, ']'], action: designatorIndex }
+      - { lhs: Designator, rhs: ['.', ID],     action: designatorMember }
 
 
   # Comma operator — the full-expression tier above assignment. Left-assoc,
