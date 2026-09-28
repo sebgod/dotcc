@@ -642,27 +642,13 @@ internal sealed partial class ZigLowering
     /// <summary>Settle a type-returning body's condition at comptime: a tag / module-bool / type-equality
     /// question (<see cref="TryFoldComptimeCondition"/>), else an ordinary expression over the comptime
     /// VALUE seeds (<c>comptime n: u16</c> → <c>n &gt; 8</c>), lowered into a throwaway hoist buffer
-    /// because nothing of it may reach an emitted body. Anything that does not settle is a loud cut — a
-    /// type cannot depend on a runtime value.</summary>
-    private bool FoldTypeBodyCondition(string fnName, Item cond)
-    {
-        if (TryFoldComptimeCondition(cond) is { } folded) { return folded; }
-        using (EnterThrowawayHoist())
-        {
-            var lowered = LowerExpr(cond);
-            if (_ir.ConstEval(lowered) is { } v) { return v != 0; }
-            // A condition that CALLS (std.bit_set.Array's `!std.math.isPowerOfTwo(@bitSizeOf(MaskIntType))`) runs
-            // through the comptime interpreter.
-            switch (_ir.EvalComptimeValue(lowered))
-            {
-                case IrModule.CtBool { Value: var calledBool }: return calledBool;
-                case IrModule.CtInt { Value: var calledInt }: return calledInt != 0;
-            }
-        }
-        throw new IrUnsupportedException(
+    /// because nothing of it may reach an emitted body (<see cref="TryFoldRequiredComptimeCondition"/>). Anything
+    /// that does not settle is a loud cut — a type cannot depend on a runtime value.</summary>
+    private bool FoldTypeBodyCondition(string fnName, Item cond) =>
+        TryFoldRequiredComptimeCondition(cond)
+        ?? throw new IrUnsupportedException(
             $"type-returning generic '{fnName}': an `if` condition must be compile-time-known "
             + "(a comptime parameter, a `builtin` query, or a type comparison)");
-    }
 
     /// <summary>Lower an expression that must denote a TYPE, folding the comptime control flow a type
     /// expression can be built from — the shapes a type-returning body returns and its aliases bind:

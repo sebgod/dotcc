@@ -428,13 +428,11 @@ internal sealed partial class ZigLowering
     }
 
     /// <summary>The value of an <c>if</c> condition in a type alias, when it is known at compile time (a comptime question,
-    /// or anything the const folder settles: <c>@bitSizeOf(T) &lt;= 64</c>); null otherwise. The condition is lowered into a
-    /// throwaway hoist, since a type alias emits no statement.</summary>
+    /// anything the const folder settles: <c>@bitSizeOf(T) &lt;= 64</c>, or a call the interpreter runs); null otherwise,
+    /// including when the condition does not lower (<see cref="TryFoldRequiredComptimeCondition"/>).</summary>
     private bool? TryFoldTypeIfCondition(Item cond)
     {
-        if (TryFoldComptimeCondition(cond) is { } folded) { return folded; }
-        using var _ = EnterThrowawayHoist();
-        try { return _ir.ConstEval(LowerExpr(cond)) is { } v ? v != 0 : null; }
+        try { return TryFoldRequiredComptimeCondition(cond); }
         catch (IrUnsupportedException) { return null; }
     }
 
