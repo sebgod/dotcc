@@ -4,12 +4,14 @@
  * omitted, plus trailing padding to their alignment. A statically initialized
  * object with a flexible array member gets storage for its initializer (a GNU
  * extension), as CPython's shared empty-keys dictionary does (dictobject.c),
- * and sre's TemplateObject reads a zero-length `items[0]` (sre.h). */
+ * and sre's TemplateObject reads a zero-length `items[0]` (sre.h). The size
+ * field is `long long` (8 bytes under LP64 and MSVC's LLP64 alike, like
+ * CPython's Py_ssize_t) so every oracle prints the same layout. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <stddef.h>
 
-struct keys { long size; char kind; signed char indices[]; };   /* after a padded tail */
+struct keys { long long size; char kind; signed char indices[]; };   /* after a padded tail */
 struct wide { char tag; int vals[]; };                          /* more aligned than the rest */
 struct tmpl { int count; struct { int index; void *literal; } items[0]; };
 
@@ -22,7 +24,7 @@ int main(void) {
 
     int sum = 0;
     for (int i = 0; i < empty_keys.size; i++) sum += empty_keys.indices[i];
-    printf("%ld %c %d\n", empty_keys.size, empty_keys.kind, sum);
+    printf("%lld %c %d\n", empty_keys.size, empty_keys.kind, sum);
     struct keys *k = &empty_keys;
     k->indices[3] = 7;
     printf("%d %d\n", empty_keys.indices[3], (&empty_keys)->indices[7]);
