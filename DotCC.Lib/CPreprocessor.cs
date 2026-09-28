@@ -3,6 +3,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using LALR.CC;
 using LALR.CC.LexicalGrammar;
 
 namespace DotCC;
@@ -94,11 +95,12 @@ internal sealed class CPreprocessor : C.IPreprocessor
     private readonly HashSet<string> _includeSeen = new(StringComparer.Ordinal);
     internal IReadOnlyList<(string Path, bool IsSystem)> IncludedHeaders => _includedHeaders;
 
-    // Symbol ids resolved once for the predefined-identifier substitutions
-    // in `Rewrite`. `__FILE__` synthesizes a STRING token; `__LINE__`
-    // synthesizes a NUM token with the use site's line number.
+    // Symbol ids resolved once for the predefined identifiers (`__FILE__`
+    // synthesizes a STRING token, `__LINE__` a NUM token) and for the `#if`
+    // operators `defined` / `__has_include` / `__has_embed`.
     private readonly int _numSymbolId;
     private readonly int _stringSymbolId;
+    private readonly int _idSymbolId;
     // Synthetic terminal for C23 #embed. OnEmbed emits one Item of this symbol
     // per directive, carrying the content-hash key into _embeds (no lexer rule —
     // the terminal is produced here, never scanned). See c.lalr.yaml's EMBED.
@@ -143,7 +145,9 @@ internal sealed class CPreprocessor : C.IPreprocessor
         }
         _numSymbolId = symMap["NUM"];
         _stringSymbolId = symMap["STRING"];
+        _idSymbolId = symMap["ID"];
         _embedSymbolId = symMap["EMBED"];
+        Macros = new MacroEngine(this);
         foreach (var d in predefines)
         {
             // -D NAME           → defined-as-marker (empty body)
@@ -152,9 +156,8 @@ internal sealed class CPreprocessor : C.IPreprocessor
             //                     token sequence. This is what makes
             //                     `__STDC_VERSION__=201710L` work as the
             //                     LHS of `#if __STDC_VERSION__ >= 199901L`
-            //                     (the conditional-expression evaluator
-            //                     pre-expands object-like macros via
-            //                     Rewrite). It also makes user-supplied
+            //                     (EvaluateCondition macro-replaces the
+            //                     condition first). It also makes user-supplied
             //                     `-D X=42` substitute as `42` at use site
             //                     instead of disappearing.
             var eq = d.IndexOf('=');
@@ -288,8 +291,7 @@ internal sealed class CPreprocessor : C.IPreprocessor
                 ? Ir.SrcPos.SyntheticLineBase
                 : 1;
             using var subLexer = BytesLexer.FromString(source, _lexerTable, initialLine: initialLine);
-            using var subPreproc = C.WrapPreprocessor(subLexer, this);
-            subPreproc.ExpandFuncMacro = ExpandFuncMacro;
+            using var subPreproc = WrapPreprocessor(subLexer);
             // Expand function-like macros WITHIN the include, mirroring the
             // top-level pipeline (where MacroExpander sits above the preprocessor).
             // Without this, a macro the included file both DEFINES and #undefs —
@@ -784,151 +786,123 @@ internal sealed class CPreprocessor : C.IPreprocessor
         return Array.Empty<Item>();
     }
 
-    public IEnumerable<Item> Rewrite(Item token)
-    {
-        // Predefined identifiers come first — they shadow any same-named
-        // user macro by C standard (which forbids redefining them anyway).
-        if (token.Content is string text)
+    /// <summary>
+    /// The <see cref="C.IPreprocessor"/> per-token rewrite hook, a pass-through:
+    /// macro replacement needs a function-like macro's unexpanded arguments and
+    /// the tokens after a replacement, so it all happens in
+    /// <see cref="MacroEngine"/> (driven by <see cref="MacroExpander"/> for text,
+    /// <see cref="EvaluateCondition"/> for <c>#if</c>). <see cref="WrapPreprocessor"/>
+    /// does not install this hook at all.
+    /// </summary>
+    public IEnumerable<Item> Rewrite(Item token) => new[] { token };
+
+    /// <summary>The macro engine over this preprocessor's macro table.</summary>
+    internal MacroEngine Macros { get; }
+
+    /// <summary>The name of the file being processed, for diagnostics.</summary>
+    internal string DiagnosticFile => _fileOverride ?? _currentlyIncluding ?? "<input>";
+
+    /// <summary>
+    /// Wrap <paramref name="lexer"/> in the directive / conditional stage: the
+    /// directives dispatch here, ordinary text passes through untouched (a
+    /// <see cref="MacroExpander"/> above it does the replacing), and <c>#if</c> /
+    /// <c>#elif</c> conditions are evaluated by <see cref="EvaluateCondition"/>.
+    /// </summary>
+    internal PreprocessorTokenStream WrapPreprocessor(ISyncIterator<Item> lexer)
+        => new(lexer, C.BuildPreprocessor(this), rewrite: null, C.BuildConditionals(this))
         {
-            if (text == "__LINE__")
-            {
-                // Physical line as the byte-DFA lexer counted it, shifted by any
-                // active #line remap (_lineDelta is 0 when no #line is in effect).
-                var line = (token.Position.Line + _lineDelta).ToString(System.Globalization.CultureInfo.InvariantCulture);
-                return new[] { new Item(_numSymbolId, line, token.Position) };
-            }
-            if (text == "__FILE__")
-            {
-                // A `#line N "file"` filename override wins over the real
-                // currently-including filename.
+            EvaluateCondition = EvaluateCondition,
+        };
+
+    /// <summary>
+    /// The value of a predefined identifier: <c>__LINE__</c> as a NUM (physical
+    /// <paramref name="line"/> shifted by any <c>#line</c>) and <c>__FILE__</c> as
+    /// a STRING; null for any other token.
+    /// </summary>
+    internal Item? PredefinedValue(Item token, int line)
+    {
+        switch (token.Content as string)
+        {
+            case "__LINE__":
+                var logical = (line + _lineDelta).ToString(System.Globalization.CultureInfo.InvariantCulture);
+                return new Item(_numSymbolId, logical, token.Position);
+            case "__FILE__":
+                // A `#line N "file"` filename override wins over the file being
+                // processed. STRING tokens carry the raw lexeme, quotes included.
                 var name = _fileOverride ?? _currentlyIncluding ?? string.Empty;
-                // STRING tokens carry the raw lexeme including surrounding
-                // quotes — the visitor's Str() strips them and re-wraps in
-                // the u8 literal form.
-                return new[] { new Item(_stringSymbolId, "\"" + name + "\"", token.Position) };
-            }
-            // Function-like macros need lookahead (peek for the `(`) which the
-            // Rewrite hook can't do — MacroExpander handles those downstream.
-            // Object-like still expands here so the existing -E (Preprocess-only)
-            // mode keeps working without wiring MacroExpander into that pipeline.
-            if (_macros.TryGetValue(text, out var macro) && !macro.IsFunctionLike)
-            {
-                // Rescan the expansion so chained macros like
-                //   #define UCHAR_MAX 255
-                //   #define CHAR_MAX  UCHAR_MAX
-                // transitively resolve at use site. Hide set guards
-                // against self-referential cycles (`#define A A`).
-                var hideSet = new HashSet<string>(StringComparer.Ordinal) { text };
-                return ExpandObjectLikeBody(macro.Body, hideSet);
-            }
+                return new Item(_stringSymbolId, "\"" + name + "\"", token.Position);
+            default:
+                return null;
         }
-        return new[] { token };
     }
 
+    /// <summary>Lex <paramref name="text"/> into preprocessing tokens (the result
+    /// of a <c>##</c> paste is whatever its spelling lexes to).</summary>
+    internal IReadOnlyList<Item> LexPreprocessingTokens(string text) => LexMacroValue(text);
+
     /// <summary>
-    /// Rescan a macro body for further object-like substitutions. Each
-    /// token whose text matches a known object-like macro NOT in the
-    /// hide set gets replaced by its body, which is itself recursively
-    /// rescanned. The hide set propagates outward to the caller's name
-    /// so a macro can't expand to itself (per the C standard's
-    /// "hideset" rule).
+    /// Evaluate a <c>#if</c> / <c>#elif</c> condition (C11 6.10.1). The operators
+    /// that look at names rather than values go first, on the tokens as written:
+    /// <c>defined NAME</c> / <c>defined(NAME)</c>, <c>__has_include(…)</c> and
+    /// <c>__has_embed(…)</c> become 1 or 0 (or the embed status). The rest is then
+    /// macro-replaced like any other text, and the result evaluated as an integer
+    /// constant expression (identifiers left over are 0).
     /// </summary>
-    private List<Item> ExpandObjectLikeBody(IReadOnlyList<Item> body, HashSet<string> hideSet)
+    internal bool EvaluateCondition(IReadOnlyList<Item> args)
     {
-        var result = new List<Item>(body.Count);
-        foreach (var item in body)
+        var tokens = new List<Item>(args.Count);
+        for (var i = 0; i < args.Count; i++)
         {
-            if (item.Content is string text
-                && !hideSet.Contains(text)
-                && _macros.TryGetValue(text, out var inner)
-                && !inner.IsFunctionLike)
+            var t = args[i];
+            if (t.ID == _idSymbolId && t.Content is string name)
             {
-                var nestedHide = new HashSet<string>(hideSet, StringComparer.Ordinal) { text };
-                result.AddRange(ExpandObjectLikeBody(inner.Body, nestedHide));
+                if (name == "defined")
+                {
+                    var (operand, end) = DefinedOperand(args, i);
+                    tokens.Add(new Item(_numSymbolId, IsDefined(operand) ? "1" : "0", t.Position));
+                    i = end;
+                    continue;
+                }
+                if (name is "__has_include" or "__has_embed"
+                    && i + 1 < args.Count && (args[i + 1].Content as string) == "(")
+                {
+                    var inner = new List<Item>();
+                    var depth = 0;
+                    var j = i + 1;
+                    for (; j < args.Count; j++)
+                    {
+                        var c = args[j].Content as string;
+                        if (c == "(" && depth++ == 0) { continue; }
+                        if (c == ")" && --depth == 0) { break; }
+                        inner.Add(args[j]);
+                    }
+                    var value = name == "__has_include" ? (EvalHasInclude(inner) ? 1 : 0) : EvalHasEmbed(inner);
+                    tokens.Add(new Item(_numSymbolId, value.ToString(System.Globalization.CultureInfo.InvariantCulture), t.Position));
+                    i = j;
+                    continue;
+                }
             }
-            else
-            {
-                result.Add(item);
-            }
+            tokens.Add(t);
         }
-        return result;
+        return PreprocessorExpressionEvaluator.Evaluate(Macros.ExpandList(tokens), IsDefined);
     }
 
-    /// <summary>
-    /// Expand a function-like macro call in a <c>#if</c> / <c>#elif</c>
-    /// expression. Collects the argument tokens (already paren-stripped by
-    /// the caller), substitutes each formal parameter with its corresponding
-    /// actual argument text, then rescans the body for object-like macros
-    /// (e.g. <c>UINT_MAX</c> → <c>4294967295u</c>). Multi-arg macros are
-    /// split on commas at the top level of the arg list.
-    /// </summary>
-    public IEnumerable<Item> ExpandFuncMacro(string name, IReadOnlyList<Item> argTokens)
+    /// <summary>The name <c>defined</c> at <paramref name="at"/> tests, as
+    /// <c>defined NAME</c> or <c>defined ( NAME )</c>, and the index of the last
+    /// token of the operator.</summary>
+    private (string Name, int End) DefinedOperand(IReadOnlyList<Item> args, int at)
     {
-        // C23 preprocessor operators usable in #if/#elif. The conditional
-        // evaluator routes any `IDENT ( args )` here (not just known macros), so
-        // we resolve __has_embed / __has_include to their integer result and let
-        // the evaluator fold the surrounding expression.
-        if (name == "__has_embed")
+        if (at + 1 < args.Count && args[at + 1].ID == _idSymbolId && args[at + 1].Content is string bare)
         {
-            return new[] { new Item(_numSymbolId, EvalHasEmbed(argTokens).ToString(
-                System.Globalization.CultureInfo.InvariantCulture), default) };
+            return (bare, at + 1);
         }
-        if (name == "__has_include")
+        if (at + 3 < args.Count && (args[at + 1].Content as string) == "("
+            && args[at + 2].ID == _idSymbolId && args[at + 2].Content is string inner
+            && (args[at + 3].Content as string) == ")")
         {
-            return new[] { new Item(_numSymbolId, EvalHasInclude(argTokens) ? "1" : "0", default) };
+            return (inner, at + 3);
         }
-        if (!_macros.TryGetValue(name, out var macro) || !macro.IsFunctionLike)
-        {
-            // Not a known function-like macro — emit name + args verbatim,
-            // though the evaluator will likely treat this as 0.
-            var list = new List<Item> { new Item(_numSymbolId, name, default) };
-            list.AddRange(argTokens);
-            return list;
-        }
-        // Split args on commas (top-level, paren-balanced).
-        var args = new List<List<Item>>();
-        var cur = new List<Item>();
-        var depth = 0;
-        foreach (var t in argTokens)
-        {
-            var ct = t.Content as string;
-            if (ct == "(") { depth++; cur.Add(t); }
-            else if (ct == ")") { depth--; cur.Add(t); }
-            else if (ct == "," && depth == 0) { args.Add(cur); cur = new List<Item>(); }
-            else { cur.Add(t); }
-        }
-        args.Add(cur);  // final arg
-
-        var parms = macro.Params!;
-        // Build param → body mapping. Each formal gets replaced by the
-        // actual-arg token list (one-to-one positional match).  Extras
-        // beyond named params go to __VA_ARGS__ for variadic macros.
-        var paramMap = new Dictionary<string, IReadOnlyList<Item>>(StringComparer.Ordinal);
-        for (var i = 0; i < parms.Count; i++)
-            paramMap[parms[i]] = i < args.Count ? args[i] : Array.Empty<Item>();
-        if (macro.IsVariadic)
-        {
-            var extras = new List<Item>();
-            for (var i = parms.Count; i < args.Count; i++)
-            {
-                if (i > parms.Count) extras.Add(new Item(0, ",", default));
-                extras.AddRange(args[i]);
-            }
-            paramMap["__VA_ARGS__"] = extras;
-        }
-
-        // Substitute: walk the body, replace each ID that matches a formal
-        // parameter with the corresponding actual-arg token list.
-        var body = new List<Item>();
-        foreach (var t in macro.Body)
-        {
-            if (t.Content is string text && paramMap.TryGetValue(text, out var replacement))
-                body.AddRange(replacement);
-            else
-                body.Add(t);
-        }
-        // Rescan for object-like macros (e.g. UINT_MAX in L_INTHASBITS).
-        return ExpandObjectLikeBody(body, new HashSet<string>(StringComparer.Ordinal) { name });
+        throw new CompileException($"{DiagnosticFile}:{args[at].Position.Line}: error: operator \"defined\" requires an identifier");
     }
 
     public bool IsDefined(string name) => name != null && _macros.ContainsKey(name);
@@ -983,9 +957,8 @@ internal sealed class CPreprocessor : C.IPreprocessor
         // (carrying the definition's position), so capture the use-site line FIRST.
         var directivePhysLine = args[0].Position.Line;
         // The standard says the arguments are macro-expanded before
-        // interpretation (`#define LN 100` then `#line LN`). Object-like
-        // expansion covers the digit-sequence + optional string-literal operands.
-        var expanded = ExpandObjectLikeBody(args, new HashSet<string>(StringComparer.Ordinal));
+        // interpretation (`#define LN 100` then `#line LN`).
+        var expanded = Macros.ExpandList(args);
         if (expanded.Count == 0 || expanded[0].Content is not string numText
             || !int.TryParse(numText, System.Globalization.NumberStyles.None,
                              System.Globalization.CultureInfo.InvariantCulture, out var logical)
@@ -1041,7 +1014,9 @@ internal sealed class CPreprocessor : C.IPreprocessor
     /// same line; the right token's column must equal left's column
     /// plus left's text length.
     /// </summary>
-    private static bool IsAdjacent(Item left, Item right)
+    /// <summary>Whether <paramref name="right"/> followed <paramref name="left"/>
+    /// with no white space between them in the source.</summary>
+    internal static bool IsAdjacent(Item left, Item right)
     {
         if (left.Position.Line != right.Position.Line) { return false; }
         var leftText = left.Content?.ToString() ?? string.Empty;

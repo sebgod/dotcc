@@ -67,13 +67,12 @@ internal sealed class CFrontend : IFrontend
             var pre = new CPreprocessor(lexerTable, includeResolver, seededDefines, quiet, gate, embedDirs, embeds);
             pre.SetActiveFile(unitPath);
             using var lexer = BytesLexer.FromString(source, lexerTable);
-            using var preproc = C.WrapPreprocessor(lexer, pre);
-            // Enable function-like macro expansion in #if/#elif expressions.
-            preproc.ExpandFuncMacro = pre.ExpandFuncMacro;
-            // MacroExpander: function-like macro expansion. Needs lookahead
-            // for the `(`, which the Rewrite hook can't do — so it lives as
-            // its own RewritingTokenStream subclass after the preprocessor
-            // populated the macro table.
+            // Directives and #if conditions (macro-replaced by the same engine
+            // as the text); ordinary text passes through to MacroExpander.
+            using var preproc = pre.WrapPreprocessor(lexer);
+            // MacroExpander: all macro replacement, object-like and function-like
+            // (a function-like invocation needs lookahead for its `(` and
+            // arguments), after the preprocessor populated the macro table.
             using var macroExp = new MacroExpander(preproc, pre);
             // DialectKeywordRewriter: dialect-aware keyword promotion (rule 2
             // of the gating model). Promotes identifier-spelled keywords
