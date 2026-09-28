@@ -102,6 +102,10 @@ internal sealed partial class IrModule
                 return (es * count, ea);
             }
             case CType.Named n: return LayoutAggregate(n.Name);
+            // An enum is laid out as its underlying integer (a C# enum field is).
+            case CType.Enum e: return Layout(e.Underlying);
+            // _Float128 wraps a UInt128, which .NET aligns to 16 on x64, as gcc does.
+            case CType.Float128Type: return (16, 16);
             default: return (0, 1);
         }
     }
