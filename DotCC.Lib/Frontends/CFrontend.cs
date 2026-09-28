@@ -140,12 +140,19 @@ internal sealed class CFrontend : IFrontend
         // parse (preprocessor-era) and IR build (emit-pass), then flush as warnings
         // (-pedantic) or one collected error (-pedantic-errors). Off by default.
         var gate = (pedantic || pedanticErrors) ? new DialectGate(activeDialect) : null;
-        var irBuilder = new Ir.IrBuilder(gate, names ?? new Backends.CSharpNameLegalizer(), embeds, warnings);
-        var irParser = C.BuildParser(C.IdentityVisitor.Instance);
+        // The binder dedupes a header's definitions re-included by several TUs on
+        // their structural fingerprints, which the parser computes as it reduces.
+        var fingerprints = new ParseFingerprints(node => node is C.FuncDef or C.GlobalDeclList);
+        var irBuilder = new Ir.IrBuilder(gate, names ?? new Backends.CSharpNameLegalizer(), embeds, warnings)
+        {
+            Fingerprints = fingerprints,
+        };
+        var irParser = fingerprints.Wrap(C.BuildParser(C.IdentityVisitor.Instance));
         foreach (var unitPath in inputPaths)
         {
             var root = ParseUnit(unitPath, irParser, quiet: false, gate);
             irBuilder.AddUnit(root, Path.GetFileName(unitPath));
+            fingerprints.Clear();
         }
         var irErrors = irBuilder.Diagnostics.Where(d => d.Severity == Ir.Severity.Error).ToList();
         if (irErrors.Count > 0)

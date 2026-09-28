@@ -255,7 +255,7 @@ internal sealed partial class IrBuilder
                 _pendingAttrDeprecated = null;
                 _pendingAttrNodiscard = null;
                 break;
-            case C.FuncDef d: BuildFuncDef(d.Arg0, d.Arg1); break;
+            case C.FuncDef d: BuildFuncDef(d.Arg0, d.Arg1, Fingerprints.Of(fn)); break;
             // A header-defined file-scope variable (chibi sexp.h's `static const
             // unsigned char sexp_uvector_sizes[] = {…};`) re-arrives once per TU
             // that includes the header. An identical re-definition is the same
@@ -286,7 +286,7 @@ internal sealed partial class IrBuilder
     // Structural fingerprints of every file-scope variable definition built so
     // far — the global-side twin of _fnDefSites (which needs per-site symbols;
     // globals don't, because their file-scope binding persists across TUs).
-    private readonly HashSet<string> _seenTopLevelDefs = new(StringComparer.Ordinal);
+    private readonly HashSet<Frontends.ParseFingerprints.Fp> _seenTopLevelDefs = new();
 
     /// <summary>True when an identical file-scope variable definition was already
     /// built (same position-free structural dump = same post-expansion tokens,
@@ -294,7 +294,11 @@ internal sealed partial class IrBuilder
     /// TU its OWN copy of a header-defined MUTABLE <c>static</c> variable; dotcc
     /// merges them into one field. For the idiom that actually occurs (header
     /// <c>static const</c> tables) the two are indistinguishable.</summary>
-    private bool AlreadySeenTopLevel(Item fn) => !_seenTopLevelDefs.Add(fn.ToString());
+    private bool AlreadySeenTopLevel(Item fn) => !_seenTopLevelDefs.Add(Fingerprints.Of(fn));
+
+    /// <summary>The structural fingerprints of the file-scope definitions this builder binds, computed by the parser
+    /// that built them (<see cref="Frontends.ParseFingerprints.Wrap"/>).</summary>
+    internal required Frontends.ParseFingerprints Fingerprints { get; init; }
 
     /// <summary>A file-scope declaration with declarators, dispatched on the storage
     /// class its Type carries (<see cref="CheckDeclSpecs(Item)"/>): <c>typedef</c> names
@@ -633,21 +637,15 @@ internal sealed partial class IrBuilder
         }
     }
 
-    /// <summary>One already-built function DEFINITION: its parse subtrees (retained
-    /// so the structural fingerprint is computed lazily — only names that actually
-    /// collide across TUs pay for the <c>ToString</c>) and the symbol it bound.</summary>
+    /// <summary>One already-built function DEFINITION: its structural fingerprint and
+    /// the symbol it bound.</summary>
     private sealed class FnDefSite
     {
-        public required Item Sig;
-        public required Item Block;
+        /// <summary>Position-free structural fingerprint of the definition: identical
+        /// ⇔ the same post-expansion tokens, i.e. the same header re-included.</summary>
+        public required Frontends.ParseFingerprints.Fp Print;
         public required Symbol Sym;
-        public string? PrintCache;
-        /// <summary>Position-free structural dump of the definition — identical
-        /// text ⇔ the same post-expansion tokens, i.e. the same header re-included.</summary>
-        public string Print => PrintCache ??= Fingerprint(Sig, Block);
     }
-
-    private static string Fingerprint(Item sig, Item block) => sig.ToString() + "" + block.ToString();
 
     // Definitions seen so far, by C name — the whole-program merge's handling of
     // C internal linkage. A `static` name may be defined in several TUs: an
@@ -671,7 +669,7 @@ internal sealed partial class IrBuilder
     private readonly HashSet<string> _referencedExternData = new(StringComparer.Ordinal);
     private readonly HashSet<string> _definedGlobalNames = new(StringComparer.Ordinal);
 
-    private void BuildFuncDef(Item fnSig, Item block)
+    private void BuildFuncDef(Item fnSig, Item block, Frontends.ParseFingerprints.Fp print)
     {
         _sawNoreturnSpec = false;
         _sawInlineSpec = false;
@@ -688,7 +686,6 @@ internal sealed partial class IrBuilder
         Symbol funcSym;
         if (_fnDefSites.TryGetValue(sig.Name, out var sites))
         {
-            var print = Fingerprint(fnSig, block);
             foreach (var site in sites)
             {
                 if (site.Print == print)
@@ -754,12 +751,12 @@ internal sealed partial class IrBuilder
                     IsGlobal = true,
                 });
             }
-            sites.Add(new FnDefSite { Sig = fnSig, Block = block, Sym = funcSym, PrintCache = print });
+            sites.Add(new FnDefSite { Print = print, Sym = funcSym });
         }
         else
         {
             funcSym = DeclareFunc(sig, fromSystemHeader: fnSig.Position.Line >= SrcPos.SyntheticLineBase);
-            _fnDefSites[sig.Name] = new List<FnDefSite> { new() { Sig = fnSig, Block = block, Sym = funcSym } };
+            _fnDefSites[sig.Name] = new List<FnDefSite> { new() { Print = print, Sym = funcSym } };
         }
 
         ApplyFnMarkers(funcSym);
