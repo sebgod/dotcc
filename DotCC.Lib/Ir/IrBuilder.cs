@@ -2730,8 +2730,9 @@ internal sealed partial class IrBuilder
             // call would use the wrong calling convention. Warn, but only once
             // <dlfcn.h> is in scope (its `dlsym` prototype registered), so the
             // legitimate managed void*-context fn-ptr idiom in non-dlfcn code stays
-            // silent.
-            if (DlfcnInScope && operand.Type.Unqualified is CType.Pointer { Pointee: CType.VoidType })
+            // silent. A null pointer (`(destructor)NULL`) holds no code address, so
+            // there is nothing to verify.
+            if (DlfcnInScope && Unparen(operand) is not NullPtr && operand.Type.Unqualified is CType.Pointer { Pointee: CType.VoidType })
             {
                 Diagnostics.Add(new Diagnostic(
                     Severity.Warning,
