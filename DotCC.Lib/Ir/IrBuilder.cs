@@ -2761,10 +2761,19 @@ internal sealed partial class IrBuilder
             && _promoted.TryGetValue(canonical, out var pm)
             && pm.TryGetValue(field, out var p))
         {
-            var hidden = new Member(base_, p.Hidden, arrow) { Type = new CType.Named(p.Nested), IsLValue = true };
+            var hidden = new Member(base_, p.Hidden, arrow) { Type = new CType.Named(p.Nested).WithQuals(MemberQuals(base_, arrow)), IsLValue = true };
             return BuildMemberAccess(hidden, field, arrow: false);
         }
-        return new Member(base_, field, arrow) { Type = MemberType(base_, field), IsLValue = true };
+        return new Member(base_, field, arrow) { Type = MemberType(base_, field).WithQuals(MemberQuals(base_, arrow)), IsLValue = true };
+    }
+
+    /// <summary>The qualifiers a member access inherits from its object (C11 6.5.2.3p3, p4): a member
+    /// of a <c>const</c> or <c>volatile</c> struct or union is itself so qualified, through <c>.</c> or
+    /// through a pointer to one.</summary>
+    private static TypeQual MemberQuals(CExpr base_, bool arrow)
+    {
+        var obj = arrow ? (base_.Type.Unqualified as CType.Pointer)?.Pointee : base_.Type;
+        return obj is null ? TypeQual.None : obj.Quals & (TypeQual.Const | TypeQual.Volatile);
     }
 
 
