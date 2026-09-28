@@ -182,7 +182,7 @@ public sealed class PreprocessorIncludeGuardTests
             var pre = new CPreprocessor(lexerTable, Compiler.BuildIncludeResolver(null), System.Array.Empty<string>());
             pre.SetActiveFile(srcPath);
             using var lex = LALR.CC.LexicalGrammar.BytesLexer.FromString(File.ReadAllText(srcPath), lexerTable);
-            using var wrap = C.WrapPreprocessor(lex, pre);
+            using var wrap = pre.WrapPreprocessor(lex);
             while (wrap.MoveNext()) { /* drain */ }
 
             pre.IncludeOptimizationHits.ShouldBe(1);
@@ -211,7 +211,7 @@ public sealed class PreprocessorIncludeGuardTests
             var pre = new CPreprocessor(lexerTable, Compiler.BuildIncludeResolver(null), System.Array.Empty<string>());
             pre.SetActiveFile(srcPath);
             using var lex = LALR.CC.LexicalGrammar.BytesLexer.FromString(File.ReadAllText(srcPath), lexerTable);
-            using var wrap = C.WrapPreprocessor(lex, pre);
+            using var wrap = pre.WrapPreprocessor(lex);
             while (wrap.MoveNext()) { /* drain */ }
 
             pre.IncludeOptimizationHits.ShouldBe(0);

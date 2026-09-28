@@ -30,8 +30,8 @@ The C front half is a straight pull-pipe:
 
 ```
 .c file → BytesLexer
-        → PreprocessorTokenStream  (#include / #define / #undef / #if / #ifdef / #ifndef / #else / #endif / #pragma / #error / #warning; object-like macro substitution via Rewrite)
-        → MacroExpander            (function-like macro expansion with paren-balanced arg collection + multi-pass rescan)
+        → PreprocessorTokenStream  (#include / #define / #undef / #if / #ifdef / #ifndef / #else / #endif / #pragma / #error / #warning; text passes through, #if conditions go to CPreprocessor.EvaluateCondition)
+        → MacroExpander            (all macro replacement, object-like and function-like, via MacroEngine's per-token hide sets)
         → DialectKeywordRewriter   (dialect-aware keyword promotion: e.g. C23 `bool` → `_Bool`, gated on -std=)
         → TypeNameRewriter         (C lexer hack: promote ID → TYPE_NAME after typedef)
         → SizeofFolder             (fold `sizeof(T)` → literal, avoiding an ArrDims/Subscript LALR conflict)
@@ -49,8 +49,9 @@ The five token-rewriting stages are all `RewritingTokenStream` subclasses (an up
 The stage *mechanics* are owned by SharpAstro.LALR.CC. `DotCC.Lib` contributes:
 - `Compiler.EmitCSharp(...)` / `EmitWat` / `EmitObject` / `LinkObjects` / `Preprocess` / `EmitDependencyRule` — public entry points (`Compiler.cs`), which dispatch inputs to the right `IFrontend` and drive a backend over the returned IR.
 - `CFrontend` / `ZigFrontend` — the `IFrontend` impls: each owns its language's lex→parse→bind pipeline and flushes source-level diagnostics; neither knows any output language.
-- `CPreprocessor` — impl of generated `C.IPreprocessor`: object + function-like macros, `#include` (quoted and angle), `#pragma once`, `#error`/`#warning`, defined-set tracking.
-- `MacroExpander` — function-like macro calls (paren-balanced arg collection + multi-pass rescan).
+- `CPreprocessor` — impl of generated `C.IPreprocessor`: the macro table, `#include` (quoted and angle), `#pragma once`, `#error`/`#warning`, `#if` evaluation (`EvaluateCondition`), defined-set tracking; `WrapPreprocessor(lexer)` builds the directive stage.
+- `MacroEngine` — C macro replacement for every context (text, argument prescan, `#if`, `#line`): Prosser's hide-set algorithm, one `HideSet` per token, replacements pushed back in front of the remaining input.
+- `MacroExpander` — the streaming stage that feeds each token of ordinary text to `MacroEngine`.
 - `DialectKeywordRewriter` — dialect-aware keyword promotion ("rule 2"). A data table maps `(identifier spelling → MinVersion + target terminal)`; an `ID` is promoted only when the active `CDialect.Version ≥ MinVersion`. **`CDialect.Version` is keyed by ISO year (1990/1999/2011/2017/2023) so the gate `Version >= year` is monotonic** — keying by the short `90/99/11/17/23` suffix sorts `c11` below `c99` and silently mis-gates (a real past bug). Why rule 2 and not the binder: keywords spelled like identifiers (`inline`/`bool`/`true`/…) can't be gated post-parse — `int true = 5;` is valid older code. Under an older `-std=` the spelling stays an identifier, so the feature is simply unavailable there (a structural rejection, no `DialectGate` row needed). Sits after `MacroExpander` (a header's `#define bool _Bool` wins) and before `TypeNameRewriter`. Genuinely new *syntax* (`_BitInt`, `_Generic`) is gated in the IR binder instead; `_Capital_` keywords are always accepted.
 - `TypeNameRewriter` — the C lexer hack: tracks typedef-bound names, promotes matching `ID` → `TYPE_NAME` so `Color * x;` routes as a declaration.
 - `IrModule` (`Ir/IrModule.cs`, partial `.Comptime` — the unified compile-time interpreter both front-ends share) — the neutral IR: output lists, aggregate/enum registries + layout model, `ConstEval`.

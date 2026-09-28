@@ -299,8 +299,7 @@ public static partial class Compiler
             var pre = new CPreprocessor(lexerTable, resolver, seededDefines);
             pre.SetActiveFile(unitPath);
             using var lexer = BytesLexer.FromString(source, lexerTable);
-            using var preproc = C.WrapPreprocessor(lexer, pre);
-            preproc.ExpandFuncMacro = pre.ExpandFuncMacro;
+            using var preproc = pre.WrapPreprocessor(lexer);
             // -E mode also routes through MacroExpander so function-like
             // macro expansion is visible in the dumped token stream.
             using var macroExp = new MacroExpander(preproc, pre);
@@ -358,8 +357,7 @@ public static partial class Compiler
         var pre = new CPreprocessor(lexerTable, resolver, seededDefines, quiet: true);
         pre.SetActiveFile(sourcePath);
         var lexer = BytesLexer.FromString(source, lexerTable);
-        var preproc = C.WrapPreprocessor(lexer, pre);
-        preproc.ExpandFuncMacro = pre.ExpandFuncMacro;
+        var preproc = pre.WrapPreprocessor(lexer);
         using (lexer)
         using (preproc)
         using (var macroExp = new MacroExpander(preproc, pre))

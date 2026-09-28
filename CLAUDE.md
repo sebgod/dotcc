@@ -59,8 +59,8 @@ N frontends × M backends meeting at one **typed IR** — today C and Zig → C#
 
 ```
 .c file → BytesLexer
-        → PreprocessorTokenStream  (#include/#define/#if…; object-like macro substitution)
-        → MacroExpander            (function-like macros)
+        → PreprocessorTokenStream  (#include/#define/#if…; #if via CPreprocessor.EvaluateCondition)
+        → MacroExpander            (all macro replacement: MacroEngine, per-token hide sets)
         → DialectKeywordRewriter   (dialect-aware keyword promotion, gated on -std=)
         → TypeNameRewriter         (C lexer hack: ID → TYPE_NAME after typedef)
         → SizeofFolder             (fold sizeof(T) → literal)
