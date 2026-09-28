@@ -27,8 +27,15 @@ public static partial class Compiler
     private const string FragMain   = "//!!dotcc-obj main:";
     private const string FragMainVoid = "//!!dotcc-obj main-void:"; // 1 when main returns void
     private const string FragMainErr = "//!!dotcc-obj main-err:";   // v|i when main returns `!void`|`!<int>`
+    // One definition each: `type:<name>`, `global:<name> <local|extern>`, `fn:<name> <local|extern>`,
+    // with its C# text on the lines up to the next marker. `local` is a name only its own unit
+    // reaches (internal linkage, or a static local's field), qualified by that unit already.
     private const string FragType   = "//!!dotcc-obj type:";
-    private const string FragSect   = "//!!dotcc-obj section:"; // aliases|globals|functions
+    // `opaque:<name>`: the placeholder of a struct the unit never completes, kept only when
+    // no object defines the type.
+    private const string FragOpaque = "//!!dotcc-obj opaque:";
+    private const string FragGlobal = "//!!dotcc-obj global:";
+    private const string FragFn     = "//!!dotcc-obj fn:";
     // Import mode in separate compilation: `-l` is known only at LINK time, so each
     // fragment serializes its import CANDIDATES (proto-only, called, non-system,
     // non-variadic — `import:<name> <cs-fn-ptr-type>`) and the names it DEFINES
@@ -44,6 +51,9 @@ public static partial class Compiler
     // (A file-based program's `#:property` directives precede it; otherwise it's
     // line 1.) Scan the first few lines for these.
     private const string MagicObject = "//!dotcc object";
+    // The object format this dotcc writes and links: 2 carries one record per definition,
+    // with its linkage (1 had one section of each kind, and no types).
+    private const string ObjectFormat = "2";
 
     /// <summary>Emit a single translation unit as a `.cs` object fragment.</summary>
     public static string EmitObject(
@@ -55,13 +65,28 @@ public static partial class Compiler
         => EmitCSharp(new[] { inputPath }, includeDirs, defines,
                       emit: EmitMode.Object, dialect: dialect, warnings: warnings);
 
+    /// <summary>
+    /// The key that qualifies an object's internal-linkage names (<see cref="Ir.IrBuilder.ObjectKey"/>):
+    /// its source file's name as an identifier, then a hash of its full path, so two units of
+    /// one name in different directories differ.
+    /// </summary>
+    private static string ObjectKeyOf(IReadOnlyList<string> inputPaths)
+    {
+        var path = Path.GetFullPath(inputPaths[0]).Replace('\\', '/');
+        var stem = Path.GetFileNameWithoutExtension(path);
+        var ident = new string(stem.Select(c => char.IsAsciiLetterOrDigit(c) ? c : '_').ToArray());
+        var hash = 0xCBF29CE484222325UL;
+        foreach (var ch in path) { hash = (hash ^ ch) * 0x100000001B3UL; }
+        return System.FormattableString.Invariant($"{ident}_{hash & 0xFFFFFF:x6}");
+    }
+
     private static string SerializeFragment(
-        string functions, IReadOnlyDictionary<string, string> typeDecls, string aliases, string globals, int mainArity,
+        IReadOnlyList<Backends.LinkRecord> records, int mainArity,
         IReadOnlyList<(string Name, string FieldType)> importSpecs, IEnumerable<string> defNames, bool mainReturnsVoid = false,
         bool mainReturnsErrUnion = false, bool mainErrPayloadIsVoid = false)
     {
         var sb = new StringBuilder();
-        sb.Append(MagicObject).Append(" 1 — link with `dotcc <objs> -o <out>`.\n");
+        sb.Append(MagicObject).Append(' ').Append(ObjectFormat).Append(" — link with `dotcc <objs> -o <out>`.\n");
         sb.Append(FragMain).Append(mainArity).Append('\n');
         if (mainReturnsVoid) { sb.Append(FragMainVoid).Append("1").Append('\n'); }
         if (mainReturnsErrUnion) { sb.Append(FragMainErr).Append(mainErrPayloadIsVoid ? "v" : "i").Append('\n'); }
@@ -70,34 +95,61 @@ public static partial class Compiler
         // unmanaged[Cdecl]<int, int>`) — is everything after the first space.
         foreach (var (name, ft) in importSpecs) { sb.Append(FragImport).Append(name).Append(' ').Append(ft).Append('\n'); }
         foreach (var d in defNames) { sb.Append(FragDef).Append(d).Append('\n'); }
-        // Types are tagged by name so the link step can union them across TUs.
-        foreach (var (name, text) in typeDecls)
+        foreach (var r in records)
         {
-            sb.Append(FragType).Append(name).Append('\n').Append(text);
+            var linkage = r.TuLocal ? " local" : " extern";
+            sb.Append(r.Kind switch
+            {
+                Backends.LinkRecordKind.Type => FragType + r.Name,
+                Backends.LinkRecordKind.OpaqueType => FragOpaque + r.Name,
+                Backends.LinkRecordKind.Global => FragGlobal + r.Name + linkage,
+                _ => FragFn + r.Name + linkage,
+            }).Append('\n');
+            sb.Append(r.Text);
+            if (r.Text.Length > 0 && r.Text[^1] != '\n') { sb.Append('\n'); }
         }
-        sb.Append(FragSect).Append("aliases\n").Append(aliases);
-        sb.Append(FragSect).Append("globals\n").Append(globals);
-        sb.Append(FragSect).Append("functions\n").Append(functions);
         return sb.ToString();
     }
 
+    /// <summary>Reject a file that is not an object of the format this dotcc links.</summary>
+    private static void CheckObjectFormat(string text, string from)
+    {
+        var at = text.IndexOf(MagicObject, StringComparison.Ordinal);
+        if (at < 0)
+        {
+            throw new CompileException(
+                $"'{from}' is not a dotcc object — no '{MagicObject}' marker. " +
+                "Link expects `--emit=obj` fragments, not a program or hand-written .cs.");
+        }
+        var rest = text[(at + MagicObject.Length)..].TrimStart(' ');
+        var end = rest.IndexOfAny([' ', '\n']);
+        var format = end < 0 ? rest : rest[..end];
+        if (format != ObjectFormat)
+        {
+            throw new CompileException(
+                $"'{from}' is a dotcc object of format {format}; this dotcc links format {ObjectFormat} (recompile it with --emit=obj)");
+        }
+    }
+
     /// <summary>
-    /// Link `.cs` object fragments (from <see cref="EmitObject"/>) into one
-    /// program: concatenate functions, union types/aliases/globals (deduping a
-    /// shared header's declarations), then wrap in the shell + runtime.
+    /// Link `.cs` object fragments (from <see cref="EmitObject"/>) into one program, as a C
+    /// linker would: every type once (the objects that include one header agree on it, and a
+    /// type defined differently in two objects is an error, since the program has one), each
+    /// function and object once (a second definition of a name is gcc's "multiple definition"
+    /// error), then wrap them in the shell + runtime.
     /// </summary>
     public static string LinkObjects(
         IReadOnlyList<string> objectPaths, EmitMode emit = EmitMode.File, bool debugHeap = false,
         ImportOptions? imports = null)
     {
         var libraryMode = emit == EmitMode.SharedLib;
-        var typeByName = new Dictionary<string, string>(StringComparer.Ordinal); // first wins
-        var typeOrder = new List<string>();
-        var aliasLines = new List<string>();
-        var aliasSeen = new HashSet<string>(StringComparer.Ordinal);
-        var globalLines = new List<string>();
-        var globalSeen = new HashSet<string>(StringComparer.Ordinal);
+        var types = new Dictionary<string, (string Text, string From)>(StringComparer.Ordinal);
+        var opaqueTypes = new Dictionary<string, string>(StringComparer.Ordinal);
+        var structDecls = new StringBuilder();
+        var definedIn = new Dictionary<string, string>(StringComparer.Ordinal);
+        var globalText = new StringBuilder();
         var functions = new StringBuilder();
+        var errors = new List<string>();
         var mainArity = -1;
         var mainReturnsVoid = false;
         var mainReturnsErrUnion = false;
@@ -110,27 +162,69 @@ public static partial class Compiler
         foreach (var path in objectPaths)
         {
             var text = File.ReadAllText(path).ReplaceLineEndings("\n");
-            if (!text.Contains(MagicObject, StringComparison.Ordinal))
-            {
-                throw new CompileException(
-                    $"'{Path.GetFileName(path)}' is not a dotcc object — no '{MagicObject}' marker. " +
-                    "Link expects `--emit=obj` fragments, not a program or hand-written .cs.");
-            }
-            // Walk the fragment line by line, routing into the current bucket.
-            string section = "";            // "type:<name>" | "aliases" | "globals" | "functions"
+            var from = Path.GetFileName(path);
+            CheckObjectFormat(text, from);
+            // The record being read: its marker line, and its text so far.
+            string? record = null;
             var buf = new StringBuilder();
-            void FlushType()
+            void Flush()
             {
-                if (section.StartsWith("type:", StringComparison.Ordinal))
-                {
-                    var name = section["type:".Length..];
-                    if (!typeByName.ContainsKey(name)) { typeByName[name] = buf.ToString(); typeOrder.Add(name); }
-                }
+                if (record is null) { return; }
+                var body = buf.ToString();
                 buf.Clear();
+                if (record.StartsWith(FragOpaque, StringComparison.Ordinal))
+                {
+                    opaqueTypes.TryAdd(record[FragOpaque.Length..], body);
+                    return;
+                }
+                if (record.StartsWith(FragType, StringComparison.Ordinal))
+                {
+                    var name = record[FragType.Length..];
+                    if (!types.TryGetValue(name, out var first))
+                    {
+                        types[name] = (body, from);
+                        structDecls.Append(body);
+                    }
+                    else if (first.Text != body)
+                    {
+                        errors.Add($"type '{name}' is defined differently in '{from}' and '{first.From}'");
+                    }
+                    return;
+                }
+                var isFn = record.StartsWith(FragFn, StringComparison.Ordinal);
+                var spec = record[(isFn ? FragFn : FragGlobal).Length..];
+                var sp = spec.IndexOf(' ');
+                var symbol = sp < 0 ? spec : spec[..sp];
+                if (definedIn.TryGetValue(symbol, out var firstFrom))
+                {
+                    errors.Add($"multiple definition of '{symbol}' in '{from}', first defined in '{firstFrom}'");
+                    return;
+                }
+                definedIn[symbol] = from;
+                if (isFn)
+                {
+                    if (functions.Length > 0) { functions.Append("\n\n"); }
+                    functions.Append(body.TrimEnd('\n'));
+                }
+                else
+                {
+                    globalText.Append(body);
+                }
             }
-            foreach (var line in text.Split('\n'))
+            // The file's final newline ends its last line; it opens no empty one.
+            var lines = text.Split('\n');
+            var lineCount = text.EndsWith('\n') ? lines.Length - 1 : lines.Length;
+            foreach (var line in lines.AsSpan(0, lineCount))
             {
-                if (line.StartsWith(FragMainErr, StringComparison.Ordinal))
+                if (line.StartsWith(FragType, StringComparison.Ordinal)
+                    || line.StartsWith(FragOpaque, StringComparison.Ordinal)
+                    || line.StartsWith(FragGlobal, StringComparison.Ordinal)
+                    || line.StartsWith(FragFn, StringComparison.Ordinal))
+                {
+                    Flush();
+                    record = line;
+                }
+                else if (line.StartsWith(FragMainErr, StringComparison.Ordinal))
                 {
                     // `main-err:` (v|i) — an error-union main (`!void`/`!<int>`). Disjoint from
                     // the `main-void:` / `main:` markers (the char after "main" differs).
@@ -158,34 +252,24 @@ public static partial class Compiler
                 {
                     definedNames.Add(line[FragDef.Length..]);
                 }
-                else if (line.StartsWith(FragType, StringComparison.Ordinal))
-                {
-                    FlushType();
-                    section = "type:" + line[FragType.Length..];
-                }
-                else if (line.StartsWith(FragSect, StringComparison.Ordinal))
-                {
-                    FlushType();
-                    section = line[FragSect.Length..];
-                }
-                else if (section.StartsWith("type:", StringComparison.Ordinal))
+                else if (record is not null)
                 {
                     buf.Append(line).Append('\n');
                 }
-                else if (section == "aliases")
-                {
-                    if (line.Length > 0 && aliasSeen.Add(line)) { aliasLines.Add(line); }
-                }
-                else if (section == "globals")
-                {
-                    if (line.Length > 0 && globalSeen.Add(line)) { globalLines.Add(line); }
-                }
-                else if (section == "functions")
-                {
-                    functions.Append(line).Append('\n');
-                }
             }
-            FlushType();
+            Flush();
+        }
+        if (errors.Count > 0)
+        {
+            const int shown = 20;
+            var more = errors.Count > shown ? $"\n... and {errors.Count - shown} more" : "";
+            throw new CompileException("link failed:\n" + string.Join("\n", errors.Take(shown)) + more);
+        }
+        // A struct some object only points at: its definition if any object has one (added
+        // above), else one placeholder.
+        foreach (var (name, text) in opaqueTypes)
+        {
+            if (!types.ContainsKey(name)) { structDecls.Append(text); }
         }
 
         if (!libraryMode && mainArity < 0)
@@ -193,10 +277,6 @@ public static partial class Compiler
             throw new CompileException("no `main` function defined in any linked object.");
         }
 
-        var structDecls = new StringBuilder();
-        foreach (var name in typeOrder) { structDecls.Append(typeByName[name]); }
-        var aliasText = aliasLines.Count > 0 ? string.Join("\n", aliasLines) + "\n" : "";
-        var globalText = globalLines.Count > 0 ? string.Join("\n", globalLines) + "\n" : "";
         // Import mode at link: bind the candidates no fragment defines (a name defined
         // in any object — function or global — is resolved internally, not imported).
         // Without `-l`, survivors stay unresolved → the same CS0103 as a normal link.
@@ -210,7 +290,7 @@ public static partial class Compiler
                 .ToList();
             if (survivors.Count > 0) { importsClass = RenderImportsClass(survivors, imports, libraryMode); }
         }
-        return BuildShell(mainArity, functions.ToString(), structDecls.ToString(), aliasText, globalText,
+        return BuildShell(mainArity, functions.ToString(), structDecls.ToString(), "", globalText.ToString(),
                           emit, System.Array.Empty<EmitHelpers.Export>(), debugHeap, importsClass,
                           importsAreStatic: false, mainReturnsVoid: mainReturnsVoid,
                           mainReturnsErrUnion: mainReturnsErrUnion, mainErrPayloadIsVoid: mainErrPayloadIsVoid);

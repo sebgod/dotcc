@@ -35,6 +35,20 @@ internal sealed partial class IrModule
     internal Dictionary<string, CType.Enum> EnumTypes { get; } = new(StringComparer.Ordinal);
     internal HashSet<string> EmittedTypes { get; } = new(StringComparer.Ordinal);
 
+    /// <summary>True when this module is one translation unit compiled to an object
+    /// (<c>--emit=obj</c>). Its types are shared with every unit it links with, so each
+    /// renders in full rather than trimmed to what this unit's own code uses.</summary>
+    public bool IsObject { get; set; }
+
+    /// <summary>The struct and union tags the program's own sources name. One never completed is
+    /// only ever pointed at (C11 6.7.2.3: an incomplete type), and the backend gives it an empty
+    /// placeholder so the pointers have a type, unless it is in <see cref="RuntimeTags"/>.</summary>
+    public HashSet<string> DeclaredTags { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>The tags a synthetic header names: <c>struct tm</c>, <c>struct stat</c> and the
+    /// like are body-less there because the runtime supplies them as C# types.</summary>
+    public HashSet<string> RuntimeTags { get; } = new(StringComparer.Ordinal);
+
     public List<FuncDef> Functions { get; } = new();
     public List<GlobalVar> Globals { get; } = new();
     public List<StructTypeDef> Types { get; } = new();

@@ -65,7 +65,8 @@ public static partial class Compiler
         CDialect? dialect,
         Ir.INameLegalizer? names = null,
         WarningFlags warnings = WarningFlags.Default,
-        bool testMode = false)
+        bool testMode = false,
+        string? objectKey = null)
     {
         // clang's shape (`clang: error: no such file or directory: 'x.c'`), checked before any frontend
         // opens the file, so a missing input is a diagnostic rather than an unhandled IO exception.
@@ -77,7 +78,7 @@ public static partial class Compiler
             }
         }
         var request = new Frontends.FrontendRequest(
-            inputPaths, includeDirs, defines, dialect, names, warnings, testMode);
+            inputPaths, includeDirs, defines, dialect, names, warnings, testMode, objectKey);
         var anyZig = inputPaths.Any(IsZigSource);
         var anyC = inputPaths.Any(p => !IsZigSource(p));
         if (anyZig && anyC) { return BuildMixedIr(request); }
@@ -148,7 +149,8 @@ public static partial class Compiler
     {
         var libraryMode = emit == EmitMode.SharedLib;
         var asObject = emit == EmitMode.Object;
-        var irBuilder = BuildIr(inputPaths, includeDirs, defines, dialect, warnings: warnings, testMode: testMode);
+        var irBuilder = BuildIr(inputPaths, includeDirs, defines, dialect, warnings: warnings, testMode: testMode,
+            objectKey: asObject ? ObjectKeyOf(inputPaths) : null);
         // -Wconversion: collect narrowing-conversion warnings during codegen, then
         // flush to stderr. Off by default (the bit is clear unless -Wconversion set).
         var convGate = (warnings & WarningFlags.Conversion) != 0 ? new ConversionGate() : null;
@@ -192,15 +194,16 @@ public static partial class Compiler
         {
             // Serialize THIS TU's import candidates (non-variadic ProtoOnlyReferenced —
             // no `-l` is known yet, so no warnings/collision filtering; the link step
-            // decides) and the names it defines (functions + globals), so the linker
-            // can resolve cross-TU and bind the survivors. No -l filtering here.
+            // decides) and the names it defines with external linkage (functions +
+            // globals: another unit can reach only those), so the linker can resolve
+            // cross-TU and bind the survivors. No -l filtering here.
             var objImports = ImportFieldSpecs(
                 irBuilder.ProtoOnlyReferenced.Values
                     .Where(s => s.Type is not Ir.CType.Func { Variadic: true }).ToList());
-            var objDefs = irBuilder.Functions.Select(f => f.Sym.Name)
-                .Concat(irBuilder.Globals.Select(g => g.Sym.Name))
+            var objDefs = irBuilder.Functions.Select(f => f.Sym).Concat(irBuilder.Globals.Select(g => g.Sym))
+                .Where(s => !s.IsTuLocal).Select(s => s.Name)
                 .Distinct(StringComparer.Ordinal);
-            return SerializeFragment(cg.Functions, new Dictionary<string, string>(), cg.Aliases, cg.Globals, cg.MainArity,
+            return SerializeFragment(cg.Records ?? [], cg.MainArity,
                 objImports, objDefs, cg.MainReturnsVoid, cg.MainReturnsErrUnion, cg.MainErrPayloadIsVoid);
         }
         return BuildShell(cg.MainArity, cg.Functions, cg.Structs, cg.Aliases, cg.Globals, emit, cg.Exports, debugHeap, importsClass, importsAreStatic, cg.MainReturnsVoid, cg.MainReturnsErrUnion, cg.MainErrPayloadIsVoid, testMode, cg.Tests);

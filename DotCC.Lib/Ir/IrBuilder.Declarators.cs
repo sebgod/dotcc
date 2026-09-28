@@ -367,8 +367,9 @@ internal sealed partial class IrBuilder
     /// <summary>An array with static storage duration (file scope, or a block-scope
     /// <c>static</c> under the mangled <paramref name="csName"/>): a pinned, rooted
     /// managed array behind a <c>T*</c> field, which persists for the program's
-    /// lifetime (a <c>stackalloc</c> cannot).</summary>
-    private void BuildStaticArray(Declarator d, CType.Array arr, string? csName)
+    /// lifetime (a <c>stackalloc</c> cannot). <paramref name="tuLocal"/> marks a
+    /// file-scope one with internal linkage.</summary>
+    private void BuildStaticArray(Declarator d, CType.Array arr, string? csName, bool tuLocal)
     {
         if (d.VlaDims is not null)
         {
@@ -376,7 +377,7 @@ internal sealed partial class IrBuilder
         }
         var a = ResolveArrayObject(d, arr);
         var init = new PinnedArray(a.Elem, a.Elems, a.Elems is null ? CountLit(a.Count) : null) { Type = new CType.Pointer(a.Elem) };
-        AddGlobalArray(d.Name, a.Type, init, csName);
+        AddGlobalArray(d.Name, a.Type, init, csName, tuLocal);
     }
 
     /// <summary>An element count as an <c>int</c> literal.</summary>

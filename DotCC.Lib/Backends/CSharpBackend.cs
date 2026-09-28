@@ -12,7 +12,9 @@ using DotCC.Ir;
 /// <summary>
 /// The six outputs <see cref="DotCC.Compiler.BuildShell"/> /
 /// <c>SerializeFragment</c> consume — produced by the IR backend in the exact
-/// shape the shell expects, so the shell is reused verbatim.
+/// shape the shell expects, so the shell is reused verbatim. <see cref="Records"/>
+/// holds the same types, globals and functions one definition at a time, for an
+/// object file's linker.
 /// </summary>
 internal sealed record CSharpBackendResult(
     string Functions,
@@ -24,7 +26,20 @@ internal sealed record CSharpBackendResult(
     bool MainReturnsVoid = false,
     bool MainReturnsErrUnion = false,
     bool MainErrPayloadIsVoid = false,
-    IReadOnlyList<(string Name, string FnName)>? Tests = null);
+    IReadOnlyList<(string Name, string FnName)>? Tests = null,
+    IReadOnlyList<LinkRecord>? Records = null);
+
+/// <summary>What a <see cref="LinkRecord"/> defines. An <see cref="OpaqueType"/> is the
+/// placeholder of a struct this unit never completes: the linker keeps it only when no
+/// object defines the type.</summary>
+internal enum LinkRecordKind { Type, OpaqueType, Global, Function }
+
+/// <summary>
+/// One definition an object file carries to the linker: its kind, the name it is emitted
+/// under, whether only its own translation unit reaches it (<see cref="Symbol.IsTuLocal"/>),
+/// and its C# text.
+/// </summary>
+internal sealed record LinkRecord(LinkRecordKind Kind, string Name, bool TuLocal, string Text);
 
 /// <summary>
 /// Lowers the typed IR to low-level unsafe C# text. Deliberately DUMB: every
@@ -60,12 +75,15 @@ internal sealed class CSharpBackend
         var mainReturnsVoid = false;
         var mainReturnsErrUnion = false;
         var mainErrPayloadIsVoid = false;
+        var records = new List<LinkRecord>();
 
         foreach (var fn in unit.Functions)
         {
             if (fns.Length > 0) { fns.Append("\n\n"); }
             cg._currentFnName = fn.Sym.Name;
-            fns.Append(cg.Func(fn));
+            var fnText = cg.Func(fn);
+            fns.Append(fnText);
+            records.Add(new LinkRecord(LinkRecordKind.Function, fn.Sym.TargetName, fn.Sym.IsTuLocal, fnText));
 
             if (fn.Sym.Name == "main")
             {
@@ -103,6 +121,7 @@ internal sealed class CSharpBackend
         if (unit.ZigErrorCodes is { Count: > 0 } errNames)
         {
             if (fns.Length > 0) { fns.Append("\n\n"); }
+            var errorNameStart = fns.Length;
             // NB: emit `static unsafe` (no access modifier) — the shell rewrites `static unsafe ` →
             // `internal static unsafe ` (exe) / `public static unsafe ` (lib), so a literal
             // `internal` here would be doubled (CS1004). Matches `Func` above.
@@ -114,12 +133,23 @@ internal sealed class CSharpBackend
                 fns.Append($"        {kv.Value} => new ConstSlice<byte>(L(\"{kv.Key}\"u8), {len}),\n");
             }
             fns.Append("        _ => new ConstSlice<byte>(L(\"(unknown)\"u8), 9),\n    };");
+            records.Add(new LinkRecord(LinkRecordKind.Function, "__zigErrorName", false,
+                fns.ToString(errorNameStart, fns.Length - errorNameStart)));
         }
 
         // File-scope variables → public static fields of DotCcGlobals (the shell
         // surfaces them by bare name via `using static DotCcGlobals;`).
         var globals = new StringBuilder();
         foreach (var g in unit.Globals)
+        {
+            var globalStart = globals.Length;
+            AppendGlobal(g);
+            records.Add(new LinkRecord(LinkRecordKind.Global, g.Sym.TargetName, g.Sym.IsTuLocal,
+                globals.ToString(globalStart, globals.Length - globalStart)));
+        }
+
+        // One global's field (or property) text, appended to `globals`.
+        void AppendGlobal(GlobalVar g)
         {
             // A pointer/fn-ptr global whose address is taken is stored as `nint` so
             // Unsafe.AsPointer / Volatile.* accept it (CS0306) — the init pointer
@@ -145,7 +175,7 @@ internal sealed class CSharpBackend
                 globals.Append($"    public static unsafe ref {fieldType} {g.Sym.TargetName}\n    {{\n        get\n        {{\n");
                 globals.Append($"            if (!{slot}_set) {{ {slot} = {initText}; {slot}_set = true; }}\n");
                 globals.Append($"            return ref {slot};\n        }}\n    }}\n");
-                continue;
+                return;
             }
             // A static object whose initializer gives its flexible array member elements
             // (GH #246, gcc's GNU extension) needs storage past its struct: a zeroed
@@ -155,7 +185,7 @@ internal sealed class CSharpBackend
             if (g.Flexible is { } flex)
             {
                 globals.Append(cg.FlexibleGlobal(g, flex, fieldType, initText));
-                continue;
+                return;
             }
             if (g.Sym.IsThreadLocal) { globals.Append("    [ThreadStatic]\n"); }
             var init = initText is null ? "" : " = " + initText;
@@ -185,10 +215,32 @@ internal sealed class CSharpBackend
             }
         }
         while (reachedMore);
-        foreach (var text in structTexts) { if (text is not null) { structs.Append(text); } }
-        foreach (var en in unit.Enums) { structs.Append(cg.EnumText(en)); }
+        for (var i = 0; i < structTexts.Length; i++)
+        {
+            if (structTexts[i] is not { } text) { continue; }
+            structs.Append(text);
+            records.Add(new LinkRecord(LinkRecordKind.Type, unit.Types[i].Name, false, text));
+        }
+        foreach (var en in unit.Enums)
+        {
+            var text = cg.EnumText(en);
+            structs.Append(text);
+            records.Add(new LinkRecord(LinkRecordKind.Type, en.Name, false, text));
+        }
+        // A tag the program declares but never completes (CPython's `typedef struct
+        // PyCriticalSection PyCriticalSection;` in a build that leaves out its body) is only
+        // pointed at: an empty struct gives the pointers a type.
+        var definedTypes = new HashSet<string>(unit.Types.Select(t => t.Name).Concat(unit.Enums.Select(e => e.Name)), StringComparer.Ordinal);
+        foreach (var tag in unit.DeclaredTags.Where(t => !definedTypes.Contains(t) && !unit.RuntimeTags.Contains(t)).Order(StringComparer.Ordinal))
+        {
+            var text = $"unsafe struct {tag}\n{{\n}}\n\n";
+            structs.Append(text);
+            records.Add(new LinkRecord(LinkRecordKind.OpaqueType, tag, false, text));
+        }
         // The zig optional-array value types (task #151), last: every type above has rendered by now.
-        structs.Append(cg._target.OptionalArrayTypesText());
+        var optionalArrays = cg._target.OptionalArrayTypesText();
+        structs.Append(optionalArrays);
+        if (optionalArrays.Length > 0) { records.Add(new LinkRecord(LinkRecordKind.Type, "__zigOptionalArrays", false, optionalArrays)); }
 
         // Zig test-mode manifest (empty for a normal build): each test's display name paired with the
         // emitted method name (TargetName — the same spelling `Func` above prints at line ~411), so the
@@ -197,7 +249,7 @@ internal sealed class CSharpBackend
             ? unit.Tests.Select(t => (t.Name, t.Sym.TargetName)).ToList()
             : null;
 
-        return new CSharpBackendResult(fns.ToString(), structs.ToString(), Aliases: "", globals.ToString(), mainArity, exports, mainReturnsVoid, mainReturnsErrUnion, mainErrPayloadIsVoid, tests);
+        return new CSharpBackendResult(fns.ToString(), structs.ToString(), Aliases: "", globals.ToString(), mainArity, exports, mainReturnsVoid, mainReturnsErrUnion, mainErrPayloadIsVoid, tests, records);
     }
 
     // ---- type declarations -----------------------------------------------
@@ -298,7 +350,7 @@ internal sealed class CSharpBackend
             sb.Append("    public override bool Equals(object o) => o is ").Append(t.Name).Append(" other && this == other;\n");
             sb.Append("    public override int GetHashCode() => 0;\n");
         }
-        if (_arrayInitTypes.Contains(t.Name)) { sb.Append(ArrayMemberInitHelper(t)); }
+        if (_arrayInitTypes.Contains(t.Name) || _module is { IsObject: true }) { sb.Append(ArrayMemberInitHelper(t)); }
         sb.Append("}\n\n");
         return wrappers.Append(sb).ToString();
     }
@@ -311,7 +363,8 @@ internal sealed class CSharpBackend
     /// <summary>The struct types some aggregate initializer gave array-member contents
     /// (the ones that get an init helper). Filled while rendering code (functions and
     /// globals render before the type declarations), so a struct nobody initializes
-    /// that way carries no helper.</summary>
+    /// that way carries no helper. An object's structs all carry theirs: a type is the
+    /// same in every object that defines it, whatever each one's code uses.</summary>
     private readonly HashSet<string> _arrayInitTypes = new(StringComparer.Ordinal);
 
     /// <summary>For a struct/union with array members, a static helper that copies

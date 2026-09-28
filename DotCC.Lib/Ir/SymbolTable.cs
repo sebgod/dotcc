@@ -75,6 +75,13 @@ public sealed class Symbol
     /// <c>DotCcGlobals</c> field rather than a block local.</summary>
     public bool IsGlobal { get; init; }
 
+    /// <summary>True for a name only its own translation unit can reach: one with internal
+    /// linkage (a <c>static</c> function or file-scope object, C11 6.2.2p3) or a function-scope
+    /// <c>static</c>'s backing field. Every unit has its own, so separate compilation qualifies
+    /// the name with the unit's (<see cref="IrBuilder.ObjectKey"/>) and the linker never merges
+    /// two of them.</summary>
+    public bool IsTuLocal { get; init; }
+
     /// <summary>True when this symbol was declared in one of dotcc's synthetic system
     /// headers (detected via the reserved line band — see <see cref="SrcPos.SyntheticLineBase"/>).
     /// A proto-only function with this set is runtime-provided (libc, surfaced by

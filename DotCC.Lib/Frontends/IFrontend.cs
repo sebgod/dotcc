@@ -32,7 +32,8 @@ internal interface IFrontend
 /// the enabled diagnostic warnings. A frontend that has no analogue for a field
 /// simply ignores it (Zig has no preprocessor <c>Defines</c>, for instance;
 /// <c>TestMode</c> is honored only by the Zig front-end — <c>dotcc zig test</c> —
-/// and ignored by C).
+/// and ignored by C). <c>ObjectKey</c> is set when the one input unit compiles to an
+/// object (<c>--emit=obj</c>): it names the unit, for its internal-linkage names.
 /// </summary>
 internal sealed record FrontendRequest(
     IReadOnlyList<string> InputPaths,
@@ -41,4 +42,5 @@ internal sealed record FrontendRequest(
     CDialect? Dialect = null,
     INameLegalizer? Names = null,
     WarningFlags Warnings = WarningFlags.Default,
-    bool TestMode = false);
+    bool TestMode = false,
+    string? ObjectKey = null);

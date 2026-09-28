@@ -141,11 +141,13 @@ internal sealed class CFrontend : IFrontend
         // (-pedantic) or one collected error (-pedantic-errors). Off by default.
         var gate = (pedantic || pedanticErrors) ? new DialectGate(activeDialect) : null;
         // The binder dedupes a header's definitions re-included by several TUs on
-        // their structural fingerprints, which the parser computes as it reduces.
-        var fingerprints = new ParseFingerprints(node => node is C.FuncDef or C.GlobalDeclList);
+        // their structural fingerprints, which the parser computes as it reduces; an
+        // object names its anonymous aggregates by their member lists'.
+        var fingerprints = new ParseFingerprints(node => node is C.FuncDef or C.GlobalDeclList or C.MembersCons or C.MembersOne);
         var irBuilder = new Ir.IrBuilder(gate, names ?? new Backends.CSharpNameLegalizer(), embeds, warnings)
         {
             Fingerprints = fingerprints,
+            ObjectKey = req.ObjectKey,
         };
         var irParser = fingerprints.Wrap(C.BuildParser(C.IdentityVisitor.Instance));
         foreach (var unitPath in inputPaths)
