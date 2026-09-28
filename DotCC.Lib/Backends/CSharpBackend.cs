@@ -652,6 +652,14 @@ internal sealed class CSharpBackend
             sb.Append("}\n");
             return sb.ToString();
         }
+        // C lets a non-void function fall off its end: only a caller that uses the value is
+        // undefined (C11 6.9.1p12), and `main` returns 0 (5.1.2.2.3). C# requires a return on
+        // every path (CS0161), so a body whose end C# may reach (CPython's `switch` returning in
+        // every case, then a Py_UNREACHABLE that is a plain call) ends in `return default;`.
+        if (retTy.Unqualified is not CType.VoidType && !Terminates(body))
+        {
+            body = body with { Stmts = [.. body.Stmts, new Return(new DefaultLit { Type = retTy })] };
+        }
         Stmt(sb, body, 0);
         return sb.ToString();
     }
