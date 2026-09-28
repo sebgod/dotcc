@@ -737,18 +737,19 @@ internal sealed partial class IrBuilder
 
     /// <summary>Register a global-array symbol and its <see cref="GlobalVar"/>. A
     /// non-null <paramref name="csName"/> marks a static local (mangled field name +
-    /// alias symbol); otherwise it's a file-scope name.</summary>
-    private void AddGlobalArray(string name, CType arrType, CExpr init, string? csName)
+    /// alias symbol); otherwise it's a file-scope name, <paramref name="tuLocal"/> when it
+    /// has internal linkage.</summary>
+    private void AddGlobalArray(string name, CType arrType, CExpr init, string? csName, bool tuLocal)
     {
         if (csName is not null)
         {
-            var sym = new Symbol { Name = name, Kind = SymKind.Var, Type = arrType, Storage = Storage.Static, IsGlobal = true, TargetName = csName };
+            var sym = new Symbol { Name = name, Kind = SymKind.Var, Type = arrType, Storage = Storage.Static, IsGlobal = true, IsTuLocal = true, TargetName = csName };
             Globals.Add(new GlobalVar(sym, init));
             _symbols.DeclareAlias(sym);
         }
         else
         {
-            var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = arrType, Storage = Storage.Static, IsGlobal = true });
+            var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = arrType, Storage = Storage.Static, IsGlobal = true, IsTuLocal = tuLocal });
             Globals.Add(new GlobalVar(sym, init));
         }
     }

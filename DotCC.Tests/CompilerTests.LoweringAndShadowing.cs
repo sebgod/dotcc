@@ -690,14 +690,8 @@ public sealed partial class CompilerTests
     public void Separate_compilation_objects_link_into_one_program()
     {
         // `--emit=obj` per TU → fragments; LinkObjects merges them and wraps
-        // in the shell, exactly like whole-program emit.
-        //
-        // FLAGGED: the typed-IR object format does not include type declarations
-        // (struct bodies) in the object fragment — only function bodies. The
-        // `unsafe struct P\b` dedup check therefore sees 0 occurrences in the
-        // linked output rather than 1. The functions and entry-point wiring still
-        // work correctly; re-point the struct-count assertion once the IR
-        // object format includes type declarations.
+        // in the shell, exactly like whole-program emit. The link semantics
+        // (shared types once, internal names per unit) are pinned in ObjectLinkTests.
         var a = WriteTemp("struct P { int x; }; int side(void) { struct P p; p.x = 1; return p.x; }");
         var b = WriteTemp("struct P { int x; }; int main(void) { return side(); }");
         var objA = Path.Combine(Path.GetTempPath(), $"dotcc-obj-{System.Guid.NewGuid():N}.cs");

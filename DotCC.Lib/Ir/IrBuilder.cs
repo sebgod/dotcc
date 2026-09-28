@@ -205,13 +205,55 @@ internal sealed partial class IrBuilder
     public void AddUnit(Item root, string file)
     {
         _file = file;
+        _unitObjects.Clear();
+        Module.IsObject = ObjectKey is not null;
         if (root.Content is C.TuEmpty)
         {
             _gate?.Report("ISO C forbids an empty translation unit", 0);
             return;
         }
         FlattenFns(root, BuildTopLevel);
+        if (ObjectKey is { } key) { QualifyTuLocals(key); }
     }
+
+    /// <summary>The file-scope objects this unit has defined so far, by name. A tentative
+    /// definition (no initializer) and a later definition of the same name in one unit are
+    /// one object (C11 6.9.2p2), as CPython's forward <c>static PyModuleDef m;</c> before
+    /// <c>static PyModuleDef m = {…};</c> relies on.</summary>
+    private readonly Dictionary<string, GlobalVar> _unitObjects = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Set when this builder compiles one translation unit to an object (<c>--emit=obj</c>): a
+    /// key naming the unit, which qualifies its <see cref="Symbol.IsTuLocal"/> names, since
+    /// every unit linked into the program has its own. It also names anonymous aggregates by
+    /// their content (<see cref="AnonAggregateName"/>).
+    /// </summary>
+    internal string? ObjectKey { get; init; }
+
+    /// <summary>Give every name only this unit can reach its <paramref name="key"/>: the
+    /// functions and objects it defines with internal linkage and its static locals. Every
+    /// reference holds the symbol, so they print the qualified name too.</summary>
+    private void QualifyTuLocals(string key)
+    {
+        foreach (var fn in Functions)
+        {
+            if (fn.Sym.IsTuLocal) { fn.Sym.TargetName += "__" + key; }
+        }
+        foreach (var g in Globals)
+        {
+            if (g.Sym.IsTuLocal) { g.Sym.TargetName += "__" + key; }
+        }
+    }
+
+    /// <summary>
+    /// The name of a synthesized anonymous aggregate over <paramref name="memberList"/>. A
+    /// whole program numbers them. An object names one by its members' parse fingerprint: a
+    /// header struct's anonymous member is then the same type, behind the same hidden field,
+    /// in every unit that includes it, as the linker's one copy of the struct requires.
+    /// </summary>
+    private string AnonAggregateName(Item memberList, bool isUnion) => ObjectKey is null
+        ? $"__Anon{_anonAggrSeq++}"
+        : $"__Anon{(isUnion ? 'U' : 'S')}_{Fingerprints.Of(memberList).A:x16}";
 
     // ---- top level -------------------------------------------------------
 
@@ -383,43 +425,68 @@ internal sealed partial class IrBuilder
                     });
                     return;
                 }
-                BuildStaticArray(d, arr, csName: null);
+                BuildStaticArray(d, arr, csName: null, tuLocal: internalLinkage);
                 _definedGlobalNames.Add(name); // a real definition — satisfies any extern decl
+                return;
+            }
+            // A second definition of an object this unit already defines completes it: a
+            // tentative one adds nothing, an initialized one replaces the tentative one under
+            // the same symbol (every earlier reference holds it), and two initializers are
+            // gcc's redefinition error.
+            if (declStorage != Storage.Extern && _unitObjects.TryGetValue(name, out var prior))
+            {
+                if (d.Init is null) { return; }
+                if (prior.Init is not null)
+                {
+                    Diagnostics.Add(new Diagnostic(Severity.Error, $"redefinition of '{name}'", SrcPos.From(d.At), _file));
+                    return;
+                }
+                Globals.Remove(prior);
+                prior.Sym.Type = d.Type;
+                DefineFileScopeObject(prior.Sym, d, typeItem);
                 return;
             }
             var sym = _symbols.Declare(new Symbol
             {
                 Name = name, Kind = SymKind.Var, Storage = declStorage, IsGlobal = true,
+                IsTuLocal = internalLinkage,
                 // A constexpr object is const-qualified (C23 §6.7.1p5 implies it),
                 // so the standard write-to-const error covers assignments.
                 Type = _sawConstexprSpec ? d.Type.WithQuals(TypeQual.Const) : d.Type,
                 IsThreadLocal = _sawThreadLocalSpec,
                 IsConstexpr = _sawConstexprSpec,
             });
-            if (declStorage != Storage.Extern)
-            {
-                _definedGlobalNames.Add(name); // a real definition — satisfies any extern decl
-                CExpr? gInit = null;
-                FlexibleTail? flexible = null;
-                if (d.Init is { } ii)
-                {
-                    gInit = BuildInitValue(sym.Type, ii);
-                    CheckQualifierDiscard(gInit, sym.Type, SrcPos.From(ii), "initialization");
-                    (gInit, flexible) = SplitFlexibleInit(gInit, SrcPos.From(ii));
-                    if (flexible is not null && sym.IsThreadLocal)
-                    {
-                        throw new IrUnsupportedException($"'{name}': a _Thread_local object with an initialized flexible array member is not supported");
-                    }
-                }
-                PropagateNativeCallConv(sym, gInit);
-                if (sym.IsConstexpr) { BindConstexpr(sym, gInit, SrcPos.From(typeItem)); }
-                Globals.Add(new GlobalVar(sym, gInit)
-                {
-                    PerThreadInit = sym.IsThreadLocal && gInit is { } ti && !Module.IsZeroInitializer(ti),
-                    Flexible = flexible,
-                });
-            }
+            if (declStorage != Storage.Extern) { DefineFileScopeObject(sym, d, typeItem); }
         });
+    }
+
+    /// <summary>Define the file-scope object <paramref name="sym"/> declared by
+    /// <paramref name="d"/>: its initializer, if any, and its <see cref="GlobalVar"/>, which
+    /// this unit's later declarations of the name find in <see cref="_unitObjects"/>.</summary>
+    private void DefineFileScopeObject(Symbol sym, Declarator d, Item typeItem)
+    {
+        _definedGlobalNames.Add(sym.Name); // a real definition — satisfies any extern decl
+        CExpr? gInit = null;
+        FlexibleTail? flexible = null;
+        if (d.Init is { } ii)
+        {
+            gInit = BuildInitValue(sym.Type, ii);
+            CheckQualifierDiscard(gInit, sym.Type, SrcPos.From(ii), "initialization");
+            (gInit, flexible) = SplitFlexibleInit(gInit, SrcPos.From(ii));
+            if (flexible is not null && sym.IsThreadLocal)
+            {
+                throw new IrUnsupportedException($"'{sym.Name}': a _Thread_local object with an initialized flexible array member is not supported");
+            }
+        }
+        PropagateNativeCallConv(sym, gInit);
+        if (sym.IsConstexpr) { BindConstexpr(sym, gInit, SrcPos.From(typeItem)); }
+        var global = new GlobalVar(sym, gInit)
+        {
+            PerThreadInit = sym.IsThreadLocal && gInit is { } ti && !Module.IsZeroInitializer(ti),
+            Flexible = flexible,
+        };
+        Globals.Add(global);
+        _unitObjects[sym.Name] = global;
     }
 
     // ---- function markers (inline / noreturn / deprecated) ----------------
@@ -709,6 +776,7 @@ internal sealed partial class IrBuilder
                     Type = new CType.Func(sig.Return, paramTypes, sig.Variadic),
                     Storage = Storage.Static,
                     IsGlobal = true,
+                    IsTuLocal = true,
                     // Program-unique: a TU defines a static name at most once, so the
                     // per-name site count suffices (same scheme as static locals' __s{n}).
                     TargetName = $"{_symbols.Escape(sig.Name)}__{sites.Count + 1}",
@@ -823,6 +891,7 @@ internal sealed partial class IrBuilder
             Type = new CType.Func(sig.Return, paramTypes, sig.Variadic),
             Storage = sig.IsStatic ? Storage.Static : Storage.None,
             IsGlobal = true,
+            IsTuLocal = sig.IsStatic,
             FromSystemHeader = fromSystemHeader,
         });
     }
@@ -1049,11 +1118,14 @@ internal sealed partial class IrBuilder
     /// the struct's sequential layout).</summary>
     private void AddAnonMember(Item innerMemberList, string owner, List<StructField> parentFields, bool isUnion)
     {
-        var nested = $"__Anon{_anonAggrSeq++}";
-        var innerFields = BuildStructFields(innerMemberList, nested);
-        _structFields[nested] = innerFields;
-        _structIsUnion[nested] = isUnion;
-        Types.Add(new StructTypeDef(nested, innerFields, isUnion));
+        var nested = AnonAggregateName(innerMemberList, isUnion);
+        if (!_structFields.TryGetValue(nested, out var innerFields))
+        {
+            innerFields = BuildStructFields(innerMemberList, nested);
+            _structFields[nested] = innerFields;
+            _structIsUnion[nested] = isUnion;
+            Types.Add(new StructTypeDef(nested, innerFields, isUnion));
+        }
 
         var hidden = "__anon_" + nested;
         parentFields.Add(new StructField(hidden, new CType.Named(nested)));
@@ -1203,8 +1275,8 @@ internal sealed partial class IrBuilder
         // tag is unknown (forward/opaque) or names an anonymous int-constant enum.
         C.TypeEnum te => _enumTypes.TryGetValue(Tok(te.Arg1), out var et) ? et : CType.Int,
         // `struct Tag` / `union Tag` as a type — the canonical C# struct name.
-        C.TypeStruct t => new CType.Named(Tok(t.Arg1)),
-        C.TypeUnion t => new CType.Named(Tok(t.Arg1)),
+        C.TypeStruct t => TagReference(t.Arg1),
+        C.TypeUnion t => TagReference(t.Arg1),
         // Tag definitions (C11 6.7.2.1 / 6.7.2.2): the type is defined once per
         // occurrence and the declaration goes on with it (`static const struct X
         // { … } t[] = …;`, `union { int i; float f; } u;`, `typedef enum { … } Mode;`).
@@ -1243,13 +1315,26 @@ internal sealed partial class IrBuilder
     /// anonymous definitions at the same line and column.</summary>
     private CType ResolveAnonAggregate(Item memberListItem, bool isUnion)
     {
-        var name = $"__Anon{_anonAggrSeq++}";
-        var named = new CType.Named(name);
-        var fields = BuildStructFields(memberListItem, name);
-        _structFields[name] = fields;
-        _structIsUnion[name] = isUnion;
-        Types.Add(new StructTypeDef(name, fields, isUnion));
-        return named;
+        var name = AnonAggregateName(memberListItem, isUnion);
+        if (!_structFields.ContainsKey(name))
+        {
+            var fields = BuildStructFields(memberListItem, name);
+            _structFields[name] = fields;
+            _structIsUnion[name] = isUnion;
+            Types.Add(new StructTypeDef(name, fields, isUnion));
+        }
+        return new CType.Named(name);
+    }
+
+    /// <summary>`struct Tag` / `union Tag` as a type: the canonical C# struct name. A tag the
+    /// program's own sources name is recorded (<see cref="IrModule.DeclaredTags"/>), so one it
+    /// never completes still gets a type; one a synthetic header names is the runtime's
+    /// (<see cref="IrModule.RuntimeTags"/>).</summary>
+    private CType TagReference(Item tag)
+    {
+        var name = Tok(tag);
+        (tag.Position.Line < SrcPos.SyntheticLineBase ? Module.DeclaredTags : Module.RuntimeTags).Add(name);
+        return new CType.Named(name);
     }
 
     /// <summary>Resolve a type-name token: a user/library typedef resolves to its
@@ -2295,13 +2380,13 @@ internal sealed partial class IrBuilder
             var csName = $"{_symbols.Escape(d.Name)}__s{_staticLocalSeq++}";
             if (d.Type.Unqualified is CType.Array arr)
             {
-                BuildStaticArray(d, arr, csName);
+                BuildStaticArray(d, arr, csName, tuLocal: true);
                 return;
             }
             var sym = new Symbol
             {
                 Name = d.Name, Kind = SymKind.Var, Type = d.Type,
-                Storage = Storage.Static, IsGlobal = true, TargetName = csName,
+                Storage = Storage.Static, IsGlobal = true, IsTuLocal = true, TargetName = csName,
             };
             CExpr? slInit = null;
             FlexibleTail? flexible = null;

@@ -11,7 +11,7 @@
 | `--emit=file` | Single .NET 10 file-based program (`#:property AllowUnsafeBlocks=true`). To `-o <file>` if given, else stdout. |
 | `--emit=csproj` | Default — `Program.cs` + paired csproj to `-o` dir. |
 | `--emit=build` | As `csproj`, then run `dotnet build -c Release` in the output dir. |
-| `--emit=obj` | **Separate compilation.** Compile ONE `.c` to a `.cs` object fragment (functions + its type decls + globals, no shell/runtime). Link by passing `.cs` objects back: `dotcc a.cs b.cs -o app` merges (deduping shared types) and wraps in the shell. Drives CMake/make per file (`examples/cmake-demo/`). |
+| `--emit=obj` | **Separate compilation.** Compile ONE `.c` to a `.cs` object fragment (its types, functions and globals, each a record with its linkage; no shell/runtime). Link by passing `.cs` objects back: `dotcc a.cs b.cs -o app` merges them as a C linker would (a shared type once; a second external definition is a "multiple definition" error; each unit's `static` names stay its own) and wraps in the shell. Drives CMake/make per file (`examples/cmake-demo/`) and the CPython build (`examples/cpython/build.sh`). |
 | **`-o` ⇄ `--emit` inference** | When one is omitted it's inferred: `-o foo.cs` ⇒ `file`; `-o <dir>` ⇒ `csproj`; `--emit=obj` with no `-o` ⇒ `<src>.cs`. Explicit `--emit` wins; `obj` is never inferred. |
 | `-E` | Preprocess only — dump the post-`#include`/`#define` token stream to stdout. No parsing. |
 | `-I <dir>` | Add header search dir. Repeatable; searched in command-line order, first match wins (as in gcc/clang). A quoted `#include "x.h"` first looks next to the file holding the directive; `<x.h>` searches only the `-I` dirs, then the embedded system headers. A header that resolves nowhere is a fatal error. |
