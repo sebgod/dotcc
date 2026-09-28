@@ -50,6 +50,9 @@ internal sealed partial class IrBuilder
         Action<string, CType, Item>? addBitField = null)
     {
         var baseType = ResolveType(typeItem);
+        // A typedef's naming hint belongs to its own type specifier only, never to
+        // a type its declarators resolve (a parameter's anonymous struct).
+        _anonTagHint = null;
         // Peel only the LITERAL trailing `*`s: they bind to the first declarator alone.
         // Pointer-ness a typedef base contributes (`BoxPtr p, q` ⇒ both Box*) is not a
         // literal star and stays in `element`, so every declarator keeps it.
@@ -295,6 +298,167 @@ internal sealed partial class IrBuilder
 
     /// <summary>An element count as an <c>int</c> literal.</summary>
     private static LitInt CountLit(int n) => new(n.ToString(System.Globalization.CultureInfo.InvariantCulture), n) { Type = CType.Int };
+
+    // ---- tag definitions and typedefs -------------------------------------
+
+    /// <summary>The types the tag definitions resolved so far define, by their Type
+    /// item: however often a declaration's type is resolved, its definition runs once
+    /// (a re-included header brings new items, and is deduped by tag instead).</summary>
+    private readonly Dictionary<Item, CType> _tagDefs = new(ReferenceEqualityComparer.Instance);
+
+    /// <summary>The name an anonymous tag definition takes when it is the type of a
+    /// typedef's first, plain declarator (<c>typedef struct { … } Foo;</c> emits the
+    /// C# type <c>Foo</c>, not a synthesized <c>__AnonN</c>). Set by
+    /// <see cref="BuildTypedefs"/>, taken by the first anonymous definition resolved.</summary>
+    private string? _anonTagHint;
+
+    /// <summary>Take (and clear) <see cref="_anonTagHint"/>, so a nested anonymous
+    /// aggregate inside the named one never sees it.</summary>
+    private string? TakeAnonTagHint()
+    {
+        var hint = _anonTagHint;
+        _anonTagHint = null;
+        return hint;
+    }
+
+    /// <summary>A struct or union definition used as a type: defined under its tag,
+    /// under the typedef name an anonymous one is given, or as a synthesized
+    /// <c>__AnonN</c>.</summary>
+    private CType DefineAggregate(Item typeItem, string? tag, Item members, bool isUnion)
+    {
+        if (_tagDefs.TryGetValue(typeItem, out var done)) { return done; }
+        // Taken before the members resolve, tagged or not: the hint names the
+        // declaration's own type, never an anonymous aggregate nested inside it.
+        var hint = TakeAnonTagHint();
+        CType type;
+        if (tag is not null)
+        {
+            BuildStructDef(tag, members, null, isUnion);
+            type = new CType.Named(tag);
+        }
+        else if (hint is { } alias)
+        {
+            BuildStructDef(null, members, alias, isUnion);
+            type = new CType.Named(alias);
+        }
+        else
+        {
+            type = ResolveAnonAggregate(typeItem, members, isUnion);
+        }
+        _tagDefs[typeItem] = type;
+        return type;
+    }
+
+    /// <summary>An enum definition used as a type: a real C# enum named by its tag or
+    /// by the typedef name an anonymous one is given, else (untagged, un-typedef'd)
+    /// plain int constants.</summary>
+    private CType DefineEnum(Item typeItem, string? tag, Item? baseType, Item list)
+    {
+        if (_tagDefs.TryGetValue(typeItem, out var done)) { return done; }
+        var hint = TakeAnonTagHint();
+        var type = RegisterEnum(tag, baseType, list, tag is null ? hint : null);
+        _tagDefs[typeItem] = type;
+        return type;
+    }
+
+    /// <summary>Whether a type specifier declares something on its own: a tag
+    /// (defined or forward-declared) or enumeration constants.</summary>
+    private static bool DeclaresTag(Item typeItem) => typeItem.Content switch
+    {
+        C.TypeStruct or C.TypeUnion or C.TypeEnum
+            or C.TypeStructDef or C.TypeUnionDef or C.TypeEnumDef or C.TypeEnumAnonDef or C.TypeEnumDefTyped => true,
+        C.TypeConstPre q => DeclaresTag(q.Arg1),
+        C.TypeConstPost q => DeclaresTag(q.Arg0),
+        C.TypeVolatile q => DeclaresTag(q.Arg1),
+        C.TypeVolatilePost q => DeclaresTag(q.Arg0),
+        _ => false,
+    };
+
+    /// <summary>A declaration with no declarators (<c>struct Node { … };</c>,
+    /// <c>struct Node;</c>, <c>enum { A, B };</c>): resolving its type defines what it
+    /// declares. One that declares nothing gets gcc's warnings.</summary>
+    private void BuildTagDecl(Item typeItem)
+    {
+        ResolveType(typeItem);
+        if (typeItem.Content is C.TypeStructAnonDef or C.TypeUnionAnonDef)
+        {
+            Diagnostics.Add(new Diagnostic(Severity.Warning, "unnamed struct/union that defines no instances", SrcPos.From(typeItem), _file));
+        }
+        else if (!DeclaresTag(typeItem))
+        {
+            Diagnostics.Add(new Diagnostic(Severity.Warning, "useless type name in empty declaration", SrcPos.From(typeItem), _file));
+        }
+    }
+
+    /// <summary>A struct or union member declaration with no declarators: a C11
+    /// anonymous struct or union, whose members are promoted into the parent, or a
+    /// nested tag definition (C declares the tag at file scope).</summary>
+    private void BuildMemberTagDecl(Item typeItem, string owner, List<StructField> fields, Item member)
+    {
+        switch (typeItem.Content)
+        {
+            case C.TypeStructAnonDef a:
+                Gate(2011, "anonymous struct/union member", member);
+                AddAnonMember(a.Arg2, owner, fields, isUnion: false);
+                return;
+            case C.TypeUnionAnonDef a:
+                Gate(2011, "anonymous struct/union member", member);
+                AddAnonMember(a.Arg2, owner, fields, isUnion: true);
+                return;
+        }
+        ResolveType(typeItem);
+        if (!DeclaresTag(typeItem))
+        {
+            Diagnostics.Add(new Diagnostic(Severity.Warning, "declaration does not declare anything", SrcPos.From(typeItem), _file));
+        }
+    }
+
+    /// <summary><c>typedef T d1, d2…;</c> at file or block scope: each declarator
+    /// names an alias of its full type (C11 6.7.8). An anonymous tag definition is
+    /// named after the first declarator when that is a plain name.</summary>
+    private void BuildTypedefs(Item typeItem, Item listItem)
+    {
+        _anonTagHint = CountLiteralStars(typeItem) == 0 ? FirstPlainDeclarator(listItem) : null;
+        try
+        {
+            WalkDeclList(typeItem, listItem, d =>
+            {
+                if (d.Init is not null) { throw new IrUnsupportedException($"typedef '{d.Name}' is initialized"); }
+                if (d.VlaDims is not null) { throw new IrUnsupportedException($"typedef '{d.Name}': a variably modified typedef is not supported"); }
+                DeclareTypedef(d.Name, d.Type);
+            });
+        }
+        finally
+        {
+            _anonTagHint = null;
+        }
+    }
+
+    /// <summary>The name of a declarator list's first declarator when it is a plain
+    /// identifier (no pointer, array or function part), else null.</summary>
+    private static string? FirstPlainDeclarator(Item listItem) => listItem.Content switch
+    {
+        C.DeclItemListCons c => FirstPlainDeclarator(c.Arg0),
+        C.DeclItemListOne o => o.Arg0.Content is C.DeclItem di ? Tok(di.Arg0) : null,
+        C.DeclItem di => Tok(di.Arg0),
+        _ => null,
+    };
+
+    /// <summary>Bind a typedef name: at file scope in the program-wide typedef table,
+    /// in a block as a scoped symbol that ends with the block (a block-scope typedef
+    /// may shadow a file-scope one of the same name).</summary>
+    private void DeclareTypedef(string name, CType type)
+    {
+        if (_symbols.AtFileScope)
+        {
+            _typedefs[name] = type;
+            return;
+        }
+        _symbols.DeclareAlias(new Symbol
+        {
+            Name = name, Kind = SymKind.Typedef, Type = type, Storage = Storage.Typedef, TargetName = name,
+        });
+    }
 
     /// <summary>The type a declarator gives a struct or union member. An array member's
     /// bounds must be constant (codegen: a <c>fixed</c> buffer for a primitive element,

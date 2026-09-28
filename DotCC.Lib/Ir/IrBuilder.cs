@@ -270,33 +270,12 @@ internal sealed partial class IrBuilder
             // `extern T x…;` declares the names + types for resolution but emits no
             // storage: the definition lives in another TU (dotcc whole-program model).
             case C.ExternVarDecl g: BuildGlobalDecls(g.Arg1, g.Arg2, Storage.Extern); break;
-            // `typedef <type> <name>;` — record name → underlying type. Resolution
-            // (ResolveType's TypeName case) then sees through it everywhere.
-            case C.TypedefAlias t: _typedefs[Tok(t.Arg2)] = ResolveType(t.Arg1); break;
-            // `typedef T Name[N];` — the alias IS an array type. Bounds must be
-            // constant (same rule as struct array members); the registered
-            // CType.Array drives every use site: member → fixed buffer, param →
-            // pointer decay, sizeof → N*sizeof(T), local decl → stackalloc.
-            case C.TypedefArr t:
-                _typedefs[Tok(t.Arg2)] = MakeArrayType(
-                    ResolveType(t.Arg1),
-                    TryConstDims(t.Arg3) ?? throw new IrUnsupportedException("non-constant array typedef bound"));
-                break;
-            // enum definitions — register a real C# enum (tagged/typedef'd) or, for
-            // an anonymous un-typedef'd enum, plain int constants.
-            case C.EnumDef e: RegisterEnum(Tok(e.Arg1), null, e.Arg3); break;
-            case C.EnumDefTyped e: RegisterEnum(Tok(e.Arg1), e.Arg3, e.Arg5); break;
-            case C.TypedefEnum e: _typedefs[Tok(e.Arg6)] = RegisterEnum(Tok(e.Arg2), null, e.Arg4, Tok(e.Arg6)); break;
-            case C.TypedefEnumAnon e: _typedefs[Tok(e.Arg5)] = RegisterEnum(null, null, e.Arg3, Tok(e.Arg5)); break;
-            // struct/union definitions.
-            case C.StructDef s: BuildStructDef(Tok(s.Arg1), s.Arg3, null, isUnion: false); break;
-            case C.UnionDef s: BuildStructDef(Tok(s.Arg1), s.Arg3, null, isUnion: true); break;
-            case C.TypedefStruct s: BuildStructDef(Tok(s.Arg2), s.Arg4, Tok(s.Arg6), isUnion: false); break;
-            case C.TypedefUnion s: BuildStructDef(Tok(s.Arg2), s.Arg4, Tok(s.Arg6), isUnion: true); break;
-            case C.TypedefStructAnon s: BuildStructDef(null, s.Arg3, Tok(s.Arg5), isUnion: false); break;
-            case C.TypedefUnionAnon s: BuildStructDef(null, s.Arg3, Tok(s.Arg5), isUnion: true); break;
-            // `struct Tag;` forward declaration — C# resolves order-independently.
-            case C.StructFwd: break;
+            // `typedef T d1, d2…;`: each declarator names an alias of its full type,
+            // which ResolveType's TypeName case then sees through everywhere.
+            case C.TypedefDecl t: BuildTypedefs(t.Arg1, t.Arg2); break;
+            // A declaration with no declarators: `struct Node { … };`, `struct
+            // Node;`, `enum { A, B };`. Resolving the type defines what it declares.
+            case C.TagDecl t: BuildTagDecl(t.Arg0); break;
             // `_Static_assert(expr[, "msg"]);` at file scope — a compile-time-only
             // assertion, EVALUATED here (C11 §6.7.10) via the unified comptime
             // interpreter. A holding assertion emits nothing; a zero or non-constant
@@ -304,9 +283,6 @@ internal sealed partial class IrBuilder
             // arity gates C23 (it postdates the two-arg C11 form).
             case C.StaticAssert sa: Gate(2011, "_Static_assert", fn); CheckStaticAssert(sa.Arg2, sa.Arg4, SrcPos.From(fn)); break;
             case C.StaticAssertNoMsg sa: Gate(2023, "_Static_assert with no message", fn); CheckStaticAssert(sa.Arg2, null, SrcPos.From(fn)); break;
-            // `typedef Ret (*Name)(params);` — record Name → fn-ptr type.
-            case C.TypedefFnPtr t: _typedefs[Tok(t.Arg4)] = FnPtrType(t.Arg1, t.Arg7); break;
-            case C.TypedefFnPtrNoArgs t: _typedefs[Tok(t.Arg4)] = FnPtrType(t.Arg1, null); break;
             default: throw new IrUnsupportedException(TypeName(fn.Content));
         }
     }
@@ -1009,18 +985,13 @@ internal sealed partial class IrBuilder
                         d => fields.Add(new StructField(d.Name, MemberDeclaratorType(d, m))),
                         (name, type, width) => fields.Add(new StructField(name, type, BitFieldWidth(width))));
                     break;
-                // C11 anonymous struct/union member — its fields are promoted into
-                // the parent. Held in a generated nested aggregate + a hidden field;
-                // each inner name is recorded so `parent.inner` routes through it.
-                case C.AnonStructMember am: Gate(2011, "anonymous struct/union member", m); AddAnonMember(am.Arg3, owner, fields, isUnion: false); break;
-                case C.AnonUnionMember am: Gate(2011, "anonymous struct/union member", m); AddAnonMember(am.Arg3, owner, fields, isUnion: true); break;
-                // A NAMED member of a nested aggregate type — `struct {…} m;` /
-                // `struct Tag {…} m;` (and union forms). Define the (tagged or
-                // synthesized) type, then add `m` of that type — no promotion.
-                case C.NamedNestedStruct nm: AddNamedNested(null, nm.Arg3, Tok(nm.Arg5), fields, isUnion: false); break;
-                case C.NamedNestedUnion nm: AddNamedNested(null, nm.Arg3, Tok(nm.Arg5), fields, isUnion: true); break;
-                case C.NamedNestedTaggedStruct nm: AddNamedNested(Tok(nm.Arg1), nm.Arg4, Tok(nm.Arg6), fields, isUnion: false); break;
-                case C.NamedNestedTaggedUnion nm: AddNamedNested(Tok(nm.Arg1), nm.Arg4, Tok(nm.Arg6), fields, isUnion: true); break;
+                // A member declaration with no declarators: a C11 anonymous
+                // struct/union member (its fields promoted into the parent, held in a
+                // generated nested aggregate + a hidden field, each inner name
+                // recorded so `parent.inner` routes through it), or a nested tag
+                // definition. A NAMED nested aggregate (`struct {…} m;`) is an
+                // ordinary member list whose Type is the tag definition.
+                case C.MemberTagDecl mt: BuildMemberTagDecl(mt.Arg0, owner, fields, m); break;
                 default: throw new IrUnsupportedException(TypeName(m.Content));
             }
         }
@@ -1050,24 +1021,6 @@ internal sealed partial class IrBuilder
 
         if (!_promoted.TryGetValue(owner, out var pm)) { _promoted[owner] = pm = new(StringComparer.Ordinal); }
         foreach (var f in innerFields) { pm[f.Name] = (hidden, nested); }
-    }
-
-    /// <summary>Add a NAMED member of a nested aggregate type (<c>struct {…} m;</c>
-    /// or a tagged <c>struct Tag {…} m;</c>, and union forms). Defines the nested
-    /// type (under its tag, or a synthesized name) and adds <paramref name="member"/>
-    /// of that type — unlike an anonymous member, the fields are NOT promoted.</summary>
-    private void AddNamedNested(string? tag, Item innerMemberList, string member, List<StructField> parentFields, bool isUnion)
-    {
-        if (tag is not null) { RejectReservedTypeName(tag, isUnion ? "union" : "struct"); }
-        var typeName = tag ?? $"__Anon{_anonAggrSeq++}";
-        if (_emittedTypes.Add(typeName))
-        {
-            var inner = BuildStructFields(innerMemberList, typeName);
-            _structFields[typeName] = inner;
-            _structIsUnion[typeName] = isUnion;
-            Types.Add(new StructTypeDef(typeName, inner, isUnion));
-        }
-        parentFields.Add(new StructField(member, new CType.Named(typeName)));
     }
 
     /// <summary>The CType of <paramref name="field"/> read off the struct/union
@@ -1213,10 +1166,16 @@ internal sealed partial class IrBuilder
         // `struct Tag` / `union Tag` as a type — the canonical C# struct name.
         C.TypeStruct t => new CType.Named(Tok(t.Arg1)),
         C.TypeUnion t => new CType.Named(Tok(t.Arg1)),
-        // Inline anonymous aggregate used as a type — `union { int i; float f; } u;`
-        // (a NAMED member/var of an unnamed aggregate). Synthesize a struct name.
-        C.TypeAnonStruct t => ResolveAnonAggregate(it, t.Arg3, isUnion: false),
-        C.TypeAnonUnion t => ResolveAnonAggregate(it, t.Arg3, isUnion: true),
+        // Tag definitions (C11 6.7.2.1 / 6.7.2.2): the type is defined once per
+        // occurrence and the declaration goes on with it (`static const struct X
+        // { … } t[] = …;`, `union { int i; float f; } u;`, `typedef enum { … } Mode;`).
+        C.TypeStructDef t => DefineAggregate(it, Tok(t.Arg1), t.Arg3, isUnion: false),
+        C.TypeStructAnonDef t => DefineAggregate(it, null, t.Arg2, isUnion: false),
+        C.TypeUnionDef t => DefineAggregate(it, Tok(t.Arg1), t.Arg3, isUnion: true),
+        C.TypeUnionAnonDef t => DefineAggregate(it, null, t.Arg2, isUnion: true),
+        C.TypeEnumDef t => DefineEnum(it, Tok(t.Arg1), null, t.Arg3),
+        C.TypeEnumAnonDef t => DefineEnum(it, null, null, t.Arg2),
+        C.TypeEnumDefTyped t => DefineEnum(it, Tok(t.Arg1), t.Arg3, t.Arg5),
         // `TypeSpecList TYPE_NAME` — a function-specifier run (inline / _Noreturn)
         // immediately preceding a typedef-name: `static inline Cell *bump(…)`,
         // Lua's `l_sinline Table *gettable(…)`. The run contributes only its
@@ -1263,7 +1222,8 @@ internal sealed partial class IrBuilder
     /// <c>FILE</c> / <c>jmp_buf</c>'s target) stays a <see cref="CType.Named"/>
     /// whose spelling the backend emits verbatim.</summary>
     private CType ResolveTypeName(string name) =>
-        _typedefs.TryGetValue(name, out var t) ? t : new CType.Named(name);
+        _symbols.Resolve(name) is { Kind: SymKind.Typedef } local ? local.Type
+        : _typedefs.TryGetValue(name, out var t) ? t : new CType.Named(name);
 
     /// <summary>Resolve a `TypeSpecList TYPE_NAME` type: the run's surviving facts
     /// are the function/storage specifiers (`_Noreturn`, `inline`,
@@ -1627,13 +1587,13 @@ internal sealed partial class IrBuilder
             case C.BlockEmpty: return BuildBlock(it);
             case C.StmtDecl d: return BuildDeclStmt(d.Arg0) with { Pos = pos };
             case C.StmtStaticDecl s: return BuildStmtStaticDecl(s) with { Pos = pos };
-            // Block-scope aggregate TYPE definitions (`struct cD { … };` inside a
-            // function body — the block-scope enum forms are handled below). A
-            // type has no storage, so C allows this; dotcc hoists the definition
-            // into the top-level type section (deduped by tag, exactly as a
-            // file-scope definition) and the statement emits nothing.
-            case C.StmtStructDef s: BuildStructDef(Tok(s.Arg1), s.Arg3, null, isUnion: false); return EmptyStmt(pos);
-            case C.StmtUnionDef s: BuildStructDef(Tok(s.Arg1), s.Arg3, null, isUnion: true); return EmptyStmt(pos);
+            // Block-scope declarations with no declarators (`struct cD { … };`
+            // inside a function body) and block-scope typedefs. A type has no
+            // storage: dotcc hoists a tag definition into the top-level type section
+            // (deduped by tag, exactly as at file scope) and the statement emits
+            // nothing; a typedef name lives in the block's scope.
+            case C.StmtTagDecl s: BuildTagDecl(s.Arg0); return EmptyStmt(pos);
+            case C.StmtTypedefDecl s: BuildTypedefs(s.Arg1, s.Arg2); return EmptyStmt(pos);
             // Block-scope `_Static_assert(expr[, "msg"]);` — compile-time only,
             // evaluated exactly like the file-scope forms; a holding assertion
             // emits nothing. The message-less arity gates C23.
@@ -1700,10 +1660,6 @@ internal sealed partial class IrBuilder
             case C.DefaultLabel dl: return new CaseLabelStmt(null, BuildStmt(dl.Arg2)) { Pos = pos };
             case C.StmtGoto s: return new Goto(Tok(s.Arg1)) { Pos = pos };
             case C.StmtLabel s: return new Labeled(Tok(s.Arg0), BuildStmt(s.Arg2)) { Pos = pos };
-            // A block-scope enum definition has no storage — register its
-            // constants and emit nothing (an empty block).
-            case C.StmtEnumDef s: RegisterEnum(Tok(s.Arg1), null, s.Arg3); return new Block(System.Array.Empty<CStmt>()) { Pos = pos };
-            case C.StmtEnumDefTyped s: RegisterEnum(Tok(s.Arg1), s.Arg3, s.Arg5); return new Block(System.Array.Empty<CStmt>()) { Pos = pos };
             default: throw new IrUnsupportedException(TypeName(it.Content));
         }
     }
