@@ -16,16 +16,11 @@
 #undef assert
 
 #ifdef NDEBUG
-   /* Release builds: assert is a no-op. The standard idiom is
-      `((void)0)`, but dotcc's emitter doesn't translate the C
-      `(void)expr` cast into a valid C# statement. Instead we route
-      to a no-arg noop function — semantically identical to `(void)0`
-      in statement context AND faithfully NOT evaluating `expr` (C99
-      §7.2.1.1: NDEBUG disables expr evaluation entirely). Note: this
-      loses comma-operator-style expression-context usage of assert
-      (rare; document if a user hits it). */
-   void __dotcc_assert_noop(void);
-#define assert(expr) __dotcc_assert_noop()
+   /* Release builds: assert is the standard `((void)0)`, which does not
+      evaluate `expr` (C99 7.2.1.1). It lowers to an empty statement, and
+      as a comma operand (CPython's `(assert(x), y)` cast macros) it is
+      dropped, having no effect. */
+#define assert(expr) ((void)0)
 #else
    /* Debug builds: route through DotCC.Libc.Libc.__dotcc_assert. C#
       overload resolution + [CallerArgumentExpression] at the call site
