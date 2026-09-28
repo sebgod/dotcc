@@ -46,6 +46,34 @@ public sealed class FlexibleArrayMemberTests
     }
 
     [Fact]
+    public void A_flexible_member_after_an_enum_member_is_at_its_aligned_offset()
+    {
+        // The layout model once sized an enum member as zero bytes, which put `name`
+        // at 1, on top of `c`.
+        var emitted = Emit("""
+            enum color { RED, BLUE };
+            struct tagged { char kind; enum color c; char name[]; };
+            char second(struct tagged *t) { return t->name[1]; }
+            int main(void) { return 0; }
+            """);
+        emitted.ShouldContain("LayoutKind.Sequential, Size = 8)]\nunsafe struct tagged");
+        emitted.ShouldContain("((byte*)((byte*)t + 8))[1]");
+    }
+
+    [Fact]
+    public void A_flexible_member_after_a_float128_member_is_at_its_aligned_offset()
+    {
+        // _Float128 is 16 bytes aligned to 16 (a UInt128 in .NET, as in gcc).
+        var emitted = Emit("""
+            struct q { char c; _Float128 v; char tail[]; };
+            char first(struct q *p) { return p->tail[0]; }
+            int main(void) { return 0; }
+            """);
+        emitted.ShouldContain("LayoutKind.Sequential, Size = 32)]\nunsafe struct q");
+        emitted.ShouldContain("((byte*)((byte*)p + 32))[0]");
+    }
+
+    [Fact]
     public void A_zero_length_member_of_anonymous_structs_is_indexed_through_its_offset()
     {
         var emitted = Emit("""
