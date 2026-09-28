@@ -1,0 +1,11 @@
+1
+6
+bad mode 'rx'
+-1
+bad mode '++'
+-1
+bad mode ''
+-1
+invalid 'q'
+-2
+35
