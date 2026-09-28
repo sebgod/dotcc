@@ -170,7 +170,24 @@ public sealed class ObjectLinkTests : IDisposable
             ("b.c", "int table[2] = { 5, 6 };"));
         var table = program.IndexOf("int* table = Libc.GlobalArrayFrom<int>(new int[]{ 5, 6 });", StringComparison.Ordinal);
         table.ShouldBeGreaterThanOrEqualTo(0);
-        program.IndexOf("int* first = table;", StringComparison.Ordinal).ShouldBeGreaterThan(table);
+        // An external pointer global is an nint slot in an object (every object must agree on it).
+        program.IndexOf("nint first = (nint)((int*)table);", StringComparison.Ordinal).ShouldBeGreaterThan(table);
+    }
+
+    [Fact]
+    public void An_external_function_pointer_global_is_called_through_its_slot()
+    {
+        // CPython's PyOS_InputHook: the nint slot reads back to its pointer type before the
+        // call, and a function stored into it (initializer or assignment) goes through its
+        // function-pointer type, since a method group converts to nothing else.
+        var program = Link(
+            ("a.c", "static int one(void) { return 1; }\nint (*hook)(void) = one;\n"
+                  + "int call_hook(void) { return hook ? hook() : -1; }"),
+            ("b.c", "extern int (*hook)(void); int call_hook(void);\nstatic int seven(void) { return 7; }\n"
+                  + "int main(void) { hook = seven; return call_hook(); }"));
+        program.ShouldContain("((delegate*<int>)hook)()");
+        Regex.IsMatch(program, @"nint hook = \(nint\)\(delegate\*<int>\)\(&one__a_[0-9a-f]{6}\);").ShouldBeTrue();
+        Regex.IsMatch(program, @"hook = \(nint\)\(delegate\*<int>\)\(&seven__b_[0-9a-f]{6}\);").ShouldBeTrue();
     }
 
     [Fact]
