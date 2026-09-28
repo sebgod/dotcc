@@ -1,0 +1,118 @@
+name: python
+
+# The Python milestone's CI (GH #201), in its own workflow like lua.yml and
+# chibi.yml because it is slower than the unit / fixture gate. It still runs on
+# every push to a PR (correctness over speed), plus nightly on main and on demand.
+#
+#   cpython-probe  compiles each CPython 3.13 translation unit in
+#                  examples/cpython/files.txt with dotcc (--emit=obj), against
+#                  dotcc's own pyconfig.h, and fails when the set that emits
+#                  differs from the committed examples/cpython/emits.txt: a unit
+#                  that stops emitting is a regression, and one that starts must
+#                  be added (probe.sh --update), so the list stays true.
+#   capi-oracle    the <Python.h> shim's differential oracle: CPythonOracleTests
+#                  builds each cpython-oracle.txt fixture with gcc against real
+#                  libpython 3.13 and requires dotcc's transcript to match it.
+#
+# Same conventions as ci.yml: ubuntu-latest, setup-dotnet 10.0.x, NuGet build
+# path (no sibling LALR.CC in CI).
+
+on:
+  # push runs only on the default branch (merges); the pull_request trigger
+  # re-fires on every push to an open PR, so each suite runs once per push.
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # 03:47 UTC nightly, clear of lua (03:17) and the top of the hour.
+    - cron: '47 3 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cpython-probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore dotcc.sln
+
+      - name: Build dotcc (Release, NuGet path)
+        run: dotnet build DotCC/DotCC.csproj -c Release --no-restore --nologo -p:UseLocalLalrCc=false
+
+      # The key names the pinned tag, so bumping CPYTHON_TAG in fetch.sh misses
+      # the cache and fetch.sh clones the new tag.
+      - name: Pinned CPython tag
+        id: tag
+        run: echo "tag=$(grep -oP 'CPYTHON_TAG:-\K[^}]+' examples/cpython/fetch.sh)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the CPython sources
+        uses: actions/cache@v6
+        with:
+          path: examples/cpython/cpython-src
+          key: cpython-src-${{ steps.tag.outputs.tag }}-sparse1
+
+      - name: Fetch CPython (sparse, pinned tag)
+        run: bash examples/cpython/fetch.sh
+
+      - name: Compile every translation unit, compare with emits.txt
+        run: bash examples/cpython/probe.sh
+
+      - name: Upload the probe's logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: cpython-probe
+          path: |
+            examples/cpython/out/results.tsv
+            examples/cpython/out/summary.txt
+            examples/cpython/out/cs/*.log
+          if-no-files-found: ignore
+
+  capi-oracle:
+    runs-on: ubuntu-latest
+    env:
+      DOTCC_RUN_CPYTHON_ORACLE: '1'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      # The oracle builds with `gcc` and `python3.13-config --embed`, which
+      # Ubuntu 24.04 does not ship (its python3 is 3.12). deadsnakes has 3.13.
+      # Assert both are present: the test skips (not fails) without them, and a
+      # silent skip would make this job a green no-op.
+      - name: Install Python 3.13 headers and libpython
+        run: |
+          set -euo pipefail
+          sudo add-apt-repository -y ppa:deadsnakes/ppa
+          sudo apt-get install -y --no-install-recommends python3.13-dev
+          gcc --version | head -1
+          python3.13-config --embed --ldflags
+
+      - name: Restore
+        run: dotnet restore dotcc.sln
+
+      - name: Build (Release, NuGet path)
+        run: dotnet build dotcc.sln -c Release --no-restore --nologo -p:UseLocalLalrCc=false
+
+      - name: CPython differential oracle (gcc + libpython 3.13 per fixture)
+        run: >
+          dotnet test DotCC.FunctionalTests/DotCC.FunctionalTests.csproj
+          -c Release --no-build --nologo --filter "FullyQualifiedName~CPythonOracleTests"
