@@ -17,14 +17,16 @@ if [ -f "$DEST/.pinned-tag" ] && [ "$(cat "$DEST/.pinned-tag")" = "$CPYTHON_TAG"
   exit 0
 fi
 
-rm -rf "$DEST"
+# Empty the directory rather than remove it: git clones into an empty one, and a
+# shell sitting in it (Windows holds the handle) cannot stop the refresh.
+if [ -d "$DEST" ]; then find "$DEST" -mindepth 1 -maxdepth 1 -exec rm -rf {} +; fi
 echo "Cloning python/cpython @ $CPYTHON_TAG (sparse) into $DEST ..."
 # LF checkout on every host, like CI's; long paths for Windows working trees.
 git -c core.autocrlf=false -c core.longpaths=true -c advice.detachedHead=false clone --quiet --depth 1 \
   --branch "$CPYTHON_TAG" --filter=blob:none --sparse \
   https://github.com/python/cpython.git "$DEST"
 git -C "$DEST" -c core.autocrlf=false sparse-checkout set \
-  Include Objects Parser Programs Python Modules
+  Include Objects Parser Programs Python Modules Lib Tools/freeze
 rm -rf "$DEST/.git"   # a flat snapshot, not a nested repo
 echo "$CPYTHON_TAG" > "$DEST/.pinned-tag"
 echo "Done. $(find "$DEST" -name '*.c' | wc -l) .c files, $(find "$DEST" -name '*.h' | wc -l) headers."

@@ -85,7 +85,7 @@ core|Python/gc_gil.c|-DPy_BUILD_CORE
 core|Python/getargs.c|-DPy_BUILD_CORE
 core|Python/getcompiler.c|-DPy_BUILD_CORE
 core|Python/getcopyright.c|-DPy_BUILD_CORE
-core|Python/getplatform.c|-DPy_BUILD_CORE -DPLATFORM="linux"
+core|Python/getplatform.c|-DPy_BUILD_CORE -DPLATFORM='"linux"'
 core|Python/getversion.c|-DPy_BUILD_CORE
 core|Python/ceval_gil.c|-DPy_BUILD_CORE
 core|Python/hamt.c|-DPy_BUILD_CORE
@@ -125,7 +125,7 @@ core|Python/bootstrap_hash.c|-DPy_BUILD_CORE
 core|Python/specialize.c|-DPy_BUILD_CORE
 core|Python/structmember.c|-DPy_BUILD_CORE
 core|Python/symtable.c|-DPy_BUILD_CORE
-core|Python/sysmodule.c|-DPy_BUILD_CORE -DABIFLAGS=""
+core|Python/sysmodule.c|-DPy_BUILD_CORE -DABIFLAGS='""'
 core|Python/thread.c|-DPy_BUILD_CORE
 core|Python/traceback.c|-DPy_BUILD_CORE
 core|Python/tracemalloc.c|-DPy_BUILD_CORE
@@ -144,7 +144,8 @@ core|Python/frozen.c|-DPy_BUILD_CORE
 core|Modules/getbuildinfo.c|-DPy_BUILD_CORE
 core|Modules/main.c|-DPy_BUILD_CORE
 core|Modules/gcmodule.c|-DPy_BUILD_CORE
-core|Modules/getpath.c|-DPy_BUILD_CORE -DPYTHONPATH="" -DPREFIX="/usr/local" -DEXEC_PREFIX="/usr/local" -DVERSION="3.13" -DVPATH="" -DPLATLIBDIR="lib" -DPYDEBUGEXT=""
+core|Modules/getpath.c|-DPy_BUILD_CORE -I@TREE@ -DPYTHONPATH='""' -DPREFIX='"/usr/local"' -DEXEC_PREFIX='"/usr/local"' -DVERSION='"3.13"' -DVPATH='""' -DPLATLIBDIR='"lib"' -DPYDEBUGEXT='""'
+core|Modules/config.c|-DPy_BUILD_CORE
 core|Programs/python.c|
 boot|Modules/atexitmodule.c|-DPy_BUILD_CORE_BUILTIN
 boot|Modules/faulthandler.c|-DPy_BUILD_CORE_BUILTIN

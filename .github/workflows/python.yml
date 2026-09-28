@@ -6,7 +6,8 @@ name: python
 #
 #   cpython-probe  compiles each CPython 3.13 translation unit in
 #                  examples/cpython/files.txt with dotcc (--emit=obj), against
-#                  dotcc's own pyconfig.h, and fails when the set that emits
+#                  dotcc's own pyconfig.h and the sources generate.sh makes
+#                  (frozen modules, Modules/config.c), and fails when the set that emits
 #                  differs from the committed examples/cpython/emits.txt: a unit
 #                  that stops emitting is a regression, and one that starts must
 #                  be added (probe.sh --update), so the list stays true.
@@ -62,10 +63,21 @@ jobs:
         uses: actions/cache@v6
         with:
           path: examples/cpython/cpython-src
-          key: cpython-src-${{ steps.tag.outputs.tag }}-sparse1
+          key: cpython-src-${{ steps.tag.outputs.tag }}-sparse2
 
       - name: Fetch CPython (sparse, pinned tag)
         run: bash examples/cpython/fetch.sh
+
+      # generate.sh freezes the startup modules with a host Python of the same
+      # minor version (bytecode is stable within 3.13) and writes Modules/config.c,
+      # which Python/frozen.c, Modules/getpath.c and Modules/config.c need.
+      - name: Setup Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Generate the frozen modules and Modules/config.c
+        run: PYTHON=python bash examples/cpython/generate.sh
 
       - name: Compile every translation unit, compare with emits.txt
         run: bash examples/cpython/probe.sh

@@ -154,16 +154,16 @@
 #define HAVE_CHOWN 1
 
 /* Define if you have the 'chroot' function. */
-#define HAVE_CHROOT 1
+/* dotcc: no runtime implementation */ /* #undef HAVE_CHROOT */
 
 /* Define to 1 if you have the `clock' function. */
 #define HAVE_CLOCK 1
 
 /* Define to 1 if you have the `clock_getres' function. */
-/* dotcc: function not declared by dotcc headers */ /* #undef HAVE_CLOCK_GETRES */
+#define HAVE_CLOCK_GETRES 1
 
 /* Define to 1 if you have the `clock_gettime' function. */
-/* dotcc: function not declared by dotcc headers */ /* #undef HAVE_CLOCK_GETTIME */
+#define HAVE_CLOCK_GETTIME 1
 
 /* Define to 1 if you have the `clock_nanosleep' function. */
 /* dotcc: function not declared by dotcc headers */ /* #undef HAVE_CLOCK_NANOSLEEP */
@@ -257,7 +257,7 @@
 
 /* Define to 1 if you have the declaration of `RTLD_DEEPBIND', and to 0 if you
    don't. */
-#define HAVE_DECL_RTLD_DEEPBIND 1
+/* dotcc: <dlfcn.h> has no RTLD_DEEPBIND */ #define HAVE_DECL_RTLD_DEEPBIND 0
 
 /* Define to 1 if you have the declaration of `RTLD_GLOBAL', and to 0 if you
    don't. */
@@ -296,13 +296,13 @@
 #define HAVE_DECL_UT_NAMESIZE 1
 
 /* Define to 1 if you have the device macros. */
-#define HAVE_DEVICE_MACROS 1
+/* dotcc: no major, minor, makedev */ /* #undef HAVE_DEVICE_MACROS */
 
 /* Define to 1 if you have the /dev/ptc device file. */
 /* #undef HAVE_DEV_PTC */
 
 /* Define to 1 if you have the /dev/ptmx device file. */
-#define HAVE_DEV_PTMX 1
+/* dotcc: no runtime implementation */ /* #undef HAVE_DEV_PTMX */
 
 /* Define to 1 if you have the <direct.h> header file. */
 /* #undef HAVE_DIRECT_H */
@@ -315,7 +315,7 @@
 #define HAVE_DIRENT_H 1
 
 /* Define if you have the 'dirfd' function or macro. */
-#define HAVE_DIRFD 1
+/* dotcc: no runtime implementation */ /* #undef HAVE_DIRFD */
 
 /* Define to 1 if you have the <dlfcn.h> header file. */
 #define HAVE_DLFCN_H 1
@@ -345,10 +345,10 @@
 /* dotcc: no <endian.h> */ /* #undef HAVE_ENDIAN_H */
 
 /* Define if you have the 'epoll_create' function. */
-#define HAVE_EPOLL 1
+/* dotcc: no runtime implementation */ /* #undef HAVE_EPOLL */
 
 /* Define if you have the 'epoll_create1' function. */
-#define HAVE_EPOLL_CREATE1 1
+/* dotcc: no runtime implementation */ /* #undef HAVE_EPOLL_CREATE1 */
 
 /* Define to 1 if you have the `erf' function. */
 /* dotcc: function not declared by dotcc headers */ /* #undef HAVE_ERF */
@@ -360,10 +360,10 @@
 #define HAVE_ERRNO_H 1
 
 /* Define if you have the 'eventfd' function. */
-#define HAVE_EVENTFD 1
+/* dotcc: no runtime implementation */ /* #undef HAVE_EVENTFD */
 
 /* Define to 1 if you have the `execv' function. */
-#define HAVE_EXECV 1
+/* dotcc: no runtime implementation */ /* #undef HAVE_EXECV */
 
 /* Define to 1 if you have the `explicit_bzero' function. */
 /* dotcc: function not declared by dotcc headers */ /* #undef HAVE_EXPLICIT_BZERO */
@@ -378,7 +378,7 @@
 /* dotcc: function not declared by dotcc headers */ /* #undef HAVE_FACCESSAT */
 
 /* Define if you have the 'fchdir' function. */
-#define HAVE_FCHDIR 1
+/* dotcc: no runtime implementation */ /* #undef HAVE_FCHDIR */
 
 /* Define to 1 if you have the `fchmod' function. */
 /* dotcc: function not declared by dotcc headers */ /* #undef HAVE_FCHMOD */
@@ -396,7 +396,7 @@
 #define HAVE_FCNTL_H 1
 
 /* Define if you have the 'fdatasync' function. */
-#define HAVE_FDATASYNC 1
+/* dotcc: no runtime implementation */ /* #undef HAVE_FDATASYNC */
 
 /* Define to 1 if you have the `fdopendir' function. */
 /* dotcc: function not declared by dotcc headers */ /* #undef HAVE_FDOPENDIR */
@@ -444,7 +444,7 @@
 /* dotcc: function not declared by dotcc headers */ /* #undef HAVE_FSTATVFS */
 
 /* Define if you have the 'fsync' function. */
-#define HAVE_FSYNC 1
+/* dotcc: no runtime implementation */ /* #undef HAVE_FSYNC */
 
 /* Define to 1 if you have the `ftell64' function. */
 /* #undef HAVE_FTELL64 */
@@ -496,13 +496,13 @@
 #define HAVE_GETADDRINFO 1
 
 /* Define this if you have flockfile(), getc_unlocked(), and funlockfile() */
-#define HAVE_GETC_UNLOCKED 1
+/* dotcc: no runtime implementation */ /* #undef HAVE_GETC_UNLOCKED */
 
 /* Define to 1 if you have the `getegid' function. */
 /* dotcc: function not declared by dotcc headers */ /* #undef HAVE_GETEGID */
 
 /* Define to 1 if you have the `getentropy' function. */
-/* dotcc: function not declared by dotcc headers */ /* #undef HAVE_GETENTROPY */
+#define HAVE_GETENTROPY 1
 
 /* Define to 1 if you have the `geteuid' function. */
 /* dotcc: function not declared by dotcc headers */ /* #undef HAVE_GETEUID */
@@ -565,7 +565,7 @@
 /* dotcc: function not declared by dotcc headers */ /* #undef HAVE_GETNAMEINFO */
 
 /* Define if you have the 'getpagesize' function. */
-#define HAVE_GETPAGESIZE 1
+/* dotcc: no runtime implementation */ /* #undef HAVE_GETPAGESIZE */
 
 /* Define if you have the 'getpeername' function. */
 #define HAVE_GETPEERNAME 1
@@ -604,7 +604,7 @@
 #define HAVE_GETRANDOM 1
 
 /* Define to 1 if the Linux getrandom() syscall is available */
-#define HAVE_GETRANDOM_SYSCALL 1
+/* dotcc: no <sys/syscall.h> (getrandom() is the libc function above) */ /* #undef HAVE_GETRANDOM_SYSCALL */
 
 /* Define to 1 if you have the `getresgid' function. */
 /* dotcc: function not declared by dotcc headers */ /* #undef HAVE_GETRESGID */
@@ -824,7 +824,7 @@
 /* dotcc: function not declared by dotcc headers */ /* #undef HAVE_MADVISE */
 
 /* Define this if you have the makedev macro. */
-#define HAVE_MAKEDEV 1
+/* dotcc: no runtime implementation */ /* #undef HAVE_MAKEDEV */
 
 /* Define if you have the 'MAXLOGNAME' constant. */
 /* #undef HAVE_MAXLOGNAME */
@@ -833,7 +833,7 @@
 /* dotcc: function not declared by dotcc headers */ /* #undef HAVE_MBRTOWC */
 
 /* Define if you have the 'memfd_create' function. */
-#define HAVE_MEMFD_CREATE 1
+/* dotcc: no runtime implementation */ /* #undef HAVE_MEMFD_CREATE */
 
 /* Define to 1 if you have the `memrchr' function. */
 /* dotcc: function not declared by dotcc headers */ /* #undef HAVE_MEMRCHR */
@@ -985,7 +985,7 @@
 
 /* Define to 1 if you have the `posix_spawn_file_actions_addclosefrom_np'
    function. */
-#define HAVE_POSIX_SPAWN_FILE_ACTIONS_ADDCLOSEFROM_NP 1
+/* dotcc: no runtime implementation */ /* #undef HAVE_POSIX_SPAWN_FILE_ACTIONS_ADDCLOSEFROM_NP */
 
 /* Define to 1 if you have the `pread' function. */
 /* dotcc: function not declared by dotcc headers */ /* #undef HAVE_PREAD */
@@ -997,7 +997,7 @@
 /* dotcc: function not declared by dotcc headers */ /* #undef HAVE_PREADV2 */
 
 /* Define if you have the 'prlimit' function. */
-#define HAVE_PRLIMIT 1
+/* dotcc: no runtime implementation */ /* #undef HAVE_PRLIMIT */
 
 /* Define to 1 if you have the <process.h> header file. */
 /* #undef HAVE_PROCESS_H */
@@ -1154,7 +1154,7 @@
 /* dotcc: function not declared by dotcc headers */ /* #undef HAVE_SETGID */
 
 /* Define if you have the 'setgroups' function. */
-#define HAVE_SETGROUPS 1
+/* dotcc: no runtime implementation */ /* #undef HAVE_SETGROUPS */
 
 /* Define to 1 if you have the `sethostname' function. */
 /* dotcc: function not declared by dotcc headers */ /* #undef HAVE_SETHOSTNAME */
@@ -1283,7 +1283,7 @@
 /* dotcc: function not declared by dotcc headers */ /* #undef HAVE_STATVFS */
 
 /* Define if you have struct stat.st_mtim.tv_nsec */
-#define HAVE_STAT_TV_NSEC 1
+/* dotcc: struct stat has no st_mtim */ /* #undef HAVE_STAT_TV_NSEC */
 
 /* Define if you have struct stat.st_mtimensec */
 /* #undef HAVE_STAT_TV_NSEC2 */
@@ -1352,10 +1352,10 @@
 /* dotcc: function not declared by dotcc headers */ /* #undef HAVE_SYMLINKAT */
 
 /* Define to 1 if you have the `sync' function. */
-#define HAVE_SYNC 1
+/* dotcc: no runtime implementation */ /* #undef HAVE_SYNC */
 
 /* Define to 1 if you have the `sysconf' function. */
-/* dotcc: function not declared by dotcc headers */ /* #undef HAVE_SYSCONF */
+#define HAVE_SYSCONF 1
 
 /* Define to 1 if you have the `sysctlbyname' function. */
 /* #undef HAVE_SYSCTLBYNAME */
@@ -1438,7 +1438,7 @@
 /* dotcc: no <sys/poll.h> */ /* #undef HAVE_SYS_POLL_H */
 
 /* Define to 1 if you have the <sys/random.h> header file. */
-/* dotcc: no <sys/random.h> */ /* #undef HAVE_SYS_RANDOM_H */
+#define HAVE_SYS_RANDOM_H 1
 
 /* Define to 1 if you have the <sys/resource.h> header file. */
 #define HAVE_SYS_RESOURCE_H 1
@@ -1480,7 +1480,7 @@
 /* dotcc: no <sys/timerfd.h> */ /* #undef HAVE_SYS_TIMERFD_H */
 
 /* Define to 1 if you have the <sys/times.h> header file. */
-/* dotcc: no <sys/times.h> */ /* #undef HAVE_SYS_TIMES_H */
+#define HAVE_SYS_TIMES_H 1
 
 /* Define to 1 if you have the <sys/time.h> header file. */
 #define HAVE_SYS_TIME_H 1
@@ -1522,10 +1522,10 @@
 /* dotcc: function not declared by dotcc headers */ /* #undef HAVE_TIMEGM */
 
 /* Define if you have the 'timerfd_create' function. */
-#define HAVE_TIMERFD_CREATE 1
+/* dotcc: no <sys/timerfd.h> */ /* #undef HAVE_TIMERFD_CREATE */
 
 /* Define to 1 if you have the `times' function. */
-/* dotcc: function not declared by dotcc headers */ /* #undef HAVE_TIMES */
+#define HAVE_TIMES 1
 
 /* Define to 1 if you have the `tmpfile' function. */
 #define HAVE_TMPFILE 1
@@ -1580,7 +1580,7 @@
 /* dotcc: function not declared by dotcc headers */ /* #undef HAVE_UTIMENSAT */
 
 /* Define to 1 if you have the `utimes' function. */
-/* dotcc: function not declared by dotcc headers */ /* #undef HAVE_UTIMES */
+#define HAVE_UTIMES 1
 
 /* Define to 1 if you have the <utime.h> header file. */
 /* dotcc: no <utime.h> */ /* #undef HAVE_UTIME_H */
@@ -1644,7 +1644,7 @@
 
 /* Define if tzset() actually switches the local timezone in a meaningful way.
    */
-#define HAVE_WORKING_TZSET 1
+/* dotcc: no runtime implementation */ /* #undef HAVE_WORKING_TZSET */
 
 /* Define to 1 if you have the `writev' function. */
 /* dotcc: function not declared by dotcc headers */ /* #undef HAVE_WRITEV */
@@ -1667,7 +1667,7 @@
 
 /* Define to 1 if `major', `minor', and `makedev' are declared in
    <sysmacros.h>. */
-#define MAJOR_IN_SYSMACROS 1
+/* dotcc: no <sys/sysmacros.h> (major, minor, makedev) */ /* #undef MAJOR_IN_SYSMACROS */
 
 /* Define if mvwdelch in curses.h is an expression. */
 #define MVWDELCH_IS_EXPRESSION 1
@@ -1697,7 +1697,7 @@
 #define PTHREAD_KEY_T_IS_COMPATIBLE_WITH_INT 1
 
 /* Defined if PTHREAD_SCOPE_SYSTEM supported. */
-#define PTHREAD_SYSTEM_SCHED_SUPPORTED 1
+/* dotcc: no pthread_attr_setscope */ /* #undef PTHREAD_SYSTEM_SCHED_SUPPORTED */
 
 /* Define as the preferred size in bits of long digits */
 /* #undef PYLONG_BITS_IN_DIGIT */
@@ -2078,9 +2078,11 @@
 #undef HAVE_GCC_ASM_FOR_X87
 /* mimalloc is GCC/pthread/mmap heavy: build like --without-mimalloc. */
 #undef WITH_MIMALLOC
+/* dotcc's multibyte conversions are UTF-8 whatever the locale (it has no
+   <langinfo.h>), as on Android: decode and encode the locale as UTF-8. */
+#define _Py_FORCE_UTF8_LOCALE
 
 /* ===== dotcc probe: missing POSIX types/decls shimmed here (each is a libc-surface gap) ===== */
-typedef int clockid_t;
 /* GNU __attribute__ is used unguarded in a few CPython headers; dotcc has no GNU attributes. */
 #define __attribute__(x)
 typedef unsigned long dev_t;   /* hit: pycore_pyhash.h */

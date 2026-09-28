@@ -20,6 +20,7 @@ Parser/tokenizer/helpers.c
 Objects/abstract.c
 Objects/boolobject.c
 Objects/bytearrayobject.c
+Objects/bytes_methods.c
 Objects/bytesobject.c
 Objects/call.c
 Objects/capsule.c
@@ -55,6 +56,8 @@ Objects/structseq.c
 Objects/tupleobject.c
 Objects/typeobject.c
 Objects/typevarobject.c
+Objects/unicodectype.c
+Objects/unicodeobject.c
 Objects/unionobject.c
 Objects/weakrefobject.c
 Python/_warnings.c
@@ -92,6 +95,7 @@ Python/hamt.c
 Python/hashtable.c
 Python/import.c
 Python/importdl.c
+Python/initconfig.c
 Python/interpconfig.c
 Python/instrumentation.c
 Python/instruction_sequence.c
@@ -124,6 +128,7 @@ Python/bootstrap_hash.c
 Python/specialize.c
 Python/structmember.c
 Python/symtable.c
+Python/sysmodule.c
 Python/thread.c
 Python/traceback.c
 Python/tracemalloc.c
@@ -138,12 +143,16 @@ Python/suggestions.c
 Python/perf_trampoline.c
 Python/perf_jit_trampoline.c
 Python/dynload_shlib.c
+Python/frozen.c
 Modules/getbuildinfo.c
 Modules/main.c
 Modules/gcmodule.c
+Modules/getpath.c
+Modules/config.c
 Programs/python.c
 Modules/atexitmodule.c
 Modules/faulthandler.c
+Modules/posixmodule.c
 Modules/signalmodule.c
 Modules/_tracemalloc.c
 Modules/_suggestions.c
