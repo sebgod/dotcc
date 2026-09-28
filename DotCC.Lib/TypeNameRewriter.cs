@@ -346,8 +346,8 @@ internal sealed class TypeNameRewriter : RewritingTokenStream
             _typeSpecifiers.Add(map[k]);
         }
         foreach (var k in new[] { "const", "volatile", "restrict", "static", "extern", "auto",
-                     "inline", "_Noreturn", "_Thread_local", "constexpr", "typedef", "_Atomic",
-                     "_Alignas" })
+                     "register", "inline", "_Noreturn", "_Thread_local", "constexpr", "typedef",
+                     "_Atomic", "_Alignas" })
         {
             _otherSpecifiers.Add(map[k]);
         }

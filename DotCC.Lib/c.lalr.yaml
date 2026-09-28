@@ -483,13 +483,23 @@ symbols:
   - Designator     # 198 non-terminal: one `.member` or `[index]` step of a Designation
   - ArrDeclarator  # 199 non-terminal: an array declarator `name[N]…`, `name[]`, `name[][N]…`, `(name[N])`
   - BraceInit      # 200 non-terminal: a brace-enclosed initializer `{ InitList }` / `{ }`
+  - 'register'     # 201 keyword (C89): storage class, a Type prefix (see typeRegister)
+  - ExternalDecls  # 202 non-terminal: a translation unit's external declarations, possibly none
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
-  # Item carries FnList's already-built C# source string.
+  # Item carries FnList's already-built C# source string. It must stay the start
+  # symbol's ONLY production: LALR.CC seeds the start state from production 0
+  # alone, so a second TU alternative would never be reachable (an empty TU goes
+  # through ExternalDecls instead).
   - derivation: none
     rules:
-      - { lhs: TU, rhs: [FnList] }
+      - { lhs: TU, rhs: [ExternalDecls] }
+      - { lhs: ExternalDecls, rhs: [FnList] }
+      # A translation unit with no external declarations (all of it `#if`'d away,
+      # or a file of nothing but macros). ISO C requires at least one; gcc accepts
+      # it and warns under -pedantic, as dotcc does.
+      - { lhs: ExternalDecls, rhs: [], action: tuEmpty }
 
   - derivation: leftmost
     rules:
@@ -546,6 +556,10 @@ productions:
       # storage classes, qualifiers and declarators: `static const struct X { … }
       # t[] = { … };`, `enum { A, B } mode;`.
       - { lhs: Fn, rhs: [Type, ';'], action: tagDecl }
+      # A stray `;` at file scope (typically a macro that expands to a complete
+      # declaration, followed by the caller's own `;`). Not an ISO C declaration;
+      # gcc accepts it and warns under -pedantic, as dotcc does.
+      - { lhs: Fn, rhs: [';'], action: fnEmpty }
       # `typedef` is a storage class over an ordinary declarator list (C11 6.7.1):
       # each declarator names an alias of its full type, so every declarator form
       # works (`typedef int Color, *ColorPtr, Row[8], (*Cmp)(int, int);`), and a tag
@@ -695,11 +709,10 @@ productions:
       - { lhs: Type, rhs: [Type, '*', 'restrict'], action: typePtrQualRestrict }
       # Abstract function-pointer type — `Type (*)(params)`, used in casts and
       # sizeof. No identifier between `*` and `)` distinguishes these from the
-      # FnSig declarator forms (`Type (*ID)(params)`). Factored into three arity
-      # variants so the visitor doesn't need to destructure ParamList.
+      # FnSig declarator forms (`Type (*ID)(params)`). `(void)` is the one-Param
+      # ParamList the binder reads as no parameters (C11 6.7.6.3p10).
       - { lhs: Type, rhs: [Type, '(', '*', ')', '(', ParamList, ')'], action: typeFnPtr }
       - { lhs: Type, rhs: [Type, '(', '*', ')', '(', ')'],            action: typeFnPtrNoArgs }
-      - { lhs: Type, rhs: [Type, '(', '*', ')', '(', 'void', ')'],    action: typeFnPtrVoid }
       - { lhs: Type, rhs: [TypeSpecList], action: typeFromSpec }
       # `struct ID` as a type reference — used in declarations, parameters,
       # casts, sizeof. The visitor emits just `ID` since C# doesn't require
@@ -710,19 +723,6 @@ productions:
       # visitor emits the type-name string verbatim (it's already the
       # C# type identifier we want).
       - { lhs: Type, rhs: [TYPE_NAME], action: typeName }
-      # A declaration-specifier RUN (function-specifiers / qualifiers like
-      # `inline` / `_Noreturn`) immediately preceding a typedef-name:
-      # `inline Table *f()` and — via the FnSig `static` prefix — Lua's
-      # `l_sinline OpCode g()` = `static inline OpCode g()`. The spec-list can't
-      # itself absorb a TYPE_NAME (a typedef-name is the separate `Type → TYPE_NAME`
-      # production, not a TypeSpec), so compose them here: the TYPE_NAME is the base
-      # type and the spec-list contributes ONLY its inline/_Noreturn flags (a builtin
-      # keyword in that run would be invalid C — `int Table` — and is dropped at
-      # resolution). `const` never reaches here (QualifierStripper deletes it);
-      # `volatile`/`_Atomic` are leading Type PREFIXES, so `volatile Table` already
-      # parses via typeVolatile. Conflict-free: a bare TYPE_NAME still reduces via
-      # `Type → TYPE_NAME`; only a TypeSpecList *followed by* a TYPE_NAME shifts here.
-      - { lhs: Type, rhs: [TypeSpecList, TYPE_NAME], action: typeSpecThenName }
       # Type qualifiers `const` / `volatile` — modelled as Type PREFIX *and*
       # POSTFIX (NOT TypeSpecs), so every position parses: west `const int` /
       # `const MyT` / `const struct X`, east `int const` / `MyT const` /
@@ -745,6 +745,22 @@ productions:
       - { lhs: Type, rhs: [Type, 'const'],    action: typeConstPost }
       - { lhs: Type, rhs: ['volatile', Type], action: typeVolatile }
       - { lhs: Type, rhs: [Type, 'volatile'], action: typeVolatilePost }
+      # Function specifiers (C11 6.7.4: `inline`, `_Noreturn`) and the storage
+      # classes that are not declaration-level productions (`_Thread_local`,
+      # C23 `constexpr`, `register`) — Type PREFIXES for the same reason as the
+      # qualifiers: a prefix composes with every Type, where a TypeSpec could not
+      # absorb a typedef-name or a tag (`inline Table *f()`, Lua's
+      # `static inline OpCode g()`, `_Thread_local const struct S *p`,
+      # `register size_t n`). Each is recorded for the enclosing declaration and
+      # dropped from the type: `inline` → [MethodImpl(AggressiveInlining)],
+      # `_Noreturn` → [DoesNotReturn], `_Thread_local` → [ThreadStatic] (file scope
+      # only), `constexpr` binds the folded value (C23 6.7.1), `register` has no
+      # effect beyond C's constraints (no address, no file scope).
+      - { lhs: Type, rhs: ['inline', Type],        action: typeInline }
+      - { lhs: Type, rhs: ['_Noreturn', Type],     action: typeNoreturn }
+      - { lhs: Type, rhs: ['_Thread_local', Type], action: typeThreadLocal }
+      - { lhs: Type, rhs: ['constexpr', Type],     action: typeConstexpr }
+      - { lhs: Type, rhs: ['register', Type],      action: typeRegister }
       # `_Atomic T` (C11) — leading atomic qualifier, same Type-prefix shape as
       # `volatile`. Flags the Type atomic; the emitter lowers reads/writes of an
       # atomic lvalue to seq-cst Interlocked-backed access (see CSharpEmitter).
@@ -808,24 +824,9 @@ productions:
       # POSTFIX productions (see the `Type` group above), so they carry a CType
       # qualifier flag and parse in every position without the spec-list-vs-prefix
       # ambiguity that being a TypeSpec would reintroduce.
-      # Function specifier — `inline` (C99). Parsed in the specifier run; dropped
-      # from the resolved type, but TypeFromSpec flags it so the FnSig path emits
-      # a [MethodImpl(AggressiveInlining)]. (Promoted from ID by the dialect rewriter.)
-      - { lhs: TypeSpec, rhs: ['inline'],   action: tsInline }
-      # `_Noreturn` (C11) — function specifier → [DoesNotReturn]. Same TypeSpec
-      # treatment as inline; TypeFromSpec flags it and the FnSig path emits it.
-      - { lhs: TypeSpec, rhs: ['_Noreturn'], action: tsNoreturn }
-      # `_Thread_local` (C11) — thread storage duration → [ThreadStatic] on the
-      # global's field. Same TypeSpec treatment as inline/_Noreturn: recorded by
-      # the spec resolution, dropped from the type. File-scope only (a
-      # block-scope `static _Thread_local` is a loud lowering rejection).
-      - { lhs: TypeSpec, rhs: ['_Thread_local'], action: tsThreadLocal }
-      # `constexpr` (C23) — compile-time constant object declaration. Same
-      # TypeSpec treatment as _Thread_local: recorded by the spec resolution,
-      # dropped from the type. The declared name binds its ConstEval'd value
-      # (Symbol.ConstValue), so it resolves in every ICE position — array
-      # bounds, case labels, _Static_assert, bit-field widths, _Generic.
-      - { lhs: TypeSpec, rhs: ['constexpr'], action: tsConstexpr }
+      # NOTE: the function specifiers `inline` / `_Noreturn` and the storage
+      # classes `_Thread_local` / `constexpr` / `register` are Type PREFIXES too
+      # (see the Type group), not TypeSpecs.
       # `_Complex` (C99) — complex type spec; resolves (with a float base) to
       # System.Numerics.Complex in ResolveTypeSpec.
       - { lhs: TypeSpec, rhs: ['_Complex'], action: tsComplex }
@@ -878,7 +879,7 @@ productions:
       - { lhs: Stmt, rhs: ['for', '(', ScopeEnter, Decl, ';', ForCond, ';', ForPost, ')', Stmt], action: stmtForDecl }
       - { lhs: Stmt, rhs: ['for', '(', CommaExprList, ';', ForCond, ';', ForPost, ')', Stmt], action: stmtForExpr }
       - { lhs: Stmt, rhs: ['for', '(', ';', ForCond, ';', ForPost, ')', Stmt], action: stmtForNoInit }
-      - { lhs: ForCond, rhs: [E], action: forCondExpr }
+      - { lhs: ForCond, rhs: [Expr], action: forCondExpr }
       - { lhs: ForCond, rhs: [],  action: forCondEmpty }
       - { lhs: ForPost, rhs: [CommaExprList], action: forPostExprs }
       - { lhs: ForPost, rhs: [],              action: forPostEmpty }
@@ -890,7 +891,9 @@ productions:
       # for-init/update positions cover the dominant use case.
       - { lhs: CommaExprList, rhs: [E],                        action: commaExprOne }
       - { lhs: CommaExprList, rhs: [CommaExprList, ',', E],    action: commaExprCons }
-      - { lhs: Stmt, rhs: ['return', E, ';'],            action: stmtReturn }
+      # `return Expr ;` takes the comma-tier expression (C11 6.8.6.4), like
+      # `Expr ;`: `return (void)f(), 0;`.
+      - { lhs: Stmt, rhs: ['return', Expr, ';'],         action: stmtReturn }
       - { lhs: Stmt, rhs: ['return', ';'],                action: stmtReturnVoid }
       # `break;` / `continue;` — bare keyword + semicolon. Grammar accepts
       # them anywhere a Stmt is valid; semantic validity (must be inside a
@@ -1640,6 +1643,7 @@ lexer:
     - { symbol: 'static',   match: 'static' }
     - { symbol: 'extern',   match: 'extern' }
     - { symbol: 'auto',     match: 'auto' }
+    - { symbol: 'register', match: 'register' }
 
     # Multi-char operators. Longest-match handles `==` vs `=`, `<=` vs `<`, etc.
     # so the ordering doesn't strictly matter — listed multi-char first for

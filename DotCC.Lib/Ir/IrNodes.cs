@@ -667,7 +667,12 @@ public readonly record struct EnumMember(string Name, long Value);
 /// <summary>A function parameter (or function-pointer parameter): its type and
 /// name. Used while building signatures — a named record rather than a loose
 /// tuple so members read as <c>.Type</c> / <c>.Name</c>.</summary>
-public readonly record struct ParamInfo(CType Type, string Name);
+public readonly record struct ParamInfo(CType Type, string Name)
+{
+    /// <summary>Declared <c>register</c> (C11 6.7.1p6: its address may not be taken).
+    /// A C constraint only, so no backend reads it.</summary>
+    public bool IsRegister { get; init; }
+}
 
 /// <summary>A function definition: signature symbol + parameter symbols + body.</summary>
 public sealed record FuncDef(Symbol Sym, IReadOnlyList<Symbol> Params, Block Body, bool Variadic);
