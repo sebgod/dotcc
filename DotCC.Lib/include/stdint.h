@@ -65,6 +65,19 @@ typedef unsigned long uint_fast32_t;
 typedef long int_fast64_t;
 typedef unsigned long uint_fast64_t;
 
+/* Integer constant macros (C99 7.18.4): each constant as its type's
+   least-width type (LP64: the 64-bit ones are long). */
+#define INT8_C(c)    c
+#define INT16_C(c)   c
+#define INT32_C(c)   c
+#define INT64_C(c)   c ## L
+#define UINT8_C(c)   c
+#define UINT16_C(c)  c
+#define UINT32_C(c)  c ## U
+#define UINT64_C(c)  c ## UL
+#define INTMAX_C(c)  c ## L
+#define UINTMAX_C(c) c ## UL
+
 /* Limit macros (C99 7.18.2). Numeric literals so they're usable as
    integer constant expressions per the C standard. */
 #define INT8_MIN   (-128)

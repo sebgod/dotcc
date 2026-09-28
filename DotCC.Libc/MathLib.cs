@@ -345,6 +345,36 @@ public static unsafe partial class Libc
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static double fabsl(double x) => Math.Abs(x);
 
+    /// <summary><c>modf(x, iptr)</c>: <paramref name="x"/>'s integral part into <paramref name="iptr"/> and its
+    /// fractional part returned, both with <paramref name="x"/>'s sign (an infinity's fraction is a signed zero).</summary>
+    public static unsafe double modf(double x, double* iptr)
+    {
+        var integral = Math.Truncate(x);
+        *iptr = integral;
+        return double.IsInfinity(x) ? Math.CopySign(0.0, x) : Math.CopySign(x - integral, x);
+    }
+
+    /// <summary><c>modff(x, iptr)</c>: single-precision <see cref="modf(double, double*)"/>.</summary>
+    public static unsafe float modff(float x, float* iptr)
+    {
+        double integral;
+        var fraction = modf(x, &integral);
+        *iptr = (float)integral;
+        return (float)fraction;
+    }
+
+    /// <summary><c>hypot(x, y)</c>: sqrt(x² + y²) without undue overflow or underflow.</summary>
+    public static double hypot(double x, double y) => double.Hypot(x, y);
+
+    /// <summary><c>hypotf(x, y)</c>: single-precision <see cref="hypot(double, double)"/>.</summary>
+    public static float hypotf(float x, float y) => float.Hypot(x, y);
+
+    /// <summary><c>copysign(x, y)</c>: <paramref name="x"/>'s magnitude with <paramref name="y"/>'s sign.</summary>
+    public static double copysign(double x, double y) => Math.CopySign(x, y);
+
+    /// <summary><c>copysignf(x, y)</c>: single-precision <see cref="copysign(double, double)"/>.</summary>
+    public static float copysignf(float x, float y) => MathF.CopySign(x, y);
+
     /// <summary><c>fmod(x, y)</c> — floating-point remainder of <paramref name="x"/> / <paramref name="y"/>. Sign matches <paramref name="x"/>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static double fmod(double x, double y)

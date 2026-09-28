@@ -513,4 +513,42 @@ public static unsafe partial class Libc
     /// string <paramref name="src"/> (wrapped in a reader, like sscanf).</summary>
     public static ScanfReader swscanf(char* src, char* fmt) =>
         new ScanfReader(new StringReader(new string(src, 0, wcslen(src))), WideFmtToUtf8(fmt));
+
+    /// <summary>The UTF-8 encoding C's multibyte strings use, rejecting an invalid sequence rather than
+    /// replacing it, as <c>mbstowcs</c> / <c>wcstombs</c> report one.</summary>
+    private static readonly System.Text.Encoding StrictUtf8 = new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+
+    /// <summary><c>mbstowcs(dst, src, n)</c> (C11 7.22.8.1): the multibyte (UTF-8) string <paramref name="src"/> as
+    /// wide (UTF-16) units, at most <paramref name="n"/> of them stored, NUL-terminated when room remains. Returns the
+    /// units stored, not counting the NUL (all of them when <paramref name="dst"/> is null), or <c>(size_t)-1</c>
+    /// for an invalid sequence.</summary>
+    public static ulong mbstowcs(char* dst, byte* src, ulong n)
+    {
+        string text;
+        try { text = StrictUtf8.GetString(src, strlen(src)); }
+        catch (System.Text.DecoderFallbackException) { return ulong.MaxValue; }
+        if (dst is null) { return (ulong)text.Length; }
+        var stored = (int)Math.Min((ulong)text.Length, n);
+        for (var i = 0; i < stored; i++) { dst[i] = text[i]; }
+        if ((ulong)stored < n) { dst[stored] = '\0'; }
+        return (ulong)stored;
+    }
+
+    /// <summary><c>wcstombs(dst, src, n)</c> (C11 7.22.8.2): the wide (UTF-16) string <paramref name="src"/> as a
+    /// multibyte (UTF-8) one, at most <paramref name="n"/> bytes stored and never part of a character,
+    /// NUL-terminated when room remains. Returns the bytes stored, not counting the NUL (all of them when
+    /// <paramref name="dst"/> is null), or <c>(size_t)-1</c> for a lone surrogate.</summary>
+    public static ulong wcstombs(byte* dst, char* src, ulong n)
+    {
+        byte[] bytes;
+        try { bytes = StrictUtf8.GetBytes(new string(src, 0, wcslen(src))); }
+        catch (System.Text.EncoderFallbackException) { return ulong.MaxValue; }
+        if (dst is null) { return (ulong)bytes.Length; }
+        var stored = (int)Math.Min((ulong)bytes.Length, n);
+        // Back off to a character boundary: a UTF-8 continuation byte is 10xxxxxx.
+        while (stored > 0 && stored < bytes.Length && (bytes[stored] & 0xC0) == 0x80) { stored--; }
+        for (var i = 0; i < stored; i++) { dst[i] = bytes[i]; }
+        if ((ulong)stored < n) { dst[stored] = 0; }
+        return (ulong)stored;
+    }
 }

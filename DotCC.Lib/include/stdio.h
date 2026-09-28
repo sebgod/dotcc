@@ -59,6 +59,13 @@ int printf(char* fmt, ...);
 int sprintf(char* dst, char* fmt, ...);
 int snprintf(char* dst, int n, char* fmt, ...);
 
+/* The same with the arguments in a va_list (C99 7.21.6.8-13). VaList is the
+   predefined type name <stdarg.h>'s va_list aliases, so these need no include. */
+int vprintf(const char* fmt, VaList ap);
+int vfprintf(FILE* stream, const char* fmt, VaList ap);
+int vsprintf(char* dst, const char* fmt, VaList ap);
+int vsnprintf(char* dst, unsigned long n, const char* fmt, VaList ap);
+
 /* Formatted input (from stdin / a buffer / a stream). */
 int scanf(char* fmt, ...);
 int sscanf(char* src, char* fmt, ...);
