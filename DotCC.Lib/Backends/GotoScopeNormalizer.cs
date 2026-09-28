@@ -27,10 +27,14 @@ using DotCC.Ir;
 /// </code>
 /// Control-flow equivalent: head still falls into the tail (via the explicit
 /// goto), every other exit of the <c>if</c> skips the tail, and the tail's own
-/// fall-through reaches <c>rest</c> exactly as block-exit did. Only if-arms and
-/// plain nested blocks are hoisted through — a label needing to move out of a
-/// LOOP or SWITCH body changes iteration semantics, and fails loudly instead
-/// (the switch-internal cases are RenderSwitch's own hoisting machinery).
+/// fall-through reaches <c>rest</c> exactly as block-exit did. If-arms and plain
+/// nested blocks are hoisted through directly. A label that must leave a LOOP
+/// body (CPython's dtoa.c jumps into a <c>for</c> body at <c>bump_up</c>) first
+/// has that loop lowered to labels and gotos at its own level (see
+/// <see cref="FlattenLoop"/>), which leaves the body a plain nested block the
+/// next step hoists through. A label that must leave a SWITCH body fails loudly
+/// (the switch-internal cases are RenderSwitch's own hoisting machinery), as does
+/// a <c>for</c> with a declaration in its init.
 /// Functions with no scope violation pass through untouched (the common case —
 /// the pass costs one read-only scan).
 /// </remarks>
@@ -38,18 +42,25 @@ internal static class GotoScopeNormalizer
 {
     public static Block Normalize(Block body)
     {
-        // Each hoist lifts the label one block level; a C function body has
-        // bounded nesting, so this converges fast — the guard is a backstop.
-        for (var guard = 0; guard < 64; guard++)
+        // Each hoist lifts one label one block level (or flattens one loop); a C
+        // function body has bounded nesting, so this converges — the guard is a
+        // backstop sized for a many-label function like dtoa.c's _Py_dg_dtoa.
+        // The skip labels already placed, so a label hoisted through several
+        // blocks gets a distinct skip label at each level.
+        var skips = new HashSet<string>(StringComparer.Ordinal);
+        for (var step = 0; step < 256; step++)
         {
             var label = FindViolation(body);
             if (label == null) { return body; }
-            var h = new Hoister(label);
+            // The step number is unique within the function, so it names the
+            // labels of the (at most one) loop this step flattens, and a skip
+            // label whose plain name is taken.
+            var h = new Hoister(label, step, skips);
             body = h.Rewrite(body);
             if (!h.Done)
             {
                 throw new IrUnsupportedException(
-                    $"goto into a block the normalizer cannot hoist through (label '{label}' — a loop/switch body, or an unhandled nesting shape)");
+                    $"goto into a block the normalizer cannot hoist through (label '{label}' — a switch body, a `for` with a declaration in its init, or an unhandled nesting shape)");
             }
         }
         throw new IrUnsupportedException("goto/label normalization did not converge");
@@ -124,9 +135,16 @@ internal static class GotoScopeNormalizer
     private sealed class Hoister
     {
         private readonly string _label;
+        private readonly int _step;
+        private readonly HashSet<string> _skips;
         public bool Done { get; private set; }
 
-        public Hoister(string label) => _label = label;
+        public Hoister(string label, int step, HashSet<string> skips)
+        {
+            _label = label;
+            _step = step;
+            _skips = skips;
+        }
 
         public Block Rewrite(Block b)
         {
@@ -134,9 +152,23 @@ internal static class GotoScopeNormalizer
             var stmts = new List<CStmt>(b.Stmts);
             for (var i = 0; i < stmts.Count; i++)
             {
+                // A loop whose body declares the label at top level: lower the loop
+                // in place, so its body becomes a plain nested block of this one.
+                // A labeled loop (`retry: for (…) …`) keeps its label on the loop's
+                // first statement, the top of its first iteration.
+                var loop = stmts[i] is Labeled { Body: var inner } ? inner : stmts[i];
+                if (DeclaresAtTop(LoopBody(loop)) && FlattenLoop(loop, _step) is { } flat)
+                {
+                    if (stmts[i] is Labeled own) { flat.Insert(0, new Labeled(own.Name, new Block(Array.Empty<CStmt>()))); }
+                    stmts.RemoveAt(i);
+                    stmts.InsertRange(i, flat);
+                    Done = true;
+                    return new Block(stmts) { Pos = b.Pos };
+                }
                 if (TryExtract(stmts[i], out var replaced, out var tail))
                 {
-                    var skip = $"__skip_{_label}";
+                    var skip = _skips.Add($"__skip_{_label}") ? $"__skip_{_label}" : $"__skip{_step}_{_label}";
+                    _skips.Add(skip);
                     var insert = new List<CStmt> { replaced, new Goto(skip) };
                     insert.AddRange(tail);
                     insert.Add(new Labeled(skip, new Block(Array.Empty<CStmt>())));
@@ -201,6 +233,15 @@ internal static class GotoScopeNormalizer
             return false;
         }
 
+        /// <summary>Whether <paramref name="body"/> declares the label as one of its
+        /// top-level statements (or is that labeled statement).</summary>
+        private bool DeclaresAtTop(CStmt? body) => body switch
+        {
+            Labeled l => l.Name == _label,
+            Block b => b.Stmts.Any(x => x is Labeled l && l.Name == _label),
+            _ => false,
+        };
+
         private CStmt RewriteStmt(CStmt s) => s switch
         {
             Block b => Rewrite(b),
@@ -226,4 +267,135 @@ internal static class GotoScopeNormalizer
             _ => s,
         };
     }
+
+    /// <summary>The body of a loop statement, or null for any other statement.</summary>
+    private static CStmt? LoopBody(CStmt s) => s switch
+    {
+        While w => w.Body,
+        DoWhile dw => dw.Body,
+        For fo => fo.Body,
+        _ => null,
+    };
+
+    /// <summary>
+    /// Lower the loop <paramref name="s"/> to labels and gotos at its own level, so a
+    /// label inside its body becomes hoistable (C lets a <c>goto</c> jump into a loop
+    /// body; C# does not):
+    /// <code>
+    ///   for (init; cond; post) body
+    /// </code>
+    /// becomes the statements
+    /// <code>
+    ///   init; __loopN_top: ; if (!cond) goto __loopN_end; body'
+    ///   __loopN_cont: ; post; goto __loopN_top; __loopN_end: ;
+    /// </code>
+    /// where <c>body'</c> is <c>body</c> with the loop's own <c>break</c> /
+    /// <c>continue</c> (not those of a nested loop, nor the <c>break</c> of a nested
+    /// switch) turned into <c>goto __loopN_end</c> / <c>goto __loopN_cont</c>.
+    /// <c>while</c> and <c>do … while</c> lower the same way, and a label is emitted
+    /// only when something jumps to it. A comma list in the init or post becomes one
+    /// statement per operand. Null for a <c>for</c> whose init declares variables:
+    /// hoisting the declaration to this level could collide with a sibling loop's.
+    /// </summary>
+    private static List<CStmt>? FlattenLoop(CStmt s, int n)
+    {
+        var top = $"__loop{n}_top";
+        var cont = $"__loop{n}_cont";
+        var end = $"__loop{n}_end";
+        static CStmt Mark(string label) => new Labeled(label, new Block(Array.Empty<CStmt>()));
+        CStmt ExitUnless(CExpr cond) => new If(new Unary(UnOp.LogNot, cond) { Type = CType.Int }, new Goto(end), null);
+        var stmts = new List<CStmt>();
+        CStmt body;
+        switch (s)
+        {
+            case While w:
+                body = RetargetJumps(w.Body, end, top);
+                stmts.Add(Mark(top));
+                stmts.Add(ExitUnless(w.Cond));
+                stmts.Add(body);
+                stmts.Add(new Goto(top));
+                stmts.Add(Mark(end));
+                return stmts;
+            case DoWhile dw:
+                body = RetargetJumps(dw.Body, end, cont);
+                stmts.Add(Mark(top));
+                stmts.Add(body);
+                if (JumpsTo(body, cont)) { stmts.Add(Mark(cont)); }
+                stmts.Add(new If(dw.Cond, new Goto(top), null));
+                if (JumpsTo(body, end)) { stmts.Add(Mark(end)); }
+                return stmts;
+            case For fo:
+                if (fo.Init is DeclStmt) { return null; }
+                body = RetargetJumps(fo.Body, end, cont);
+                if (fo.Init is ExprStmt { Expr: var init }) { stmts.AddRange(ExprStmts(init)); }
+                else if (fo.Init is { } other) { stmts.Add(other); }
+                stmts.Add(Mark(top));
+                if (fo.Cond is { } c) { stmts.Add(ExitUnless(c)); }
+                stmts.Add(body);
+                if (JumpsTo(body, cont)) { stmts.Add(Mark(cont)); }
+                if (fo.Post is { } post) { stmts.AddRange(ExprStmts(post)); }
+                stmts.Add(new Goto(top));
+                if (fo.Cond is not null || JumpsTo(body, end)) { stmts.Add(Mark(end)); }
+                return stmts;
+            default:
+                return null;
+        }
+    }
+
+    /// <summary>One expression statement per operand of a for-init / for-update comma
+    /// list (a <see cref="CommaSeq"/> renders as <c>a, b</c>, legal only in a
+    /// <c>for</c> header).</summary>
+    private static IEnumerable<CStmt> ExprStmts(CExpr e)
+        => e is CommaSeq cs ? cs.Items.Select(x => (CStmt)new ExprStmt(x)) : new CStmt[] { new ExprStmt(e) };
+
+    /// <summary>Turn a loop body's own <c>break</c> / <c>continue</c> into gotos; a
+    /// nested loop keeps both, a nested switch keeps its <c>break</c>.</summary>
+    private static CStmt RetargetJumps(CStmt s, string breakLabel, string continueLabel)
+    {
+        CStmt Walk(CStmt st, bool inSwitch) => st switch
+        {
+            Break when !inSwitch => new Goto(breakLabel) { Pos = st.Pos },
+            Continue => new Goto(continueLabel) { Pos = st.Pos },
+            Block b => b with { Stmts = b.Stmts.Select(x => Walk(x, inSwitch)).ToList() },
+            Seq q => q with { Stmts = q.Stmts.Select(x => Walk(x, inSwitch)).ToList() },
+            Labeled l => l with { Body = Walk(l.Body, inSwitch) },
+            If f => f with { Then = Walk(f.Then, inSwitch), Else = f.Else is { } e ? Walk(e, inSwitch) : null },
+            CaseLabelStmt cl => cl with { Body = Walk(cl.Body, inSwitch) },
+            SetjmpGuard sj => sj with
+            {
+                TryBody = sj.TryBody is { } tb ? Walk(tb, inSwitch) : null,
+                CatchBody = sj.CatchBody is { } cb ? Walk(cb, inSwitch) : null,
+            },
+            SetjmpCapture sc => sc with { Body = Walk(sc.Body, inSwitch) },
+            Switch sw => sw with
+            {
+                Sections = sw.Sections
+                    .Select(sec => sec with { Body = sec.Body.Select(x => Walk(x, inSwitch: true)).ToList() })
+                    .ToList(),
+            },
+            // A nested loop owns its break and continue.
+            _ => st,
+        };
+        return Walk(s, inSwitch: false);
+    }
+
+    /// <summary>Whether <paramref name="s"/> contains a <c>goto</c> to
+    /// <paramref name="label"/>.</summary>
+    private static bool JumpsTo(CStmt? s, string label) => s switch
+    {
+        null => false,
+        Goto g => g.Label == label,
+        Block b => b.Stmts.Any(x => JumpsTo(x, label)),
+        Seq q => q.Stmts.Any(x => JumpsTo(x, label)),
+        Labeled l => JumpsTo(l.Body, label),
+        If f => JumpsTo(f.Then, label) || JumpsTo(f.Else, label),
+        While w => JumpsTo(w.Body, label),
+        DoWhile dw => JumpsTo(dw.Body, label),
+        For fo => JumpsTo(fo.Body, label),
+        CaseLabelStmt cl => JumpsTo(cl.Body, label),
+        SetjmpGuard sj => JumpsTo(sj.TryBody, label) || JumpsTo(sj.CatchBody, label),
+        SetjmpCapture sc => JumpsTo(sc.Body, label),
+        Switch sw => sw.Sections.Any(sec => sec.Body.Any(x => JumpsTo(x, label))),
+        _ => false,
+    };
 }
