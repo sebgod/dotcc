@@ -2650,9 +2650,21 @@ internal sealed partial class IrBuilder
     /// (<c>static assertion failed: "msg"</c>).</summary>
     private void CheckStaticAssert(Item exprItem, Item? msgItem, SrcPos pos)
     {
-        switch (ConstEval(BuildExpr(exprItem)))
+        _firstUndeclared = null;
+        var cond = BuildExpr(exprItem);
+        switch (ConstEval(cond))
         {
             case null:
+                // An undeclared identifier is the likely cause; report it first, as gcc
+                // does (a header's missing macro reads as an unknown name here).
+                if (_firstUndeclared is { } undeclared)
+                {
+                    Diagnostics.Add(new Diagnostic(Severity.Error,
+                        _symbols.AtFileScope
+                            ? $"'{undeclared}' undeclared here (not in a function)"
+                            : $"'{undeclared}' undeclared (first use in this function)",
+                        SrcPos.From(exprItem), _file));
+                }
                 Diagnostics.Add(new Diagnostic(Severity.Error,
                     "expression in static assertion is not constant", pos, _file));
                 break;
@@ -2770,9 +2782,16 @@ internal sealed partial class IrBuilder
         }
         // Unresolved (a macro-substituted token, a builtin not in a header). Surface
         // the raw name; the backend escapes it and lets its compiler arbitrate. Slice
-        // code never hits this; it's a safety net during incremental growth.
+        // code never hits this; it's a safety net during incremental growth. A
+        // constant-expression context reads the first such name to report it.
+        _firstUndeclared ??= name;
         return new NameRef(name) { Type = CType.Int };
     }
+
+    /// <summary>The first identifier <see cref="BuildVar"/> could not resolve since a
+    /// constant-expression context cleared it, so that context can report the
+    /// undeclared name (gcc's diagnostic) rather than only "not constant".</summary>
+    private string? _firstUndeclared;
 
     private CExpr BuildCall(Item calleeItem, Item? argList)
     {
