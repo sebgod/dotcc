@@ -252,24 +252,24 @@ internal sealed partial class IrBuilder
                 break;
             case C.FuncDef d: BuildFuncDef(d.Arg0, d.Arg1); break;
             case C.ExternFnDef d: BuildFuncDef(d.Arg1, d.Arg2); break;
-            case C.FuncProto p: RegisterProto(p.Arg0); break;
-            case C.ExternFnProto p: RegisterProto(p.Arg1); break;
             // A header-defined file-scope variable (chibi sexp.h's `static const
             // unsigned char sexp_uvector_sizes[] = {…};`) re-arrives once per TU
             // that includes the header. An identical re-definition is the same
             // object — the first build's field + file-scope binding serve every
             // TU, so skip it (mirrors BuildFuncDef's static-inline dedup; see
             // AlreadySeenTopLevel for the per-TU-state caveat).
-            case C.GlobalDeclList or C.GlobalStaticDeclList when AlreadySeenTopLevel(fn):
+            case C.GlobalDeclList g when !DeclaresFunction(g.Arg1) && AlreadySeenTopLevel(fn):
+                break;
+            case C.GlobalStaticDeclList g when !DeclaresFunction(g.Arg2) && AlreadySeenTopLevel(fn):
                 break;
             // File-scope object declarations, any declarator in any position (scalar,
             // struct, array, fn-ptr, fn-ptr table): plain and `static` lower
             // identically (internal linkage is a no-op for a never-exported variable).
-            case C.GlobalDeclList g: BuildGlobalDecls(g.Arg0, g.Arg1, Storage.Static); break;
-            case C.GlobalStaticDeclList g: BuildGlobalDecls(g.Arg1, g.Arg2, Storage.Static); break;
+            case C.GlobalDeclList g: BuildGlobalDecls(g.Arg0, g.Arg1, Storage.Static, internalLinkage: false); break;
+            case C.GlobalStaticDeclList g: BuildGlobalDecls(g.Arg1, g.Arg2, Storage.Static, internalLinkage: true); break;
             // `extern T x…;` declares the names + types for resolution but emits no
             // storage: the definition lives in another TU (dotcc whole-program model).
-            case C.ExternVarDecl g: BuildGlobalDecls(g.Arg1, g.Arg2, Storage.Extern); break;
+            case C.ExternVarDecl g: BuildGlobalDecls(g.Arg1, g.Arg2, Storage.Extern, internalLinkage: false); break;
             // `typedef T d1, d2…;`: each declarator names an alias of its full type,
             // which ResolveType's TypeName case then sees through everywhere.
             case C.TypedefDecl t: BuildTypedefs(t.Arg1, t.Arg2); break;
@@ -300,17 +300,25 @@ internal sealed partial class IrBuilder
     /// <c>static const</c> tables) the two are indistinguishable.</summary>
     private bool AlreadySeenTopLevel(Item fn) => !_seenTopLevelDefs.Add(fn.ToString());
 
-    /// <summary>File-scope object declaration. Each declarator becomes a
-    /// <c>DotCcGlobals</c> field (codegen emits <c>public static unsafe T name</c>; an
-    /// array, a pinned array behind a <c>T*</c>). An <c>extern</c> declaration is
-    /// registered for resolution only (no field), unless it has an initializer, which
-    /// makes it a definition (C11 6.9.2p1; gcc warns).</summary>
-    private void BuildGlobalDecls(Item typeItem, Item listItem, Storage storage)
+    /// <summary>File-scope declaration. A function declarator declares a function (a
+    /// prototype; <paramref name="internalLinkage"/> for <c>static</c>); every other
+    /// declarator becomes a <c>DotCcGlobals</c> field (codegen emits <c>public static
+    /// unsafe T name</c>; an array, a pinned array behind a <c>T*</c>). An
+    /// <c>extern</c> declaration is registered for resolution only (no field), unless
+    /// it has an initializer, which makes it a definition (C11 6.9.2p1; gcc warns).</summary>
+    private void BuildGlobalDecls(Item typeItem, Item listItem, Storage storage, bool internalLinkage)
     {
         _sawThreadLocalSpec = false; // consumed below: set by THIS declaration's spec resolution
         _sawConstexprSpec = false;   // same discipline
+        _sawNoreturnSpec = false;    // a function declarator's `_Noreturn` / `inline`
+        _sawInlineSpec = false;
         WalkDeclList(typeItem, listItem, d =>
         {
+            if (d.Type is CType.Func { IsFunctionType: true } fnType)
+            {
+                DeclareFunctionDeclarator(d, fnType, internalLinkage);
+                return;
+            }
             var name = d.Name;
             var declStorage = storage;
             if (storage == Storage.Extern && d.Init is not null)
@@ -375,14 +383,12 @@ internal sealed partial class IrBuilder
         });
     }
 
-    /// <summary>A prototype declares the function (so calls resolve + we know its
-    /// signature) but emits no body.</summary>
     // ---- function markers (inline / noreturn / deprecated) ----------------
     // _sawNoreturnSpec/_sawInlineSpec: the signature's spec resolution saw the
     // `_Noreturn` (C11; the C23 lowercase `noreturn` arrives pre-promoted onto the
-    // same terminal) / `inline` (C99) function specifier — reset by
-    // RegisterProto/BuildFuncDef immediately before ExtractFnSig so only THIS
-    // declaration's specifiers count. _pendingAttrNoreturn/_pendingAttrDeprecated:
+    // same terminal) / `inline` (C99) function specifier — reset by BuildFuncDef
+    // immediately before ExtractFnSig, and at the start of every declaration that
+    // may hold a function declarator, so only THIS declaration's specifiers count. _pendingAttrNoreturn/_pendingAttrDeprecated:
     // the recognized attrs of an enclosing C23 `[[…]]` specifier (BuildTopLevel's
     // AttrFn case), consumed by the wrapped function declaration and cleared on unwind.
     private bool _sawNoreturnSpec;
@@ -588,23 +594,6 @@ internal sealed partial class IrBuilder
         }
     }
 
-    private void RegisterProto(Item fnSig)
-    {
-        _sawNoreturnSpec = false;
-        _sawInlineSpec = false;
-        var sig = ExtractFnSig(fnSig);
-        // The reduction's position is its leftmost leaf token (LALR.CC propagates
-        // children[0].Position up), and the whole declaration lives in one file —
-        // so the band check is reliable without inspecting the name token.
-        var sym = DeclareFunc(sig, fromSystemHeader: fnSig.Position.Line >= SrcPos.SyntheticLineBase);
-        ApplyFnMarkers(sym);
-        // Import-mode candidate tracking: a prototype not (yet) defined in any TU
-        // is a potential native `-l` import. A definition seen later retracts it
-        // (BuildFuncDef). System-header protos are flagged above and excluded at
-        // ProtoOnlyReferenced — they're runtime-provided via `using static Libc`.
-        if (!_fnDefSites.ContainsKey(sig.Name)) { _protoOnlyFuncs[sig.Name] = sym; }
-    }
-
     /// <summary>One already-built function DEFINITION: its parse subtrees (retained
     /// so the structural fingerprint is computed lazily — only names that actually
     /// collide across TUs pay for the <c>ToString</c>) and the symbol it bound.</summary>
@@ -799,27 +788,22 @@ internal sealed partial class IrBuilder
     {
         C.FnSig n => new(ResolveType(n.Arg0), Tok(n.Arg1), BuildParams(n.Arg3, out var v0), v0, false),
         C.FnSigNoArgs n => new(ResolveType(n.Arg0), Tok(n.Arg1), new(), false, false),
-        C.FnSigVoidArgs n => new(ResolveType(n.Arg0), Tok(n.Arg1), new(), false, false),
         C.FnSigStatic n => new(ResolveType(n.Arg1), Tok(n.Arg2), BuildParams(n.Arg4, out var v1), v1, true),
         C.FnSigStaticNoArgs n => new(ResolveType(n.Arg1), Tok(n.Arg2), new(), false, true),
-        C.FnSigStaticVoidArgs n => new(ResolveType(n.Arg1), Tok(n.Arg2), new(), false, true),
         // Parenthesized declarator name `T (name)(args)` — identical to
         // `T name(args)`; the parens are pure grouping around the name (public
         // headers wrap API names so a same-named function-like macro can't expand
         // at the declaration). Name is Arg2, the param list Arg5.
         C.FnSigParen n => new(ResolveType(n.Arg0), Tok(n.Arg2), BuildParams(n.Arg5, out var vp), vp, false),
         C.FnSigParenNoArgs n => new(ResolveType(n.Arg0), Tok(n.Arg2), new(), false, false),
-        C.FnSigParenVoidArgs n => new(ResolveType(n.Arg0), Tok(n.Arg2), new(), false, false),
         C.FnSigStaticParen n => new(ResolveType(n.Arg1), Tok(n.Arg3), BuildParams(n.Arg6, out var vsp), vsp, true),
         C.FnSigStaticParenNoArgs n => new(ResolveType(n.Arg1), Tok(n.Arg3), new(), false, true),
-        C.FnSigStaticParenVoidArgs n => new(ResolveType(n.Arg1), Tok(n.Arg3), new(), false, true),
         // Function returning a function pointer: `Ret (*name(params))(fnPtrParams)`
         // (e.g. <signal.h>'s `void (*signal(int, void(*)(int)))(int)`). The result
         // type is the function-pointer `Ret (*)(fnPtrParams)`; name + params are the
         // outer declarator's.
         C.FnSigRetFnPtr n => new(FnPtrType(n.Arg0, n.Arg9), Tok(n.Arg3), BuildParams(n.Arg5, out var vr), vr, false),
         C.FnSigRetFnPtrNoArgs n => new(FnPtrType(n.Arg0, null), Tok(n.Arg3), BuildParams(n.Arg5, out var vrn), vrn, false),
-        C.FnSigRetFnPtrVoid n => new(FnPtrType(n.Arg0, null), Tok(n.Arg3), BuildParams(n.Arg5, out var vrv), vrv, false),
         _ => throw new IrUnsupportedException(TypeName(it.Content)),
     };
 
@@ -860,6 +844,9 @@ internal sealed partial class IrBuilder
         }
         Walk(paramList);
         variadic = vararg;
+        // `(void)`: an unnamed parameter of type void as the only item means the
+        // function has no parameters (C11 6.7.6.3p10).
+        if (acc.Count == 1 && acc[0].Type.Unqualified is CType.VoidType) { acc.Clear(); }
         return acc;
     }
 
@@ -867,8 +854,12 @@ internal sealed partial class IrBuilder
     /// Only relevant when the type ARRIVES as an array — i.e. through an
     /// array-typedef alias; the explicit <c>T name[]</c> productions decay at
     /// their own case arms.</summary>
-    private static CType DecayParam(CType t)
-        => t is CType.Array a ? new CType.Pointer(a.Element) : t;
+    private static CType DecayParam(CType t) => t switch
+    {
+        CType.Array a => new CType.Pointer(a.Element),
+        CType.Func { IsFunctionType: true } f => f with { IsFunctionType = false },
+        _ => t,
+    };
 
     // ---- enums -----------------------------------------------------------
 
@@ -1132,13 +1123,13 @@ internal sealed partial class IrBuilder
     private CType ResolveType(Item it) => it.Content switch
     {
         C.TypeFromSpec t => ResolveSpecs(CollectSpecs(t.Arg0), SrcPos.From(it)),
-        C.TypePtr t => new CType.Pointer(ResolveType(t.Arg0)),
+        C.TypePtr t => PointerTo(ResolveType(t.Arg0)),
         // `int * const p` — the POINTER is const (can't repoint); the pointee is
         // unchanged. Flag the Pointer so `p = q` trips the const check while
         // `*p = v` (pointee write) does not. `* volatile` / `* restrict` have no
         // C# model, so they stay plain pointers (dropped).
-        C.TypePtrQualConst t => new CType.Pointer(ResolveType(t.Arg0)).WithQuals(TypeQual.Const),
-        C.TypePtrQualVolatile t => new CType.Pointer(ResolveType(t.Arg0)),
+        C.TypePtrQualConst t => PointerTo(ResolveType(t.Arg0)).WithQuals(TypeQual.Const),
+        C.TypePtrQualVolatile t => PointerTo(ResolveType(t.Arg0)),
         // `const T` / `T const` — leading or trailing const qualifier. Carries the
         // flag on the type; drives the const-correctness check + read-only-array RVA.
         C.TypeConstPre t => ResolveType(t.Arg1).WithQuals(TypeQual.Const),
@@ -1158,7 +1149,7 @@ internal sealed partial class IrBuilder
         // Gated C11; the operand is validated but never read.
         C.TypeAlignasType t => AlignasType(t.Arg2, t.Arg4, it),
         C.TypeAlignasExpr t => AlignasExpr(t.Arg2, t.Arg4, it),
-        C.TypePtrQualRestrict t => new CType.Pointer(ResolveType(t.Arg0)),
+        C.TypePtrQualRestrict t => PointerTo(ResolveType(t.Arg0)),
         C.TypeName t => ResolveTypeName(Tok(t.Arg0)),
         // `enum Tag` as a type — the registered real C# enum, or plain int if the
         // tag is unknown (forward/opaque) or names an anonymous int-constant enum.
@@ -1587,6 +1578,7 @@ internal sealed partial class IrBuilder
             case C.BlockEmpty: return BuildBlock(it);
             case C.StmtDecl d: return BuildDeclStmt(d.Arg0) with { Pos = pos };
             case C.StmtStaticDecl s: return BuildStmtStaticDecl(s) with { Pos = pos };
+            case C.StmtExternDecl s: BuildBlockExternDecls(s.Arg1, s.Arg2); return EmptyStmt(pos);
             // Block-scope declarations with no declarators (`struct cD { … };`
             // inside a function body) and block-scope typedefs. A type has no
             // storage: dotcc hoists a tag definition into the top-level type section
@@ -1991,6 +1983,12 @@ internal sealed partial class IrBuilder
     {
         WalkDeclList(n.Arg1, n.Arg2, d =>
         {
+            if (d.Type is CType.Func { IsFunctionType: true })
+            {
+                Diagnostics.Add(new Diagnostic(Severity.Error,
+                    $"invalid storage class for function '{d.Name}'", SrcPos.From(d.At), _file));
+                return;
+            }
             var csName = $"{_symbols.Escape(d.Name)}__s{_staticLocalSeq++}";
             if (d.Type.Unqualified is CType.Array arr)
             {
@@ -2035,8 +2033,17 @@ internal sealed partial class IrBuilder
             if (scalars.Count > 0) { stmts.Add(new DeclStmt(scalars.ToArray())); scalars.Clear(); }
         }
         _sawConstexprSpec = false; // consumed below (C23 allows block-scope constexpr)
+        _sawNoreturnSpec = false;
+        _sawInlineSpec = false;
         WalkDeclList(typeItem, listItem, d =>
         {
+            // A block-scope function declaration (C11 6.2.2p5: external linkage)
+            // declares the function for the rest of the block and emits nothing.
+            if (d.Type is CType.Func { IsFunctionType: true } fnType)
+            {
+                DeclareFunctionDeclarator(d, fnType, internalLinkage: false);
+                return;
+            }
             if (d.Type.Unqualified is CType.Array arr)
             {
                 if (_sawConstexprSpec)
@@ -2082,9 +2089,15 @@ internal sealed partial class IrBuilder
 
     private static CType WrapPtr(CType t, int stars)
     {
-        for (var i = 0; i < stars; i++) { t = new CType.Pointer(t); }
+        for (var i = 0; i < stars; i++) { t = PointerTo(t); }
         return t;
     }
+
+    /// <summary>The type a pointer declarator gives over <paramref name="t"/>: a
+    /// pointer, except over a function type, where it is the function-pointer type
+    /// (dotcc represents a fn-ptr as the bare <see cref="CType.Func"/>).</summary>
+    private static CType PointerTo(CType t)
+        => t is CType.Func { IsFunctionType: true } f ? f with { IsFunctionType = false } : new CType.Pointer(t);
 
     /// <summary>Count the literal trailing <c>*</c>s on a type node (the
     /// <c>Type → Type *</c> pointer-qualifier chain). Distinguishes a pointer
