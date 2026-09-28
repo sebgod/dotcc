@@ -115,9 +115,17 @@ public static partial class Compiler
         return sb.ToString();
     }
 
+    /// <summary>The most user functions one generated class holds. The CLR caps a type at
+    /// 65535 methods (past it the program fails to load: "contains more methods than the
+    /// current implementation allows"), and a function's local functions add to its class, so a
+    /// large program (CPython: some 70k functions, most of them each unit's own copies of header
+    /// <c>static inline</c> functions) is spread over several classes, which <c>using static</c>
+    /// surfaces alike.</summary>
+    internal const int FunctionsPerClass = 8192;
+
     internal static string BuildShell(
         int mainArity,
-        string emittedFnList,
+        IReadOnlyList<string> emittedFns,
         string structDecls,
         string usingAliases,
         string globals,
@@ -135,7 +143,7 @@ public static partial class Compiler
     {
         if (emit == EmitMode.SharedLib)
         {
-            return BuildLibraryShell(emittedFnList, structDecls, usingAliases, globals, exports, importsClass, importsAreStatic, pythonShim);
+            return BuildLibraryShell(string.Join("\n\n", emittedFns), structDecls, usingAliases, globals, exports, importsClass, importsAreStatic, pythonShim);
         }
         // Import mode: surface the import table by bare name and splice it into the
         // type-decls section. A GOT (-l) table is bound before main; static [DllImport]
@@ -163,8 +171,15 @@ public static partial class Compiler
         // visitor's `static unsafe` becomes `internal static unsafe` so `using
         // static DotCcProgram;` surfaces them by bare name everywhere (the entry's
         // `main(...)` call, file-scope `&fn` initializers, and inter-function calls).
-        var indentedFns = IndentBlock(
-            emittedFnList.Replace("static unsafe ", "internal static unsafe "), "    ");
+        // Past FunctionsPerClass the functions continue in DotCcProgram2, DotCcProgram3, ...;
+        // C function names are unique in a program, so the imports never collide.
+        var fnChunks = emittedFns.Count == 0 ? new[] { System.Array.Empty<string>() } : emittedFns.Chunk(FunctionsPerClass).ToArray();
+        var programClassNames = fnChunks.Select((_, i) => i == 0 ? "DotCcProgram" : $"DotCcProgram{i + 1}").ToArray();
+        var programUsings = string.Join("\n", programClassNames.Select(n => $"using static {n};"));
+        var programClasses = string.Join("\n\n", fnChunks.Select((chunk, i) =>
+            $"static unsafe class {programClassNames[i]}\n{{\n"
+            + IndentBlock(string.Join("\n\n", chunk).Replace("static unsafe ", "internal static unsafe "), "    ")
+            + "\n}"));
         // A `void`-returning main (Zig's `pub fn main() void`; also a non-standard
         // `void main()` in C) can't be `return`ed from the int-typed entry, so it is
         // called for effect and followed by `return 0;`. An int-returning main is
@@ -270,7 +285,7 @@ public static partial class Compiler
             // idiom) by bare name across the class boundary (using-static surfaces
             // the method group).
             using static DotCcGlobals;
-            using static DotCcProgram;{{importsUsing}}
+            {{programUsings}}{{importsUsing}}
 
             // ---- typedef'd `using` aliases (C# 12+ permits `using unsafe X = Y;`
             //      at file scope, ahead of top-level statements). Empty when no
@@ -302,10 +317,7 @@ public static partial class Compiler
             //      `using static` note above — class methods, not top-level locals,
             //      so `&fn` / function-pointer tables / cross-context refs work) ----
 
-            static unsafe class DotCcProgram
-            {
-            {{indentedFns}}
-            }
+            {{programClasses}}
 
             {{importsClass}}
             // ---- type declarations (must come last; C# requires top-level
