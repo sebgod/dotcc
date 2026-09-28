@@ -188,6 +188,15 @@ public abstract record CType
         /// <see cref="Describe"/> / <see cref="Unqualified"/>).</summary>
         public bool IsNativeCallConv { get; init; }
 
+        /// <summary>True for a FUNCTION type, as a function declarator or a typedef of
+        /// one declares it (<c>int f(int);</c>, <c>typedef int fn_t(void *);</c>),
+        /// rather than the function-POINTER type dotcc otherwise represents as a bare
+        /// <see cref="Func"/>. It exists only between a declarator and its binding: a
+        /// pointer declarator over it (<c>fn_t *p</c>) and a parameter of it (C11
+        /// 6.7.6.3p8) yield the fn-ptr type, and a declaration of it declares a
+        /// function. Like <see cref="IsNativeCallConv"/> it is excluded from equality.</summary>
+        public bool IsFunctionType { get; init; }
+
         /// <summary>Equality excludes <see cref="IsNativeCallConv"/> (a .NET ABI
         /// annotation, not C type identity) and otherwise replicates the synthesized
         /// record behavior this replaces: <see cref="Params"/> compares structurally

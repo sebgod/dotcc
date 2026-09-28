@@ -58,7 +58,13 @@ internal sealed partial class IrBuilder
         // literal star and stays in `element`, so every declarator keeps it.
         var litStars = CountLiteralStars(typeItem);
         var element = baseType;
-        for (var i = 0; i < litStars && element is CType.Pointer p; i++) { element = p.Pointee; }
+        for (var i = 0; i < litStars; i++)
+        {
+            // A literal star made a pointer, or the fn-ptr of a function type.
+            if (element is CType.Pointer p) { element = p.Pointee; }
+            else if (element is CType.Func { IsFunctionType: false } f) { element = f with { IsFunctionType = true }; }
+            else { break; }
+        }
 
         void BitField(string name, Item width, CType type, Item at)
         {
@@ -88,6 +94,13 @@ internal sealed partial class IrBuilder
                 // `Ret (*name)(params) [= E]`: the declarator's base type is the RETURN type.
                 case C.DeclItemFnPtr fp: { var (n, ft) = FnPtrDeclarator(t, fp.Arg0, fp.Arg1); add(new(n, ft, null, fp.Arg0)); break; }
                 case C.DeclItemFnPtrInit fp: { var (n, ft) = FnPtrDeclarator(t, fp.Arg0, fp.Arg1); add(new(n, ft, fp.Arg3, fp.Arg0)); break; }
+                // A function declarator declares a function (or, in a typedef, names
+                // a function type): its type is the function type, not the fn-ptr.
+                case C.DeclItemFn f: add(new(Tok(f.Arg0), FunctionType(t, f.Arg1), null, f.Arg0)); break;
+                case C.DeclItemParenFn f: add(new(Tok(f.Arg1), FunctionType(t, f.Arg3), null, f.Arg1)); break;
+                case C.DeclItemFnRetFnPtr f:
+                    add(new(Tok(f.Arg2), FnPtrType(FnPtrTailType(t, f.Arg7), f.Arg4) with { IsFunctionType = true }, null, f.Arg2));
+                    break;
                 case C.DeclItemFnPtrArr fa: add(FnPtrArrDeclarator(t, fa.Arg0, fa.Arg1, null)); break;
                 case C.DeclItemFnPtrArrInit fa: add(FnPtrArrDeclarator(t, fa.Arg0, fa.Arg1, fa.Arg3)); break;
                 case C.DeclItemFnPtrArrOpenInit fa: add(FnPtrArrDeclarator(t, fa.Arg0, fa.Arg1, fa.Arg3)); break;
@@ -146,6 +159,71 @@ internal sealed partial class IrBuilder
             default:
                 throw new IrUnsupportedException(TypeName(arrDecl.Content));
         }
+    }
+
+    /// <summary>The function type a function declarator's parameter tail gives over
+    /// return type <paramref name="ret"/>.</summary>
+    private CType.Func FunctionType(CType ret, Item tail) => FnPtrTailType(ret, tail) with { IsFunctionType = true };
+
+    /// <summary>Whether a declarator list declares a function (such a declaration is
+    /// a prototype, which a re-included header repeats harmlessly, so it is never
+    /// deduplicated as a header-defined variable is).</summary>
+    private static bool DeclaresFunction(Item listItem) => listItem.Content switch
+    {
+        C.DeclItemListCons c => DeclaresFunction(c.Arg0) || DeclaresFunction(c.Arg2),
+        C.DeclItemListOne o => DeclaresFunction(o.Arg0),
+        C.DeclItemTailPtr t => DeclaresFunction(t.Arg1),
+        C.DeclItemTailPlain t => DeclaresFunction(t.Arg0),
+        C.DeclItemFn or C.DeclItemParenFn or C.DeclItemFnRetFnPtr => true,
+        _ => false,
+    };
+
+    /// <summary>A function declarator outside a definition: a prototype. Declares the
+    /// function in the current scope (file scope, or a block for a block-scope
+    /// declaration), applies its function specifiers and attributes, and tracks a
+    /// declared-but-undefined function as a native-import candidate.</summary>
+    private void DeclareFunctionDeclarator(Declarator d, CType.Func fn, bool internalLinkage)
+    {
+        var ps = new List<ParamInfo>(fn.Params.Count);
+        for (var i = 0; i < fn.Params.Count; i++) { ps.Add(new ParamInfo(fn.Params[i], "_p" + i)); }
+        var sig = new FnSig(fn.Return, d.Name, ps, fn.Variadic, internalLinkage);
+        // The declarator's position is its name token; the whole declaration lives in
+        // one file, so the system-header band check is reliable.
+        var sym = DeclareFunc(sig, fromSystemHeader: d.At.Position.Line >= SrcPos.SyntheticLineBase);
+        ApplyFnMarkers(sym);
+        // Import-mode candidate tracking: a prototype not (yet) defined in any TU is a
+        // potential native `-l` import; a later definition retracts it (BuildFuncDef).
+        if (!_fnDefSites.ContainsKey(sig.Name)) { _protoOnlyFuncs[sig.Name] = sym; }
+    }
+
+    /// <summary>A block-scope <c>extern T x…;</c> (C11 6.2.2p4): a function declarator
+    /// declares the function; an object declarator refers to the file-scope object of
+    /// that name for the rest of the block (declared as an extern if none is known
+    /// yet). Nothing is emitted.</summary>
+    private void BuildBlockExternDecls(Item typeItem, Item listItem)
+    {
+        _sawNoreturnSpec = false;
+        _sawInlineSpec = false;
+        WalkDeclList(typeItem, listItem, d =>
+        {
+            if (d.Type is CType.Func { IsFunctionType: true } fnType)
+            {
+                DeclareFunctionDeclarator(d, fnType, internalLinkage: false);
+                return;
+            }
+            if (d.Init is not null)
+            {
+                Diagnostics.Add(new Diagnostic(Severity.Error,
+                    $"'{d.Name}' has both 'extern' and initializer", SrcPos.From(d.At), _file));
+                return;
+            }
+            var type = d.Type.Unqualified is CType.Array { Count: null } open ? new CType.Pointer(open.Element) : d.Type;
+            _symbols.DeclareAlias(new Symbol
+            {
+                Name = d.Name, Kind = SymKind.Var, Type = type, Storage = Storage.Extern, IsGlobal = true,
+                TargetName = _symbols.Escape(d.Name),
+            });
+        });
     }
 
     /// <summary>An array-of-function-pointers declarator <c>Ret (*name[N])(params)</c> /
@@ -471,6 +549,13 @@ internal sealed partial class IrBuilder
         if (d.Init is not null)
         {
             throw new IrUnsupportedException($"struct or union member '{d.Name}' cannot have an initializer");
+        }
+        if (d.Type is CType.Func { IsFunctionType: true } fn)
+        {
+            // Reported, then kept as the fn-ptr so the rest of the layout still builds.
+            Diagnostics.Add(new Diagnostic(Severity.Error,
+                $"field '{d.Name}' declared as a function", SrcPos.From(d.At), _file));
+            return fn with { IsFunctionType = false };
         }
         if (d.Type.Unqualified is not CType.Array arr) { return d.Type; }
         if (d.VlaDims is not null) { throw new IrUnsupportedException("non-constant struct array bound"); }
