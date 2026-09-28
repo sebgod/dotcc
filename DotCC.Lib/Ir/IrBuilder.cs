@@ -396,10 +396,24 @@ internal sealed partial class IrBuilder
             {
                 _definedGlobalNames.Add(name); // a real definition — satisfies any extern decl
                 CExpr? gInit = null;
-                if (d.Init is { } ii) { gInit = BuildInitValue(sym.Type, ii); CheckQualifierDiscard(gInit, sym.Type, SrcPos.From(ii), "initialization"); }
+                FlexibleTail? flexible = null;
+                if (d.Init is { } ii)
+                {
+                    gInit = BuildInitValue(sym.Type, ii);
+                    CheckQualifierDiscard(gInit, sym.Type, SrcPos.From(ii), "initialization");
+                    (gInit, flexible) = SplitFlexibleInit(gInit, SrcPos.From(ii));
+                    if (flexible is not null && sym.IsThreadLocal)
+                    {
+                        throw new IrUnsupportedException($"'{name}': a _Thread_local object with an initialized flexible array member is not supported");
+                    }
+                }
                 PropagateNativeCallConv(sym, gInit);
                 if (sym.IsConstexpr) { BindConstexpr(sym, gInit, SrcPos.From(typeItem)); }
-                Globals.Add(new GlobalVar(sym, gInit) { PerThreadInit = sym.IsThreadLocal && gInit is { } ti && !Module.IsZeroInitializer(ti) });
+                Globals.Add(new GlobalVar(sym, gInit)
+                {
+                    PerThreadInit = sym.IsThreadLocal && gInit is { } ti && !Module.IsZeroInitializer(ti),
+                    Flexible = flexible,
+                });
             }
         });
     }
@@ -2295,9 +2309,15 @@ internal sealed partial class IrBuilder
                 Storage = Storage.Static, IsGlobal = true, TargetName = csName,
             };
             CExpr? slInit = null;
-            if (d.Init is { } ii) { slInit = BuildInitValue(sym.Type, ii); CheckQualifierDiscard(slInit, sym.Type, SrcPos.From(ii), "initialization"); }
+            FlexibleTail? flexible = null;
+            if (d.Init is { } ii)
+            {
+                slInit = BuildInitValue(sym.Type, ii);
+                CheckQualifierDiscard(slInit, sym.Type, SrcPos.From(ii), "initialization");
+                (slInit, flexible) = SplitFlexibleInit(slInit, SrcPos.From(ii));
+            }
             PropagateNativeCallConv(sym, slInit);
-            Globals.Add(new GlobalVar(sym, slInit));
+            Globals.Add(new GlobalVar(sym, slInit) { Flexible = flexible });
             _symbols.DeclareAlias(sym);
         });
         return new DeclStmt(System.Array.Empty<LocalDecl>());
@@ -2360,7 +2380,12 @@ internal sealed partial class IrBuilder
                 IsConstexpr = _sawConstexprSpec,
             });
             CExpr? sInit = null;
-            if (d.Init is { } ii) { sInit = BuildInitValue(sym.Type, ii); CheckQualifierDiscard(sInit, sym.Type, SrcPos.From(ii), "initialization"); }
+            if (d.Init is { } ii)
+            {
+                sInit = BuildInitValue(sym.Type, ii);
+                CheckQualifierDiscard(sInit, sym.Type, SrcPos.From(ii), "initialization");
+                CheckNoFlexibleInit(sInit, SrcPos.From(ii));
+            }
             PropagateNativeCallConv(sym, sInit);
             if (sym.IsConstexpr) { BindConstexpr(sym, sInit, SrcPos.From(typeItem)); }
             scalars.Add(new LocalDecl(sym, sInit));
@@ -2574,7 +2599,7 @@ internal sealed partial class IrBuilder
             C.LitNullptr => new NullPtr { Type = new CType.Pointer(CType.Void) },
             C.SizeofType s => new SizeOfExpr(TypeNameType(s.Arg2, TypeNameSite.Sizeof)) { Type = CType.SizeT },
             // `sizeof expr` — the operand isn't evaluated, only its type measured.
-            C.SizeofExpr s => new SizeOfExpr(BuildExpr(s.Arg1).Type) { Type = CType.SizeT },
+            C.SizeofExpr s => BuildSizeofExpr(s),
             // `_Alignof(Type)` (C11 §6.5.3.4) — folds immediately to the layout
             // model's alignment (an integer constant expression, `size_t`-typed
             // like sizeof), so it composes with _Static_assert / array bounds /
@@ -2655,6 +2680,19 @@ internal sealed partial class IrBuilder
         return new Member(base_, field, arrow) { Type = MemberType(base_, field), IsLValue = true };
     }
 
+
+    /// <summary><c>sizeof expr</c>: the operand is not evaluated, only its type measured,
+    /// which must be complete (a flexible array member's is not; gcc's error).</summary>
+    private CExpr BuildSizeofExpr(C.SizeofExpr s)
+    {
+        var operand = BuildExpr(s.Arg1);
+        if (operand.Type.Unqualified is CType.Array { Count: null } incomplete)
+        {
+            Diagnostics.Add(new Diagnostic(Severity.Error,
+                $"invalid application of 'sizeof' to incomplete type '{incomplete.Describe()}'", SrcPos.From(s.Arg1), _file));
+        }
+        return new SizeOfExpr(operand.Type) { Type = CType.SizeT };
+    }
 
     /// <summary><c>va_arg(ap, T)</c>: its second operand is a type name.</summary>
     private CExpr BuildVaArg(C.VaArgExpr v)

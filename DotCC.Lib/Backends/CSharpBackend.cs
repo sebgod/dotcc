@@ -47,7 +47,7 @@ internal sealed class CSharpBackend
 
     public static CSharpBackendResult Run(IrModule unit, DotCC.ConversionGate? convGate = null)
     {
-        var cg = new CSharpBackend { _convGate = convGate };
+        var cg = new CSharpBackend { _convGate = convGate, _module = unit };
         // C tag namespace vs ordinary namespace: collect globals whose name an
         // emitted struct/enum type will shadow, so reads qualify (GlobalName).
         var typeNames = new HashSet<string>(unit.Types.Select(t => t.Name), StringComparer.Ordinal);
@@ -147,6 +147,16 @@ internal sealed class CSharpBackend
                 globals.Append($"            return ref {slot};\n        }}\n    }}\n");
                 continue;
             }
+            // A static object whose initializer gives its flexible array member elements
+            // (GH #246, gcc's GNU extension) needs storage past its struct: a zeroed
+            // native block, never freed (static storage duration), holding the struct at
+            // its start and the elements at the member's offset, behind a ref-returning
+            // property named like the C variable (as a per-thread one is).
+            if (g.Flexible is { } flex)
+            {
+                globals.Append(cg.FlexibleGlobal(g, flex, fieldType, initText));
+                continue;
+            }
             if (g.Sym.IsThreadLocal) { globals.Append("    [ThreadStatic]\n"); }
             var init = initText is null ? "" : " = " + initText;
             globals.Append($"    public static unsafe {fieldType} {g.Sym.TargetName}{init};\n");
@@ -199,19 +209,27 @@ internal sealed class CSharpBackend
     {
         var wrappers = new StringBuilder();   // [InlineArray] wrapper types for non-primitive array members
         var sb = new StringBuilder();
+        // A flexible or zero-length array member has no storage (it is left out below), but
+        // C sizes the struct as if it were there with no elements: aligned to its element,
+        // with trailing padding to that alignment (C11 6.7.2.1p18). The layout model has
+        // that size; `Size =` gives the C# struct the same one (never smaller than the
+        // fields it keeps).
+        var size = !t.IsUnion && t.Fields.Any(f => f.Type.Unqualified is CType.Array za && FlatCount(za) == 0)
+            && _module?.SizeOfConst(new CType.Named(t.Name)) is long n and > 0
+            ? $", Size = {n}" : "";
         if (t.IsUnion)
         {
             sb.Append("[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Explicit)]\n");
         }
-        else if (t.Layout == AggregateLayout.Sequential)
+        else if (t.Layout == AggregateLayout.Sequential || size.Length > 0 && t.Layout != AggregateLayout.Packed)
         {
             // Zig `extern struct` — pin guaranteed C-ABI sequential layout.
-            sb.Append("[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]\n");
+            sb.Append($"[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential{size})]\n");
         }
         else if (t.Layout == AggregateLayout.Packed)
         {
             // Zig `packed struct` — byte-pack with no inter-field padding (V1: Pack=1, not bit-packed).
-            sb.Append("[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential, Pack = 1)]\n");
+            sb.Append($"[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential, Pack = 1{size})]\n");
         }
         sb.Append("unsafe struct ").Append(t.Name).Append("\n{\n");
         var bitUnitCounter = 0;
@@ -235,8 +253,9 @@ internal sealed class CSharpBackend
             // A zig `void` field (std.sort's `sub_ctx: @TypeOf(context)` for a `{}` context) has no storage, and C#
             // has no void field (CS0670): it is left out, as its initializers and argument uses are erased too.
             if (f.Type.Unqualified is CType.VoidType) { fi++; continue; }
-            // A zero-length array field (zig's `data: [0]u8`, the flexible-array idiom, task #197) has no storage either,
-            // and C# has no zero-length fixed buffer or InlineArray (CS1665): it is left out too.
+            // A flexible or zero-length array member (C's `T d[]` / GNU `T d[0]`, zig's `data: [0]u8`; task #197, GH #246)
+            // has no storage either, and C# has no zero-length fixed buffer or InlineArray (CS1665): it is left out too,
+            // and an access computes its address from the layout model's offset (the Member case).
             if (f.Type.Unqualified is CType.Array zeroArr && FlatCount(zeroArr) == 0) { fi++; continue; }
             if (t.IsUnion) { sb.Append("    [System.Runtime.InteropServices.FieldOffset(0)]\n"); }
             // An array member is C-inline storage, not a pointer field. A primitive
@@ -307,7 +326,7 @@ internal sealed class CSharpBackend
     /// argument).</summary>
     private string ArrayMemberInitHelper(StructTypeDef t)
     {
-        var arrays = t.Fields.Where(f => !f.IsBitField && f.Type.Unqualified is CType.Array).ToList();
+        var arrays = t.Fields.Where(f => !f.IsBitField && f.Type.Unqualified is CType.Array a && FlatCount(a) > 0).ToList();
         if (arrays.Count == 0) { return ""; }
         var ps = new List<string>();
         var body = new StringBuilder();
@@ -1251,6 +1270,16 @@ internal sealed class CSharpBackend
     private DotCC.ConversionGate? _convGate;
     private string? _currentFnName;
 
+    /// <summary>The unit being rendered, for its compile-time layout model (a flexible
+    /// or zero-length array member's offset, a struct's C size).</summary>
+    private IrModule? _module;
+
+    /// <summary>The layout model's byte offset of member <paramref name="field"/> of
+    /// struct <paramref name="owner"/>.</summary>
+    private int MemberOffset(string owner, string field) =>
+        _module?.OffsetOfConst(owner, field)
+            ?? throw new IrUnsupportedException($"the offset of '{field}' in '{owner}' is not modeled");
+
     // ---- volatile / atomic access ----------------------------------------
 
     /// <summary>Render a READ of an lvalue, fencing it when the lvalue's type is
@@ -2028,6 +2057,14 @@ internal sealed class CSharpBackend
                 // captured), so `&__t` needs no `fixed`. A primitive `fixed`-buffer
                 // member's access already yields its address (no `&`); a scalar
                 // member uses `&`.
+                // A flexible or zero-length array member has no C# field to measure (GH #246): its
+                // offset is the layout model's, the same one its accesses use.
+                if (o.MemberType?.Unqualified is CType.Array { } za && FlatCount(za) == 0
+                    && o.StructType.Unqualified is CType.Named owner
+                    && _module?.OffsetOfConstPath(owner.Name, o.Path) is { } modeled)
+                {
+                    return ($"(ulong){modeled}", PUnary);
+                }
                 var m = string.Join(".", o.Path.Select(DotCC.EmitHelpers.Id));
                 // A member that lowers to a C# `fixed` buffer (primitive-element
                 // array) already yields its own address — no `&` (would be CS0211).
@@ -2056,13 +2093,11 @@ internal sealed class CSharpBackend
                 return ("default(Unit)", PPrimary);
             case Member m:
             {
-                // A zero-length array field has no emitted storage (StructText): its address would be the byte after the
-                // fields before it, which only zig's layout rules fix, so a read of it is not modeled yet (task #197).
+                // A flexible or zero-length array member has no emitted storage (StructText): it is the address its
+                // offset gives in the object (task #197, GH #246), which is where its elements live.
                 if (m.Type.Unqualified is CType.Array zeroField && FlatCount(zeroField) == 0)
                 {
-                    throw new IrUnsupportedException(
-                        $"zig zero-length array field `{m.Field}` has no storage in the emitted C#; reading it (a flexible "
-                        + "array's address) is not supported yet");
+                    return (FlexibleMemberAddress(m, zeroField), PUnary);
                 }
                 // An ARRAY member of an rvalue struct (`(struct S){…}.arr[i]`, `f().arr`) is
                 // inline storage with no address: a fixed buffer or [InlineArray] of an
@@ -2364,6 +2399,9 @@ internal sealed class CSharpBackend
             // The address of a ROW of a multi-dimensional array (`for (rows) |*r|` over a `[][3]u8`, task #152): a pointer to
             // an array is the array's own flat element pointer, which the row subscript (`base + i * N`) already is.
             case UnOp.AddrOf when u.Operand is Index { Type.Unqualified: CType.Array }: return Render(u.Operand);
+            // The address of a flexible or zero-length array member is its element pointer (GH #246).
+            case UnOp.AddrOf when u.Operand is Member { Type.Unqualified: CType.Array za } fm && FlatCount(za) == 0:
+                return ($"({Cs(u.Type)}){FlexibleMemberAddress(fm, za)}", PUnary);
             // &global — a file-scope global / static local lowers to a C# static
             // field, which is a MOVEABLE variable (`&field` is CS0212). Take its
             // address via Unsafe.AsPointer: dotcc's globals are unmanaged value
@@ -2720,7 +2758,15 @@ internal sealed class CSharpBackend
         var obj = sb.Append(" }").ToString();
         // Array members can't be assigned in an object initializer; route their
         // contents through the struct's init helper (see ArrayMemberInitHelper).
-        var arrays = si.Members.Where(m => m.Value is ArrayValue).ToList();
+        // A flexible or zero-length array member has no storage: an empty initializer for
+        // it stores nothing, and elements for it are split off a static object's
+        // initializer (GlobalVar.Flexible) or rejected elsewhere before codegen.
+        if (si.Members.Any(m => m.FieldType.Unqualified is CType.Array za && FlatCount(za) == 0
+                && m.Value is ArrayValue { Elems.Count: > 0 }))
+        {
+            throw new IrUnsupportedException("initialized flexible array member outside a static object");
+        }
+        var arrays = si.Members.Where(m => m.Value is ArrayValue && FlatCount(m.FieldType) > 0).ToList();
         if (arrays.Count == 0) { return obj; }
         if (si.Type.Unqualified is CType.Named named) { _arrayInitTypes.Add(named.Name); }
         var spans = arrays.Select(m =>
@@ -2729,6 +2775,53 @@ internal sealed class CSharpBackend
             return $"{DotCC.EmitHelpers.Id(m.Name)}: [{string.Join(", ", av.Elems.Select(e => ArrayMemberElem(e, av.Element)))}]";
         });
         return $"{Cs(si.Type)}.{ArrayInitHelper}({obj}, {string.Join(", ", spans)})";
+    }
+
+    /// <summary>The element pointer of a flexible or zero-length array member (GH #246):
+    /// the object's address plus the member's offset in the layout model, which places it
+    /// after the members before it, aligned to its element. The base is a pointer
+    /// (<c>p-&gt;fam</c>), a global (through <c>Unsafe.AsPointer</c>, as <c>&amp;global</c>
+    /// is) or an addressable local.</summary>
+    private string FlexibleMemberAddress(Member m, CType.Array member)
+    {
+        var owner = (m.Arrow ? (m.Base.Type.Unqualified as CType.Pointer)?.Pointee : m.Base.Type)?.Unqualified as CType.Named
+            ?? throw new IrUnsupportedException($"flexible array member '{m.Field}' of a non-struct");
+        var offset = MemberOffset(owner.Name, m.Field);
+        var at = m.Arrow ? $"(byte*){Sub(m.Base, PUnary)}"
+            : RootsAtGlobal(m.Base) ? $"(byte*)System.Runtime.CompilerServices.Unsafe.AsPointer(ref {BareLValue(m.Base)})"
+            : m.Base.IsLValue ? $"(byte*)&{BareLValue(m.Base)}"
+            : throw new IrUnsupportedException($"flexible array member '{m.Field}' of a struct value that has no address");
+        return $"({Cs(member.FlatElement)}*)({at} + {offset})";
+    }
+
+    /// <summary>A static object whose initializer gives its flexible array member
+    /// elements (GH #246): a zeroed native block sized for the struct and the elements
+    /// (at least the struct's size), filled once by a helper that stores the struct part
+    /// at its start and each element at the member's offset, and the C variable as a
+    /// ref-returning property over it, so reads, stores, <c>&amp;x</c> and member access
+    /// go through the reference.</summary>
+    private string FlexibleGlobal(GlobalVar g, FlexibleTail flex, string fieldType, string? initText)
+    {
+        var owner = g.Sym.Type.Unqualified as CType.Named
+            ?? throw new IrUnsupportedException($"'{g.Sym.Name}': a flexible array member initializer for a non-struct");
+        var offset = MemberOffset(owner.Name, flex.Field);
+        var elemSize = _module?.SizeOfConst(flex.Element) ?? 0;
+        var size = System.Math.Max(_module?.SizeOfConst(g.Sym.Type) ?? 0, offset + elemSize * flex.Elems.Count);
+        var mem = "__fam_" + g.Sym.TargetName;
+        var elem = Cs(flex.Element);
+        var sb = new StringBuilder();
+        sb.Append($"    private static unsafe byte* {mem}_init()\n    {{\n");
+        sb.Append($"        var p = (byte*)System.Runtime.InteropServices.NativeMemory.AllocZeroed({size});\n");
+        if (initText is not null) { sb.Append($"        *({fieldType}*)p = {initText};\n"); }
+        sb.Append($"        var tail = ({elem}*)(p + {offset});\n");
+        for (var i = 0; i < flex.Elems.Count; i++)
+        {
+            sb.Append($"        tail[{i}] = {StaticInit(flex.Elems[i], flex.Element)};\n");
+        }
+        sb.Append("        return p;\n    }\n");
+        sb.Append($"    private static readonly unsafe byte* {mem} = {mem}_init();\n");
+        sb.Append($"    public static unsafe ref {fieldType} {g.Sym.TargetName} => ref *({fieldType}*){mem};\n");
+        return sb.ToString();
     }
 
     /// <summary>One element of an array member's init span, coerced to the element

@@ -2,8 +2,10 @@
 #include <stdlib.h>
 
 /* C99 flexible array member (sized at malloc time) + C89 sized array member.
-   Both lower to C# fixed-size buffers; the FAM's [1] over-allocates by one
-   element so the malloc(sizeof(S)+n*sizeof(T)) idiom stays safe. */
+   The sized one lowers to a C# fixed-size buffer; the flexible one has no
+   storage of its own and is its offset in the malloc'd object (GH #246), so
+   sizeof(struct Vec) is C's 4 and the malloc(sizeof(S)+n*sizeof(T)) idiom
+   allocates exactly what C does. */
 
 struct Vec { int len; int data[]; };        /* flexible array member */
 struct Grid { int rows; int cells[4]; };     /* sized array member */

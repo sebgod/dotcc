@@ -6243,9 +6243,9 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
-    public void Reading_a_zero_length_array_field_is_not_supported_yet()
+    public void A_zero_length_array_field_is_its_address_in_the_object()
     {
-        var ex = Should.Throw<CompileException>(() => EmitZig("""
+        var cs = EmitZig("""
             const Header = struct {
                 kind: u8,
                 data: [0]u8,
@@ -6256,9 +6256,11 @@ public sealed class ZigStdHelperShapesTests
                 _ = p;
                 return h.kind + @as(u8, @intCast(h.data.len));
             }
-            """));
-        // Task #197: its address is the byte after the fields before it, which only zig's layout fixes. zig returns 42.
-        ex.Message.ShouldContain("zero-length array field `data` has no storage");
+            """);
+        // Task #197 / GH #246: no storage of its own, its address is the byte after the fields before it (the layout
+        // model's offset), and the struct keeps the model's size. zig returns 42.
+        cs.ShouldContain("byte* p = (byte*)((byte*)&h + 1);");
+        cs.ShouldContain("LayoutKind.Sequential, Size = 1)]\nunsafe struct Header");
     }
 
     [Fact]

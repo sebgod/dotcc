@@ -684,7 +684,18 @@ public sealed record GlobalVar(Symbol Sym, CExpr? Init)
     /// takes the initial value on that thread's first access (C11 6.2.4p4), not only
     /// the first thread's, as a .NET [ThreadStatic] field initializer would.</summary>
     public bool PerThreadInit { get; init; }
+
+    /// <summary>The initializer's elements for the object's flexible array member (a
+    /// GNU extension C compilers accept for static storage): the object needs storage
+    /// past its struct for them, so <see cref="Init"/> carries the rest of the struct
+    /// and the backend places these after it, at the member's offset. Null when the
+    /// member is not initialized.</summary>
+    public FlexibleTail? Flexible { get; init; }
 }
+
+/// <summary>The elements a static initializer gives a struct's flexible array member
+/// <paramref name="Field"/>, each of <paramref name="Element"/> type (GH #246).</summary>
+public sealed record FlexibleTail(string Field, CType Element, IReadOnlyList<CExpr> Elems);
 
 /// <summary>The whole compiled unit: the typed IR a backend consumes.</summary>
 public sealed class TranslationUnit
