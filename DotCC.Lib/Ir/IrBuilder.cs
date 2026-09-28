@@ -868,6 +868,9 @@ internal sealed partial class IrBuilder
         C.FnSigParen n => new(ResolveType(n.Arg0), Tok(n.Arg2), BuildParams(n.Arg5, out var vp), vp, false),
         C.FnSigParenNoArgs n => new(ResolveType(n.Arg0), Tok(n.Arg2), new(), false, false),
         C.FnSigParenVoidArgs n => new(ResolveType(n.Arg0), Tok(n.Arg2), new(), false, false),
+        C.FnSigStaticParen n => new(ResolveType(n.Arg1), Tok(n.Arg3), BuildParams(n.Arg6, out var vsp), vsp, true),
+        C.FnSigStaticParenNoArgs n => new(ResolveType(n.Arg1), Tok(n.Arg3), new(), false, true),
+        C.FnSigStaticParenVoidArgs n => new(ResolveType(n.Arg1), Tok(n.Arg3), new(), false, true),
         // Function returning a function pointer: `Ret (*name(params))(fnPtrParams)`
         // (e.g. <signal.h>'s `void (*signal(int, void(*)(int)))(int)`). The result
         // type is the function-pointer `Ret (*)(fnPtrParams)`; name + params are the
@@ -898,9 +901,18 @@ internal sealed partial class IrBuilder
                 case C.ParamUnnamed p: acc.Add(new(DecayParam(ResolveType(p.Arg0)), "_p" + unnamed++)); break;
                 case C.ParamArrayUnsized p: acc.Add(new(new CType.Pointer(ResolveType(p.Arg0)), Tok(p.Arg1))); break;
                 case C.ParamArraySized p: acc.Add(new(new CType.Pointer(ResolveType(p.Arg0)), Tok(p.Arg1))); break;
-                // Function-pointer parameter: `Ret (*name)(paramTypes)`.
-                case C.ParamFnPtr p: acc.Add(new(FnPtrType(p.Arg0, p.Arg6), Tok(p.Arg3))); break;
-                case C.ParamFnPtrNoArgs p: acc.Add(new(FnPtrType(p.Arg0, null), Tok(p.Arg3))); break;
+                // Function-pointer parameter: `Ret (*name)(paramTypes)` and its
+                // `(*const name)` / `(**name)` forms.
+                case C.ParamFnPtrDecl p:
+                {
+                    var (name, type) = FnPtrDeclarator(ResolveType(p.Arg0), p.Arg1, p.Arg2);
+                    acc.Add(new(type, name));
+                    break;
+                }
+                // A parameter of function type is a pointer to that function
+                // (C11 6.7.6.3p8): `Ret name(paramTypes)`, `Ret (name)(paramTypes)`.
+                case C.ParamFnType p: acc.Add(new(FnPtrTailType(ResolveType(p.Arg0), p.Arg2), Tok(p.Arg1))); break;
+                case C.ParamParenFnType p: acc.Add(new(FnPtrTailType(ResolveType(p.Arg0), p.Arg4), Tok(p.Arg2))); break;
                 default: throw new IrUnsupportedException(TypeName(it.Content));
             }
         }
@@ -1160,8 +1172,9 @@ internal sealed partial class IrBuilder
         _ => throw new IrUnsupportedException(TypeName(quals.Content)),
     };
 
-    /// <summary>A <c>FnPtrName</c> (<c>(*name)</c> / <c>(*quals name)</c>) as the
-    /// fn-ptr type over <paramref name="ret"/> (const-qualified for <c>*const</c>).</summary>
+    /// <summary>A <c>FnPtrName</c> (<c>(*name)</c> / <c>(*quals name)</c> /
+    /// <c>(**name)</c>) as the fn-ptr type over <paramref name="ret"/>
+    /// (const-qualified for <c>*const</c>, a pointer to it for <c>**</c>).</summary>
     private (string Name, CType Type) FnPtrDeclarator(CType ret, Item nameItem, Item tailItem)
     {
         CType type = FnPtrTailType(ret, tailItem);
@@ -1169,6 +1182,8 @@ internal sealed partial class IrBuilder
         {
             C.FnPtrName n => (Tok(n.Arg2), type),
             C.FnPtrNameQual n => (Tok(n.Arg3), QualsHaveConst(n.Arg2) ? type.WithQuals(TypeQual.Const) : type),
+            // `(**name)`: a pointer to the function pointer.
+            C.FnPtrNamePtr n => (Tok(n.Arg3), new CType.Pointer(type)),
             _ => throw new IrUnsupportedException(TypeName(nameItem.Content)),
         };
     }
@@ -2938,7 +2953,11 @@ internal sealed partial class IrBuilder
             // promotion and a narrowing store (chibi's `sign = -sign`) misses
             // its cast. inc/dec below keep the lvalue's own type.
             UnOp.Plus or UnOp.Neg or UnOp.BitNot => CType.IntegerPromote(oe.Type),
-            UnOp.AddrOf => new CType.Pointer(oe.Type),
+            // `&f` of a function designator is the pointer to the function,
+            // which in dotcc's IR IS the fn-ptr type (a bare CType.Func), so
+            // Pointer(Func) only ever means a pointer TO a function pointer
+            // (`&fp`, a `(**name)` declarator).
+            UnOp.AddrOf => Unparen(oe) is VarRef { Sym.Kind: SymKind.Func } ? oe.Type : new CType.Pointer(oe.Type),
             // *p → pointee; *arr (incl. a string literal, typed char[]) → its element
             // (the array decays to a pointer first). *ptr-to-array stays the array,
             // which codegen treats as a no-op decay back to the row pointer.
@@ -3018,7 +3037,14 @@ internal sealed partial class IrBuilder
             // resolved symbol rides along so the backend emits its TargetName —
             // matters only when a same-named static was renamed (see BuildFuncDef).
             var sym = _symbols.Resolve(name);
-            var fn = sym?.Type as CType.Func;
+            var fn = sym?.Type.Unqualified as CType.Func;
+            if (sym is { Kind: SymKind.Var or SymKind.Param } && fn is null)
+            {
+                // C11 6.5.2.2p1: an object called by name must be a function
+                // pointer (a pointer to one needs its `*` first).
+                Diagnostics.Add(new Diagnostic(Severity.Error,
+                    "called object is not a function or function pointer", SrcPos.From(calleeItem), _file));
+            }
             // Passing a `const T*` where the parameter is a plain `T*` discards the
             // pointee const (gcc -Wdiscarded-qualifiers). Only the fixed params are
             // checked; a variadic tail has no declared type to compare against.
@@ -3034,7 +3060,7 @@ internal sealed partial class IrBuilder
             // may be spelled differently from the C name (a block-scope static's
             // mangled `name__sN` field, a CS0136 rename), and the call must use that.
             var calleeSym = sym is { Kind: SymKind.Func }
-                || sym is { Kind: SymKind.Var or SymKind.Param, Type: CType.Func } ? sym : null;
+                || sym is { Kind: SymKind.Var or SymKind.Param } && fn is not null ? sym : null;
             return new Call(name, args, fn?.Params, calleeSym) { Type = fn?.Return ?? CType.Int };
         }
 
@@ -3044,8 +3070,8 @@ internal sealed partial class IrBuilder
         // and rejects `*fp` (CS0193). Peel redundant parens, then any leading
         // deref whose operand is itself a function pointer — repeatedly, so
         // `(*(e.op))(x)` and the parenthesised `(*f)(x)` forms both reduce. A
-        // deref of a pointer-TO-fn-pointer is preserved: C# needs it to reach
-        // the callable value.
+        // deref of a pointer-TO-fn-pointer (`(*pp)(x)`) is preserved: it is what
+        // reaches the callable value.
         var callee = BuildExpr(calleeItem);
         while (true)
         {
@@ -3053,12 +3079,14 @@ internal sealed partial class IrBuilder
             if (callee is Unary { Op: UnOp.Deref } u && IsFuncPtr(u.Operand.Type)) { callee = u.Operand; continue; }
             break;
         }
-        var calleeFn = callee.Type.Unqualified switch
+        var calleeFn = callee.Type.Unqualified as CType.Func;
+        if (calleeFn is null)
         {
-            CType.Func f2 => f2,
-            CType.Pointer { Pointee: CType.Func f3 } => f3,
-            _ => null,
-        };
+            // C11 6.5.2.2p1: the callee must be a function pointer (a pointer to
+            // a function pointer, say, needs its `*` first).
+            Diagnostics.Add(new Diagnostic(Severity.Error,
+                "called object is not a function or function pointer", SrcPos.From(calleeItem), _file));
+        }
         // The function pointer's parameter types drive the same call-argument
         // coercion as a direct call's (GH #230: `s.fn(0)` passes `null`).
         return new IndirectCall(callee, args, calleeFn?.Params) { Type = calleeFn?.Return ?? CType.Int };
@@ -3068,8 +3096,7 @@ internal sealed partial class IrBuilder
     /// function type) — the operand of a no-op call-site deref. Typedefs already
     /// resolve to their underlying type at <c>ResolveType</c> time, so a plain
     /// structural check on the unqualified type suffices.</summary>
-    private static bool IsFuncPtr(CType t) =>
-        t.Unqualified is CType.Pointer { Pointee: CType.Func } or CType.Func;
+    private static bool IsFuncPtr(CType t) => t.Unqualified is CType.Func;
 
     /// <summary>True when <paramref name="t"/> is the C99 <c>_Complex</c> type —
     /// recognised structurally, independent of any target spelling.</summary>

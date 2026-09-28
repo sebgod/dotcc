@@ -516,6 +516,9 @@ productions:
       - { lhs: FnSig, rhs: [Type, '(', ID, ')', '(', ParamList, ')'], action: fnSigParen }
       - { lhs: FnSig, rhs: [Type, '(', ID, ')', '(', ')'],            action: fnSigParenNoArgs }
       - { lhs: FnSig, rhs: [Type, '(', ID, ')', '(', 'void', ')'],    action: fnSigParenVoidArgs }
+      - { lhs: FnSig, rhs: ['static', Type, '(', ID, ')', '(', ParamList, ')'], action: fnSigStaticParen }
+      - { lhs: FnSig, rhs: ['static', Type, '(', ID, ')', '(', ')'],            action: fnSigStaticParenNoArgs }
+      - { lhs: FnSig, rhs: ['static', Type, '(', ID, ')', '(', 'void', ')'],    action: fnSigStaticParenVoidArgs }
       # Function returning a function pointer: `Type (*name(params))(trailing)`.
       # The `(*name(params))` is the declarator; `(trailing)` is the parameter
       # list of the returned function pointer. E.g. `void (*signal(int, void(*)(int)))(int)`.
@@ -635,6 +638,9 @@ productions:
       # the FnPtrTail's `(`, where the pointer-to-array declarator needs `[`.
       - { lhs: FnPtrName, rhs: ['(', '*', ID, ')'],             action: fnPtrName }
       - { lhs: FnPtrName, rhs: ['(', '*', FnPtrQuals, ID, ')'], action: fnPtrNameQual }
+      # A pointer to a function pointer, `(**name)` (CPython's ceval_gil.c
+      # `int (**func)(void *)`). After `( *` a second `*` is taken by nothing else.
+      - { lhs: FnPtrName, rhs: ['(', '*', '*', ID, ')'],        action: fnPtrNamePtr }
       - { lhs: FnPtrArr, rhs: ['(', '*', ID, ArrDims, ')'],             action: fnPtrArr }
       - { lhs: FnPtrArr, rhs: ['(', '*', FnPtrQuals, ID, ArrDims, ')'], action: fnPtrArrQual }
       - { lhs: FnPtrArrOpen, rhs: ['(', '*', ID, '[', ']', ')'],             action: fnPtrArrOpen }
@@ -786,12 +792,19 @@ productions:
       # so we drop it entirely and emit a pointer parameter.
       - { lhs: Param, rhs: [Type, ID, '[', ']'],     action: paramArrayUnsized }
       - { lhs: Param, rhs: [Type, ID, '[', E, ']'],  action: paramArraySized }
-      # Function-pointer parameter — `void qsort(…, int (*cmp)(const void*, const void*))`.
-      # Same `( * ID ) ( … )` shape as the local fn-ptr declarator; lowers to a
-      # `delegate*<args…, ret>` parameter. (The typedef'd form `Comparator cmp`
-      # also works.) Disambiguated from `Type ID …` by the `(` after Type.
-      - { lhs: Param, rhs: [Type, '(', '*', ID, ')', '(', ParamList, ')'], action: paramFnPtr }
-      - { lhs: Param, rhs: [Type, '(', '*', ID, ')', '(', ')'],            action: paramFnPtrNoArgs }
+      # Function-pointer parameter: `void qsort(…, int (*cmp)(const void*, const void*))`,
+      # through the same declarator name as every other raw fn-ptr (FnPtrName:
+      # `(*cmp)`, `(*const cmp)`, `(**cmp)`); lowers to a `delegate*<args…, ret>`
+      # parameter. (The typedef'd form `Comparator cmp` also works.)
+      - { lhs: Param, rhs: [Type, FnPtrName, FnPtrTail], action: paramFnPtrDecl }
+      # A parameter declared with a FUNCTION type is adjusted to a pointer to it
+      # (C11 6.7.6.3p8): `int siftup(PyListObject *, Py_ssize_t)` and the
+      # parenthesized `void *(func)(Parser *)` are `int (*siftup)(…)` and
+      # `void *(*func)(Parser *)`. After `Type ID`, the `(` selects the first form
+      # (FOLLOW(Param) has only `,` / `)`); after `Type (`, an `ID` the second (an
+      # abstract or named fn-ptr has `*` there).
+      - { lhs: Param, rhs: [Type, ID, FnPtrTail],          action: paramFnType }
+      - { lhs: Param, rhs: [Type, '(', ID, ')', FnPtrTail], action: paramParenFnType }
 
   # Type — the "declarator type" non-terminal. Most C type forms reduce to
   # this via TypeSpecList (the C-standard declaration-specifier sequence:

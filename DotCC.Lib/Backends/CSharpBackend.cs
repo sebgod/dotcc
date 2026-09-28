@@ -2462,11 +2462,11 @@ internal sealed class CSharpBackend
         return (Sub(left, lp), Sub(right, rp));
     }
 
-    /// <summary>True when <paramref name="t"/> is a function pointer — in dotcc's
-    /// IR a fn-ptr is a bare <see cref="CType.Func"/> (the C# backend renders it as a
-    /// <c>delegate*&lt;…&gt;</c>); <c>Pointer(Func)</c> is tolerated for safety.</summary>
-    private static bool IsFnPtrType(CType t) =>
-        t.Unqualified is CType.Func or CType.Pointer { Pointee: CType.Func };
+    /// <summary>True when <paramref name="t"/> is a function pointer: in dotcc's IR a
+    /// fn-ptr is a bare <see cref="CType.Func"/> (rendered as a <c>delegate*&lt;…&gt;</c>),
+    /// and <c>&amp;f</c> of a function designator has that type too; <c>Pointer(Func)</c>
+    /// is a pointer to a function pointer.</summary>
+    private static bool IsFnPtrType(CType t) => t.Unqualified is CType.Func;
 
     /// <summary>True when the expression (under parens / <c>&amp;</c>) is a bare
     /// function designator — i.e. it renders as an untyped method group.</summary>
