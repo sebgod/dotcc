@@ -17,14 +17,14 @@ namespace DotCC.FunctionalTests;
 /// (<c>python&lt;ver&gt;-config --embed</c>) with <c>Py_LIMITED_API</c> pinned to that
 /// version, run, and its stdout compared with dotcc's and with the committed
 /// <c>expected-stdout.txt</c>. So the same extension C source, driven by the same C
-/// host, must print the same transcript — results AND exception messages — on real
+/// host, must print the same transcript (results AND exception messages) on real
 /// CPython and on the shim.
 /// </summary>
 /// <remarks>
 /// <para><b>Modes</b> (env vars): <c>DOTCC_RUN_CPYTHON_ORACLE=1</c> runs it (skips with a
 /// hint otherwise); adding <c>DOTCC_REGEN_BASELINE=1</c> rewrites the snapshot from
 /// CPython's output. Skips cleanly on a host without <c>bash</c>, <c>gcc</c> or the
-/// matching <c>python&lt;ver&gt;-config</c> (Windows included — no WSL hop here).</para>
+/// matching <c>python&lt;ver&gt;-config</c> (Windows included; there is no WSL hop here).</para>
 /// <para><b><c>Process.Start</c></b> is confined to this opt-in mode, as for every oracle.</para>
 /// </remarks>
 public sealed class CPythonOracleTests

@@ -108,7 +108,7 @@ public sealed class LibraryModeTests
     public void Lib_mode_global_initializer_can_name_a_library_function()
     {
         // A file-scope function-pointer table (a Python PyMethodDef array, Lua's
-        // luaL_Reg) is a DotCcGlobals initializer naming DotCcLib methods — it only
+        // luaL_Reg) is a DotCcGlobals initializer naming DotCcLib methods; it only
         // binds if the library shell surfaces DotCcLib by bare name.
         var tempC = Path.GetTempFileName() + ".c";
         File.WriteAllText(tempC, """
@@ -126,8 +126,8 @@ public sealed class LibraryModeTests
                 defines: null,
                 emit: EmitMode.SharedLib);
             var asm = CompileLibrary(program);
-            var apply = asm.GetType("DotCcLib", throwOnError: true)!
-                .GetMethod("apply", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)!;
+            var apply = asm.GetType("DotCcLib", throwOnError: true).ShouldNotBeNull()
+                .GetMethod("apply", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic).ShouldNotBeNull();
             apply.Invoke(null, new object[] { 1, 7 }).ShouldBe(49);
         }
         finally

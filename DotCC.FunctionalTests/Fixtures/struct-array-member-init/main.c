@@ -1,4 +1,4 @@
-/* Aggregate initializers for structs with ARRAY members — braced, brace-elided
+/* Aggregate initializers for structs with ARRAY members: braced, brace-elided
    (C11 6.7.9p20), partial (zero-filled), string literals into char arrays,
    struct / pointer / function-pointer element arrays, 2-D members, designated
    `.member = {…}`, unions (first member), nested structs, compound literals, and

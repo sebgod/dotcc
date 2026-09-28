@@ -101,9 +101,9 @@ internal sealed partial class IrBuilder
 
     // ---- struct / union aggregates ---------------------------------------
 
-    /// <summary>Build a positional struct/union aggregate initializer — the brace
+    /// <summary>Build a positional struct/union aggregate initializer: the brace
     /// elements land on the fields in declaration order. Trailing fields the list
-    /// doesn't reach are omitted (C# zero-fills them — C's partial-init rule). This is
+    /// doesn't reach are omitted (C# zero-fills them, C's partial-init rule). This is
     /// the one place the legacy emitter's positional <c>BuildAggregateInit</c> and the
     /// struct-array element builder converge.</summary>
     private StructInit BuildStructPositional(CType type, IReadOnlyList<Init> items)
@@ -113,12 +113,12 @@ internal sealed partial class IrBuilder
     }
 
     /// <summary>Consume <paramref name="items"/> from <paramref name="cursor"/> onto the
-    /// fields of <paramref name="type"/>. Each field takes a braced group, or — C's brace
-    /// elision (C11 §6.7.9p20) — as many of the following items as it needs: a nested
+    /// fields of <paramref name="type"/>. Each field takes a braced group or (by C's brace
+    /// elision, C11 §6.7.9p20) as many of the following items as it needs: a nested
     /// struct its fields' worth, an array member its element count. A union initializes
     /// through its FIRST member only (§6.7.9p17) unless a designator names another.
     /// A member designator <c>.f = v</c> (only in the <paramref name="braced"/> list it
-    /// belongs to — inside an elided sub-aggregate it ends the elision and applies to the
+    /// belongs to; inside an elided sub-aggregate it ends the elision and applies to the
     /// enclosing braces, §6.7.9p17) initializes <c>f</c>, and the next positional element
     /// continues with the member after it; a later initializer for the same member
     /// overrides an earlier one.</summary>
@@ -159,7 +159,7 @@ internal sealed partial class IrBuilder
     }
 
     /// <summary>The initializer for one aggregate member (or array element) of type
-    /// <paramref name="ft"/>, consuming one braced item or — brace elision — the run of
+    /// <paramref name="ft"/>, consuming one braced item or (brace elision) the run of
     /// items it needs.</summary>
     private CExpr BuildMemberValue(CType ft, IReadOnlyList<Init> items, ref int cursor)
     {
@@ -170,7 +170,7 @@ internal sealed partial class IrBuilder
         }
         if (ft.Unqualified is CType.Array arr)
         {
-            // `char name[8] = "…"` inside a struct — the string's bytes, braced or not.
+            // `char name[8] = "…"` inside a struct: the string's bytes, braced or not.
             if (item is InitVal sv && StringArrayValue(arr, sv.Value) is { } str) { cursor++; return str; }
             if (item is InitGroup { Items: [InitVal bsv] } && StringArrayValue(arr, bsv.Value) is { } bstr) { cursor++; return bstr; }
             if (item is InitGroup g) { cursor++; return BuildArrayValue(arr, g.Items); }
@@ -192,7 +192,7 @@ internal sealed partial class IrBuilder
         return item switch
         {
             InitVal v => v.Value,
-            InitGroup { Items: [InitVal inner, ..] } => inner.Value,   // `{ 5 }` — a braced scalar
+            InitGroup { Items: [InitVal inner, ..] } => inner.Value,   // `{ 5 }`, a braced scalar
             _ => throw new IrUnsupportedException("an empty or nested brace around a scalar initializer"),
         };
     }
@@ -211,7 +211,7 @@ internal sealed partial class IrBuilder
         return new ArrayValue(arr.FlatElement, elems) { Type = arr };
     }
 
-    /// <summary>An array member whose braces were elided — it takes the following items,
+    /// <summary>An array member whose braces were elided: it takes the following items,
     /// one flat element each (a struct element itself elides), up to its extent.</summary>
     private ArrayValue ElidedArrayValue(CType.Array arr, IReadOnlyList<Init> items, ref int cursor)
     {
@@ -224,7 +224,7 @@ internal sealed partial class IrBuilder
         return new ArrayValue(arr.FlatElement, elems) { Type = arr };
     }
 
-    /// <summary>A string literal initializing a 1-D character array member — its code
+    /// <summary>A string literal initializing a 1-D character array member: its code
     /// units plus the NUL, truncated to the extent (an exact fit drops the NUL, C's
     /// rule). Null when <paramref name="value"/> isn't a string literal matching the
     /// element width.</summary>
@@ -487,7 +487,7 @@ internal sealed partial class IrBuilder
         => BuildGlobalArr(ResolveType(typeItem), nameItem, dimsItem, initItem, csName);
 
     /// <summary><see cref="BuildGlobalArr(Item, Item, Item?, Item?, string?)"/> over an
-    /// already-resolved element type — the raw fn-ptr array declarator
+    /// already-resolved element type. The raw fn-ptr array declarator
     /// (<c>Ret (*name[N])(params)</c>) computes its element type from the declarator,
     /// not from a type item.</summary>
     private void BuildGlobalArr(CType elem, Item nameItem, Item? dimsItem, Item? initItem, string? csName)

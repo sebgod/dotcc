@@ -2,7 +2,7 @@
    file-scope variables (plain / static / extern / initialized), arrays of
    function pointers (sized, size-from-initializer, zero-filled), block-scope
    arrays, block-scope static pointers and tables, and an array-of-fn-ptrs
-   struct member — each the spelling a typedef would otherwise hide — plus comma
+   struct member (each the spelling a typedef would otherwise hide), plus comma
    lists of fn-ptr declarators and `*const`-qualified declarators / tables. */
 #include <stdio.h>
 

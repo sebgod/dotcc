@@ -435,7 +435,7 @@ public static partial class Compiler
             using static Libc;
             using static DotCcGlobals;
             // A global initializer can name a user function (`&fn` in a C function
-            // table), and DotCcGlobals sits outside DotCcLib — surface DotCcLib by
+            // table), and DotCcGlobals sits outside DotCcLib, so surface DotCcLib by
             // bare name, as the exe shell does with `using static DotCcProgram;`.
             using static DotCcLib;{{importsUsing}}
 

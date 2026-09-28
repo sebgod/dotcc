@@ -475,10 +475,10 @@ symbols:
   - U8CHAR         # 190 char8_t char constant — u8'x'
   - U8StringSeq    # 191 non-terminal: a run of adjacent u8"…" literals
   - FnPtrTail      # 192 non-terminal: a raw fn-ptr declarator's `(params)` / `()` tail
-  - FnPtrName      # 193 non-terminal: `(*name)` / `(*const name)` — a fn-ptr DeclItem's name
+  - FnPtrName      # 193 non-terminal: `(*name)` / `(*const name)`, a fn-ptr DeclItem's name
   - FnPtrQuals     # 194 non-terminal: the qualifiers after a fn-ptr declarator's `*`
-  - FnPtrArr       # 195 non-terminal: `(*name[N])` / `(*const name[N])` — a sized fn-ptr array
-  - FnPtrArrOpen   # 196 non-terminal: `(*name[])` / `(*const name[])` — a size-from-init fn-ptr array
+  - FnPtrArr       # 195 non-terminal: `(*name[N])` / `(*const name[N])`, a sized fn-ptr array
+  - FnPtrArrOpen   # 196 non-terminal: `(*name[])` / `(*const name[])`, a size-from-init fn-ptr array
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -624,7 +624,7 @@ productions:
       # below. `(void)` arrives as a one-Param ParamList, as everywhere else.
       - { lhs: FnPtrTail, rhs: ['(', ParamList, ')'], action: fnPtrTail }
       - { lhs: FnPtrTail, rhs: ['(', ')'],            action: fnPtrTailNoArgs }
-      # A raw declarator's name part: `(*name)` / `(*const name)` (FnPtrName — a
+      # A raw declarator's name part: `(*name)` / `(*const name)` (FnPtrName; a
       # scalar fn-ptr is a DeclItem, so file-scope / static / extern / block-scope /
       # static-local / struct-member fn-ptrs and COMMA LISTS of them all ride the
       # ordinary `Type DeclItemList` productions), and the array forms
@@ -1059,7 +1059,7 @@ productions:
       # after the name (DeclItemList has no array suffix), exactly like the
       # file-scope pair `globalStaticDeclList` / `globalStaticArr*`.
       - { lhs: Stmt, rhs: ['static', Type, ID, ArrDims, ';'],                           action: stmtStaticArr }
-      # Block-scope `static` arrays of function pointers — the static-local
+      # Block-scope `static` arrays of function pointers: the static-local
       # counterparts of the file-scope globalStaticFnPtrArr* forms (a mangled pinned
       # array + an alias symbol). A static-local scalar fn-ptr is a DeclItem.
       - { lhs: Stmt, rhs: ['static', Type, FnPtrArr, FnPtrTail, ';'],                         action: stmtStaticFnPtrArr }
@@ -1162,7 +1162,7 @@ productions:
       - { lhs: Member, rhs: [Type, ID, ArrDims, ';'],     action: structArrMember }
       - { lhs: Member, rhs: [Type, ID, '[', ']', ';'],    action: structFlexArrMember }
       # Function-pointer members `Ret (*name)(params);` (ubiquitous in callback
-      # tables / vtables — chibi's `struct sigaction { void (*sa_handler)(int); … }`)
+      # tables / vtables, as in chibi's `struct sigaction { void (*sa_handler)(int); … }`)
       # are DeclItems of the `Type DeclItemList ;` member form, so comma lists
       # (`int (*get)(void), (*set)(int);`) work too. An array-of-fn-ptrs member
       # `Ret (*name[N])(params);` (an ops table embedded in a struct) has its own form.
@@ -1341,7 +1341,7 @@ productions:
       - { lhs: DeclItem, rhs: [ID], action: declItem }
       - { lhs: DeclItem, rhs: [ID, '=', E], action: declItemInit }
       # A function-pointer declarator `(*name)(params)` [= E] (also `(*const name)…`)
-      # — first or tail position, at every scope (see FnPtrName).
+      # in first or tail position, at every scope (see FnPtrName).
       - { lhs: DeclItem, rhs: [FnPtrName, FnPtrTail],         action: declItemFnPtr }
       - { lhs: DeclItem, rhs: [FnPtrName, FnPtrTail, '=', E], action: declItemFnPtrInit }
       # A tail (non-first) init-declarator: a plain DeclItem, or one or more `*`
@@ -1359,7 +1359,7 @@ productions:
 
   # (The MemberInitList / MemberInit symbols are retired: a `.field =` designator is
   # an InitElem, so struct designators work in every brace-initializer position and
-  # mix with positional elements. The symbols stay listed — `symbols:` is append-only.)
+  # mix with positional elements. The symbols stay listed; `symbols:` is append-only.)
 
   # InitList — brace-initializer element list with an optional trailing comma.
   # Left-recursive (clean trailing-comma). An element (InitElem) is a scalar
@@ -1384,7 +1384,7 @@ productions:
       # loudly). Distinct from struct designators (`.field =`, MemberInitList).
       - { lhs: InitElem, rhs: ['[', E, ']', '=', E], action: initElemDesignated }
       # Member designator (C99): `.field = value` / `.field = { … }` inside a struct /
-      # union initializer — in ANY brace-initializer position (block scope, file scope,
+      # union initializer, in ANY brace-initializer position (block scope, file scope,
       # static, compound literal, nested aggregate) and mixed with positional elements
       # (`{ 1, "x", .last = 9 }`: the next positional element follows the designated
       # member). `.` can't begin an expression, and an E never starts with `{`, so both

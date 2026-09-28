@@ -278,7 +278,7 @@ internal sealed class CSharpBackend
     private const string ArrayInitHelper = "__dotcc_init";
 
     /// <summary>The struct types some aggregate initializer gave array-member contents
-    /// — the ones that get an init helper. Filled while rendering code (functions and
+    /// (the ones that get an init helper). Filled while rendering code (functions and
     /// globals render before the type declarations), so a struct nobody initializes
     /// that way carries no helper.</summary>
     private readonly HashSet<string> _arrayInitTypes = new(StringComparer.Ordinal);
@@ -288,7 +288,7 @@ internal sealed class CSharpBackend
     /// the object-initialized value and returns it. An array member is inline storage
     /// (a <c>fixed</c> buffer or an <c>[InlineArray]</c>), which a C# object initializer
     /// can't assign, so an aggregate initializer that gives one contents renders as
-    /// <c>S.__dotcc_init(new S { … }, a: [1, 2])</c> — still an expression, so it works
+    /// <c>S.__dotcc_init(new S { … }, a: [1, 2])</c>, still an expression, so it works
     /// in every initializer position (locals, static fields, nested aggregates, array
     /// elements). An omitted span is empty: the member keeps its zero fill. A pointer or
     /// function-pointer element travels as <c>nint</c> (a pointer can't be a span's type
@@ -2042,7 +2042,7 @@ internal sealed class CSharpBackend
                         + "array's address) is not supported yet");
                 }
                 // An ARRAY member of an rvalue struct (`(struct S){…}.arr[i]`, `f().arr`) is
-                // inline storage with no address — a fixed buffer or [InlineArray] of an
+                // inline storage with no address: a fixed buffer or [InlineArray] of an
                 // rvalue can't be indexed or decayed (CS1666/CS1612). Materialize the rvalue
                 // into a block-local temp first (C's automatic storage for the unnamed
                 // object), as `&(T){…}` does.
@@ -2062,7 +2062,7 @@ internal sealed class CSharpBackend
                 // restoring both over-indexing and array→pointer decay.
                 if (m.Type.Unqualified is CType.Array arr && !IsFixedBufferType(Cs(arr.FlatElement)))
                 {
-                    // Rooted at a global / static local — a moveable C# static field —
+                    // Rooted at a global / static local (a moveable C# static field),
                     // the address goes through Unsafe.AsPointer (as `&global` does).
                     return RootsAtGlobal(m)
                         ? ($"({Cs(m.Type)})System.Runtime.CompilerServices.Unsafe.AsPointer(ref {BareLValue(m)})", PUnary)
@@ -2641,7 +2641,7 @@ internal sealed class CSharpBackend
         if (pa.Element.Unqualified is CType.Func)
         {
             // The array interpreter zero-fills a short initializer with integer 0,
-            // which a delegate* slot can't take implicitly — spell it null.
+            // which a delegate* slot can't take implicitly, so spell it null.
             var fns = pa.Elems.Select(e => e is LitInt { Value: 0 } ? "null" : Expr(e));
             return $"({elemCs}*)Libc.PinFnPtrArray(new {elemCs}[]{{ {string.Join(", ", fns)} }})";
         }
@@ -2695,7 +2695,7 @@ internal sealed class CSharpBackend
             sb.Append(DotCC.EmitHelpers.Id(m.Name)).Append(" = ").Append(Coerced(m.Value, m.FieldType));
         }
         var obj = sb.Append(" }").ToString();
-        // Array members can't be assigned in an object initializer — route their
+        // Array members can't be assigned in an object initializer; route their
         // contents through the struct's init helper (see ArrayMemberInitHelper).
         var arrays = si.Members.Where(m => m.Value is ArrayValue).ToList();
         if (arrays.Count == 0) { return obj; }
@@ -2708,7 +2708,7 @@ internal sealed class CSharpBackend
         return $"{Cs(si.Type)}.{ArrayInitHelper}({obj}, {string.Join(", ", spans)})";
     }
 
-    /// <summary>One element of an array member's init span — coerced to the element
+    /// <summary>One element of an array member's init span, coerced to the element
     /// type, or carried as <c>nint</c> for a pointer / function-pointer element.</summary>
     private string ArrayMemberElem(CExpr e, CType elem)
     {
