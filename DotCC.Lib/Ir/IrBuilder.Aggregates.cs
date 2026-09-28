@@ -148,11 +148,13 @@ internal sealed partial class IrBuilder
     /// <summary>A string literal initializing a 1-D character array member: its code
     /// units plus the NUL, truncated to the extent (an exact fit drops the NUL, C's
     /// rule). Null when <paramref name="value"/> isn't a string literal matching the
-    /// element width.</summary>
+    /// element width. The literal may be parenthesized, as gcc accepts (warning only
+    /// under -pedantic) and CPython's <c>_PyASCIIObject_INIT</c> spells
+    /// <c>._data = (LITERAL)</c>.</summary>
     private static ArrayValue? StringArrayValue(CType.Array arr, CExpr value)
     {
         if (arr.Element is CType.Array || arr.Element.Unqualified is not CType.Prim p) { return null; }
-        List<int>? units = value switch
+        List<int>? units = Unparen(value) switch
         {
             LitStr s when p.Bytes == 1 => DotCC.EmitHelpers.StringByteValues(s.Segments),
             LitU16Str s when p.Bytes == 2 => DotCC.EmitHelpers.StringU16Values(s.Segments),
