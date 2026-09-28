@@ -698,11 +698,11 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
-    public void Include_assert_h_with_NDEBUG_lowers_to_noop_call()
+    public void Include_assert_h_with_NDEBUG_expands_to_void_zero()
     {
         // `#define NDEBUG` before `#include <assert.h>` selects the
-        // no-op branch: `assert(expr)` expands to `__dotcc_assert_noop()`.
-        // The condition expression is NOT evaluated (matches C99 §7.2.1.1).
+        // no-op branch: `assert(expr)` expands to `((void)0)`, which emits
+        // nothing. The condition expression is NOT evaluated (C99 7.2.1.1).
         var src = WriteTemp("""
             #define NDEBUG
             #include <assert.h>
@@ -712,7 +712,7 @@ public sealed partial class CompilerTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("__dotcc_assert_noop()");
+            emitted.ShouldNotContain("__dotcc_assert_noop();");
             // The condition `explode_marker_z7q()` should appear EXACTLY
             // once — at the function definition. If NDEBUG hadn't
             // discarded the call site, we'd see a second occurrence.
