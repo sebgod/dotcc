@@ -3332,8 +3332,49 @@ internal sealed partial class IrBuilder
         // byte/int sinks via C#'s constant conversions.
         var raw = Tok(c.Arg0);
         if (raw is null || raw.Length < 3) { return new LitInt("0", 0) { Type = CType.Int }; }
-        var value = DecodeCharConstant(raw[1..^1]);
+        var units = CharConstantUnits(raw[1..^1]);
+        var value = units.Count == 1 ? DecodeCharConstant(units[0]) : MultiCharValue(units, SrcPos.From(c.Arg0));
         return new LitInt(value.ToString(System.Globalization.CultureInfo.InvariantCulture), value) { Type = CType.Int };
+    }
+
+    /// <summary>The characters of a character constant's body, each a plain char or
+    /// an escape sequence (<c>\n</c>, <c>\x41</c>, <c>\101</c>).</summary>
+    private static List<string> CharConstantUnits(string inner)
+    {
+        var units = new List<string>();
+        for (var i = 0; i < inner.Length;)
+        {
+            var start = i;
+            if (inner[i] != '\\' || i + 1 >= inner.Length) { i++; }
+            else if (inner[i + 1] == 'x')
+            {
+                i += 2;
+                while (i < inner.Length && char.IsAsciiHexDigit(inner[i])) { i++; }
+            }
+            else if (inner[i + 1] is >= '0' and <= '7')
+            {
+                i += 2;
+                while (i < inner.Length && i - start < 4 && inner[i] is >= '0' and <= '7') { i++; }
+            }
+            else { i += 2; }
+            units.Add(inner[start..i]);
+        }
+        return units;
+    }
+
+    /// <summary>A multi-character constant's value as gcc computes it (C11 6.4.4.4p10
+    /// leaves it implementation-defined): each character's byte shifted in from the
+    /// right, keeping the last four, with gcc's warnings.</summary>
+    private int MultiCharValue(List<string> units, SrcPos pos)
+    {
+        Diagnostics.Add(new Diagnostic(Severity.Warning, "multi-character character constant [-Wmultichar]", pos, _file));
+        if (units.Count > 4)
+        {
+            Diagnostics.Add(new Diagnostic(Severity.Warning, "character constant too long for its type", pos, _file));
+        }
+        var value = 0;
+        foreach (var u in units) { value = unchecked((value << 8) | (DecodeCharConstant(u) & 0xFF)); }
+        return value;
     }
 
     private CExpr BuildU16Chr(C.U16chr c)
