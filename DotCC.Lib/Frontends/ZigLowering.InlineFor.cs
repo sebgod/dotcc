@@ -187,12 +187,12 @@ internal sealed partial class ZigLowering
         {
             var shadows = new List<ComptimeCaptureShadow>(binds.Count);
             foreach (var (list, capture) in binds) { shadows.Add(SeedComptimeCapture(capture, list, k)); }
-            _symbols.EnterScope();
+            using var symbolScope = EnterSymbolScope();
             _inlineUnrollDepth++;   // a copy is analysed with its capture comptime-known
             CStmt body;
             try { body = LowerStmt(bodyItem); }
             finally { _inlineUnrollDepth--; }
-            _symbols.ExitScope();
+            symbolScope.Dispose();
             // Restore innermost-first, so two captures sharing a name (`|x, x|`, which zig rejects but
             // which must not corrupt the maps here) unwind in the order they were seeded.
             for (var i = shadows.Count - 1; i >= 0; i--) { RestoreComptimeCapture(shadows[i]); }
@@ -275,7 +275,7 @@ internal sealed partial class ZigLowering
             {
                 if (lists[k] is { } list) { shadows.Add(SeedComptimeCapture(captures[k].Name, list, i)); }
             }
-            _symbols.EnterScope();
+            using var symbolScope = EnterSymbolScope();
             var decls = new List<CStmt>();
             for (var k = 0; k < objects.Count; k++)
             {
@@ -291,7 +291,7 @@ internal sealed partial class ZigLowering
             CStmt body;
             try { body = LowerStmt(bodyItem); }
             finally { _inlineUnrollDepth--; }
-            _symbols.ExitScope();
+            symbolScope.Dispose();
             for (var s = shadows.Count - 1; s >= 0; s--) { RestoreComptimeCapture(shadows[s]); }
             if (!unroll.Add(new Block([.. decls, body]))) { break; }
         }

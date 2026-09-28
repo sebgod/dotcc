@@ -1922,9 +1922,8 @@ internal sealed partial class ZigLowering
     /// unchanged.</para></summary>
     private void LowerGlobal(Item nameTok, Item? typeItem, Item rhsItem, bool threadLocal = false, bool isConst = false)
     {
-        _comptimeDepth++;   // a container-level initializer is evaluated at compile time (task #92)
-        try { LowerGlobalCore(nameTok, typeItem, rhsItem, threadLocal, isConst); }
-        finally { _comptimeDepth--; }
+        // A container-level initializer is evaluated at compile time (task #92).
+        using (EnterComptime()) { LowerGlobalCore(nameTok, typeItem, rhsItem, threadLocal, isConst); }
         // A top-level `const` is immutable: a store to it is zig's "cannot assign to constant" (task #95).
         if (isConst && _symbols.Resolve(Tok(nameTok)) is { IsGlobal: true } declared) { _zigConstBindings.Add(declared); }
     }
@@ -2178,11 +2177,8 @@ internal sealed partial class ZigLowering
     {
         if (_containerVars.TryGetValue(container, out var done) && done.ContainsKey(name)) { return; }
         var declared = typeItem is not null ? LowerType(typeItem) : null;
-        var prev = _currentConstContainer;
-        _currentConstContainer = container;   // a container var's init may name a sibling const
         CExpr init;
-        try { init = LowerExprSink(rhsItem, declared); }
-        finally { _currentConstContainer = prev; }
+        using (EnterConstContainer(container)) { init = LowerExprSink(rhsItem, declared); }   // a container var's init may name a sibling const
         Symbol sym;
         if (init is StackArray sa)
         {
@@ -2223,8 +2219,7 @@ internal sealed partial class ZigLowering
         {
             throw new IrUnsupportedException($"container '{container}' const '{name}' has a dependency cycle");
         }
-        var prev = _currentConstContainer;
-        _currentConstContainer = container;
+        using var constContainer = EnterConstContainer(container);
         // A reified struct's const may read its comptime params (`pub const max = if (cap) |n| n else 0;`),
         // and any const is evaluated in its container's scope (`pub const empty: Self = .{ … };`, read as a
         // decl literal from another module).
@@ -2272,11 +2267,7 @@ internal sealed partial class ZigLowering
             }
             return LowerExprSink(rhs, sink);
         }
-        finally
-        {
-            _currentConstContainer = prev;
-            _constResolving.Remove(key);
-        }
+        finally { _constResolving.Remove(key); }
     }
 
     /// <summary><c>comptime label: { … }</c> in value position (std.unicode's <c>const first = comptime first: { … break :first

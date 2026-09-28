@@ -378,9 +378,7 @@ internal sealed partial class ZigLowering
             case Zig.PreComptime p:
             {
                 CExpr inner;
-                _comptimeDepth++;   // a call under `comptime` runs at compile time (task #92)
-                try { inner = LowerExpr(p.Arg1); }
-                finally { _comptimeDepth--; }
+                using (EnterComptime()) { inner = LowerExpr(p.Arg1); }   // a call under `comptime` runs at compile time (task #92)
                 var fold = new ComptimeFold(inner) { Type = inner.Type };
                 // Evaluated NOW when it can be (the comptime engine's E2 lowers a pending callee on demand),
                 // so a position that needs the value during lowering has it; otherwise after the drain.
