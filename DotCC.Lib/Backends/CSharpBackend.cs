@@ -1380,6 +1380,7 @@ internal sealed class CSharpBackend
         // (CS0306): reinterpret its slot as `nint` through its address, cast back.
         : lv.Type.IsVolatile && lv.Type.IsPointerLowered
             ? ($"({Cs(lv.Type.Unqualified)}){VolatileRead($"*(nint*)&{bare}")}", PUnary)
+        : lv.Type.IsVolatile && !HasVolatileOverload(lv.Type) ? ($"Atomic.VolatileLoad(ref {bare})", PPrimary)
         : lv.Type.IsVolatile ? (VolatileRead(bare), PPrimary)
         : (bare, barePrec);
 
@@ -1400,6 +1401,32 @@ internal sealed class CSharpBackend
         var exact = b.Op switch { BinOp.Add => ul + ur, BinOp.Sub => ul - ur, _ => ul * ur };
         return exact < 0 || exact > mask;
     }
+
+    /// <summary>The text of a member access's base. A <c>.</c> member of a volatile struct or union
+    /// is reached through the aggregate's own storage: the member itself is the volatile access (it
+    /// carries the qualifier, C11 6.5.2.3p3), and a whole-value Atomic.VolatileLoad would be a copy
+    /// a store cannot assign (CS1612; signalmodule.c's <c>wakeup.fd = fd</c>).</summary>
+    private string MemberBaseText(Member m)
+    {
+        if (m.Arrow || !m.Base.IsLValue || !m.Base.Type.IsVolatile || HasVolatileOverload(m.Base.Type))
+        {
+            return Sub(m.Base, PPostfix);
+        }
+        var storage = BareLValue(m.Base);
+        return Unparen(m.Base) is Unary { Op: UnOp.Deref } ? $"({storage})" : storage;
+    }
+
+    /// <summary>The C# types <c>System.Threading.Volatile</c> has a Read/Write overload for.</summary>
+    private static readonly HashSet<string> _volatileOverloads = new(StringComparer.Ordinal)
+    {
+        "bool", "byte", "sbyte", "short", "ushort", "int", "uint", "long", "ulong", "nint", "nuint", "float", "double",
+    };
+
+    /// <summary>Whether a volatile access of <paramref name="t"/> goes through
+    /// <c>System.Threading.Volatile</c>; a struct, union or enum (CPython's volatile
+    /// <c>_PyOnceFlag</c>-like aggregates) has no overload (CS0452) and uses the generic
+    /// <c>Atomic.VolatileLoad</c> / <c>VolatileStore</c> instead.</summary>
+    private bool HasVolatileOverload(CType t) => _volatileOverloads.Contains(Cs(t.Unqualified));
 
     /// <summary>The <c>Atomic.*Fetch</c> helper for a compound assignment / step
     /// that returns the NEW value (C's <c>x op= n</c> result). Throws for an
@@ -1469,7 +1496,7 @@ internal sealed class CSharpBackend
     {
         Paren p => BareLValue(p.Inner),
         VarRef v => GlobalName(v.Sym),
-        Member m => $"{Sub(m.Base, PPostfix)}{(m.Arrow ? "->" : ".")}{DotCC.EmitHelpers.Id(m.Field)}",
+        Member m => $"{MemberBaseText(m)}{(m.Arrow ? "->" : ".")}{DotCC.EmitHelpers.Id(m.Field)}",
         Index ix => $"{Sub(ix.Base, PPostfix)}[{Expr(DecayEnum(ix.Idx))}]",
         Unary { Op: UnOp.Deref } u => $"*{Sub(u.Operand, PUnary)}",
         _ => Expr(e),
@@ -2258,7 +2285,7 @@ internal sealed class CSharpBackend
                         ? QualifiedRead(m, tdot, PPostfix)
                         : ($"({Cs(m.Type)})&{tdot}", PUnary);
                 }
-                var dot = $"{Sub(m.Base, PPostfix)}{(m.Arrow ? "->" : ".")}{DotCC.EmitHelpers.Id(m.Field)}";
+                var dot = $"{MemberBaseText(m)}{(m.Arrow ? "->" : ".")}{DotCC.EmitHelpers.Id(m.Field)}";
                 // A non-primitive array member is stored as an [InlineArray]; its
                 // access decays to the element pointer `(T*)&field` (C#'s InlineArray
                 // indexer bounds-checks, but a C array over-indexes into the tail),
@@ -2436,9 +2463,19 @@ internal sealed class CSharpBackend
                             : Coerced(a.Value, a.Target.Type);
                         return ($"global::System.Threading.Volatile.Write(ref {slot}, (nint)({pstored}))", PPrimary);
                     }
+                    if (!HasVolatileOverload(a.Target.Type) && a.CompoundOp is null)
+                    {
+                        return ($"Atomic.VolatileStore(ref {lv}, {Coerced(a.Value, a.Target.Type)})", PPrimary);
+                    }
                     var stored = a.CompoundOp is { } cop
                         ? $"{VolatileRead(lv)} {BinSym(cop)} {Sub(a.Value, Prec(cop) + 1)}"
                         : Coerced(a.Value, a.Target.Type);
+                    // `volatile unsigned char r; r |= x ^ y;` computes in int (C's promotions); the
+                    // store converts it back, which C# needs spelled out (CS1503).
+                    if (a.CompoundOp is not null && Cs(a.Target.Type.Unqualified) is "byte" or "sbyte" or "short" or "ushort" or "char")
+                    {
+                        stored = $"({Cs(a.Target.Type.Unqualified)})({stored})";
+                    }
                     return ($"global::System.Threading.Volatile.Write(ref {lv}, {stored})", PPrimary);
                 }
             case Assign a when StoredAsNint(a.Target):
@@ -3146,10 +3183,24 @@ internal sealed class CSharpBackend
         var leadingVoid = false;
         for (var i = 0; i < items.Count - 1; i++)
         {
-            if (items[i].Type.Unqualified is CType.VoidType) { leadingVoid = true; break; }
+            if (items[i].Type.Unqualified is CType.VoidType || RendersVoid(items[i])) { leadingVoid = true; break; }
         }
         return !leadingVoid && items.Count <= 7 ? CommaTuple(items) : CommaDelegate(items);
     }
+
+    /// <summary>True when an expression with a value in C renders as a void C# call: a store to,
+    /// or <c>++</c>/<c>--</c> of, a volatile (not atomic) lvalue, which goes through
+    /// <c>Volatile.Write</c>. A tuple cannot hold it (CS8210), so a comma operand of that shape
+    /// renders as a statement of the delegate form (bufferedio's ENTER_BUFFERED:
+    /// <c>(self-&gt;owner = PyThread_get_thread_ident(), 1)</c>).</summary>
+    private static bool RendersVoid(CExpr e) => e switch
+    {
+        Assign a => a.Target.Type.IsVolatile && !a.Target.Type.IsAtomic,
+        Unary { Op: UnOp.PreInc or UnOp.PreDec or UnOp.PostInc or UnOp.PostDec } u =>
+            u.Operand.Type.IsVolatile && !u.Operand.Type.IsAtomic,
+        Paren p => RendersVoid(p.Inner),
+        _ => false,
+    };
 
     /// <summary>True when an expression has no side effects — so a non-final comma
     /// operand can be dropped without changing observable behavior. Conservative:

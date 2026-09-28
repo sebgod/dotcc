@@ -128,6 +128,65 @@ public static class Atomic
     public static T XorFetch<T>(ref T loc, T arg) where T : unmanaged, IBinaryInteger<T>
     { T old, neu; do { old = Load(ref loc); neu = old ^ arg; } while (!TryCas(ref loc, neu, old)); return neu; }
 
+    // ---- pointers ----------------------------------------------------------
+    // A pointer cannot be a generic argument (CS0306), so the pointer forms (CPython's
+    // _Py_atomic_*_ptr over `void **`) take the location as `ref void*` and run the same
+    // Interlocked operations on it as an 8-byte integer.
+
+    /// <summary>Atomically read a pointer.</summary>
+    public static unsafe void* Load(ref void* loc)
+    {
+        fixed (void** p = &loc) { return (void*)Interlocked.Read(ref *(long*)p); }
+    }
+
+    /// <summary>Atomically store a pointer; returns it, as the C assignment yields it.</summary>
+    public static unsafe void* Store(ref void* loc, void* value)
+    {
+        fixed (void** p = &loc) { Interlocked.Exchange(ref *(nint*)p, (nint)value); }
+        return value;
+    }
+
+    /// <summary>Atomically replace a pointer and return the old one.</summary>
+    public static unsafe void* Exchange(ref void* loc, void* value)
+    {
+        fixed (void** p = &loc) { return (void*)Interlocked.Exchange(ref *(nint*)p, (nint)value); }
+    }
+
+    /// <summary><see cref="CompareExchange{T}"/> for a pointer: store <paramref name="desired"/> iff
+    /// the location holds <paramref name="expected"/>, else load the actual pointer into it.</summary>
+    public static unsafe bool CompareExchange(ref void* loc, ref void* expected, void* desired)
+    {
+        fixed (void** p = &loc)
+        {
+            var e = (nint)expected;
+            var actual = Interlocked.CompareExchange(ref *(nint*)p, (nint)desired, e);
+            if (actual == e) { return true; }
+            expected = (void*)actual;
+            return false;
+        }
+    }
+
+    // ---- volatile aggregates -----------------------------------------------
+    // C volatile access of a type System.Threading.Volatile has no overload for (a struct,
+    // union or enum): the access itself, fenced on the side C's ordering needs (a read
+    // before later accesses, a write after earlier ones).
+
+    /// <summary>A volatile read of any unmanaged value.</summary>
+    public static T VolatileLoad<T>(ref T loc) where T : unmanaged
+    {
+        var value = loc;
+        Interlocked.MemoryBarrier();
+        return value;
+    }
+
+    /// <summary>A volatile write of any unmanaged value; returns it, as the C assignment yields it.</summary>
+    public static T VolatileStore<T>(ref T loc, T value) where T : unmanaged
+    {
+        Interlocked.MemoryBarrier();
+        loc = value;
+        return value;
+    }
+
     // ---- fences ------------------------------------------------------------
     // C11 atomic_thread_fence / atomic_signal_fence. A seq-cst thread fence is a
     // full memory barrier; the signal fence is a compiler barrier (single-thread

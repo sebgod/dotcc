@@ -116,9 +116,10 @@ public sealed class VolatileTests
     [Fact]
     public void non_eligible_volatile_struct_local_falls_back_to_plain()
     {
-        // A volatile lvalue of non-eligible type (a struct value) is read via
-        // Volatile.Read on the whole struct, then the field is accessed on the
-        // returned copy. The declaration itself is a plain initializer.
+        // A member of a volatile struct is itself volatile (C11 6.5.2.3p3), so reading it is
+        // the volatile access, through the struct's own storage (a whole-struct load would be a
+        // copy, and System.Threading.Volatile has no struct overload). The declaration itself
+        // is a plain initializer.
         var src = WriteTemp("""
             typedef struct Pt { int x; int y; } Pt;
             int main(void) { volatile Pt p = { 1, 2 }; return p.x; }
@@ -127,7 +128,42 @@ public sealed class VolatileTests
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
             emitted.ShouldContain("Pt p = new Pt");
-            emitted.ShouldContain("Volatile.Read(ref p).x");
+            emitted.ShouldContain("Volatile.Read(ref p.x)");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void volatile_struct_stores_whole_and_by_member()
+    {
+        // A whole-struct store has no System.Threading.Volatile overload, so it goes through the
+        // generic Atomic.VolatileStore; a member store is the member's own volatile write, to the
+        // struct's storage (signalmodule.c's `wakeup.fd = fd`).
+        var src = WriteTemp("""
+            typedef struct Wake { int fd; int warn; } Wake;
+            static volatile Wake wakeup;
+            int main(void) { Wake w = { 3, 1 }; wakeup = w; wakeup.fd = 4; return wakeup.fd; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("Atomic.VolatileStore(ref wakeup, w)");
+            emitted.ShouldContain("Volatile.Write(ref wakeup.fd, 4)");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void narrow_volatile_compound_store_converts_the_promoted_result()
+    {
+        // C computes `r |= x ^ y` in int; the store back into a volatile unsigned char converts it.
+        var src = WriteTemp("""
+            int main(void) { volatile unsigned char r = 1; unsigned char x = 2, y = 4; r |= x ^ y; return r; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("Volatile.Write(ref r, (byte)(");
         }
         finally { File.Delete(src); }
     }
