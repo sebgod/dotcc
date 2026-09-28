@@ -17,7 +17,7 @@ using DotCC.Ir;
 /// object file's linker.
 /// </summary>
 internal sealed record CSharpBackendResult(
-    string Functions,
+    IReadOnlyList<string> Functions,
     string Structs,
     string Aliases,
     string Globals,
@@ -72,7 +72,7 @@ internal sealed class CSharpBackend
         typeNames.UnionWith(unit.Enums.Select(e => e.Name));
         cg._typeShadowedGlobals = new HashSet<string>(
             unit.Globals.Select(g => g.Sym.TargetName).Where(typeNames.Contains), StringComparer.Ordinal);
-        var fns = new StringBuilder();
+        var fns = new List<string>();
         var exports = new List<DotCC.EmitHelpers.Export>();
         var mainArity = -1;
         var mainReturnsVoid = false;
@@ -82,10 +82,9 @@ internal sealed class CSharpBackend
 
         foreach (var fn in unit.Functions)
         {
-            if (fns.Length > 0) { fns.Append("\n\n"); }
             cg._currentFnName = fn.Sym.Name;
             var fnText = cg.Func(fn);
-            fns.Append(fnText);
+            fns.Add(fnText);
             records.Add(new LinkRecord(LinkRecordKind.Function, fn.Sym.TargetName, fn.Sym.IsTuLocal, fnText));
 
             if (fn.Sym.Name == "main")
@@ -123,21 +122,20 @@ internal sealed class CSharpBackend
         // escaping). Emitted only when the program names ≥1 error (so a `@errorName` call resolves).
         if (unit.ZigErrorCodes is { Count: > 0 } errNames)
         {
-            if (fns.Length > 0) { fns.Append("\n\n"); }
-            var errorNameStart = fns.Length;
+            var errorName = new StringBuilder();
             // NB: emit `static unsafe` (no access modifier) — the shell rewrites `static unsafe ` →
             // `internal static unsafe ` (exe) / `public static unsafe ` (lib), so a literal
             // `internal` here would be doubled (CS1004). Matches `Func` above.
-            fns.Append("    /// <summary>Zig `@errorName`: a flat error code → its name as `[]const u8`.</summary>\n");
-            fns.Append("    static unsafe ConstSlice<byte> __zigErrorName(ushort code) => code switch\n    {\n");
+            errorName.Append("    /// <summary>Zig `@errorName`: a flat error code → its name as `[]const u8`.</summary>\n");
+            errorName.Append("    static unsafe ConstSlice<byte> __zigErrorName(ushort code) => code switch\n    {\n");
             foreach (var kv in errNames.OrderBy(kv => kv.Value))
             {
                 var len = System.Text.Encoding.UTF8.GetByteCount(kv.Key);
-                fns.Append($"        {kv.Value} => new ConstSlice<byte>(L(\"{kv.Key}\"u8), {len}),\n");
+                errorName.Append($"        {kv.Value} => new ConstSlice<byte>(L(\"{kv.Key}\"u8), {len}),\n");
             }
-            fns.Append("        _ => new ConstSlice<byte>(L(\"(unknown)\"u8), 9),\n    };");
-            records.Add(new LinkRecord(LinkRecordKind.Function, "__zigErrorName", false,
-                fns.ToString(errorNameStart, fns.Length - errorNameStart)));
+            errorName.Append("        _ => new ConstSlice<byte>(L(\"(unknown)\"u8), 9),\n    };");
+            fns.Add(errorName.ToString());
+            records.Add(new LinkRecord(LinkRecordKind.Function, "__zigErrorName", false, errorName.ToString()));
         }
 
         // File-scope variables → public static fields of DotCcGlobals (the shell
@@ -285,7 +283,7 @@ internal sealed class CSharpBackend
             ? unit.Tests.Select(t => (t.Name, t.Sym.TargetName)).ToList()
             : null;
 
-        return new CSharpBackendResult(fns.ToString(), structs.ToString(), Aliases: "", storage.ToString() + globals.ToString(), mainArity, exports, mainReturnsVoid, mainReturnsErrUnion, mainErrPayloadIsVoid, tests, records);
+        return new CSharpBackendResult(fns, structs.ToString(), Aliases: "", storage.ToString() + globals.ToString(), mainArity, exports, mainReturnsVoid, mainReturnsErrUnion, mainErrPayloadIsVoid, tests, records);
     }
 
     // ---- type declarations -----------------------------------------------

@@ -37,6 +37,21 @@ public sealed class EmissionModelTests
     }
 
     [Fact]
+    public void functions_past_the_per_class_limit_continue_in_another_class()
+    {
+        // The CLR caps a type's methods (CPython's ~70k functions failed to load as one class):
+        // past FunctionsPerClass the functions continue in DotCcProgram2, surfaced alike.
+        var n = Compiler.FunctionsPerClass + 1;
+        var src = new System.Text.StringBuilder();
+        for (var i = 0; i < n; i++) { src.Append($"static int f{i}(void) {{ return {i % 7}; }}\n"); }
+        src.Append($"int main(void) {{ return f0() + f{n - 1}(); }}\n");
+        var emitted = Emit(src.ToString());
+        emitted.ShouldContain("using static DotCcProgram;\nusing static DotCcProgram2;");
+        emitted.ShouldContain("static unsafe class DotCcProgram2\n{\n    internal static unsafe int f8192(void)".Replace("(void)", "()"));
+        emitted.ShouldNotContain("class DotCcProgram3");
+    }
+
+    [Fact]
     public void address_of_user_function_in_file_scope_initializer()
     {
         // `&fn` in a file-scope initializer resolves across the class boundary —

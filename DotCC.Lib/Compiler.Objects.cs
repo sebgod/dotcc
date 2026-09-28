@@ -159,7 +159,7 @@ public static partial class Compiler
         var definedIn = new Dictionary<string, string>(StringComparer.Ordinal);
         var storageText = new StringBuilder();
         var globalText = new StringBuilder();
-        var functions = new StringBuilder();
+        var functions = new List<string>();
         var errors = new List<string>();
         var mainArity = -1;
         var mainReturnsVoid = false;
@@ -221,8 +221,7 @@ public static partial class Compiler
                 definedIn[symbol] = from;
                 if (isFn)
                 {
-                    if (functions.Length > 0) { functions.Append("\n\n"); }
-                    functions.Append(body.TrimEnd('\n'));
+                    functions.Add(body.TrimEnd('\n'));
                 }
                 else
                 {
@@ -313,7 +312,7 @@ public static partial class Compiler
                 .ToList();
             if (survivors.Count > 0) { importsClass = RenderImportsClass(survivors, imports, libraryMode); }
         }
-        return BuildShell(mainArity, functions.ToString(), structDecls.ToString(), "", storageText.ToString() + globalText.ToString(),
+        return BuildShell(mainArity, functions, structDecls.ToString(), "", storageText.ToString() + globalText.ToString(),
                           emit, System.Array.Empty<EmitHelpers.Export>(), debugHeap, importsClass,
                           importsAreStatic: false, mainReturnsVoid: mainReturnsVoid,
                           mainReturnsErrUnion: mainReturnsErrUnion, mainErrPayloadIsVoid: mainErrPayloadIsVoid, pythonShim: pythonShim);
