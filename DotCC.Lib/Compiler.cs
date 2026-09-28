@@ -204,9 +204,9 @@ public static partial class Compiler
                 .Where(s => !s.IsTuLocal).Select(s => s.Name)
                 .Distinct(StringComparer.Ordinal);
             return SerializeFragment(cg.Records ?? [], cg.MainArity,
-                objImports, objDefs, cg.MainReturnsVoid, cg.MainReturnsErrUnion, cg.MainErrPayloadIsVoid);
+                objImports, objDefs, cg.MainReturnsVoid, cg.MainReturnsErrUnion, cg.MainErrPayloadIsVoid, irBuilder.UsesPythonShim);
         }
-        return BuildShell(cg.MainArity, cg.Functions, cg.Structs, cg.Aliases, cg.Globals, emit, cg.Exports, debugHeap, importsClass, importsAreStatic, cg.MainReturnsVoid, cg.MainReturnsErrUnion, cg.MainErrPayloadIsVoid, testMode, cg.Tests);
+        return BuildShell(cg.MainArity, cg.Functions, cg.Structs, cg.Aliases, cg.Globals, emit, cg.Exports, debugHeap, importsClass, importsAreStatic, cg.MainReturnsVoid, cg.MainReturnsErrUnion, cg.MainErrPayloadIsVoid, testMode, cg.Tests, pythonShim: irBuilder.UsesPythonShim);
     }
 
     /// <summary>

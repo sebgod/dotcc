@@ -43,6 +43,9 @@ public static partial class Compiler
     // fragment defines it, then binds the survivors GOT-style (see LinkObjects).
     private const string FragImport = "//!!dotcc-obj import:"; // import:<name> <delegate* unmanaged[Cdecl]<…>>
     private const string FragDef    = "//!!dotcc-obj def:";    // def:<name> (this TU defines it)
+    // `runtime:python`: the unit included the synthetic <Python.h>, so the program links the
+    // runtime's abi3 shim.
+    private const string FragRuntimePython = "//!!dotcc-obj runtime:python";
 
     // The uniform "magic" first line every dotcc-generated `.cs` carries, so any
     // file can be classified at a glance:
@@ -83,13 +86,14 @@ public static partial class Compiler
     private static string SerializeFragment(
         IReadOnlyList<Backends.LinkRecord> records, int mainArity,
         IReadOnlyList<(string Name, string FieldType)> importSpecs, IEnumerable<string> defNames, bool mainReturnsVoid = false,
-        bool mainReturnsErrUnion = false, bool mainErrPayloadIsVoid = false)
+        bool mainReturnsErrUnion = false, bool mainErrPayloadIsVoid = false, bool pythonShim = false)
     {
         var sb = new StringBuilder();
         sb.Append(MagicObject).Append(' ').Append(ObjectFormat).Append(" — link with `dotcc <objs> -o <out>`.\n");
         sb.Append(FragMain).Append(mainArity).Append('\n');
         if (mainReturnsVoid) { sb.Append(FragMainVoid).Append("1").Append('\n'); }
         if (mainReturnsErrUnion) { sb.Append(FragMainErr).Append(mainErrPayloadIsVoid ? "v" : "i").Append('\n'); }
+        if (pythonShim) { sb.Append(FragRuntimePython).Append('\n'); }
         // Import candidates + defined names, for the link step's resolution. Names
         // have no spaces (C identifiers), so the type — which does (`delegate*
         // unmanaged[Cdecl]<int, int>`) — is everything after the first space.
@@ -154,6 +158,7 @@ public static partial class Compiler
         var mainReturnsVoid = false;
         var mainReturnsErrUnion = false;
         var mainErrPayloadIsVoid = false;
+        var pythonShim = false;
         // Import resolution across fragments: a candidate name → its fn-ptr type, and
         // every name some fragment DEFINES. A candidate survives iff no fragment defines it.
         var importSpecs = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -252,6 +257,10 @@ public static partial class Compiler
                 {
                     definedNames.Add(line[FragDef.Length..]);
                 }
+                else if (line == FragRuntimePython)
+                {
+                    pythonShim = true;
+                }
                 else if (record is not null)
                 {
                     buf.Append(line).Append('\n');
@@ -293,7 +302,7 @@ public static partial class Compiler
         return BuildShell(mainArity, functions.ToString(), structDecls.ToString(), "", globalText.ToString(),
                           emit, System.Array.Empty<EmitHelpers.Export>(), debugHeap, importsClass,
                           importsAreStatic: false, mainReturnsVoid: mainReturnsVoid,
-                          mainReturnsErrUnion: mainReturnsErrUnion, mainErrPayloadIsVoid: mainErrPayloadIsVoid);
+                          mainReturnsErrUnion: mainReturnsErrUnion, mainErrPayloadIsVoid: mainErrPayloadIsVoid, pythonShim: pythonShim);
     }
 
 }
