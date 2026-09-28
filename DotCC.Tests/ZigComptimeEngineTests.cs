@@ -241,4 +241,34 @@ public sealed class ZigComptimeEngineTests
         // `T == bool` is false for u8, so the `and` is false without evaluating `flag()`, as in zig.
         cs.ShouldMatch(@"byte f__u8\(\)\s*\{\s*return 2;");
     }
+
+    [Fact]
+    public void A_calling_condition_settles_in_a_comptime_block_and_a_type_alias()
+    {
+        // Every position where zig requires a compile-time-known `if` condition shares one fold (#235): a
+        // `comptime { … }` block and a type alias both run a condition that CALLS through the interpreter, as a
+        // type-returning body's condition already did.
+        var cs = EmitZig("""
+            fn isPow2(x: u32) bool {
+                return x != 0 and (x & (x - 1)) == 0;
+            }
+            const W = if (isPow2(8)) u8 else u16;
+            pub fn main() u8 {
+                comptime var n: u32 = 0;
+                comptime {
+                    if (isPow2(12)) {
+                        n = 1;
+                    } else if (isPow2(16)) {
+                        n = 40;
+                    } else {
+                        n = 3;
+                    }
+                }
+                const w: W = 1;
+                return @intCast(n + w);
+            }
+            """);
+        cs.ShouldContain("byte w = 1;");
+        cs.ShouldContain("40u + w");
+    }
 }

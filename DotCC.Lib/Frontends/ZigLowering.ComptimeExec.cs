@@ -291,15 +291,9 @@ internal sealed partial class ZigLowering
     private int _comptimeBoolCallDepth;
     /// <summary>The condition of an <c>if</c> inside a <c>comptime { … }</c> block, which must be compile-time
     /// known: a comptime question (<see cref="TryFoldComptimeCondition"/>) or a folded integer.</summary>
-    private bool FoldComptimeBlockCondition(Item cond)
-    {
-        if (TryFoldComptimeCondition(cond) is { } folded) { return folded; }
-        using (EnterThrowawayHoist())
-        {
-            if (_ir.ConstEval(LowerExpr(cond)) is { } v) { return v != 0; }
-        }
-        throw new IrUnsupportedException("zig: an `if` in a `comptime` block needs a compile-time-known condition");
-    }
+    private bool FoldComptimeBlockCondition(Item cond) =>
+        TryFoldRequiredComptimeCondition(cond)
+        ?? throw new IrUnsupportedException("zig: an `if` in a `comptime` block needs a compile-time-known condition");
     /// <summary>The last name of a callee (<c>assert</c> for <c>assert</c> and <c>std.debug.assert</c>), or null.</summary>
     private static string? CalleeLastName(Item callee) => callee.Content switch
     {

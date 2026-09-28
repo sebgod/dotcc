@@ -1934,6 +1934,30 @@ public sealed class ZigOracleTests
             "    return @intCast(total + 6);\n" +
             "}\n", 42, "total=36" },
 
+        // An `if` whose condition CALLS, where zig requires it to be compile-time-known: inside a `comptime { … }`
+        // block (an `else if` chain) and in a type alias. Both settle through the comptime interpreter, as a
+        // type-returning body's condition already did (#235). 40 + @sizeOf(u8) + (255 +% 2 = 1) = 42.
+        new object[] { "comptime_condition_calls",
+            "fn isPow2(x: u32) bool {\n" +
+            "    return x != 0 and (x & (x - 1)) == 0;\n" +
+            "}\n" +
+            "const W = if (isPow2(8)) u8 else u16;\n" +
+            "pub fn main() u8 {\n" +
+            "    comptime var n: u32 = 0;\n" +
+            "    comptime {\n" +
+            "        if (isPow2(12)) {\n" +
+            "            n = 1;\n" +
+            "        } else if (isPow2(16)) {\n" +
+            "            n = 40;\n" +
+            "        } else {\n" +
+            "            n = 3;\n" +
+            "        }\n" +
+            "    }\n" +
+            "    var w: W = 255;\n" +
+            "    w +%= 2;\n" +
+            "    return @intCast(n + @sizeOf(W) + w);\n" +
+            "}\n", 42, "" },
+
         // `@alignOf(T)` / `@offsetOf(T, "field")` as comptime values (Milestone T, part 4). An
         // `extern struct` pins the C-ABI layout (a plain Zig struct may reorder fields), so dotcc's
         // layout model and real zig agree: Point { a:u8, b:u32, c:u16 } → size 12, align 4, b@4, c@8.

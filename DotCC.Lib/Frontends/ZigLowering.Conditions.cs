@@ -204,6 +204,27 @@ internal sealed partial class ZigLowering
         }
         return TryFoldImportedComptimeValue(cur, out var v) && v is LitBool { Value: var b } ? b : null;
     }
+    /// <summary>The value of an <c>if</c> condition in a position where zig REQUIRES it to be compile-time-known (a
+    /// <c>comptime { … }</c> block, a type-returning body, a type alias), or null when it is not. Wider than
+    /// <see cref="TryFoldComptimeCondition"/>, which must leave a runtime condition alone: here every condition is
+    /// comptime, so after the comptime questions it tries the const folder, then the comptime interpreter, which runs a
+    /// condition that CALLS (std.bit_set.Array's <c>!std.math.isPowerOfTwo(@bitSizeOf(MaskIntType))</c>). The lowering
+    /// goes to a throwaway hoist and is discarded. A condition that does not lower throws, as the lowering does.</summary>
+    private bool? TryFoldRequiredComptimeCondition(Item cond)
+    {
+        if (TryFoldComptimeCondition(cond) is { } folded) { return folded; }
+        using (EnterThrowawayHoist())
+        {
+            var lowered = LowerExpr(cond);
+            if (_ir.ConstEval(lowered) is { } v) { return v != 0; }
+            return _ir.EvalComptimeValue(lowered) switch
+            {
+                IrModule.CtBool { Value: var calledBool } => calledBool,
+                IrModule.CtInt { Value: var calledInt } => calledInt != 0,
+                _ => null,
+            };
+        }
+    }
     /// <summary>A comparison whose operands are both side-effect-free numeric shapes (<see cref="IsPureNumericShape"/>), settled
     /// by the interpreter over their lowering (discarded), or null. Outside a call frame the interpreter reads no runtime
     /// variable, so an operand that is one (or anything else it cannot evaluate) leaves the comparison unsettled; the
