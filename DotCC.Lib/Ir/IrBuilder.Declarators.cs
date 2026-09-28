@@ -426,7 +426,7 @@ internal sealed partial class IrBuilder
         }
         else
         {
-            type = ResolveAnonAggregate(typeItem, members, isUnion);
+            type = ResolveAnonAggregate(members, isUnion);
         }
         _tagDefs[typeItem] = type;
         return type;

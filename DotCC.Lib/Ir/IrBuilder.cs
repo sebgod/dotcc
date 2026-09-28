@@ -1236,20 +1236,18 @@ internal sealed partial class IrBuilder
         _ => throw new IrUnsupportedException(TypeName(it.Content)),
     };
 
-    /// <summary>Per-occurrence synthetic name for an inline anonymous aggregate
-    /// type, cached by source position so the same type item always resolves to
-    /// the same <see cref="CType.Named"/> (the field that holds it and every
-    /// member access agree on one synthesized struct).</summary>
-    private readonly Dictionary<SrcPos, CType> _anonAggregates = new();
     private int _anonAggrSeq;
 
-    private CType ResolveAnonAggregate(Item typeItem, Item memberListItem, bool isUnion)
+    /// <summary>A synthesized <c>__AnonN</c> struct or union for an anonymous
+    /// aggregate definition. Each definition is a distinct type, and
+    /// <see cref="DefineAggregate"/> calls this once per definition (its cache is
+    /// keyed by the Type item), so the field that holds it and every member access
+    /// agree on one struct. A source position is no key: two headers can hold
+    /// anonymous definitions at the same line and column.</summary>
+    private CType ResolveAnonAggregate(Item memberListItem, bool isUnion)
     {
-        var pos = SrcPos.From(typeItem);
-        if (_anonAggregates.TryGetValue(pos, out var cached)) { return cached; }
         var name = $"__Anon{_anonAggrSeq++}";
         var named = new CType.Named(name);
-        _anonAggregates[pos] = named;
         var fields = BuildStructFields(memberListItem, name);
         _structFields[name] = fields;
         _structIsUnion[name] = isUnion;
