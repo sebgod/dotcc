@@ -61,6 +61,11 @@ double fmod(double x, double y); float fmodf(float x, float y);
 double fmin(double x, double y); float fminf(float x, float y);
 double fmax(double x, double y); float fmaxf(float x, float y);
 
+/* Decomposition and manipulation (C99 7.12.6.12, 7.12.7.3, 7.12.11.1). */
+double modf(double x, double* iptr);        float modff(float x, float* iptr);
+double hypot(double x, double y);           float hypotf(float x, float y);
+double copysign(double x, double y);        float copysignf(float x, float y);
+
 /* Classification (C99). Returns int (non-zero on match) — NOT bool. */
 int isnan(double x);
 int isinf(double x);

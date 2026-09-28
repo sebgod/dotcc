@@ -62,4 +62,9 @@ void abort(void);
 void qsort(void* base, int n, int size, int (*cmp)(const void*, const void*));
 void* bsearch(const void* key, const void* base, int n, int size, int (*cmp)(const void*, const void*));
 
+/* Multibyte string conversion (C99 7.22.8): the multibyte encoding is UTF-8 and
+   wchar_t is dotcc's UTF-16 unit. (size_t)-1 reports an invalid sequence. */
+unsigned long mbstowcs(wchar_t* dst, const char* src, unsigned long n);
+unsigned long wcstombs(char* dst, const wchar_t* src, unsigned long n);
+
 #endif
