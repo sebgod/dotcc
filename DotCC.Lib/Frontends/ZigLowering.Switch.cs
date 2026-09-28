@@ -570,7 +570,7 @@ internal sealed partial class ZigLowering
                 var payloadType = info.Variants[variant]
                     ?? throw new IrUnsupportedException(
                         $"union '{info.Name}' variant '{variant}' is a void variant — it has no payload to capture with `|{captureName}|`");
-                _symbols.EnterScope();
+                using var symbolScope = EnterSymbolScope();
                 // By-value (`|x|`): `var x = __un.__payload.variant;` (a copy). By-reference (`|*x|`):
                 // `T* x = &(__un.__payload.variant);` — a pointer into the union's payload field, so
                 // `x.* = …` writes through to the (mutable) union value.
@@ -581,7 +581,7 @@ internal sealed partial class ZigLowering
                 CExpr capInit = captureByRef ? new Unary(UnOp.AddrOf, payloadField) { Type = bindType } : payloadField;
                 if (captureByRef && unionRef is VarRef { Sym: { } uvar }) { uvar.AddressTaken = true; }
                 var inner = LowerProngBody();
-                _symbols.ExitScope();
+                symbolScope.Dispose();
                 var combined = new List<CStmt> { new DeclStmt(new List<LocalDecl> { new(capSym, capInit) }) };
                 combined.AddRange(inner);
                 body = new List<CStmt> { new Block(combined) };

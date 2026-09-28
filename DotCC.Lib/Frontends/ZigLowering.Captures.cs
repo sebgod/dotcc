@@ -31,7 +31,7 @@ internal sealed partial class ZigLowering
                     "zig `if (opt) |*x|` over a comptime-known optional: a comptime value has no runtime payload to point at");
             }
             if (!copt.HasValue) { return elseItem is { } el ? LowerStmt(el) : new Seq(new List<CStmt>()); }
-            _symbols.EnterScope();
+            using var symbolScope = EnterSymbolScope();
             BindFoldedCapture(capName, copt.Value, copt.Inner);
             // The payload's declared width rides the capture (`if (comptime std.math.cast(usize, v)) |x|`: 64 bits),
             // so an `anytype` it is passed to can answer `@typeInfo(@TypeOf(x)).int.bits`.
@@ -46,7 +46,7 @@ internal sealed partial class ZigLowering
                 RecordValueBits(foldedCap, capBits, null);
             }
             var folded = LowerStmt(thenItem);
-            _symbols.ExitScope();
+            symbolScope.Dispose();
             return folded;
         }
 
@@ -123,24 +123,26 @@ internal sealed partial class ZigLowering
             // flat global code), so `e == error.Foo` compares codes (Milestone N) — what un-erased
             // the part-3 cut: a USED named `|e|` is now valid in both compilers.
             var errStmts = new List<CStmt>();
-            _symbols.EnterScope();
-            if (errCapName is not null && errCapName != "_")
+            using (EnterSymbolScope())
             {
-                var errSym = _symbols.Declare(new Symbol { Name = errCapName, Kind = SymKind.Var, Type = CType.ErrorSet });
-                errStmts.Add(new DeclStmt(new List<LocalDecl> { new(errSym, new Member(condRef, "Code", false) { Type = CType.ErrorSet }) }));
+                if (errCapName is not null && errCapName != "_")
+                {
+                    var errSym = _symbols.Declare(new Symbol { Name = errCapName, Kind = SymKind.Var, Type = CType.ErrorSet });
+                    errStmts.Add(new DeclStmt(new List<LocalDecl> { new(errSym, new Member(condRef, "Code", false) { Type = CType.ErrorSet }) }));
+                }
+                if (elseItem is not null) { errStmts.Add(LowerStmt(elseItem)); }
             }
-            if (elseItem is not null) { errStmts.Add(LowerStmt(elseItem)); }
-            _symbols.ExitScope();
 
             var okStmts = new List<CStmt>();
-            _symbols.EnterScope();
-            if (capName != "_")
+            using (EnterSymbolScope())
             {
-                var okSym = _symbols.Declare(new Symbol { Name = capName, Kind = SymKind.Var, Type = eu.Payload });
-                okStmts.Add(new DeclStmt(new List<LocalDecl> { new(okSym, new Member(condRef, "Value", false) { Type = eu.Payload }) }));
+                if (capName != "_")
+                {
+                    var okSym = _symbols.Declare(new Symbol { Name = capName, Kind = SymKind.Var, Type = eu.Payload });
+                    okStmts.Add(new DeclStmt(new List<LocalDecl> { new(okSym, new Member(condRef, "Value", false) { Type = eu.Payload }) }));
+                }
+                okStmts.Add(LowerStmt(thenItem));
             }
-            okStmts.Add(LowerStmt(thenItem));
-            _symbols.ExitScope();
 
             var errTest = new Member(condRef, "IsErr", false) { Type = CType.Bool };
             CStmt euIf = new If(errTest, new Block(errStmts), new Block(okStmts));
@@ -155,16 +157,17 @@ internal sealed partial class ZigLowering
 
         // then-branch: bind the payload at the top, with `x` in scope while lowering the branch.
         var thenStmts = new List<CStmt>();
-        _symbols.EnterScope();
-        if (capName != "_")
+        using (EnterSymbolScope())
         {
-            var capSym = _symbols.Declare(new Symbol { Name = capName, Kind = SymKind.Var, Type = payloadType });
-            // The payload's declared width (`if (std.math.cast(isize, v)) |x|`: 64), for an `anytype` it reaches.
-            if (DeclaredBitsOfLowered(cond) is { } runtimeCapBits) { RecordValueBits(capSym, runtimeCapBits, null); }
-            thenStmts.Add(new DeclStmt(new List<LocalDecl> { new(capSym, payloadInit) }));
+            if (capName != "_")
+            {
+                var capSym = _symbols.Declare(new Symbol { Name = capName, Kind = SymKind.Var, Type = payloadType });
+                // The payload's declared width (`if (std.math.cast(isize, v)) |x|`: 64), for an `anytype` it reaches.
+                if (DeclaredBitsOfLowered(cond) is { } runtimeCapBits) { RecordValueBits(capSym, runtimeCapBits, null); }
+                thenStmts.Add(new DeclStmt(new List<LocalDecl> { new(capSym, payloadInit) }));
+            }
+            thenStmts.Add(LowerStmt(thenItem));
         }
-        thenStmts.Add(LowerStmt(thenItem));
-        _symbols.ExitScope();
         var thenBlock = new Block(thenStmts);
 
         var elseStmt = elseItem is null ? null : LowerStmt(elseItem);
@@ -303,10 +306,10 @@ internal sealed partial class ZigLowering
         if (TryComptimeOptionalCond(condItem, out var copt))
         {
             if (!copt.HasValue) { return LowerCaptureBranch(elseItem, sink, _hoist); }
-            _symbols.EnterScope();
+            using var foldedScope = EnterSymbolScope();
             BindFoldedCapture(capName, copt.Value, copt.Inner);
             var folded = LowerCaptureBranch(thenItem, sink, _hoist);
-            _symbols.ExitScope();
+            foldedScope.Dispose();
             return folded;
         }
 
@@ -364,24 +367,24 @@ internal sealed partial class ZigLowering
 
         // then-branch: bind the payload to `x`, then lower the then value (which may use `x`).
         var thenStmts = new List<CStmt>();
-        _symbols.EnterScope();
+        using var thenScope = EnterSymbolScope();
         if (capName != "_")
         {
             var capSym = _symbols.Declare(new Symbol { Name = capName, Kind = SymKind.Var, Type = payloadType });
             thenStmts.Add(new DeclStmt(new List<LocalDecl> { new(capSym, payloadInit) }));
         }
         var thenVal = LowerCaptureBranch(thenItem, sink, thenStmts);
-        _symbols.ExitScope();
+        thenScope.Dispose();
 
         var elseStmts = new List<CStmt>();
-        _symbols.EnterScope();
+        using var elseScope = EnterSymbolScope();
         if (errCapName is not null && errCapName != "_")
         {
             var errSym = _symbols.Declare(new Symbol { Name = errCapName, Kind = SymKind.Var, Type = CType.ErrorSet });
             elseStmts.Add(new DeclStmt(new List<LocalDecl> { new(errSym, new Member(condRef, "Code", false) { Type = CType.ErrorSet }) }));
         }
         var elseVal = LowerCaptureBranch(elseItem, sink, elseStmts);
-        _symbols.ExitScope();
+        elseScope.Dispose();
         var resultType = sink ?? thenVal.Type;
 
         // A result temp (declared before the statement), assigned by each branch of a real `if`.

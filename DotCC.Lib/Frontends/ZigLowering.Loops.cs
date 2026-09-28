@@ -203,9 +203,9 @@ internal sealed partial class ZigLowering
                         $"`inline while` exceeded the unroll cap ({InlineUnrollCap}) — a non-terminating comptime condition?");
                 }
                 // Unroll one body copy (the comptime counter substitutes to its current value within it).
-                _symbols.EnterScope();
+                using var symbolScope = EnterSymbolScope();
                 var body = LowerStmt(bodyItem);
-                _symbols.ExitScope();
+                symbolScope.Dispose();
                 var (trimmed, jump) = TrimTrailingJump(body, target.BreakLabel);
                 if (HasLoopEscape(trimmed) || ContainsGotoTo(trimmed, target.BreakLabel))
                 {
@@ -251,7 +251,7 @@ internal sealed partial class ZigLowering
         var unroll = new InlineUnroll(_blockLabelCounter++);
         for (long k = 0; k < count; k++)
         {
-            _symbols.EnterScope();
+            using var symbolScope = EnterSymbolScope();
             // A comptime-known capture (a counted range's index) IS its value in every comptime question,
             // as zig has it: `const block_x_len = block_len / (1 << j); comptime if (block_x_len < 4) break;`
             // in std.mem.findScalarPos folds through it.
@@ -270,7 +270,7 @@ internal sealed partial class ZigLowering
             CStmt body;
             try { body = LowerStmt(bodyItem); }
             finally { _inlineUnrollDepth--; }
-            _symbols.ExitScope();
+            symbolScope.Dispose();
             // `inline for (0..2) |_|` discards the index: no declaration (an unused `_` local is CS0219).
             var copy = captureName == "_" ? new List<CStmt> { body }
                 : new List<CStmt> { new DeclStmt(new List<LocalDecl> { new(sym, init) }), body };
@@ -300,7 +300,7 @@ internal sealed partial class ZigLowering
         var unroll = new InlineUnroll(_blockLabelCounter++);
         for (var k = 0; k < tuple.Elements.Count; k++)
         {
-            _symbols.EnterScope();
+            using var symbolScope = EnterSymbolScope();
             var copy = new List<CStmt>();
             if (elemName != "_")
             {
@@ -323,7 +323,7 @@ internal sealed partial class ZigLowering
             _inlineUnrollDepth++;
             try { copy.Add(LowerStmt(bodyItem)); }
             finally { _inlineUnrollDepth--; }
-            _symbols.ExitScope();
+            symbolScope.Dispose();
             if (!unroll.Add(new Block(copy))) { break; }
         }
         pre.Add(unroll.Finish());
@@ -455,24 +455,26 @@ internal sealed partial class ZigLowering
             {
                 okStmts.Add(BindCapture(eu.Payload, new Member(capRef, "Value", false) { Type = eu.Payload }));
             }
-            _symbols.EnterScope();
-            if (capName != "_" && contPost is null)
+            using (EnterSymbolScope())
             {
-                okStmts.Add(BindCapture(eu.Payload, new Member(capRef, "Value", false) { Type = eu.Payload }));
+                if (capName != "_" && contPost is null)
+                {
+                    okStmts.Add(BindCapture(eu.Payload, new Member(capRef, "Value", false) { Type = eu.Payload }));
+                }
+                okStmts.Add(LowerStmt(bodyItem));
             }
-            okStmts.Add(LowerStmt(bodyItem));
-            _symbols.ExitScope();
 
             var errStmts = new List<CStmt>();
-            _symbols.EnterScope();
-            if (errName != "_")
+            using (EnterSymbolScope())
             {
-                var errSym = _symbols.Declare(new Symbol { Name = errName, Kind = SymKind.Var, Type = CType.ErrorSet });
-                errStmts.Add(new DeclStmt(new List<LocalDecl> { new(errSym, new Member(capRef, "Code", false) { Type = CType.ErrorSet }) }));
+                if (errName != "_")
+                {
+                    var errSym = _symbols.Declare(new Symbol { Name = errName, Kind = SymKind.Var, Type = CType.ErrorSet });
+                    errStmts.Add(new DeclStmt(new List<LocalDecl> { new(errSym, new Member(capRef, "Code", false) { Type = CType.ErrorSet }) }));
+                }
+                errStmts.Add(LowerStmt(eErrBody));
+                errStmts.Add(new Break());
             }
-            errStmts.Add(LowerStmt(eErrBody));
-            errStmts.Add(new Break());
-            _symbols.ExitScope();
 
             var isErr = new Member(capRef, "IsErr", false) { Type = CType.Bool };
             loopBody = new List<CStmt>
@@ -512,10 +514,11 @@ internal sealed partial class ZigLowering
             // then-branch: bind the payload, then the user body, with `x` in scope while lowering it.
             var thenStmts = new List<CStmt>();
             if (capName != "_" && contPost is not null) { thenStmts.Add(BindCapture(payloadType, payloadInit)); }
-            _symbols.EnterScope();
-            if (capName != "_" && contPost is null) { thenStmts.Add(BindCapture(payloadType, payloadInit)); }
-            thenStmts.Add(LowerStmt(bodyItem));
-            _symbols.ExitScope();
+            using (EnterSymbolScope())
+            {
+                if (capName != "_" && contPost is null) { thenStmts.Add(BindCapture(payloadType, payloadInit)); }
+                thenStmts.Add(LowerStmt(bodyItem));
+            }
 
             // exit branch (payload null): run the `else` body (if any), then break. Kept a bare
             // `break` when there's no else, preserving the plain capture-while emit shape.
@@ -730,7 +733,7 @@ internal sealed partial class ZigLowering
         {
             throw new CompileException("zig: a `for` over unbounded ranges only has no length (give a range an end, or add an object)");
         }
-        _symbols.EnterScope();
+        using var symbolScope = EnterSymbolScope();
         var iSym = _symbols.Declare(new Symbol { Name = "__i", Kind = SymKind.Var, Type = CType.ULong });
         var iRef = new VarRef(iSym) { Type = CType.ULong, IsLValue = true };
         var init = new DeclStmt(new List<LocalDecl> { new(iSym, new LitInt("0", 0) { Type = CType.ULong }) });
@@ -777,7 +780,7 @@ internal sealed partial class ZigLowering
         }
         var userBody = LowerStmt(bodyItem);
         bodyStmts.Add(userBody);
-        _symbols.ExitScope();
+        symbolScope.Dispose();
         var forStmt = new For(init, natural is null ? cond : null, post, new Block(bodyStmts));
         if (pre.Count == 0 && elseItem is null) { return forStmt; }
         pre.Add(forStmt);
@@ -797,7 +800,7 @@ internal sealed partial class ZigLowering
     /// the function.</summary>
     private CStmt LowerWhileElseStmt(Item condItem, Item bodyItem, Item elseItem)
     {
-        _symbols.EnterScope();
+        using var symbolScope = EnterSymbolScope();
         // Numbered: a nested while-else's flag would otherwise shadow its enclosing one's, which C# refuses (CS0136).
         var flag = _symbols.Declare(new Symbol { Name = "__natural" + _loopLabelCounter++, Kind = SymKind.Var, Type = CType.Bool });
         var natural = new VarRef(flag) { Type = CType.Bool, IsLValue = true };
@@ -809,7 +812,7 @@ internal sealed partial class ZigLowering
         var userBody = LowerStmt(bodyItem);
         var loop = new While(new LitBool(true) { Type = CType.Bool }, new Block(new List<CStmt> { exit, userBody }));
         var elseStmt = LowerStmt(elseItem);
-        _symbols.ExitScope();
+        symbolScope.Dispose();
         return new Block(new List<CStmt>
         {
             new DeclStmt(new List<LocalDecl> { new(flag, new LitBool(false) { Type = CType.Bool }) }),
@@ -882,7 +885,7 @@ internal sealed partial class ZigLowering
             sliceRef = new VarRef(tmp) { Type = sliceExpr.Type, IsLValue = true };
         }
 
-        _symbols.EnterScope();
+        using var symbolScope = EnterSymbolScope();
         // usize __i = 0; __i < __s.Len; __i++
         var iSym = _symbols.Declare(new Symbol { Name = "__i", Kind = SymKind.Var, Type = CType.ULong });
         var iRef = new VarRef(iSym) { Type = CType.ULong, IsLValue = true };
@@ -909,7 +912,7 @@ internal sealed partial class ZigLowering
             bodyStmts.Add(new DeclStmt(new List<LocalDecl> { new(idxSym, idxInit) }));
         }
         bodyStmts.Add(LowerStmt(bodyItem));
-        _symbols.ExitScope();
+        symbolScope.Dispose();
 
         var forStmt = new For(init, cond, post, new Block(bodyStmts));
         if (pre.Count == 0) { return forStmt; }

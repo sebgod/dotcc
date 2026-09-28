@@ -236,9 +236,7 @@ internal sealed partial class ZigLowering
         foreach (var fnDef in fnDefs)
         {
             if (!IsTypeReturningFnDef(fnDef)) { runtime.Add(fnDef); continue; }
-            var prev = _currentContainer;
-            try { DeclareMethod(container, fnDef); }
-            finally { _currentContainer = prev; }
+            using (EnterContainer(_currentContainer)) { DeclareMethod(container, fnDef); }
         }
         return runtime;
     }
@@ -450,7 +448,7 @@ internal sealed partial class ZigLowering
         {
             foreach (var rootFn in rootGraph.RootFunctionTargetNames()) { _symbols.Reserve(rootFn); }
         }
-        _symbols.EnterScope();
+        using var symbolScope = EnterSymbolScope();
         var ptrSizeShadows = new List<(string name, string? prev, ZigSentinel? prevSentinel)>();
         // Seed comptime-TYPE parameters (wall-plan W3b): `T ↦ concrete` into _typeAliases, shadow-saved
         // so a colliding outer/sibling alias name is restored at body exit — the instance body then
@@ -522,7 +520,7 @@ internal sealed partial class ZigLowering
         // backing. Runs BEFORE ExitScope so the synthetic backing-buffer temp uniquifies against this
         // function's names (BeginFunction cleared `_usedNames`; ExitScope would not).
         blk = PromoteStackSlices(blk);
-        _symbols.ExitScope();
+        symbolScope.Dispose();
         // Un-shadow: restore any `_containerTypes` plain-name binding an in-function container
         // overwrote (wall-plan W2), so a local `const Point = struct{…}` doesn't leak into the next
         // function. Reverse order handles a name shadowed twice in one body. The mangled IR type
@@ -1199,9 +1197,7 @@ internal sealed partial class ZigLowering
                 // is, so a call to one of the unit's own functions (`b = maxOf(u16) - 5`, task #123) runs in the
                 // interpreter rather than counting as a runtime call.
                 CExpr lowered;
-                _comptimeDepth++;
-                try { lowered = LowerExpr(valExpr); }
-                finally { _comptimeDepth--; }
+                using (EnterComptime()) { lowered = LowerExpr(valExpr); }
                 next = ZigConstEval(lowered)
                     ?? (_ir.ResolveComptimeFold(lowered) is { } folded ? ZigConstEval(folded) : null)
                     // An `enum(u64)` / `enum(usize)` member above long.MaxValue (std.Io.Limit's
@@ -1632,13 +1628,9 @@ internal sealed partial class ZigLowering
     private CExpr LowerFieldDefault(string structName, CType fieldType, Item defaultItem)
     {
         using var seeds = EnterReifiedSeeds(structName);
-        var prevConstContainer = _currentConstContainer;
-        _currentConstContainer = structName;
-        try
-        {
-            using (EnterContainer(structName)) { return LowerExprSink(defaultItem, fieldType); }
-        }
-        finally { _currentConstContainer = prevConstContainer; }
+        using var constContainer = EnterConstContainer(structName);
+        using var container = EnterContainer(structName);
+        return LowerExprSink(defaultItem, fieldType);
     }
 
     /// <summary>True when a struct-literal member targets an ARRAY field and must be DROPPED from the

@@ -325,7 +325,7 @@ internal sealed partial class ZigLowering
             // is cast to usize so the comparison is unsigned-clean (C# forbids ulong<>signed).
             case Zig.StmtForRange f:
             {
-                _symbols.EnterScope();
+                using var symbolScope = EnterSymbolScope();
                 var start = LowerExpr(f.Arg2);
                 var end = LowerExpr(f.Arg4);
                 var iSym = _symbols.Declare(new Symbol { Name = Tok(f.Arg7), Kind = SymKind.Var, Type = CType.ULong });
@@ -335,7 +335,7 @@ internal sealed partial class ZigLowering
                 var cond = new Binary(BinOp.Lt, iRef, new Cast(CType.ULong, end) { Type = CType.ULong }) { Type = CType.Int };
                 var post = new Unary(UnOp.PostInc, iRef) { Type = CType.ULong };
                 var body = LowerStmt(f.Arg9);
-                _symbols.ExitScope();
+                symbolScope.Dispose();
                 return new For(init, cond, post, body);
             }
 

@@ -6,8 +6,12 @@ using DotCC.Ir;
 namespace DotCC.Frontends;
 
 /// <summary>Scope guards for the lowering context that is saved, replaced and restored around a nested
-/// lowering — the current container (<see cref="_currentContainer"/>) and the ANF hoist buffer
-/// (<see cref="_hoist"/> + <see cref="_hoistImpureSeen"/>). Each used to be a hand-written
+/// lowering — the current container (<see cref="_currentContainer"/>), the container whose consts are being
+/// read (<see cref="_currentConstContainer"/>), the ANF hoist buffer (<see cref="_hoist"/> +
+/// <see cref="_hoistImpureSeen"/>), a symbol scope, and the comptime depth (<see cref="_comptimeDepth"/>).
+/// A symbol scope matters most: several <c>Try…</c> helpers catch <see cref="IrUnsupportedException"/> and
+/// carry on, so a scope opened by a lowering that threw would otherwise stay open and bind every later name
+/// in the wrong place. Each used to be a hand-written
 /// save / <c>try</c> / <c>finally</c> restore at every site; a site that forgot the <c>finally</c> would
 /// have leaked a nested context into the rest of the compile on the first exception, silently. A guard
 /// makes the restore part of the construct: <c>using var _ = EnterContainer(name);</c>.
@@ -28,6 +32,49 @@ internal sealed partial class ZigLowering
         }
 
         public void Dispose() => _owner._currentContainer = _saved;
+    }
+
+    /// <summary>Restores <see cref="_currentConstContainer"/> on dispose. See <see cref="EnterConstContainer"/>.</summary>
+    private readonly ref struct ConstContainerScope
+    {
+        private readonly ZigLowering _owner;
+        private readonly string? _saved;
+
+        internal ConstContainerScope(ZigLowering owner, string? saved)
+        {
+            _owner = owner;
+            _saved = saved;
+        }
+
+        public void Dispose() => _owner._currentConstContainer = _saved;
+    }
+
+    /// <summary>Closes the symbol scope <see cref="EnterSymbolScope"/> opened, on dispose, by returning the table to the
+    /// depth it had before: so disposing twice is harmless (a site whose locals outlive the scope closes it early with
+    /// <c>scope.Dispose()</c> and lets the <c>using</c> dispose again), and a scope a nested lowering left open is closed
+    /// with it.</summary>
+    private readonly ref struct SymbolScope
+    {
+        private readonly ZigLowering _owner;
+        private readonly int _depth;
+
+        internal SymbolScope(ZigLowering owner, int depth)
+        {
+            _owner = owner;
+            _depth = depth;
+        }
+
+        public void Dispose() => _owner._symbols.TruncateScopes(_depth);
+    }
+
+    /// <summary>Leaves the compile-time region <see cref="EnterComptime"/> entered, on dispose.</summary>
+    private readonly ref struct ComptimeScope
+    {
+        private readonly ZigLowering _owner;
+
+        internal ComptimeScope(ZigLowering owner) => _owner = owner;
+
+        public void Dispose() => _owner._comptimeDepth--;
     }
 
     /// <summary>Restores what <see cref="EnterReifiedSeeds"/> installed: the type aliases its type seeds
@@ -112,6 +159,32 @@ internal sealed partial class ZigLowering
         var scope = new ContainerScope(this, _currentContainer);
         _currentContainer = container;
         return scope;
+    }
+
+    /// <summary>Make <paramref name="container"/> the container whose consts a bare name resolves to (a sibling
+    /// const, Milestone R part 6) until the returned guard is disposed; null clears it.</summary>
+    private ConstContainerScope EnterConstContainer(string? container)
+    {
+        var scope = new ConstContainerScope(this, _currentConstContainer);
+        _currentConstContainer = container;
+        return scope;
+    }
+
+    /// <summary>Open a symbol scope until the returned guard is disposed: names declared meanwhile (captures, loop
+    /// indices, seeds) go out of scope with it, also when the lowering inside throws.</summary>
+    private SymbolScope EnterSymbolScope()
+    {
+        var scope = new SymbolScope(this, _symbols.Depth);
+        _symbols.EnterScope();
+        return scope;
+    }
+
+    /// <summary>Lower at compile time until the returned guard is disposed: a call made meanwhile runs in the
+    /// interpreter rather than counting as a runtime call (task #92). Nests.</summary>
+    private ComptimeScope EnterComptime()
+    {
+        _comptimeDepth++;
+        return new ComptimeScope(this);
     }
 
     /// <summary>Restores the ANF hoist buffer and its impurity watermark on dispose. See

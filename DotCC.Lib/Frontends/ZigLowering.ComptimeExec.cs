@@ -95,11 +95,9 @@ internal sealed partial class ZigLowering
             }
             return TryComptimeReturnBlock(stmts, ret) ?? LowerBlock(blockItem);
         }
-        _symbols.EnterScope();
-        _comptimeDepth++;   // a comptime block's calls run at compile time (task #92)
-        try { ExecuteComptimeStmt(blockItem); }
-        finally { _comptimeDepth--; }
-        _symbols.ExitScope();
+        // A comptime block's calls run at compile time (task #92).
+        using (EnterSymbolScope())
+        using (EnterComptime()) { ExecuteComptimeStmt(blockItem); }
         return new Seq(new List<CStmt>());   // compile-time-only — nothing runs at runtime
     }
     /// <summary>The nesting depth of <see cref="TryComptimeReturnBlock"/>'s lowering: statements lowered only for the comptime
