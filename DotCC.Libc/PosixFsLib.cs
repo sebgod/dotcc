@@ -44,9 +44,19 @@ public static unsafe partial class Libc
     private sealed class DirState
     {
         public required string[] Names;
+        /// <summary>Each entry's <c>d_type</c> (a <c>DT_*</c> value), parallel to <see cref="Names"/>.</summary>
+        public required byte[] Types;
         public int Pos;
         public byte* Dirent;
     }
+
+    /// <summary><c>&lt;dirent.h&gt;</c>'s <c>d_type</c> values (Linux's) for what .NET's enumeration
+    /// tells apart: a symbolic link, a directory, a regular file.</summary>
+    private const byte DtDir = 4, DtReg = 8, DtLnk = 10;
+
+    /// <summary>The offset of <c>d_type</c> in <c>struct dirent</c>: after <c>d_name[256]</c> and
+    /// <c>unsigned long d_ino</c>.</summary>
+    private const int DType = 264;
 
     private static readonly Dictionary<nint, DirState> _dirs = new();
     private static readonly System.Threading.Lock _dirsLock = new();   // qualified: a user type may be named `Lock`
@@ -62,20 +72,31 @@ public static unsafe partial class Libc
         if (name == null) { errno = ENOENT; return null; }
         var path = Encoding.UTF8.GetString(name, strlen(name));
         string[] names;
+        byte[] types;
         try
         {
             if (!Directory.Exists(path)) { errno = ENOENT; return null; }
-            var entries = Directory.GetFileSystemEntries(path);
+            // The enumeration carries each entry's attributes, so d_type costs no stat.
+            var entries = new DirectoryInfo(path).GetFileSystemInfos();
             names = new string[entries.Length + 2];
+            types = new byte[entries.Length + 2];
             names[0] = ".";
             names[1] = "..";
-            for (var i = 0; i < entries.Length; i++) { names[i + 2] = Path.GetFileName(entries[i]); }
+            types[0] = types[1] = DtDir;
+            for (var i = 0; i < entries.Length; i++)
+            {
+                var attrs = entries[i].Attributes;
+                names[i + 2] = entries[i].Name;
+                types[i + 2] = (attrs & FileAttributes.ReparsePoint) != 0 && entries[i].LinkTarget is not null ? DtLnk
+                    : (attrs & FileAttributes.Directory) != 0 ? DtDir
+                    : DtReg;
+            }
         }
         catch (UnauthorizedAccessException) { errno = EACCES; return null; }
         catch (IOException) { errno = EIO; return null; }
         var token = (byte*)NativeMemory.Alloc(8);
-        var buf = (byte*)NativeMemory.Alloc((nuint)DName + 16);
-        lock (_dirsLock) { _dirs[(nint)token] = new DirState { Names = names, Dirent = buf }; }
+        var buf = (byte*)NativeMemory.AllocZeroed((nuint)DName + 16);
+        lock (_dirsLock) { _dirs[(nint)token] = new DirState { Names = names, Types = types, Dirent = buf }; }
         return token;
     }
 
@@ -87,10 +108,11 @@ public static unsafe partial class Libc
         DirState? st;
         lock (_dirsLock) { _dirs.TryGetValue((nint)dirp, out st); }
         if (st == null || st.Pos >= st.Names.Length) { return null; }
-        var nm = st.Names[st.Pos++];
+        var nm = st.Names[st.Pos];
         new Span<byte>(st.Dirent, DName).Clear();
         var n = Encoding.UTF8.GetBytes(nm, new Span<byte>(st.Dirent, DName - 1));
         st.Dirent[n] = 0;
+        st.Dirent[DType] = st.Types[st.Pos++];
         return st.Dirent;
     }
 
@@ -106,6 +128,38 @@ public static unsafe partial class Libc
         NativeMemory.Free(st!.Dirent);
         NativeMemory.Free(dirp);
         return 0;
+    }
+
+    /// <summary><c>utimes(path, times)</c> (POSIX <c>&lt;sys/time.h&gt;</c>): set the access and
+    /// modification times of a file or directory from two <c>struct timeval</c>s (seconds and
+    /// microseconds since the epoch), or both to now when <paramref name="times"/> is null.
+    /// Returns 0, or -1 with errno ENOENT, EACCES or EIO.</summary>
+    public static int utimes(byte* path, void* times)
+    {
+        if (path == null) { errno = EFAULT; return -1; }
+        var p = Encoding.UTF8.GetString(path, strlen(path));
+        var now = DateTime.UtcNow;
+        var t = (long*)times;
+        DateTime At(int i) => DateTime.UnixEpoch.AddTicks(t[2 * i] * TimeSpan.TicksPerSecond + t[2 * i + 1] * 10);
+        var atime = t == null ? now : At(0);
+        var mtime = t == null ? now : At(1);
+        try
+        {
+            if (Directory.Exists(p))
+            {
+                Directory.SetLastAccessTimeUtc(p, atime);
+                Directory.SetLastWriteTimeUtc(p, mtime);
+            }
+            else if (File.Exists(p))
+            {
+                File.SetLastAccessTimeUtc(p, atime);
+                File.SetLastWriteTimeUtc(p, mtime);
+            }
+            else { errno = ENOENT; return -1; }
+            return 0;
+        }
+        catch (UnauthorizedAccessException) { errno = EACCES; return -1; }
+        catch (IOException) { errno = EIO; return -1; }
     }
 
     /// <summary><c>rewinddir(dirp)</c> — restart iteration from the first entry

@@ -31,5 +31,8 @@ struct timezone {
 int gettimeofday(struct timeval *tv, void *tz);
 /* settimeofday: a managed process can't set the system clock; fails EPERM. */
 int settimeofday(const struct timeval *tv, const struct timezone *tz);
+/* Set a file's access and modification times (times[0], times[1]); a null
+   times sets both to now. */
+int utimes(const char *path, const struct timeval times[2]);
 
 #endif /* _SYS_TIME_H */

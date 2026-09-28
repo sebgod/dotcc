@@ -14,6 +14,11 @@
 #define F_GETFL 3
 #define F_SETFL 4
 
+/* The one fd flag (F_GETFD / F_SETFD). F_GETFD reports it clear and F_SETFD
+   claims success: dotcc runs no child processes, so an fd is never inherited
+   either way. */
+#define FD_CLOEXEC 1
+
 #define O_RDONLY   0x0
 #define O_WRONLY   0x1
 #define O_RDWR     0x2
@@ -22,6 +27,13 @@
 #define O_TRUNC    0x200
 #define O_APPEND   0x400
 #define O_NONBLOCK 0x800
+/* Linux's values. open() has nothing to do for O_NOCTTY (dotcc has no
+   controlling terminal) or O_CLOEXEC (it runs no child to inherit the fd).
+   O_NOFOLLOW is accepted but not enforced: a symbolic link as the last
+   component is followed, as .NET's file open does. */
+#define O_NOCTTY    0x100
+#define O_NOFOLLOW  0x20000
+#define O_CLOEXEC   0x80000
 
 int fcntl(int fd, int cmd, ...);
 

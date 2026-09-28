@@ -106,6 +106,16 @@ public static unsafe partial class Libc
         return 0;
     }
 
+    /// <summary><c>pause()</c> (POSIX): wait for a signal that runs a handler or ends the
+    /// process. As with <see cref="sleep"/>, no signal interrupts a wait on .NET, so the thread
+    /// sleeps for good (CPython's PyThread_hang_thread calls it in a loop).</summary>
+    public static int pause()
+    {
+        System.Threading.Thread.Sleep(System.Threading.Timeout.Infinite);
+        errno = EINTR;
+        return -1;
+    }
+
     /// <summary><c>fork()</c> — no .NET primitive; fails with EPERM (return -1).
     /// A managed runtime can't duplicate its own address space.</summary>
     public static int fork() { errno = EPERM; return -1; }

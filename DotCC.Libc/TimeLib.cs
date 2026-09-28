@@ -69,4 +69,91 @@ public static unsafe partial class Libc
         ts->tv_nsec = (now.UtcTicks % TimeSpan.TicksPerSecond) * 100;   // 100 ns ticks → ns
         return @base;
     }
+
+    /// <summary><c>clock_gettime(clk, ts)</c> (POSIX): the time of clock <paramref name="clk"/>, by
+    /// <c>&lt;time.h&gt;</c>'s Linux ids: 0 <c>CLOCK_REALTIME</c> (UTC since the epoch), 1
+    /// <c>CLOCK_MONOTONIC</c> (the <see cref="System.Diagnostics.Stopwatch"/> timestamp, which never
+    /// steps), 2 <c>CLOCK_PROCESS_CPUTIME_ID</c> (the process's user plus system CPU time). Returns 0,
+    /// or -1 with <c>errno</c> EINVAL for another clock (a thread's CPU time is not available) and
+    /// EFAULT for a null <paramref name="ts"/>.</summary>
+    public static int clock_gettime(int clk, timespec* ts)
+    {
+        if (ts == null) { errno = EFAULT; return -1; }
+        long ticks;   // 100 ns units
+        switch (clk)
+        {
+            case 0:
+                ticks = DateTimeOffset.UtcNow.UtcTicks - DateTimeOffset.UnixEpoch.UtcTicks;
+                break;
+            case 1:
+                var stamp = System.Diagnostics.Stopwatch.GetTimestamp();
+                var freq = System.Diagnostics.Stopwatch.Frequency;
+                ts->tv_sec = stamp / freq;
+                ts->tv_nsec = (long)((Int128)(stamp % freq) * 1_000_000_000 / freq);
+                return 0;
+            case 2:
+                ticks = Environment.CpuUsage.TotalTime.Ticks;
+                break;
+            default:
+                errno = EINVAL;
+                return -1;
+        }
+        ts->tv_sec = ticks / TimeSpan.TicksPerSecond;
+        ts->tv_nsec = ticks % TimeSpan.TicksPerSecond * 100;
+        return 0;
+    }
+
+    /// <summary><c>clock_getres(clk, res)</c> (POSIX): the resolution of clock <paramref name="clk"/>
+    /// (see <see cref="clock_gettime"/>): 100 ns for the real-time and CPU clocks, one
+    /// <see cref="System.Diagnostics.Stopwatch"/> tick for the monotonic one. A null
+    /// <paramref name="res"/> only checks the clock.</summary>
+    public static int clock_getres(int clk, timespec* res)
+    {
+        long nsec;
+        switch (clk)
+        {
+            case 0 or 2: nsec = 100; break;
+            case 1: nsec = Math.Max(1, 1_000_000_000 / System.Diagnostics.Stopwatch.Frequency); break;
+            default: errno = EINVAL; return -1;
+        }
+        if (res != null) { res->tv_sec = 0; res->tv_nsec = nsec; }
+        return 0;
+    }
+
+    /// <summary>The clock ticks per second of <see cref="times"/> (<c>sysconf(_SC_CLK_TCK)</c>).</summary>
+    private const long ClockTicksPerSecond = 100;
+
+    /// <summary><c>times(buf)</c> (POSIX <c>&lt;sys/times.h&gt;</c>): the process's user and system CPU
+    /// time in clock ticks into <c>struct tms</c> (four <c>clock_t</c>: utime, stime, cutime, cstime;
+    /// the children's are 0, none having been waited for). Returns the ticks since an arbitrary fixed
+    /// point, from the monotonic clock.</summary>
+    public static long times(void* buf)
+    {
+        const long per = TimeSpan.TicksPerSecond / ClockTicksPerSecond;
+        if (buf != null)
+        {
+            var cpu = Environment.CpuUsage;
+            var t = (long*)buf;
+            t[0] = cpu.UserTime.Ticks / per;
+            t[1] = cpu.PrivilegedTime.Ticks / per;
+            t[2] = 0;
+            t[3] = 0;
+        }
+        return (long)((Int128)System.Diagnostics.Stopwatch.GetTimestamp() * ClockTicksPerSecond / System.Diagnostics.Stopwatch.Frequency);
+    }
+
+    /// <summary><c>sysconf(name)</c> (POSIX): the configuration values <c>&lt;unistd.h&gt;</c> names,
+    /// by Linux's numbers: 2 <c>_SC_CLK_TCK</c>, 30 <c>_SC_PAGESIZE</c>, 83/84
+    /// <c>_SC_NPROCESSORS_CONF</c>/<c>_ONLN</c>. Any other name returns -1 with <c>errno</c>
+    /// EINVAL.</summary>
+    public static long sysconf(int name)
+    {
+        switch (name)
+        {
+            case 2: return ClockTicksPerSecond;
+            case 30: return Environment.SystemPageSize;
+            case 83 or 84: return Environment.ProcessorCount;
+            default: errno = EINVAL; return -1;
+        }
+    }
 }

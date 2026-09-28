@@ -33,4 +33,29 @@ struct rusage {
 
 int getrusage(int who, struct rusage *usage);
 
+/* Resource limits (POSIX getrlimit / setrlimit), with Linux's resource
+   numbers. On Linux both forward to libc. Elsewhere no such per-process limit
+   exists, so getrlimit reports every limit as RLIM_INFINITY and setrlimit
+   fails EPERM: a limit cannot be imposed. */
+typedef unsigned long rlim_t;
+#define RLIM_INFINITY  (~0UL)
+#define RLIMIT_CPU     0
+#define RLIMIT_FSIZE   1
+#define RLIMIT_DATA    2
+#define RLIMIT_STACK   3
+#define RLIMIT_CORE    4
+#define RLIMIT_RSS     5
+#define RLIMIT_NPROC   6
+#define RLIMIT_NOFILE  7
+#define RLIMIT_MEMLOCK 8
+#define RLIMIT_AS      9
+
+struct rlimit {
+    rlim_t rlim_cur;   /* the soft limit */
+    rlim_t rlim_max;   /* the hard limit */
+};
+
+int getrlimit(int resource, struct rlimit *rlim);
+int setrlimit(int resource, const struct rlimit *rlim);
+
 #endif /* _SYS_RESOURCE_H */

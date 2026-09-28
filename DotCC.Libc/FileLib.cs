@@ -347,6 +347,19 @@ public static unsafe partial class Libc
     /// </summary>
     public static int fileno(FILE* stream) => stream == null ? -1 : stream->_slot;
 
+    /// <summary>POSIX <c>fdopen(fd, mode)</c>: a stream over the open descriptor
+    /// <paramref name="fd"/>. dotcc's FILE slots are the fds, so the stream is that slot, and
+    /// closing it closes the fd. The mode must parse; the stream keeps the access the fd was
+    /// opened with. Null, with errno EINVAL for a bad mode or EBADF for an fd not open.</summary>
+    public static FILE* fdopen(int fd, byte* mode)
+    {
+        if (mode == null || !ParseMode(mode, out _, out _)) { errno = EINVAL; return null; }
+        if (SlotByFd(fd) == null) { errno = EBADF; return null; }
+        var fp = (FILE*)NativeMemory.Alloc((nuint)sizeof(FILE));
+        fp->_slot = fd;
+        return fp;
+    }
+
     /// <summary>
     /// POSIX <c>close(fd)</c> — close by fd. The slot-level half of
     /// <see cref="fclose"/> (no <c>FILE*</c> to free — a caller holding one,

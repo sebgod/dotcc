@@ -39,6 +39,10 @@ public static unsafe partial class Libc
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void* malloc(int size) => _dbgHeap ? DbgAlloc((nuint)size, false) : NativeMemory.Alloc((nuint)size);
 
+    /// <summary><c>malloc</c> at C's own <c>size_t</c> parameter, so the function stores into a
+    /// <c>void *(*)(size_t)</c> slot (CPython's hashtable allocator <c>{malloc, free}</c>).</summary>
+    public static void* malloc(ulong size) => _dbgHeap ? DbgAlloc((nuint)size, false) : NativeMemory.Alloc((nuint)size);
+
     /// <inheritdoc cref="malloc(int)"/>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void* Malloc(int size) => malloc(size);

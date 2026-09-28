@@ -111,5 +111,7 @@ void perror(char* s);
 /* POSIX: the fd behind a stream (dotcc FILE slots ARE the fds — 0/1/2 are
    stdin/stdout/stderr, fopen'd streams take the next free slot). */
 int fileno(FILE* stream);
+/* POSIX: a stream over an open fd (the same slot, so fclose closes the fd). */
+FILE* fdopen(int fd, const char* mode);
 
 #endif
