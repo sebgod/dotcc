@@ -108,6 +108,26 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
+    public void An_if_reads_integer_constants_in_every_base_and_suffix()
+    {
+        // C11 6.10.1p4: each is intmax_t/uintmax_t whatever its suffix. `0xFFu` read as no
+        // number, and CPython's `#if STRINGLIB_MAX_CHAR > 0x7Fu` dropped its count functions.
+        var src = WriteTemp("""
+            #define MAX_CHAR 0xFFu
+            #if MAX_CHAR > 0x7Fu && 010 == 8 && 0b101 == 5 && 1'000 == 1000 && 0x10UL == 16
+            int main(void) { return 0; }
+            #else
+            #error integer constants misread in #if
+            #endif
+            """);
+        try
+        {
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("int main()");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void Float_literals_are_csharp_real_literals()
     {
         // C allows an empty fraction; C# does not lex one (`1.e5` is a member access),

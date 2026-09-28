@@ -884,7 +884,27 @@ internal sealed class CPreprocessor : C.IPreprocessor
             }
             tokens.Add(t);
         }
-        return PreprocessorExpressionEvaluator.Evaluate(Macros.ExpandList(tokens), IsDefined);
+        return PreprocessorExpressionEvaluator.Evaluate(DecimalIntegers(Macros.ExpandList(tokens)), IsDefined);
+    }
+
+    /// <summary>
+    /// <paramref name="tokens"/> with each integer constant spelled in plain decimal, its
+    /// suffix gone: <c>#if</c> evaluates every one in intmax_t or uintmax_t whatever its suffix
+    /// (C11 6.10.1p4), and the evaluator reads only decimal. Without this <c>0xFFu</c> read as
+    /// no number, and CPython's <c>#if STRINGLIB_MAX_CHAR &gt; 0x7Fu</c> dropped every
+    /// <c>ucs*lib_count</c>. A constant past 64 bits is left for the evaluator to reject.
+    /// </summary>
+    private List<Item> DecimalIntegers(IEnumerable<Item> tokens)
+    {
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        var result = new List<Item>();
+        foreach (var t in tokens)
+        {
+            result.Add(t.ID == _numSymbolId && t.Content is string num && EmitHelpers.TryParseIntConstant(num, out var value)
+                ? new Item(_numSymbolId, value.ToString(inv), t.Position)
+                : t);
+        }
+        return result;
     }
 
     /// <summary>The name <c>defined</c> at <paramref name="at"/> tests, as
