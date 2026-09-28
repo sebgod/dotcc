@@ -13,8 +13,10 @@ namespace DotCC.Tests;
 /// the emitted DotCcGlobals field (the marker rides `Symbol.IsThreadLocal`, set
 /// by the spec resolution / the Zig container-var lowering). V1 constraints,
 /// all loud: file-scope only (block scope rejected, even `static _Thread_local`
-/// which C allows), zero/default initializer only (a .NET [ThreadStatic]
-/// initializer runs on the first thread only), scalars only on the Zig side.
+/// which C allows), scalars only on the Zig side. A non-zero initializer is set
+/// on each thread's first access behind a ref-returning property (a .NET
+/// [ThreadStatic] field initializer would run on the first thread only), and
+/// `NULL` is a zero initializer (GH #247; also `thread-local-init/`, gcc-matched).
 /// End-to-end in the `c11-thread-local/` fixture (gcc `-pthread` oracle) and
 /// the `threadlocal_var` Zig oracle program.
 /// </summary>
@@ -46,20 +48,40 @@ public sealed class ThreadLocalTests
     }
 
     [Fact]
-    public void Zero_initializer_is_allowed_nonzero_is_rejected()
+    public void A_zero_or_null_initializer_is_the_thread_static_default()
     {
-        // Zero-init matches the zero/default value .NET gives every thread's
-        // slot anyway; a non-zero initializer would only reach the FIRST thread
-        // ([ThreadStatic] semantics), so it is a loud compile error.
-        var ok = WriteTemp("_Thread_local int a = 0; int main(void) { return a; }");
-        var bad = WriteTemp("_Thread_local int b = 7; int main(void) { return b; }");
+        // Every thread's [ThreadStatic] slot starts zeroed, so a zero initializer,
+        // NULL included (the null pointer constant `((void *)0)`), needs nothing more.
+        var src = WriteTemp("""
+            #include <stddef.h>
+            _Thread_local int a = 0;
+            _Thread_local int *p = NULL;
+            int main(void) { return a + (p != 0); }
+            """);
         try
         {
-            Should.NotThrow(() => Compiler.EmitCSharp(new[] { ok }));
-            Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { bad }))
-                .Message.ShouldContain("non-zero-initialized _Thread_local is not supported");
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("[ThreadStatic]\n    public static unsafe int a = 0;");
+            emitted.ShouldContain("[ThreadStatic]\n    public static unsafe int* p = null;");
         }
-        finally { File.Delete(ok); File.Delete(bad); }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void A_nonzero_initializer_is_set_on_each_threads_first_access()
+    {
+        // A [ThreadStatic] field initializer would run on the first thread only; C
+        // gives every thread's instance the initial value (C11 6.2.4p4).
+        var src = WriteTemp("_Thread_local int b = 7; int main(void) { int *q = &b; return b + *q; }");
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("[ThreadStatic] private static unsafe int __tls_b;");
+            emitted.ShouldContain("[ThreadStatic] private static bool __tls_b_set;");
+            emitted.ShouldContain("public static unsafe ref int b");
+            emitted.ShouldContain("if (!__tls_b_set) { __tls_b = 7; __tls_b_set = true; }");
+        }
+        finally { File.Delete(src); }
     }
 
     [Fact]
@@ -141,13 +163,14 @@ public sealed class ThreadLocalTests
     }
 
     [Fact]
-    public void Zig_nonzero_threadlocal_initializer_is_rejected()
+    public void Zig_nonzero_threadlocal_initializer_is_set_per_thread()
     {
         var src = WriteTemp("threadlocal var tl: i32 = 7;\npub fn main() u8 { return @intCast(tl); }\n", "zig");
         try
         {
-            Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { src }))
-                .Message.ShouldContain("non-zero initializer is not supported");
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("public static unsafe ref int tl");
+            emitted.ShouldContain("if (!__tls_tl_set) { __tls_tl = 7; __tls_tl_set = true; }");
         }
         finally { File.Delete(src); }
     }

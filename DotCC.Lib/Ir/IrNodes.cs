@@ -678,7 +678,13 @@ public readonly record struct ParamInfo(CType Type, string Name)
 public sealed record FuncDef(Symbol Sym, IReadOnlyList<Symbol> Params, Block Body, bool Variadic);
 
 /// <summary>A file-scope variable.</summary>
-public sealed record GlobalVar(Symbol Sym, CExpr? Init);
+public sealed record GlobalVar(Symbol Sym, CExpr? Init)
+{
+    /// <summary>A thread-local whose initializer is not all-zero: each thread's slot
+    /// takes the initial value on that thread's first access (C11 6.2.4p4), not only
+    /// the first thread's, as a .NET [ThreadStatic] field initializer would.</summary>
+    public bool PerThreadInit { get; init; }
+}
 
 /// <summary>The whole compiled unit: the typed IR a backend consumes.</summary>
 public sealed class TranslationUnit

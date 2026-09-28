@@ -389,17 +389,8 @@ internal sealed partial class IrBuilder
                 CExpr? gInit = null;
                 if (d.Init is { } ii) { gInit = BuildInitValue(sym.Type, ii); CheckQualifierDiscard(gInit, sym.Type, SrcPos.From(ii), "initialization"); }
                 PropagateNativeCallConv(sym, gInit);
-                // A .NET [ThreadStatic] initializer runs on the FIRST thread only,
-                // so C's "every thread starts at the initial value" holds only for
-                // the zero/default value .NET gives every thread's slot anyway.
-                if (sym.IsThreadLocal && gInit is not null and not DefaultLit && ConstEval(gInit) is not 0)
-                {
-                    Diagnostics.Add(new Diagnostic(Severity.Error,
-                        $"'{name}': a non-zero-initialized _Thread_local is not supported (a .NET [ThreadStatic] initializer runs only on the first thread)",
-                        SrcPos.From(typeItem), _file));
-                }
                 if (sym.IsConstexpr) { BindConstexpr(sym, gInit, SrcPos.From(typeItem)); }
-                Globals.Add(new GlobalVar(sym, gInit));
+                Globals.Add(new GlobalVar(sym, gInit) { PerThreadInit = sym.IsThreadLocal && gInit is { } ti && !Module.IsZeroInitializer(ti) });
             }
         });
     }
@@ -2471,6 +2462,12 @@ internal sealed partial class IrBuilder
         // `(void)X` — C# has no void cast and the value is discarded; carry the
         // operand through typed void so a statement position emits `X;`.
         if (target is CType.VoidType) { return operand with { Type = CType.Void }; }
+        // `(void *)0`, the headers' NULL: the null pointer constant, typed void* (C11
+        // 6.3.2.3p3), the same node C23 `nullptr` builds.
+        if (target.Unqualified is CType.Pointer { Pointee: CType.VoidType } && IsNullPointerConstant(operand))
+        {
+            return new NullPtr { Type = target };
+        }
         if (target is CType.Func ft)
         {
             // A cast of a dlsym() result DIRECTLY to a function-pointer type is

@@ -244,6 +244,18 @@ internal sealed partial class IrModule
         }
     }
 
+    /// <summary>Whether a static initializer is the all-zero value default
+    /// initialization gives (C11 6.7.9p10): the empty initializer, a null pointer, or a
+    /// constant that folds to 0. A thread-local with any other initializer is set per
+    /// thread on first access (GlobalVar.PerThreadInit), since every thread's slot
+    /// otherwise starts zeroed.</summary>
+    internal bool IsZeroInitializer(CExpr e) => e switch
+    {
+        DefaultLit or NullPtr => true,
+        Paren p => IsZeroInitializer(p.Inner),
+        _ => ConstEval(e) is 0,
+    };
+
     /// <summary>Evaluate an integer constant expression to a signed <c>long</c>, or null
     /// if it is not a constant the interpreter folds (or its value does not fit
     /// <c>long</c>). The constant-expression entry point for both front-ends: C array

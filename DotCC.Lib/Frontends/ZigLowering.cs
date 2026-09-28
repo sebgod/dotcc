@@ -1931,15 +1931,15 @@ internal sealed partial class ZigLowering
     /// <summary>Lower a top-level <c>const</c> / <c>var</c> declaration (see <see cref="LowerGlobal"/>).</summary>
     private void LowerGlobalCore(Item nameTok, Item? typeItem, Item rhsItem, bool threadLocal, bool isConst)
     {
-        // `threadlocal` V1: a zero-initialized SCALAR only. The array/aggregate
-        // paths below don't carry the marker (their pinned backing store is
-        // process-wide by construction), and a non-zero initializer breaks under
-        // .NET [ThreadStatic] (the initializer runs on the first thread only) —
-        // both are loud rejections, checked where they'd otherwise lower.
+        // `threadlocal` V1: a SCALAR only. The array/aggregate paths below don't
+        // carry the marker (their pinned backing store is process-wide by
+        // construction), so they are loud rejections, checked where they'd
+        // otherwise lower. A non-zero initializer is set on each thread's first
+        // access (GlobalVar.PerThreadInit).
         if (threadLocal && (IsSentinelArrayType(typeItem) || rhsItem.Content is Zig.UndefinedLit or Zig.LabeledBlock))
         {
             throw new IrUnsupportedException(
-                $"threadlocal '{Tok(nameTok)}': only a zero-initialized scalar threadlocal is supported");
+                $"threadlocal '{Tok(nameTok)}': only a scalar threadlocal is supported (not an array, `undefined` or a labeled block)");
         }
         // A labeled value-block initializer (`const table = blk: { … break :blk t; };`) runs at compile time, as in
         // zig: its value becomes the static initializer (task #79).
@@ -2037,7 +2037,7 @@ internal sealed partial class ZigLowering
             if (threadLocal)
             {
                 throw new IrUnsupportedException(
-                    $"threadlocal '{Tok(nameTok)}': only a zero-initialized scalar threadlocal is supported");
+                    $"threadlocal '{Tok(nameTok)}': only a scalar threadlocal is supported (not an array, `undefined` or a labeled block)");
             }
             // A NESTED array (`const TABLE: [N][2]u64 = .{ .{…}, … }`, std.fmt.float's power-of-5 tables) is one flat
             // block of scalars, row after row, as every use indexes it (`TABLE + i * 2`); its rows had been emitted as
@@ -2050,14 +2050,6 @@ internal sealed partial class ZigLowering
             if (isConst) { _ir.ConstGlobalInits[arraySym] = sa; }
             return;
         }
-        // A .NET [ThreadStatic] initializer runs on the FIRST thread only, so C's/
-        // Zig's "every thread starts at the initial value" holds only for the
-        // zero/default value every thread's slot gets anyway.
-        if (threadLocal && _ir.ConstEval(init) is not 0)
-        {
-            throw new IrUnsupportedException(
-                $"threadlocal '{Tok(nameTok)}': a non-zero initializer is not supported (a .NET [ThreadStatic] initializer runs only on the first thread)");
-        }
         var type = declared ?? init.Type ?? CType.Int;
         var folded = isConst && type.Unqualified is CType.Prim { Integer: true } ? _ir.ConstEval(init) : null;
         var sym = _symbols.Declare(new Symbol
@@ -2069,7 +2061,8 @@ internal sealed partial class ZigLowering
         });
         if (declared is null && init is LitStr) { _stringLiteralSyms.Add(sym); }
         NoteComptimeFloatConst(sym, isConst, declared, init);
-        _ir.Globals.Add(new GlobalVar(sym, init));
+        // Every thread starts at the initial value: a non-zero one is set per thread.
+        _ir.Globals.Add(new GlobalVar(sym, init) { PerThreadInit = threadLocal && !_ir.IsZeroInitializer(init) });
         // A top-level CONST aggregate (`const cpu: std.Target.Cpu = .{…}`) is comptime-known, so a comptime
         // call may read it (`comptime std.atomic.cacheLineForCpu(cpu)`): the interpreter evaluates its init.
         if (isConst && type.Unqualified is CType.Named) { _ir.ConstGlobalInits[sym] = init; }
