@@ -38,11 +38,12 @@ using DotCC.Ir;
 /// case, reached from the other cases): from there RenderSwitch's own machinery
 /// takes a goto from another section (<c>goto case</c>, or the shared-handler
 /// hoist). A goto from outside the switch (fileio.c's <c>goto bad_mode</c> after
-/// the loop around the switch) needs the label out of the switch: its tail leaves
-/// the section, as a tail leaves an <c>if</c>, with the section's own
-/// <c>break</c>s now jumping past it (see <see cref="Hoister.SplitSwitch"/>).</para>
-/// A <c>for</c> with a declaration in its init fails loudly, as does a case tail
-/// that must leave its switch but falls through into the next case.
+/// the loop around the switch, chibi's <c>goto call_error_handler</c> before its
+/// dispatch switch) needs the label out of the switch: its tail leaves the section,
+/// as a tail leaves an <c>if</c>, with the section's own <c>break</c>s now jumping
+/// past it, and a tail that falls through into the next case takes the cases it
+/// falls into along (see <see cref="Hoister.SplitSwitch"/>).</para>
+/// A <c>for</c> with a declaration in its init fails loudly.
 /// Functions with no scope violation pass through untouched (the common case —
 /// the pass costs one read-only scan).
 /// </remarks>
@@ -132,9 +133,7 @@ internal static class GotoScopeNormalizer
         foreach (var (label, gchain) in gotos)
         {
             if (!labelChain.TryGetValue(label, out var lchain)) { continue; }
-            var visible = lchain.Count <= gchain.Count
-                && !lchain.Where((blk, i) => !ReferenceEquals(blk, gchain[i])).Any();
-            if (visible) { continue; }
+            if (IsPrefix(lchain, gchain)) { continue; }
             if (SectionOfTopLevelLabel(lchain) is { } sec && sectionSwitch.TryGetValue(sec, out var sw)
                 && sw.Sections.Any(other => gchain.Any(scope => ReferenceEquals(scope, other))))
             {
@@ -144,6 +143,12 @@ internal static class GotoScopeNormalizer
         }
         return null;
     }
+
+    /// <summary>Whether scope chain <paramref name="outer"/> is a prefix of <paramref name="inner"/>:
+    /// what is declared in <paramref name="outer"/>'s innermost scope is visible from
+    /// <paramref name="inner"/>'s.</summary>
+    private static bool IsPrefix(List<object> outer, List<object> inner)
+        => outer.Count <= inner.Count && !outer.Where((scope, i) => !ReferenceEquals(scope, inner[i])).Any();
 
     /// <summary>The case section a label is declared at the top level of, from the label's
     /// scope chain: the chain ends at the section, or at the one block that is the section's
@@ -276,7 +281,10 @@ internal static class GotoScopeNormalizer
         /// now ends in <c>goto label;</c>), and the section's tail, which leaves the switch. In
         /// the tail, the section's own <c>break</c>s (not a nested loop's or switch's) become
         /// <c>goto past</c>, the label just after the tail, where leaving the switch lands. A
-        /// tail that falls through into the next case cannot leave: that fails loudly.</summary>
+        /// tail that falls through into the next case takes that case's statements along, and so
+        /// on until a section ends its flow (chibi's <c>call_error_handler:</c> falls into
+        /// <c>case SEXP_OP_RAISE</c>): each relocated section's case now jumps to its statements'
+        /// new place, as RenderSwitch relocates a shared handler's fall-through.</summary>
         internal bool SplitSwitch(Switch sw, out CStmt head, out List<CStmt> tail, out string past)
         {
             head = sw;
@@ -297,20 +305,25 @@ internal static class GotoScopeNormalizer
                 _skips.Add(leave);
                 past = leave;
                 var moved = eff.Skip(at).Select(x => RetargetJumps(x, leave, continueLabel: null)).ToList();
-                if (moved.Count == 0 || !EndsFlow(moved[^1]))
+                var sections = sw.Sections.ToList();
+                var relocated = new HashSet<int>();
+                for (var t = si + 1; t < sections.Count && !(moved.Count > 0 && EndsFlow(moved[^1])); t++)
                 {
-                    throw new IrUnsupportedException(
-                        $"goto into switch: the case tail at label '{_label}' falls through into the next case, so it cannot leave the switch");
+                    var entry = _skips.Add($"__sw_case{_step}_{t}") ? $"__sw_case{_step}_{t}" : $"__sw_case{_step}_{t}_{_label}";
+                    _skips.Add(entry);
+                    moved.Add(new Labeled(entry, new Block(Array.Empty<CStmt>())));
+                    moved.AddRange(HoistDecls(sections[t].Body).Select(x => RetargetJumps(x, leave, continueLabel: null)));
+                    sections[t] = sections[t] with { Body = new List<CStmt> { new Goto(entry) } };
+                    relocated.Add(t);
                 }
                 tail = moved;
                 var kept = HoistDecls(eff.Take(at));
                 kept.Add(new Goto(_label));
                 IReadOnlyList<CStmt> body = wrapped is null ? kept : new List<CStmt> { new Block(kept) { Pos = wrapped.Pos } };
-                var sections = sw.Sections.ToList();
                 sections[si] = sec with { Body = body };
                 for (var other = 0; other < sections.Count; other++)
                 {
-                    if (other != si) { sections[other] = sections[other] with { Body = HoistDecls(sections[other].Body) }; }
+                    if (other != si && !relocated.Contains(other)) { sections[other] = sections[other] with { Body = HoistDecls(sections[other].Body) }; }
                 }
                 head = sw with { Sections = sections };
                 return true;

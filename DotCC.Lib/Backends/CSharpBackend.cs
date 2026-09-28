@@ -1216,7 +1216,12 @@ internal sealed class CSharpBackend
                 // relocated just above — flow into that segment instead of `goto past`.
                 var contNext = !(tail.Count > 0 && Terminates(tail[^1])) && relocWhole.Contains(si + 1);
                 postSegments.Add((null, tail, contNext));
-                sb.Append(Pad(bodyInd)).Append($"goto {DotCC.EmitHelpers.Id(((Labeled)eff[cut]).Name)};\n");
+                // The head reaches the tail by falling into it, unless it already ends
+                // (`case NOOP: break; handler: ...`), where the jump would be unreachable.
+                if (!(head.Count > 0 && Terminates(head[^1])))
+                {
+                    sb.Append(Pad(bodyInd)).Append($"goto {DotCC.EmitHelpers.Id(((Labeled)eff[cut]).Name)};\n");
+                }
             }
             if (wrapped) { sb.Append(Pad(inner + 1)).Append("}\n"); }
             // Synthesize C's fall-through jump when the section doesn't end control
