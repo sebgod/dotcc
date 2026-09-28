@@ -375,9 +375,14 @@ internal sealed partial class IrBuilder
         {
             throw new IrUnsupportedException($"storage size of '{d.Name}' isn't constant");
         }
+        // The array is in scope in its own initializer (C11 6.2.1p7: from the end of its
+        // declarator), as parking_lot.c's `buckets[]` pointing into itself needs: declare it
+        // first, then give it the size its initializer counts.
+        var sym = DeclareGlobalArray(d.Name, arr, csName, tuLocal);
         var a = ResolveArrayObject(d, arr);
+        sym.Type = a.Type;
         var init = new PinnedArray(a.Elem, a.Elems, a.Elems is null ? CountLit(a.Count) : null) { Type = new CType.Pointer(a.Elem) };
-        AddGlobalArray(d.Name, a.Type, init, csName, tuLocal);
+        Globals.Add(new GlobalVar(sym, init));
     }
 
     /// <summary>An element count as an <c>int</c> literal.</summary>

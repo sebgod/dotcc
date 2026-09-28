@@ -93,8 +93,10 @@ public sealed class FlexibleArrayMemberTests
             static struct keys empty = { 2, 'e', -1, -1 };
             int main(void) { return empty.indices[1] + (&empty)->indices[0] + 2; }
             """);
-        emitted.ShouldContain("var p = (byte*)System.Runtime.InteropServices.NativeMemory.AllocZeroed(16);");
+        emitted.ShouldContain("byte* __fam_empty = (byte*)System.Runtime.InteropServices.NativeMemory.AllocZeroed(16);");
+        emitted.ShouldContain("var p = __fam_empty;");
         emitted.ShouldContain("*(keys*)p = new keys { size = 2, kind = 101 };");
+        emitted.ShouldContain("__fam_empty_filled = __fam_empty_init();");
         emitted.ShouldContain("var tail = (sbyte*)(p + 9);");
         emitted.ShouldContain("tail[1] = (sbyte)(-1);");
         emitted.ShouldContain("public static unsafe ref keys empty => ref *(keys*)__fam_empty;");

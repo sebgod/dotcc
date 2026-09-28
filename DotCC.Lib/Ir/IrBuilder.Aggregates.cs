@@ -735,22 +735,18 @@ internal sealed partial class IrBuilder
     // a static local additionally gets a program-unique mangled name + an alias
     // symbol so the function body's references resolve to that field.
 
-    /// <summary>Register a global-array symbol and its <see cref="GlobalVar"/>. A
-    /// non-null <paramref name="csName"/> marks a static local (mangled field name +
-    /// alias symbol); otherwise it's a file-scope name, <paramref name="tuLocal"/> when it
-    /// has internal linkage.</summary>
-    private void AddGlobalArray(string name, CType arrType, CExpr init, string? csName, bool tuLocal)
+    /// <summary>Declare a global-array symbol, before its initializer is built. A non-null
+    /// <paramref name="csName"/> marks a static local (mangled field name + alias symbol);
+    /// otherwise it's a file-scope name, <paramref name="tuLocal"/> when it has internal
+    /// linkage.</summary>
+    private Symbol DeclareGlobalArray(string name, CType arrType, string? csName, bool tuLocal)
     {
         if (csName is not null)
         {
             var sym = new Symbol { Name = name, Kind = SymKind.Var, Type = arrType, Storage = Storage.Static, IsGlobal = true, IsTuLocal = true, TargetName = csName };
-            Globals.Add(new GlobalVar(sym, init));
             _symbols.DeclareAlias(sym);
+            return sym;
         }
-        else
-        {
-            var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = arrType, Storage = Storage.Static, IsGlobal = true, IsTuLocal = tuLocal });
-            Globals.Add(new GlobalVar(sym, init));
-        }
+        return _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = arrType, Storage = Storage.Static, IsGlobal = true, IsTuLocal = tuLocal });
     }
 }

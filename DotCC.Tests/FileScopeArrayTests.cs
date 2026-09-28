@@ -170,4 +170,32 @@ public sealed class FileScopeArrayTests
         }
         finally { File.Delete(src); }
     }
+
+    [Fact]
+    public void array_whose_elements_take_addresses_is_allocated_before_any_initializer_runs()
+    {
+        // The storage of every array exists before an initializer takes an address in it:
+        // `ring` points into itself, and `first` names `table` before its definition.
+        var src = WriteTemp("""
+            struct node { struct node *next; int v; };
+            static struct node ring[2] = { { &ring[1], 1 }, { &ring[0], 2 } };
+            extern int table[];
+            int *first = table;
+            int table[2] = { 5, 6 };
+            int main(void) { return ring[0].next->v + *first; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            var ring = emitted.IndexOf("node* ring = Libc.GlobalArrayZeroed<node>(2);", System.StringComparison.Ordinal);
+            var table = emitted.IndexOf("int* table = Libc.GlobalArrayFrom<int>(new int[]{ 5, 6 });", System.StringComparison.Ordinal);
+            var fill = emitted.IndexOf("__fill_ring = Libc.GlobalArrayFill<node>(ring, new node[]{ new node { next = &ring[1], v = 1 }", System.StringComparison.Ordinal);
+            var first = emitted.IndexOf("int* first = table;", System.StringComparison.Ordinal);
+            ring.ShouldBeGreaterThanOrEqualTo(0);
+            table.ShouldBeGreaterThan(ring);
+            fill.ShouldBeGreaterThan(table);
+            first.ShouldBeGreaterThan(table);
+        }
+        finally { File.Delete(src); }
+    }
 }
