@@ -546,86 +546,21 @@ productions:
       # is a prototype. Saves 4 productions overall (8 vs 12).
       - { lhs: Fn, rhs: [FnSig, Block], action: funcDef }
       - { lhs: Fn, rhs: [FnSig, ';'],    action: funcProto }
-      # Struct declaration: `struct ID { MemberList } ;`. Disambiguates from
-      # `struct ID *? ID(...)` (function returning a struct) by lookahead on
-      # `{` — when the parser sees `struct ID {`, structDef is the only
-      # production that fits. The visitor side-channels the resulting
-      # source into a struct-decls collection (see CSharpEmitter); the
-      # action's emit value is empty so it doesn't appear inside the user-
-      # function emit, which would violate C#'s top-level-statements-before-
-      # type-declarations rule.
-      - { lhs: Fn, rhs: ['struct', ID, '{', MemberList, '}', ';'], action: structDef }
-      # Forward struct declaration: `struct Node ;` (no body). Required for
-      # self-referential types declared across translation-unit boundaries
-      # and for circular references between sibling types. Emits nothing
-      # in C# (types hoist regardless of declaration order).
-      - { lhs: Fn, rhs: ['struct', ID, ';'], action: structFwd }
-      # Enum declaration: `enum Name { A, B = 5, C } ;`. Lowers to a series
-      # of top-level `const int NAME = VAL;` so users can reference the
-      # enumerators by their bare name (matching C's int-constant
-      # semantics). The visitor auto-numbers items that have no explicit
-      # value: each unnumbered item is `previous + 1`, starting at 0.
-      - { lhs: Fn, rhs: ['enum', ID, '{', EnumList, '}', ';'], action: enumDef }
-      # C23 enum with an explicit fixed underlying type: `enum Name : Type { … } ;`.
-      # The Type is an integer type-specifier; it lowers to a real C# enum whose
-      # base is the mapped integral type (`unsigned char` → `byte`, `int` → `int`,
-      # …). After `enum ID`, a `:` is unambiguous — Type is never followed by `:`.
-      - { lhs: Fn, rhs: ['enum', ID, ':', Type, '{', EnumList, '}', ';'], action: enumDefTyped }
-      # Union declaration: `union Name { Type f1; Type f2; … } ;`. Reuses
-      # the struct MemberList. Lowers to a C# struct with
-      # [StructLayout(LayoutKind.Explicit)] and [FieldOffset(0)] on every
-      # member — matches C's overlapping-storage semantics.
-      - { lhs: Fn, rhs: ['union', ID, '{', MemberList, '}', ';'], action: unionDef }
-      # `typedef Type ID ;` — simple alias. Covers `typedef int Color;`,
-      # `typedef int* IntPtr;`, and `typedef struct Foo Foo;` (the last one
-      # because Type reduces from `struct ID`). The rewriter records the
-      # trailing ID as a typedef-name so subsequent uses lex as TYPE_NAME.
-      # The visitor emits a C# `using` alias when the source type lowers to
-      # a single C# identifier (e.g. struct tag), otherwise emits nothing —
-      # C# already infers usage from the underlying type and the lexer hack
-      # has done its job at parse time.
-      - { lhs: Fn, rhs: ['typedef', Type, ID, ';'], action: typedefAlias }
-      # `typedef T Name[N];` — a typedef of an ARRAY type (C89). The alias
-      # denotes `T[N]`: a variable of the alias type declares an array, a
-      # struct member becomes a fixed buffer, a parameter decays to `T*`, and
-      # `sizeof(Alias)` is `N*sizeof(T)` — all via registering the alias as
-      # CType.Array (the typed-IR sites already key on the resolved type).
-      # ArrDims (not a single `[E]`) so multi-dim aliases compose like array
-      # declarations. chibi-scheme: `typedef char sexp_abi_identifier_t[8];`.
-      # Conflict-free with typedefAlias: `[` vs `;` after the ID.
-      - { lhs: Fn, rhs: ['typedef', Type, ID, ArrDims, ';'], action: typedefArr }
-      # `typedef struct ID { MemberList } ID ;` — struct definition + alias
-      # in one go (the common C idiom). The trailing ID may differ from the
-      # tag — the visitor emits the C# struct under the alias name (since C#
-      # has no separate tag namespace) plus an empty alias for the tag form
-      # when they differ.
-      - { lhs: Fn, rhs: ['typedef', 'struct', ID, '{', MemberList, '}', ID, ';'], action: typedefStruct }
-      # `typedef struct { MemberList } ID ;` — ANONYMOUS (tagless) struct + alias,
-      # the most common typedef-struct idiom in real C. Conflict-free with the
-      # tagged form above: after `typedef struct`, an ID lookahead → tagged, a `{`
-      # lookahead → tagless. Same emit as typedefStruct, minus the tag binding.
-      - { lhs: Fn, rhs: ['typedef', 'struct', '{', MemberList, '}', ID, ';'], action: typedefStructAnon }
-      # `typedef union ID { MemberList } ID ;` and `typedef union { MemberList } ID ;`
-      # — the union counterparts of the two struct forms above (Lua's core value
-      # representation: `typedef union Value { … } Value;` in lobject.h). Same
-      # tagged-vs-anonymous `ID` / `{` lookahead split. The emitted C# is a
-      # [StructLayout(Explicit)] + [FieldOffset(0)] struct (overlapping storage =
-      # C union), exactly like a plain `union ID { … };` def (unionDef).
-      - { lhs: Fn, rhs: ['typedef', 'union', ID, '{', MemberList, '}', ID, ';'], action: typedefUnion }
-      - { lhs: Fn, rhs: ['typedef', 'union', '{', MemberList, '}', ID, ';'], action: typedefUnionAnon }
-      # `typedef enum Tag { EnumList } Alias ;` and `typedef enum { EnumList }
-      # Alias ;` — the enum counterparts (Lua's `typedef enum { TM_INDEX, … }
-      # TMS;` in ltm.h). Same tagged-vs-anonymous `ID` / `{` lookahead split as
-      # the struct/union forms. Lowers to a real C# `enum Alias : int { … }`.
-      - { lhs: Fn, rhs: ['typedef', 'enum', ID, '{', EnumList, '}', ID, ';'], action: typedefEnum }
-      - { lhs: Fn, rhs: ['typedef', 'enum', '{', EnumList, '}', ID, ';'], action: typedefEnumAnon }
-      # Function-pointer typedef: `typedef Ret (*Name)(args);`. Lowers to
-      # C# `using unsafe Name = delegate*<args..., Ret>;`. The standalone
-      # form `int (*fn)(int);` is famously hard to LALR-parse due to the
-      # embedded name — typedef'd form is the idiomatic use case anyway,
-      # and once aliased, `Name fn;` works through the TypeNameRewriter.
-      - { lhs: Fn, rhs: ['typedef', Type, '(', '*', ID, ')', '(', ParamList, ')', ';'], action: typedefFnPtr }
-      - { lhs: Fn, rhs: ['typedef', Type, '(', '*', ID, ')', '(', ')', ';'], action: typedefFnPtrNoArgs }
+      # A declaration with no declarators (C11 6.7p2) declares what its type
+      # specifier does: a tag (`struct Node { … };`, `union U { … };`, `enum E : T
+      # { … };`), a forward-declared tag (`struct Node;`), or enumeration constants
+      # (an untagged `enum { A, B };`). The tag definitions are Type forms (see the
+      # tag-definition group before Type), so a definition also combines with
+      # storage classes, qualifiers and declarators: `static const struct X { … }
+      # t[] = { … };`, `enum { A, B } mode;`.
+      - { lhs: Fn, rhs: [Type, ';'], action: tagDecl }
+      # `typedef` is a storage class over an ordinary declarator list (C11 6.7.1):
+      # each declarator names an alias of its full type, so every declarator form
+      # works (`typedef int Color, *ColorPtr, Row[8], (*Cmp)(int, int);`), and a tag
+      # definition in the Type gives `typedef struct Foo { … } Foo;`, `typedef
+      # struct { … } Foo;`, `typedef enum { … } Mode;`. The TypeNameRewriter records
+      # each declarator's name as a typedef name, so later uses lex as TYPE_NAME.
+      - { lhs: Fn, rhs: ['typedef', Type, DeclItemList, ';'], action: typedefDecl }
       # The parameter tail of a raw (un-typedef'd) function-pointer declarator,
       # shared by the file-scope, array, static-local and array-member forms
       # below. `(void)` arrives as a one-Param ParamList, as everywhere else.
@@ -733,6 +668,26 @@ productions:
       - { lhs: Param, rhs: [Type, ID, FnPtrTail],          action: paramFnType }
       - { lhs: Param, rhs: [Type, '(', ID, ')', FnPtrTail], action: paramParenFnType }
 
+  # Tag definitions are type specifiers (C11 6.7.2.1, 6.7.2.2): a struct, union
+  # or enum body appears wherever a type can, so it combines with storage classes,
+  # qualifiers and declarators (`static const struct X { … } t[] = { … };`,
+  # `typedef struct { … } Foo;`, a member `struct { … } name;`). After the keyword
+  # and optional tag, `{` selects the body (a Type is never followed by `{`), and
+  # after `enum ID` a `:` the C23 fixed underlying type. This group sits BEFORE
+  # the Type group on purpose: LALR.CC settles a conflict between groups by group
+  # order, and `enum ID :` must shift into the typed definition rather than reduce
+  # `enum ID` for an unnamed bit-field (`enum E : 3;` is not supported). The binder
+  # defines each occurrence's type once.
+  - derivation: none
+    rules:
+      - { lhs: Type, rhs: ['struct', ID, '{', MemberList, '}'],        action: typeStructDef }
+      - { lhs: Type, rhs: ['struct', '{', MemberList, '}'],            action: typeStructAnonDef }
+      - { lhs: Type, rhs: ['union', ID, '{', MemberList, '}'],         action: typeUnionDef }
+      - { lhs: Type, rhs: ['union', '{', MemberList, '}'],             action: typeUnionAnonDef }
+      - { lhs: Type, rhs: ['enum', ID, '{', EnumList, '}'],            action: typeEnumDef }
+      - { lhs: Type, rhs: ['enum', '{', EnumList, '}'],                action: typeEnumAnonDef }
+      - { lhs: Type, rhs: ['enum', ID, ':', Type, '{', EnumList, '}'], action: typeEnumDefTyped }
+
   # Type — the "declarator type" non-terminal. Most C type forms reduce to
   # this via TypeSpecList (the C-standard declaration-specifier sequence:
   # any order, any combination of `signed/unsigned`, `short/long/long-long`,
@@ -762,14 +717,6 @@ productions:
       # casts, sizeof. The visitor emits just `ID` since C# doesn't require
       # the `struct` keyword in usage position (only at declaration).
       - { lhs: Type, rhs: ['struct', ID], action: typeStruct }
-      # Anonymous struct type at declaration scope — `struct { … } x;` /
-      # `static struct { … } tab[] = {…}` (Lua's lparser priority table). Unlike
-      # the named-nested-MEMBER forms this is a TYPE: synthesize a name, emit the
-      # struct decl, record its fields, and return the synth name so the enclosing
-      # declaration (array / init / …) composes via the ordinary Type productions.
-      # Keyed on `struct {` (no tag), disjoint from `struct ID` (typeStruct) and
-      # `struct ID { … } ;` (structDef).
-      - { lhs: Type, rhs: ['struct', '{', MemberMark, MemberList, '}'], action: typeAnonStruct }
       # `TYPE_NAME` — synthetic terminal injected by TypeNameRewriter for
       # any ID that's been seen on the LHS of a previous `typedef`. The
       # visitor emits the type-name string verbatim (it's already the
@@ -833,16 +780,6 @@ productions:
       # `union ID` as a type reference — emits just the ID (the generated
       # union-struct decl shares the same name, like `struct ID`).
       - { lhs: Type, rhs: ['union', ID], action: typeUnion }
-      # Anonymous union type at declaration scope — `union { … } x;` /
-      # `static const union { … } v = {…}` (Lua lstrlib's native-endianness probe
-      # `static const union { int dummy; char little; } nativeendian = {1};`). The
-      # union counterpart of typeAnonStruct: synthesize a name, emit the
-      # explicit-layout (overlapping) union decl, record its fields, and return the
-      # synth name as the Type so the enclosing declaration composes via the ordinary
-      # Type productions (incl. the brace aggregate init, which targets the FIRST
-      # union member). Keyed on `union {` (no tag) → disjoint from `union ID`
-      # (typeUnion) and the anon/named-nested-union MEMBER forms (different context).
-      - { lhs: Type, rhs: ['union', '{', MemberMark, MemberList, '}'], action: typeAnonUnion }
       # `typeof(expr)` / `typeof(type)` (C23) — yields a type. The expr form reads
       # the operand's synthesized CType (same layer `sizeof expr` uses); the type
       # form just unwraps. Conflict-free the same way `sizeof` splits: the
@@ -990,22 +927,14 @@ productions:
       # counterpart (a DotCcGlobals field, a pinned array for an array) under a
       # program-unique mangled name, with uses inside the function resolving to it.
       - { lhs: Stmt, rhs: ['static', Type, DeclItemList, ';'], action: stmtStaticDecl }
-      # Block-scope (local) AGGREGATE TYPE DEFINITIONS — `struct Tag { … };`,
-      # `union Tag { … };`, `enum Tag { … };` (and the C23 fixed-underlying-type
-      # `enum Tag : Type { … };`) used as a STATEMENT. C lets a type be defined
-      # inside a function body (Lua lstrlib's `struct cD { char c; union {
-      # LUAI_MAXALIGN; } u; };`, a local alignment probe). A type has no storage,
-      # so each lowers IDENTICALLY to its file-scope counterpart — the type is
-      # hoisted into the top-level type-decls section (deduped by tag) and the
-      # statement itself emits nothing. The visitors delegate to the same emit as
-      # the `Fn`-level structDef/unionDef/enumDef. Disjoint from `Stmt → Decl ;`
-      # (a `struct ID x;` declaration) on the `{` lookahead after the tag — exactly
-      # the shift/reduce the file-scope pair already resolves. (Combined def+decl
-      # `struct Tag { … } v;` is not supported here, matching file scope.)
-      - { lhs: Stmt, rhs: ['struct', ID, '{', MemberList, '}', ';'],            action: stmtStructDef }
-      - { lhs: Stmt, rhs: ['union', ID, '{', MemberList, '}', ';'],             action: stmtUnionDef }
-      - { lhs: Stmt, rhs: ['enum', ID, '{', EnumList, '}', ';'],                action: stmtEnumDef }
-      - { lhs: Stmt, rhs: ['enum', ID, ':', Type, '{', EnumList, '}', ';'],     action: stmtEnumDefTyped }
+      # Block-scope declarations with no declarators: a tag defined inside a
+      # function body (Lua lstrlib's `struct cD { char c; union { LUAI_MAXALIGN; }
+      # u; };`) or forward-declared, and block-scope typedefs (CPython's ast_opt.c,
+      # getargs.c, modsupport.c). A type has no storage: dotcc hoists it into the
+      # top-level type section (deduped by tag) and the statement emits nothing; a
+      # block-scope typedef name is visible to the end of its block.
+      - { lhs: Stmt, rhs: [Type, ';'],                          action: stmtTagDecl }
+      - { lhs: Stmt, rhs: ['typedef', Type, DeclItemList, ';'], action: stmtTypedefDecl }
       # Expression statement uses the full `Expr` tier so `a, b;` (comma
       # operator, result discarded) parses; the visitor splits it into
       # sequential statements.
@@ -1050,38 +979,13 @@ productions:
       # wrapper, multi-dim flattened with `s.grid[i][j]` striding; a FAM uses [1]
       # (the `malloc(sizeof(S)+n*sizeof(T))` idiom over-allocates by one element).
       - { lhs: Member, rhs: [Type, DeclItemList, ';'], action: structMemberList }
-      # Nested aggregate members. All four forms carry a MemberMark (epsilon)
-      # right after the `{` to snapshot where the inner fields begin, so a
-      # consumer can isolate them from the parent's. The NAMED-vs-anonymous split
-      # is the trailing `ID` before `;` (a clean shift decision after `}`), and
-      # struct-vs-union by the keyword — no epsilon conflict.
-      #
-      # ANONYMOUS struct (C11) `struct { … };` — fields PROMOTED into the parent's
-      # namespace (`s.x`). Sequential, no overlap, so promotion == inline: emit
-      # the inner lines directly as parent fields (no access rewrite).
-      - { lhs: Member, rhs: ['struct', '{', MemberMark, MemberList, '}', ';'], action: anonStructMember }
-      # ANONYMOUS union (C11) `union { … };` — fields must OVERLAP, so they can't
-      # inline. Lift them into a generated nested [StructLayout(Explicit)] type,
-      # add one synthetic field of it to the parent, and rewrite promoted accesses
-      # (`o.i` → `o.__anonN.i`) at member-access time.
-      - { lhs: Member, rhs: ['union', '{', MemberMark, MemberList, '}', ';'], action: anonUnionMember }
-      # NAMED nested aggregates `struct { … } name;` / `union { … } name;` — NOT
-      # promoted: `name` is a real field of a synthesized nested type, accessed as
-      # `o.name.inner`. The struct nested type is sequential, the union one gets
-      # the explicit-layout treatment. Lua's `union StackValue { TValue val;
-      # struct { …; unsigned short delta; } tbc; }` is the motivating case.
-      - { lhs: Member, rhs: ['struct', '{', MemberMark, MemberList, '}', ID, ';'], action: namedNestedStruct }
-      - { lhs: Member, rhs: ['union', '{', MemberMark, MemberList, '}', ID, ';'], action: namedNestedUnion }
-      # TAGGED named nested aggregates `struct Tag { … } name;` / `union Tag { … }
-      # name;` — define a nested tag type AND a member of it. In C a nested tag
-      # lives at the ENCLOSING (file) scope, so dotcc emits the type under the tag
-      # name (`Tag`) and the member as a field of it. Lua's `union Node { struct
-      # NodeKey { … } u; }` is the motivating case. Conflict-free: after `struct
-      # ID`, a `{` lookahead shifts here (`{` ∉ FOLLOW(Type), so `struct Foo x;`
-      # still reduces `struct Foo` → Type for the plain member).
-      - { lhs: Member, rhs: ['struct', ID, '{', MemberMark, MemberList, '}', ID, ';'], action: namedNestedTaggedStruct }
-      - { lhs: Member, rhs: ['union', ID, '{', MemberMark, MemberList, '}', ID, ';'], action: namedNestedTaggedUnion }
-      - { lhs: MemberMark, rhs: [], action: memberMark }
+      # A member declaration with no declarators: a C11 anonymous struct or union
+      # (`union { … };`, its members promoted into the parent's namespace, `s.x`), or
+      # a nested tag definition (`struct Tag { … };`, which in C declares the tag at
+      # file scope). A NAMED nested aggregate (`struct { … } name;`, `union Tag { … }
+      # name;`, Lua's `union Node { struct NodeKey { … } u; }`) is the plain
+      # `Type DeclItemList ;` member with a tag-definition Type.
+      - { lhs: Member, rhs: [Type, ';'], action: memberTagDecl }
 
   # EnumList / EnumItem — enumerator body for `enum Name { … }`.
   - derivation: leftmost
