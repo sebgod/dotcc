@@ -67,7 +67,8 @@ public sealed class ZigPrintPathTests
                 return a.vtable.drain(&a, 12);
             }
             """, ("Writer.zig", Writer));
-        cs.ShouldContain("public static unsafe Writer__VTable Writer__anon0 = new Writer__VTable { drain = &Writer__fixedDrain, flush = &Writer__noFlush };");
+        cs.ShouldContain("public static unsafe Writer__VTable Writer__anon0;");
+        cs.ShouldContain("__o->drain = &Writer__fixedDrain;\n        __o->flush = &Writer__noFlush;\n");
         cs.ShouldContain("Unsafe.AsPointer(ref Writer__anon0)");
     }
 

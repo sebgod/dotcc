@@ -3395,7 +3395,7 @@ public sealed class ZigFrontendTests
             "const Point = struct { x: u8, y: u8 };\n" +
             "const origin: Point = .{ .x = 6, .y = 7 };\n" +
             "pub fn main() u8 { return origin.x + origin.y; }\n");
-        cs.ShouldContain("new Point { x = 6, y = 7 }");
+        cs.ShouldContain("__o->x = 6;\n        __o->y = 7;\n");
     }
 
     // ---- Milestone L (part 1): switch as an expression ----

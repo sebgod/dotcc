@@ -94,14 +94,15 @@ public sealed class ZigWriterShapesTests
     public void Container_functions_named_as_values_fill_a_vtable_const()
     {
         var cs = EmitZig(Program);
-        cs.ShouldContain("new Sink__VTable { put = &Sink_put, reset = &Sink_resetInner }");
+        cs.ShouldContain("__o->put = &Sink_put;\n        __o->reset = &Sink_resetInner;\n");
     }
 
     [Fact]
     public void The_address_of_a_container_const_is_static_storage()
     {
         var cs = EmitZig(Program);
-        cs.ShouldContain("public static unsafe Sink__VTable Sink__vtable__static = new Sink__VTable { put = &Sink_put, reset = &Sink_resetInner };");
+        cs.ShouldContain("public static unsafe Sink__VTable Sink__vtable__static;");
+        cs.ShouldContain("__o->put = &Sink_put;\n        __o->reset = &Sink_resetInner;\n");
         cs.ShouldContain("vtable = (Sink__VTable*)System.Runtime.CompilerServices.Unsafe.AsPointer(ref Sink__vtable__static)");
         cs.ShouldNotContain("Sink__VTable __cl");
     }

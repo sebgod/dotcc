@@ -221,6 +221,18 @@ internal sealed class CSharpBackend
                 }
                 return;
             }
+            // A struct or union object is built in place: its members are stored through a
+            // pointer to its storage, in a helper that runs at the object's place in the
+            // initialization order. An object initializer builds the whole value in a
+            // temporary, one per nested aggregate, and the JIT gives every temporary of the
+            // static constructor its own stack slot: CPython's `_PyRuntime` (an 838 KB
+            // initializer, twice) overflowed a 64 MB stack.
+            if (g.Init is StructInit si && !g.Sym.IsThreadLocal && !nint)
+            {
+                globals.Append($"    public static unsafe {fieldType} {g.Sym.TargetName};\n");
+                cg.InPlaceStructInit(g.Sym.TargetName, fieldType, si, globals);
+                return;
+            }
             if (g.Sym.IsThreadLocal) { globals.Append("    [ThreadStatic]\n"); }
             var init = initText is null ? "" : " = " + initText;
             globals.Append($"    public static unsafe {fieldType} {g.Sym.TargetName}{init};\n");
@@ -3102,6 +3114,62 @@ internal sealed class CSharpBackend
         globals.Append("        return true;\n    }\n");
         globals.Append($"    internal static readonly bool {mem}_filled = {mem}_init();\n");
     }
+
+    /// <summary>A static struct or union object's initializer as stores into its storage: a
+    /// helper that stores each member through a pointer to the object, called from a field in
+    /// <paramref name="globals"/> so it runs at the object's place in the initialization order.
+    /// The object's storage is zero before any initializer runs (C11 6.7.9p10), so a zero
+    /// member stores nothing.</summary>
+    private void InPlaceStructInit(string name, string fieldType, StructInit si, StringBuilder globals)
+    {
+        globals.Append($"    private static unsafe bool {name}__init()\n    {{\n");
+        globals.Append($"        var __o = ({fieldType}*)System.Runtime.CompilerServices.Unsafe.AsPointer(ref {name});\n");
+        StoreMembers(globals, "__o->", si);
+        globals.Append("        return true;\n    }\n");
+        globals.Append($"    internal static readonly bool {name}__filled = {name}__init();\n");
+    }
+
+    /// <summary>The stores <see cref="InPlaceStructInit"/> makes for one aggregate: each member of
+    /// <paramref name="si"/> is stored at <paramref name="prefix"/> plus its name, a nested
+    /// struct or union member member by member, an array member element by element (a
+    /// <c>fixed</c> buffer indexed directly, an <c>[InlineArray]</c> through its element
+    /// pointer, as <see cref="ArrayMemberInitHelper"/> does).</summary>
+    private void StoreMembers(StringBuilder body, string prefix, StructInit si)
+    {
+        foreach (var m in si.Members)
+        {
+            if (m.FieldType.Unqualified is CType.VoidType) { continue; }   // a `void` field has no storage
+            var at = prefix + DotCC.EmitHelpers.Id(m.Name);
+            switch (m.Value)
+            {
+                case StructInit nested when m.FieldType.Unqualified is CType.Named:
+                    StoreMembers(body, at + ".", nested);
+                    break;
+                case ArrayValue av:
+                    if (FlatCount(m.FieldType) == 0)
+                    {
+                        if (av.Elems.Count > 0) { throw new IrUnsupportedException("initialized flexible array member outside a static object"); }
+                        break;
+                    }
+                    var elemCs = Cs(av.Element);
+                    var slot = IsFixedBufferType(elemCs) ? at : $"(({elemCs}*)&{at})";
+                    for (var i = 0; i < av.Elems.Count; i++)
+                    {
+                        var e = av.Elems[i];
+                        if (e is StructInit esi) { StoreMembers(body, $"{slot}[{i}].", esi); }
+                        else if (!IsZeroStore(e)) { body.Append($"        {slot}[{i}] = {StaticInit(e, av.Element)};\n"); }
+                    }
+                    break;
+                default:
+                    if (!IsZeroStore(m.Value)) { body.Append($"        {at} = {StaticInit(m.Value, m.FieldType)};\n"); }
+                    break;
+            }
+        }
+    }
+
+    /// <summary>Whether a static member's value is an integer zero or a null pointer, which the
+    /// object's zeroed storage already holds.</summary>
+    private static bool IsZeroStore(CExpr e) => e is LitInt { Value: 0 } || IsNullPtr(e);
 
     /// <summary>One element of an array member's init span, coerced to the element
     /// type, or carried as <c>nint</c> for a pointer / function-pointer element.</summary>
