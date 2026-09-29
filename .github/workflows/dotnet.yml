@@ -418,6 +418,16 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
+      # The zig archive is cached per version and checksum, so a run downloads it from
+      # ziglang.org only once: the same download took 42 s one day and 9 to 20 minutes
+      # the next. The checksum is still verified on every run, cached copy or not.
+      - name: Restore zig archive
+        id: zig-dist
+        uses: actions/cache/restore@v6
+        with:
+          path: /tmp/zig-dist
+          key: zig-dist-${{ runner.os }}-${{ runner.arch }}-${{ env.ZIG_VERSION }}-${{ env.ZIG_SHA256 }}
+
       - name: Install zig ${{ env.ZIG_VERSION }} (pinned + checksum-verified)
         run: |
           set -euo pipefail
@@ -425,12 +435,23 @@ jobs:
           # index). A tagged release lives under /download/<ver>/, not /builds/.
           asset="zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
           url="https://ziglang.org/download/${ZIG_VERSION}/${asset}"
-          curl -fsSL "$url" -o "/tmp/${asset}"
-          echo "${ZIG_SHA256}  /tmp/${asset}" | sha256sum -c -
+          archive="/tmp/zig-dist/${asset}"
+          if [ ! -f "$archive" ]; then
+            mkdir -p /tmp/zig-dist
+            curl -fsSL "$url" -o "$archive"
+          fi
+          echo "${ZIG_SHA256}  ${archive}" | sha256sum -c -
           mkdir -p /tmp/zig
           # --strip-components=1 flattens the top-level zig-*/ dir → /tmp/zig/zig.
-          tar -xJf "/tmp/${asset}" -C /tmp/zig --strip-components=1
+          tar -xJf "$archive" -C /tmp/zig --strip-components=1
           echo "/tmp/zig" >> "$GITHUB_PATH"
+
+      - name: Save zig archive
+        if: steps.zig-dist.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: /tmp/zig-dist
+          key: ${{ steps.zig-dist.outputs.cache-primary-key }}
 
       - name: Verify zig present + exact version (fail rather than let the oracle skip)
         run: |
@@ -501,19 +522,38 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
+      # The zig archive cached per version and checksum, as on the Linux leg; the four
+      # shards share one entry. The checksum is still verified on every run.
+      - name: Restore zig archive
+        id: zig-dist
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}\zig-dist
+          key: zig-dist-${{ runner.os }}-${{ runner.arch }}-${{ env.ZIG_VERSION }}-${{ env.ZIG_SHA256 }}
+
       - name: Install zig ${{ env.ZIG_VERSION }} (pinned + checksum-verified)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $asset = "zig-x86_64-windows-$env:ZIG_VERSION.zip"
           $url = "https://ziglang.org/download/$env:ZIG_VERSION/$asset"
-          $zip = "$env:RUNNER_TEMP\zig.zip"
-          Invoke-WebRequest -Uri $url -OutFile $zip
+          $zip = "$env:RUNNER_TEMP\zig-dist\$asset"
+          if (-not (Test-Path $zip)) {
+            New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\zig-dist" | Out-Null
+            Invoke-WebRequest -Uri $url -OutFile $zip
+          }
           $got = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
           if ($got -ne $env:ZIG_SHA256) { throw "sha256 mismatch: got $got, expected $env:ZIG_SHA256" }
           Expand-Archive -Path $zip -DestinationPath "$env:RUNNER_TEMP\zig" -Force
           # the zip contains a top-level zig-x86_64-windows-<ver>\ directory
           Add-Content -Path $env:GITHUB_PATH -Value "$env:RUNNER_TEMP\zig\zig-x86_64-windows-$env:ZIG_VERSION"
+
+      - name: Save zig archive
+        if: steps.zig-dist.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}\zig-dist
+          key: ${{ steps.zig-dist.outputs.cache-primary-key }}
 
       - name: Verify zig present + exact version (fail rather than let the oracle skip)
         shell: pwsh
