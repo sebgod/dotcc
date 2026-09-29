@@ -39,6 +39,60 @@ public sealed unsafe class LibcStdioCharTests
     }
 
     [Fact]
+    public void utf8_bytes_to_stdout_print_as_their_characters()
+    {
+        // The console is a TextWriter: each byte path must assemble UTF-8, including a
+        // sequence written a byte at a time or split across calls (CPython's write(1, …)).
+        var prev = Console.Out;
+        var sw = new StringWriter();
+        Console.SetOut(sw);
+        try
+        {
+            byte[] snake = [0xC3, 0xA9, 0xF0, 0x9F, 0x90, 0x8D];   // "é🐍"
+            foreach (var b in snake) { putchar(b); }
+            fixed (byte* p = snake)
+            {
+                fwrite(p, 1, 1, stdout);                 // the first byte of é alone,
+                fwrite(p + 1, 1, snake.Length - 1, stdout); // then the rest
+                write(1, p, 3);                          // é and the first byte of 🐍,
+                write(1, p + 3, 3);                      // then its last three
+            }
+            byte[] euro = [0xE2, 0x82, 0, 0xAC, 0];      // "€" split over two fputs
+            fixed (byte* e = euro) { fputs(e, stdout); fputs(e + 3, stdout); }
+        }
+        finally { Console.SetOut(prev); }
+        sw.ToString().ShouldBe("é🐍é🐍é🐍€");
+    }
+
+    [Fact]
+    public void invalid_utf8_to_stderr_prints_a_replacement_character()
+    {
+        var prev = Console.Error;
+        var sw = new StringWriter();
+        Console.SetError(sw);
+        try
+        {
+            fputc(0xFF, stderr);   // never valid in UTF-8
+            fputc('A', stderr);
+        }
+        finally { Console.SetError(prev); }
+        sw.ToString().ShouldBe("�A");
+    }
+
+    [Fact]
+    public void utf8_stdin_hands_out_each_character_as_its_bytes()
+    {
+        var prev = Console.In;
+        Console.SetIn(new StringReader("é🐍x"));
+        try
+        {
+            int[] got = [getchar(), getchar(), getchar(), getchar(), getchar(), getchar(), getchar(), getchar()];
+            got.ShouldBe([0xC3, 0xA9, 0xF0, 0x9F, 0x90, 0x8D, 'x', -1]);
+        }
+        finally { Console.SetIn(prev); }
+    }
+
+    [Fact]
     public void getchar_reads_stdin_then_eof()
     {
         var prev = Console.In;

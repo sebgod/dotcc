@@ -1,0 +1,3 @@
+The fixture writes through POSIX write(1, ...) from <unistd.h>, the path CPython
+uses for its stdout, and MSVC has no <unistd.h>. gcc runs the program natively and
+its raw UTF-8 bytes are the reference, so the gcc oracle validates this fixture.

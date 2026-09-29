@@ -67,6 +67,11 @@ public static unsafe partial class Libc
         public int PendingWide = -1;    // one wchar_t pending for the wide reader
                                         // (a stashed low surrogate, or an ungetwc
                                         // pushback); -1 = none. See ReadWideFrom.
+        public System.Text.Decoder? ConsoleOut; // console output kinds: assembles the
+                                        // UTF-8 bytes written, a sequence split
+                                        // across writes included. See ConsoleWrite.
+        public byte[]? ConsoleIn;       // console input: the UTF-8 bytes of the last
+        public int ConsoleInPos, ConsoleInLen; // char read, handed out one at a time.
     }
 
     // Slots 0/1/2 are the std streams. fopen() appends (or reuses a freed slot).
@@ -162,8 +167,53 @@ public static unsafe partial class Libc
             st.WriteByte(b);
             return true;
         }
-        (s.Kind == FileSlot.K.Err ? Console.Error : Console.Out).Write((char)b);
+        ConsoleWrite(s, new ReadOnlySpan<byte>(in b));
         return true;
+    }
+
+    /// <summary>
+    /// Write bytes to a console stream (<c>stdout</c> / <c>stderr</c>) as the UTF-8
+    /// text they encode. The console is a <see cref="TextWriter"/>, so bytes must
+    /// become chars: a per-stream <see cref="System.Text.Decoder"/> assembles each
+    /// multi-byte sequence, including one written a byte at a time (<c>putchar</c>,
+    /// <c>fwrite</c>'s byte loop) or split across two writes (CPython's buffered
+    /// <c>write(1, …)</c>). A byte that is not valid UTF-8 becomes U+FFFD.
+    /// </summary>
+    private static void ConsoleWrite(FileSlot s, ReadOnlySpan<byte> bytes)
+    {
+        var decoder = s.ConsoleOut ??= System.Text.Encoding.UTF8.GetDecoder();
+        var chars = System.Buffers.ArrayPool<char>.Shared.Rent(bytes.Length + 4);
+        try
+        {
+            int n = decoder.GetChars(bytes, chars, flush: false);
+            if (n > 0) { (s.Kind == FileSlot.K.Err ? Console.Error : Console.Out).Write(chars, 0, n); }
+        }
+        finally { System.Buffers.ArrayPool<char>.Shared.Return(chars); }
+    }
+
+    /// <summary>
+    /// The next byte of console input (<c>stdin</c>). <see cref="Console.In"/> yields
+    /// chars; each one (a surrogate pair as one character) is encoded back to UTF-8
+    /// and handed out a byte at a time, so a C reader sees the bytes the terminal or
+    /// the redirected file supplied rather than a char truncated to 8 bits.
+    /// </summary>
+    private static int ConsoleReadByte(FileSlot s)
+    {
+        if (s.ConsoleIn is { } pending && s.ConsoleInPos < s.ConsoleInLen) { return pending[s.ConsoleInPos++]; }
+        int c = Console.In.Read();
+        if (c < 0x80) { return c; }   // EOF (-1) or ASCII
+        Span<char> ch = stackalloc char[2];
+        ch[0] = (char)c;
+        int len = 1;
+        if (char.IsHighSurrogate(ch[0]) && Console.In.Peek() is var lo and >= 0 && char.IsLowSurrogate((char)lo))
+        {
+            ch[1] = (char)Console.In.Read();
+            len = 2;
+        }
+        var buf = s.ConsoleIn ??= new byte[4];
+        s.ConsoleInLen = System.Text.Encoding.UTF8.GetBytes(ch[..len], buf);
+        s.ConsoleInPos = 1;
+        return buf[0];
     }
 
     internal static int ReadByteFrom(FILE* f) => Slot(f) is { } s ? ReadByteSlot(s) : -1;
@@ -186,7 +236,7 @@ public static unsafe partial class Libc
         }
         else
         {
-            r = Console.In.Read();
+            r = ConsoleReadByte(s);
         }
         if (r < 0) { s.Eof = true; return -1; }
         return r & 0xFF;
@@ -404,6 +454,17 @@ public static unsafe partial class Libc
         // file/console kinds whose backing has no bulk write).
         if (s.Kind == FileSlot.K.Socket) { return SocketSendFrom(s, buf, count, 0); }
         var src = (byte*)buf;
+        // Console fd: the whole buffer through the stream's UTF-8 decoder at once.
+        if (s.Kind is FileSlot.K.Out or FileSlot.K.Err)
+        {
+            for (ulong done = 0; done < count;)
+            {
+                int chunk = (int)Math.Min(count - done, 1UL << 20);
+                ConsoleWrite(s, new ReadOnlySpan<byte>(src + done, chunk));
+                done += (ulong)chunk;
+            }
+            return (long)count;
+        }
         long written = 0;
         for (; (ulong)written < count; written++)
         {
