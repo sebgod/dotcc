@@ -23,9 +23,6 @@
 #define NULL ((void *)0)
 #endif
 
-/* The six C-standard locale categories (7.4). Values are implementation-defined
-   distinct ints (glibc's here); dotcc's setlocale ignores the category since
-   there is only one locale. */
 struct lconv {
     char *decimal_point;
     char *thousands_sep;
@@ -53,6 +50,9 @@ struct lconv {
     char int_n_sign_posn;
 };
 
+/* The six C-standard locale categories (7.4). Values are implementation-defined
+   distinct ints (glibc's here); dotcc's setlocale ignores the category since
+   there is only one locale. */
 #define LC_ALL      6
 #define LC_COLLATE  3
 #define LC_CTYPE    0

@@ -37,7 +37,7 @@ struct tm {
     int tm_yday;
     int tm_isdst;
     long tm_gmtoff;
-    char *tm_zone;
+    const char *tm_zone;
 };
 
 #define CLOCKS_PER_SEC 1000
