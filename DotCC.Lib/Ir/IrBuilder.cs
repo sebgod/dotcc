@@ -1042,8 +1042,11 @@ internal sealed partial class IrBuilder
     /// <summary>Define a struct/union. <paramref name="tag"/> is the C tag (null
     /// for an anonymous <c>typedef struct {…} Alias</c>); <paramref name="alias"/>
     /// the typedef name if any. Emits a C# struct under a canonical name, records
-    /// its fields for member-type resolution, and maps the typedef alias to it.</summary>
-    private void BuildStructDef(string? tag, Item memberList, string? alias, bool isUnion)
+    /// its fields for member-type resolution, and maps the typedef alias to it.
+    /// A body a synthetic header gives a runtime-owned aggregate (<paramref name="synthetic"/>, and
+    /// <see cref="RuntimeTypeNames.IsRuntimeOwnedAggregate"/>) is registered the same way, marked
+    /// <see cref="StructTypeDef.IsRuntimeOwned"/> so the backend emits no second type for it.</summary>
+    private void BuildStructDef(string? tag, Item memberList, string? alias, bool isUnion, bool synthetic)
     {
         var canonical = tag ?? alias ?? throw new IrUnsupportedException("struct with neither tag nor typedef name");
         RejectReservedTypeName(canonical, isUnion ? "union" : "struct");
@@ -1052,7 +1055,8 @@ internal sealed partial class IrBuilder
         {
             _structFields[canonical] = fields;
             _structIsUnion[canonical] = isUnion;
-            Types.Add(new StructTypeDef(canonical, fields, isUnion));
+            var runtimeOwned = synthetic && RuntimeTypeNames.IsRuntimeOwnedAggregate(canonical);
+            Types.Add(new StructTypeDef(canonical, fields, isUnion, IsRuntimeOwned: runtimeOwned));
         }
         // `struct Tag` and the typedef alias both resolve to the canonical type.
         if (alias is not null) { _typedefs[alias] = new CType.Named(canonical); }

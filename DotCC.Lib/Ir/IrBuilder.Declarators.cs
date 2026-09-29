@@ -419,15 +419,16 @@ internal sealed partial class IrBuilder
         // Taken before the members resolve, tagged or not: the hint names the
         // declaration's own type, never an anonymous aggregate nested inside it.
         var hint = TakeAnonTagHint();
+        var synthetic = typeItem.Position.Line >= SrcPos.SyntheticLineBase;
         CType type;
         if (tag is not null)
         {
-            BuildStructDef(tag, members, null, isUnion);
+            BuildStructDef(tag, members, null, isUnion, synthetic);
             type = new CType.Named(tag);
         }
         else if (hint is { } alias)
         {
-            BuildStructDef(null, members, alias, isUnion);
+            BuildStructDef(null, members, alias, isUnion, synthetic);
             type = new CType.Named(alias);
         }
         else

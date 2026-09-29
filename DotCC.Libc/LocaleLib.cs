@@ -23,9 +23,10 @@ namespace DotCC.Libc;
 /// <b><c>struct lconv</c> lowering.</b> C code spells the type <c>struct lconv</c>;
 /// dotcc parses it via the usual <c>struct ID</c> rule and emits the bare tag
 /// <c>lconv</c>, which binds to <see cref="lconv"/> here through
-/// <c>using static Libc;</c> — so the body lives ONLY in the runtime (same
-/// pattern as <c>&lt;time.h&gt;</c>'s <c>struct tm</c>); <c>&lt;locale.h&gt;</c>
-/// must NOT redefine it. C <c>char *</c> members lower to <c>byte*</c> (dotcc's
+/// <c>using static Libc;</c>. <c>&lt;locale.h&gt;</c> declares the same body for
+/// the IR only (runtime-owned, same pattern as <c>&lt;time.h&gt;</c>'s
+/// <c>struct tm</c>): the backend emits no second <c>lconv</c>, and
+/// <c>RuntimeOwnedAggregateTests</c> keeps the two in sync. C <c>char *</c> members lower to <c>byte*</c> (dotcc's
 /// <c>char</c> is <c>byte</c>), so <c>localeconv()-&gt;decimal_point[0]</c> reads
 /// a byte — the locale-aware decimal point.
 /// </para>

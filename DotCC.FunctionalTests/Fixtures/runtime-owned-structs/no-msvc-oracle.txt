@@ -1,0 +1,1 @@
+LP64: long is 64 bits here (ldiv_t's size, ldiv on 5000000000L); MSVC's long is 32.

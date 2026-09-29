@@ -17,8 +17,11 @@ namespace DotCC.Libc;
 /// </summary>
 /// <remarks>
 /// The <c>div_t</c> / <c>ldiv_t</c> / <c>lldiv_t</c> result structs are
-/// pre-registered as known type names (<c>Compiler.PredefinedTypeNames</c>) so
-/// emitted user code can spell them without a typedef. <c>qsort</c> /
+/// runtime-owned: <c>&lt;stdlib.h&gt;</c> declares the same bodies for the IR
+/// (<c>RuntimeTypeNames.IsRuntimeOwnedAggregate</c>), the backend emits no C#
+/// type for them, and the typedef names resolve here through
+/// <c>using static Libc;</c>. <c>RuntimeOwnedAggregateTests</c> keeps the two in
+/// sync. <c>qsort</c> /
 /// <c>bsearch</c> take a C# function pointer (<c>delegate*</c>) for the
 /// comparator — AOT-clean, no delegate allocation — which dotcc produces by
 /// decaying a bare comparator name to <c>&amp;cmp</c> at the call site.

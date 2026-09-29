@@ -1,0 +1,10 @@
+tm: 0 70 1
+copy: 70 0
+timespec: 1 2
+pad: 8
+div: 3 2
+ldiv: 1666666666 2
+lldiv: 3 4
+imaxdiv: 2 1
+generic: 1
+sizes: 8 16 16

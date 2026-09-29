@@ -7,15 +7,14 @@
    (Environment.TickCount64), so CLOCKS_PER_SEC is 1000 and
    (clock()-start)/(double)CLOCKS_PER_SEC gives elapsed wall-clock seconds.
 
-   `struct tm` is the runtime Libc.tm struct. dotcc parses `struct tm` via
-   the usual `struct ID` rule (typeStruct) and emits the bare tag `tm`, which
-   resolves to Libc.tm through `using static Libc;`. The body is therefore
-   declared ONLY in the runtime, NOT here: a `struct tm { … };` in this header
-   would make the emitter emit a second, top-level `tm` that collides with
-   Libc.tm. (And `tm` must NOT be seeded as a type name — that would break the
-   `struct ID` parse.) The fields, for reference, are the C89 set: tm_sec,
-   tm_min, tm_hour, tm_mday, tm_mon (0-11), tm_year (since 1900), tm_wday
-   (0-6, Sun=0), tm_yday (0-365), tm_isdst. */
+   `struct tm` and `struct timespec` are runtime-owned: the runtime supplies
+   them as Libc.tm / Libc.timespec, and the bare tags resolve there through
+   `using static Libc;`. The bodies below exist so the IR knows every field's
+   type and layout (sizeof, offsetof, initializers); the backend emits no
+   C# struct for a runtime-owned body declared in a synthetic header
+   (RuntimeTypeNames.IsRuntimeOwnedAggregate). They must match the C# types
+   field for field, which RuntimeOwnedAggregateTests checks. (And `tm` must
+   NOT be seeded as a type name — that would break the `struct ID` parse.) */
 
 #ifndef NULL
 #define NULL ((void *)0)
@@ -24,17 +23,36 @@
 typedef long time_t;
 typedef long clock_t;
 
+/* Broken-down calendar time: the C89 fields (tm_mon 0-11, tm_year since
+   1900, tm_wday 0-6 with Sunday 0, tm_yday 0-365) plus the glibc/BSD
+   tm_gmtoff / tm_zone extensions. */
+struct tm {
+    int tm_sec;
+    int tm_min;
+    int tm_hour;
+    int tm_mday;
+    int tm_mon;
+    int tm_year;
+    int tm_wday;
+    int tm_yday;
+    int tm_isdst;
+    long tm_gmtoff;
+    char *tm_zone;
+};
+
 #define CLOCKS_PER_SEC 1000
 
 time_t time(time_t* t);
 clock_t clock(void);
 double difftime(time_t end, time_t beginning);
 
-/* C11 struct timespec + timespec_get (§7.27). Like `struct tm`, the body is
-   the runtime Libc.timespec struct — parsed via the usual `struct ID` rule and
-   surfaced through `using static Libc;` — so it is NOT redeclared here (fields
-   for reference: time_t tv_sec; long tv_nsec;). Also used by <threads.h>'s
-   timed calls, which #include this header. */
+/* C11 struct timespec + timespec_get (§7.27). Runtime-owned like `struct tm`
+   (Libc.timespec). Also used by <threads.h>'s timed calls, which #include
+   this header. */
+struct timespec {
+    time_t tv_sec;
+    long tv_nsec;
+};
 #define TIME_UTC 1
 int timespec_get(struct timespec* ts, int base);
 

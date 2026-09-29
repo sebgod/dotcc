@@ -96,8 +96,9 @@
 #define SCNxPTR "llx"
 
 /* ---- greatest-width integer functions ----
-   imaxdiv_t is pre-registered in dotcc's TypeNameRewriter
-   (Compiler.PredefinedTypeNames) and resolves to Libc.imaxdiv_t. */
+   imaxdiv_t is runtime-owned (Libc.imaxdiv_t); the body is for the IR only
+   and must match it (RuntimeOwnedAggregateTests). */
+typedef struct imaxdiv_t { intmax_t quot; intmax_t rem; } imaxdiv_t;
 intmax_t imaxabs(intmax_t n);
 imaxdiv_t imaxdiv(intmax_t num, intmax_t den);
 intmax_t strtoimax(const char *nptr, char **endptr, int base);

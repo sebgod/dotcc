@@ -68,7 +68,7 @@ internal sealed class CSharpBackend
         var cg = new CSharpBackend { _convGate = convGate, _module = unit };
         // C tag namespace vs ordinary namespace: collect globals whose name an
         // emitted struct/enum type will shadow, so reads qualify (GlobalName).
-        var typeNames = new HashSet<string>(unit.Types.Select(t => t.Name), StringComparer.Ordinal);
+        var typeNames = new HashSet<string>(unit.Types.Where(t => !t.IsRuntimeOwned).Select(t => t.Name), StringComparer.Ordinal);
         typeNames.UnionWith(unit.Enums.Select(e => e.Name));
         cg._typeShadowedGlobals = new HashSet<string>(
             unit.Globals.Select(g => g.Sym.TargetName).Where(typeNames.Contains), StringComparer.Ordinal);
@@ -251,7 +251,9 @@ internal sealed class CSharpBackend
             for (var i = 0; i < unit.Types.Count; i++)
             {
                 var t = unit.Types[i];
+                // A runtime-owned aggregate (`struct tm`) is the runtime's own nested type: no second one.
                 if (structTexts[i] is not null
+                    || t.IsRuntimeOwned
                     || unit.PrunableTypes.Contains(t.Name) && !cg._target.RenderedNamedTypes.Contains(t.Name))
                 {
                     continue;
@@ -3462,7 +3464,7 @@ internal sealed class CSharpBackend
     /// <c>DIR</c> that <c>&lt;dirent.h&gt;</c> declares with a body), rather than the runtime.</summary>
     private bool ProgramDefinesType(string name)
     {
-        _programTypes ??= new HashSet<string>(_module?.Types.Select(t => t.Name) ?? [], StringComparer.Ordinal);
+        _programTypes ??= new HashSet<string>(_module?.Types.Where(t => !t.IsRuntimeOwned).Select(t => t.Name) ?? [], StringComparer.Ordinal);
         return _programTypes.Contains(name);
     }
 

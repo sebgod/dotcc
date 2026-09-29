@@ -11,7 +11,8 @@ namespace DotCC.Libc;
 /// </summary>
 public static unsafe partial class Libc
 {
-    /// <summary><c>imaxdiv_t</c> — quotient/remainder pair for <see cref="imaxdiv"/>.</summary>
+    /// <summary><c>imaxdiv_t</c> — quotient/remainder pair for <see cref="imaxdiv"/>. Runtime-owned:
+    /// <c>&lt;inttypes.h&gt;</c> declares the same body for the IR (<c>RuntimeOwnedAggregateTests</c>).</summary>
     public struct imaxdiv_t { public long quot; public long rem; }
 
     /// <summary><c>imaxabs(n)</c> — absolute value of an <c>intmax_t</c>.</summary>
