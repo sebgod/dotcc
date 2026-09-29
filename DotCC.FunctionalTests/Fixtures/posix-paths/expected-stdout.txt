@@ -1,0 +1,11 @@
+getcwd is a POSIX path: 1
+stat(getcwd()) works: 1
+opendir(getcwd()) works: 1
+tmpnam is a POSIX path: 1
+fopen(tmpnam) works: 1
+access(tmpnam) works: 1
+realpath is a POSIX path: 1
+realpath goes back in: 1
+remove(tmpnam) works: 1
+PATH has no ';': 1
+HOME is unset or a POSIX path: 1

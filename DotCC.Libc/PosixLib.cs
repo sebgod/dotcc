@@ -46,7 +46,7 @@ public static unsafe partial class Libc
     /// (file or directory), filling mode/size/times; -1 (ENOENT) otherwise.</summary>
     public static int stat(byte* path, void* buf)
     {
-        var name = Encoding.UTF8.GetString(path, strlen(path));
+        var name = HostPath(path);
         try
         {
             if (File.Exists(name))

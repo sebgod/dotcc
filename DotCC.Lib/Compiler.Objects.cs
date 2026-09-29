@@ -146,11 +146,13 @@ public static partial class Compiler
     /// linker would: every type once (the objects that include one header agree on it, and a
     /// type defined differently in two objects is an error, since the program has one), each
     /// function and object once (a second definition of a name is gcc's "multiple definition"
-    /// error), then wrap them in the shell + runtime.
+    /// error), then wrap them in the shell + runtime. <paramref name="posixPaths"/> is
+    /// <c>-fposix-paths</c>, as for <see cref="EmitCSharp"/>: a property of the program,
+    /// so it is given when linking.
     /// </summary>
     public static string LinkObjects(
         IReadOnlyList<string> objectPaths, EmitMode emit = EmitMode.File, bool debugHeap = false,
-        ImportOptions? imports = null)
+        ImportOptions? imports = null, bool posixPaths = false)
     {
         var libraryMode = emit == EmitMode.SharedLib;
         var types = new Dictionary<string, (string Text, string From)>(StringComparer.Ordinal);
@@ -315,7 +317,7 @@ public static partial class Compiler
         return BuildShell(mainArity, functions, structDecls.ToString(), "", storageText.ToString() + globalText.ToString(),
                           emit, System.Array.Empty<EmitHelpers.Export>(), debugHeap, importsClass,
                           importsAreStatic: false, mainReturnsVoid: mainReturnsVoid,
-                          mainReturnsErrUnion: mainReturnsErrUnion, mainErrPayloadIsVoid: mainErrPayloadIsVoid, pythonShim: pythonShim);
+                          mainReturnsErrUnion: mainReturnsErrUnion, mainErrPayloadIsVoid: mainErrPayloadIsVoid, pythonShim: pythonShim, posixPaths: posixPaths);
     }
 
 }

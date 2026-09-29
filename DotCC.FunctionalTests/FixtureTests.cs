@@ -30,7 +30,8 @@ public sealed class FixtureTests
             includeDirs: new[] { dir },
             defines: null,
             emit: EmitMode.Csproj,  // csproj-shaped shell — Roslyn doesn't want the #:property header
-            dialect: CDialect.Parse(match.std));
+            dialect: CDialect.Parse(match.std),
+            posixPaths: match.posixPaths);
 
         var stdout = FixtureRunner.CompileAndRun(emitted, args: System.Array.Empty<string>());
 

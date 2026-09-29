@@ -168,7 +168,8 @@ public static partial class Compiler
         bool mainErrPayloadIsVoid = false,
         bool testMode = false,
         IReadOnlyList<(string Name, string FnName)>? tests = null,
-        bool pythonShim = false)
+        bool pythonShim = false,
+        bool posixPaths = false)
     {
         if (emit == EmitMode.SharedLib)
         {
@@ -193,6 +194,14 @@ public static partial class Compiler
         var debugHeapInit = debugHeap
             ? "Libc.EnableDebugHeap(); // -fsanitize=address: checked malloc/free\n            "
             : string.Empty;
+        // -fposix-paths: the POSIX view of Windows paths (GH #254), on before main
+        // so argv and the first getcwd already see /c/... (a no-op off Windows).
+        // Each argv entry goes through Libc.ViewArgument, which converts one that
+        // is an absolute Windows path.
+        var posixPathsInit = posixPaths
+            ? "Libc.EnablePosixPathView(); // -fposix-paths: /c/... paths on Windows\n            "
+            : string.Empty;
+        string Arg(string expr) => posixPaths ? $"Libc.ViewArgument({expr})" : expr;
         // User functions live as STATIC METHODS of `DotCcProgram` (not top-level
         // local functions). A top-level local function can't be addressed (`&fn`),
         // stored in a function-pointer table (Lua's `luaL_Reg`), or referenced from
@@ -255,10 +264,10 @@ public static partial class Compiler
                         return slot;
                     }
                     argv[0] = EncodeUtf8Nul(
-                        System.Environment.ProcessPath ?? System.AppContext.BaseDirectory);
+                        {{Arg("System.Environment.ProcessPath ?? System.AppContext.BaseDirectory")}});
                     for (int i = 0; i < args.Length; i++)
                     {
-                        argv[i + 1] = EncodeUtf8Nul(args[i]);
+                        argv[i + 1] = EncodeUtf8Nul({{Arg("args[i]")}});
                     }
                     argv[argc] = null; // C standard: argv[argc] == NULL
                     // argv is deliberately NOT freed. In C the argument vector is
@@ -329,7 +338,7 @@ public static partial class Compiler
             // raise its own catchable "C stack overflow". Reserving 64 MB (virtual
             // address space, not committed memory) restores the native headroom so
             // such programs reach their own recursion guards and fault gracefully.
-            {{debugHeapInit}}int __dotccExit = 0;
+            {{debugHeapInit}}{{posixPathsInit}}int __dotccExit = 0;
             var __dotccThread = new System.Threading.Thread(
                 () => { __dotccExit = __DotCcEntry(); }, 64 * 1024 * 1024);
             __dotccThread.Start();

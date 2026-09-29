@@ -301,7 +301,7 @@ public static unsafe partial class Libc
     public static FILE* fopen(byte* path, byte* mode)
     {
         if (path == null || mode == null) { errno = EINVAL; return null; }
-        var p = Encoding.UTF8.GetString(path, strlen(path));
+        var p = HostPath(path);
         if (!ParseMode(mode, out var fileMode, out var access)) { errno = EINVAL; return null; }
         Stream stream;
         // The well-known Unix device files, backed by synthetic streams so C code
@@ -345,7 +345,7 @@ public static unsafe partial class Libc
         // mode state to change, so just return the stream unchanged.
         if (path == null) { return stream; }
         if (!ParseMode(mode, out var fileMode, out var access)) { errno = EINVAL; return null; }
-        var p = Encoding.UTF8.GetString(path, strlen(path));
+        var p = HostPath(path);
         Stream newStream;
         try
         {
@@ -696,7 +696,7 @@ public static unsafe partial class Libc
     public static byte* tmpnam(byte* s)
     {
         const int LTmpnam = 260;  // keep in sync with L_tmpnam in include/stdio.h
-        var name = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+        var name = ViewPath(Path.Combine(Path.GetTempPath(), Path.GetRandomFileName()));
         var bytes = Encoding.UTF8.GetBytes(name);
         if (bytes.Length + 1 > LTmpnam) { return null; }
         // tmpnam(NULL) is non-reentrant by spec (shared buffer, overwritten by a
@@ -799,7 +799,7 @@ public static unsafe partial class Libc
     /// <summary><c>remove(path)</c> — delete a file. 0 on success, -1 (errno) on failure.</summary>
     public static int remove(byte* path)
     {
-        var p = Encoding.UTF8.GetString(path, strlen(path));
+        var p = HostPath(path);
         try
         {
             // .NET's File.Delete is a silent no-op on a missing file, but C's
@@ -821,8 +821,8 @@ public static unsafe partial class Libc
     {
         try
         {
-            File.Move(Encoding.UTF8.GetString(oldp, strlen(oldp)),
-                      Encoding.UTF8.GetString(newp, strlen(newp)), overwrite: true);
+            File.Move(HostPath(oldp),
+                      HostPath(newp), overwrite: true);
             return 0;
         }
         catch (FileNotFoundException) { errno = ENOENT; return -1; }

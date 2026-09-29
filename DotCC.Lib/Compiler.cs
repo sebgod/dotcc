@@ -136,6 +136,10 @@ public static partial class Compiler
     /// <c>[UnmanagedCallersOnly]</c> in <c>public static class DotCcExports</c>, and no
     /// <c>main</c> required; every other shape emits the standalone-executable shell with
     /// a <c>return main(…);</c> entry.</param>
+    /// <param name="posixPaths"><c>-fposix-paths</c>: the executable shell turns on the
+    /// runtime's POSIX view of Windows paths before <c>main</c> (<c>/c/...</c> for
+    /// <c>C:\...</c> in <c>getcwd</c>, <c>argv</c> and the like; GH #254). Off by default,
+    /// so paths behave as .NET's do; a no-op on other hosts.</param>
     public static string EmitCSharp(
         IReadOnlyList<string> inputPaths,
         IReadOnlyList<string>? includeDirs = null,
@@ -145,7 +149,8 @@ public static partial class Compiler
         bool debugHeap = false,
         ImportOptions? imports = null,
         WarningFlags warnings = WarningFlags.Default,
-        bool testMode = false)
+        bool testMode = false,
+        bool posixPaths = false)
     {
         var libraryMode = emit == EmitMode.SharedLib;
         var asObject = emit == EmitMode.Object;
@@ -206,7 +211,7 @@ public static partial class Compiler
             return SerializeFragment(cg.Records ?? [], cg.MainArity,
                 objImports, objDefs, cg.MainReturnsVoid, cg.MainReturnsErrUnion, cg.MainErrPayloadIsVoid, irBuilder.UsesPythonShim);
         }
-        return BuildShell(cg.MainArity, cg.Functions, cg.Structs, cg.Aliases, cg.Globals, emit, cg.Exports, debugHeap, importsClass, importsAreStatic, cg.MainReturnsVoid, cg.MainReturnsErrUnion, cg.MainErrPayloadIsVoid, testMode, cg.Tests, pythonShim: irBuilder.UsesPythonShim);
+        return BuildShell(cg.MainArity, cg.Functions, cg.Structs, cg.Aliases, cg.Globals, emit, cg.Exports, debugHeap, importsClass, importsAreStatic, cg.MainReturnsVoid, cg.MainReturnsErrUnion, cg.MainErrPayloadIsVoid, testMode, cg.Tests, pythonShim: irBuilder.UsesPythonShim, posixPaths: posixPaths);
     }
 
     /// <summary>
