@@ -44,9 +44,12 @@ redoes everything and after a source edit only that unit. `BUILD_JOBS` sets the
 parallelism, and `BUILD_OBJ` the object directory: the probe's `out/cs` holds the
 same objects, compiled with the same flags, so CI builds the interpreter from
 those, and only this build's units are linked. The pyconfig is Linux's, so `sys.platform` is `linux` even on a
-Windows host, and a POSIX CPython splits `PYTHONHOME` on `:`: `run.sh` passes
-the home without its drive letter, and a script is best named by a relative
-path.
+Windows host, and `os.path` is `posixpath`. The interpreter is therefore linked
+with `-fposix-paths`: on Windows the runtime shows it POSIX paths (`/c/Users/...`
+for `C:\Users\...`, `//server/share` for UNC) in `getcwd`, `sys.executable`,
+`PATH` and the other path-valued environment variables, and accepts both forms
+wherever a path goes in, so a script can be named by a Windows path too
+(GH #254).
 
 ## Probing the tree
 

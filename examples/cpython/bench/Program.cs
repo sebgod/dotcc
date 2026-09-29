@@ -51,9 +51,10 @@ public static unsafe class Interpreter
 
     private static RunFn? _run;
 
-    /// <summary>Load the interpreter, point PYTHONHOME at the build's home (without
-    /// the drive letter: a POSIX CPython splits PYTHONHOME on ':') and initialize it
-    /// once per process.</summary>
+    /// <summary>Load the interpreter, turn on its POSIX view of Windows paths (what the
+    /// program shell does for an interpreter linked with <c>-fposix-paths</c>; this
+    /// harness calls in without the shell), point PYTHONHOME at the build's home and
+    /// initialize it once per process.</summary>
     public static void Start()
     {
         if (_run is not null) { return; }
@@ -61,11 +62,10 @@ public static unsafe class Interpreter
             ?? throw new InvalidOperationException($"{DllVariable} is not set");
         var home = Environment.GetEnvironmentVariable("PYBENCH_HOME")
             ?? throw new InvalidOperationException("PYBENCH_HOME is not set");
-        home = Path.GetFullPath(home).Replace('\\', '/');
-        if (home.Length > 1 && home[1] == ':') { home = home[2..]; }
-        Environment.SetEnvironmentVariable("PYTHONHOME", home);
+        Environment.SetEnvironmentVariable("PYTHONHOME", Path.GetFullPath(home));
 
         var asm = Assembly.LoadFrom(dll);
+        asm.GetType("Libc")?.GetMethod("EnablePosixPathView")?.Invoke(null, null);
         _run = Find<RunFn>(asm, "PyRun_SimpleString");
         Find<InitFn>(asm, "Py_InitializeEx")(0);
     }
