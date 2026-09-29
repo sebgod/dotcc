@@ -31,6 +31,43 @@ namespace DotCC.FunctionalTests;
 /// </summary>
 public sealed class LibraryModeTests
 {
+    /// <summary>GH #253: an emitted library takes a file-scope static's address with
+    /// <c>Unsafe.AsPointer(ref staticField)</c>, sound only while the static cannot move.
+    /// <see cref="CompileLibrary"/> must therefore load non-collectibly (a collectible
+    /// load context keeps statics in a movable array), and the address must survive a
+    /// compacting GC.</summary>
+    [Fact]
+    public unsafe void A_static_objects_address_survives_a_compacting_gc()
+    {
+        var tempC = Path.GetTempFileName() + ".c";
+        File.WriteAllText(tempC, """
+            struct pair { long a; long b; };
+            static struct pair g = { 1, 2 };
+            long *where(void) { return &g.b; }
+            """);
+        try
+        {
+            var program = Compiler.EmitCSharp(new[] { tempC }, includeDirs: null, defines: null, emit: EmitMode.SharedLib);
+            var asm = CompileLibrary(program);
+            System.Runtime.Loader.AssemblyLoadContext.GetLoadContext(asm).ShouldNotBeNull().IsCollectible.ShouldBeFalse();
+
+            var where = (delegate*<long*>)asm.GetType("DotCcLib", throwOnError: true).ShouldNotBeNull()
+                .GetMethod("where", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic).ShouldNotBeNull()
+                .MethodHandle.GetFunctionPointer();
+            var before = where();
+            (*before).ShouldBe(2L);
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
+            GC.WaitForPendingFinalizers();
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
+            ((nint)where()).ShouldBe((nint)before);
+            (*before).ShouldBe(2L);
+        }
+        finally
+        {
+            File.Delete(tempC);
+        }
+    }
+
     [Fact]
     public void Lib_mode_emits_unmanagedcallersonly_for_extern_functions()
     {
@@ -179,7 +216,14 @@ public sealed class LibraryModeTests
         }
         pe.Position = 0;
 
-        var alc = new AssemblyLoadContext($"dotcc-lib-{Guid.NewGuid():N}", isCollectible: true);
+        // NON-collectible on purpose, for the reason FixtureRunner gives (GH #253): an
+        // emitted library takes the address of a file-scope static through
+        // `Unsafe.AsPointer(ref staticField)` (`PyModule_Create(&spammodule)`), which is
+        // only sound in non-moving storage. A collectible ALC keeps statics in a movable
+        // managed array, so a GC inside the callee (PyModule_Create2 allocates before it
+        // reads `m_slots`) can relocate the struct and leave the pointer reading whatever
+        // moved in: the shim then saw a non-null `m_slots` on a module that has none.
+        var alc = new AssemblyLoadContext($"dotcc-lib-{Guid.NewGuid():N}", isCollectible: false);
         return alc.LoadFromStream(pe);
     }
 
