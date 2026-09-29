@@ -509,6 +509,49 @@ jobs:
           Write-Host "zig version: $got"
           if ($got -ne $env:ZIG_VERSION) { throw "expected zig $env:ZIG_VERSION, got $got" }
 
+      # zig's GLOBAL cache holds what every oracle program shares: the libc (zig's
+      # bundled mingw-w64) and compiler_rt builds for this zig version, target and mode
+      # (every program is `zig build-exe ... -lc`, Debug, native). Built cold they cost
+      # the first program ~90 s on this runner, every run. Keep them across runs, keyed
+      # on the zig version: restore; on a miss, warm the cache with one program of the
+      # same shape (zig + a C file, so the C runtime pieces are built too) and save it
+      # at once, before the oracle adds its per-program entries (67 MB then). Bump the
+      # -vN suffix to rebuild it. (The Linux leg's cold build is ~4 s, so it does
+      # without.)
+      - name: Restore zig global cache
+        id: zig-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}\zig-global-cache
+          key: zig-global-${{ runner.os }}-${{ runner.arch }}-${{ env.ZIG_VERSION }}-v1
+
+      - name: Warm zig global cache (cache miss only)
+        if: steps.zig-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        env:
+          ZIG_LOCAL_CACHE_DIR: ${{ runner.temp }}\zig-local-cache
+          ZIG_GLOBAL_CACHE_DIR: ${{ runner.temp }}\zig-global-cache
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Location (New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'zig-warm'))
+          Set-Content warm.zig 'extern fn putchar(c: c_int) c_int;', 'extern fn warm_c() c_int;', 'pub fn main() void { _ = putchar(warm_c()); }'
+          Set-Content warm_c.c 'int warm_c(void) { return 10; }'
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          # Quoted: pwsh splits a bare -femit-bin=warm.exe at the dot into two arguments.
+          zig build-exe warm.zig warm_c.c -lc '-femit-bin=warm.exe'
+          if ($LASTEXITCODE -ne 0) { throw "zig build-exe failed (exit $LASTEXITCODE)" }
+          Write-Host "warm build: $([int]$sw.Elapsed.TotalSeconds) s"
+          ./warm.exe
+          $bytes = (Get-ChildItem -Recurse -File $env:ZIG_GLOBAL_CACHE_DIR | Measure-Object Length -Sum).Sum
+          Write-Host "global cache: $([int]($bytes / 1MB)) MB"
+
+      - name: Save zig global cache
+        if: steps.zig-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}\zig-global-cache
+          key: ${{ steps.zig-cache.outputs.cache-primary-key }}
+
       # Same separate restore -> build --no-restore -> test --no-build structure as the
       # other Windows jobs (keeps clear of the LALR.CC.dll copy-lock flake).
       - name: Restore
