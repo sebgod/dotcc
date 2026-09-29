@@ -19,7 +19,11 @@ namespace DotCC.Libc;
 /// dotcc parses <c>struct ID</c> as a type reference (<c>typeStruct</c>) and
 /// emits just the tag (<c>tm</c>), which resolves to this <see cref="tm"/>
 /// struct via <c>using static Libc;</c> — exactly like a user-defined struct,
-/// but defined here in the runtime. <c>tm</c> is deliberately <i>not</i> seeded
+/// but defined here in the runtime. <c>&lt;time.h&gt;</c> declares the same body
+/// so the IR knows its layout; it is runtime-owned
+/// (<c>RuntimeTypeNames.IsRuntimeOwnedAggregate</c>), so the backend emits no
+/// second <c>tm</c>, and <c>RuntimeOwnedAggregateTests</c> keeps the two in
+/// sync. <c>tm</c> is deliberately <i>not</i> seeded
 /// in <c>PredefinedTypeNames</c>: that would make it a <c>TYPE_NAME</c> and
 /// break the <c>['struct', ID]</c> grammar rule. All-<c>int</c> fields keep
 /// <c>tm</c> unmanaged, so <c>struct tm *</c> stays a real pointer.

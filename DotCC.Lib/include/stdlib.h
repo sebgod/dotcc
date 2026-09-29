@@ -14,9 +14,12 @@
 #define EXIT_FAILURE 1
 #define RAND_MAX     32767
 
-/* div/ldiv/lldiv result structs. These names are pre-registered in
-   dotcc's TypeNameRewriter (Compiler.PredefinedTypeNames) and resolve to
-   the Libc.div_t / ldiv_t / lldiv_t value structs — no typedef needed. */
+/* div/ldiv/lldiv result structs. Runtime-owned (see <time.h>'s struct tm):
+   the runtime supplies Libc.div_t / ldiv_t / lldiv_t, the bodies here are for
+   the IR only and must match them (RuntimeOwnedAggregateTests). */
+typedef struct div_t { int quot; int rem; } div_t;
+typedef struct ldiv_t { long quot; long rem; } ldiv_t;
+typedef struct lldiv_t { long long quot; long long rem; } lldiv_t;
 
 /* Memory management. */
 void* malloc(int size);

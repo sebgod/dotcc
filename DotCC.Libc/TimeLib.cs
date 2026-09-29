@@ -43,9 +43,9 @@ public static unsafe partial class Libc
 
     /// <summary>C11 <c>struct timespec</c> (§7.27.1) — a whole-seconds + nanoseconds
     /// time value. A blittable value struct (like <see cref="tm"/>) so user code can
-    /// stack-allocate it and take its address; <c>&lt;time.h&gt;</c> parses
-    /// <c>struct timespec</c> via the usual <c>struct ID</c> rule (tag → this Libc
-    /// type). Used by <c>timespec_get</c> and the <c>&lt;threads.h&gt;</c> timed calls
+    /// stack-allocate it and take its address. Runtime-owned: <c>&lt;time.h&gt;</c>
+    /// declares the same body for the IR, the backend emits no C# type for it, and
+    /// the tag resolves here (<c>RuntimeOwnedAggregateTests</c>). Used by <c>timespec_get</c> and the <c>&lt;threads.h&gt;</c> timed calls
     /// (<c>thrd_sleep</c> / <c>mtx_timedlock</c> / <c>cnd_timedwait</c>).</summary>
     // CS8981: the all-lowercase name is deliberate — it must match the C type
     // `struct timespec` so `using static Libc;` resolves the emitted `timespec`.

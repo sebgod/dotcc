@@ -632,8 +632,11 @@ public enum AggregateLayout { Default, Sequential, Packed }
 /// explicit-layout one for a union). Field types are also registered in the
 /// builder's struct table so member access resolves a field's type.
 /// <see cref="Layout"/> drives an optional <c>[StructLayout]</c> attribute for a
-/// non-union aggregate (Zig <c>extern</c>/<c>packed struct</c>).</summary>
-public sealed record StructTypeDef(string Name, IReadOnlyList<StructField> Fields, bool IsUnion, AggregateLayout Layout = AggregateLayout.Default);
+/// non-union aggregate (Zig <c>extern</c>/<c>packed struct</c>).
+/// <see cref="IsRuntimeOwned"/> marks a body a synthetic header declares for a type the runtime
+/// supplies (<c>struct tm</c> is <c>Libc.tm</c>, see <see cref="RuntimeTypeNames.IsRuntimeOwnedAggregate"/>):
+/// the IR has its fields and layout, and the backend emits nothing for it.</summary>
+public sealed record StructTypeDef(string Name, IReadOnlyList<StructField> Fields, bool IsUnion, AggregateLayout Layout = AggregateLayout.Default, bool IsRuntimeOwned = false);
 
 /// <summary>One field of a <see cref="StructTypeDef"/>. <see cref="BitWidth"/> is
 /// <c>null</c> for a normal field, or the declared width of a bit-field —

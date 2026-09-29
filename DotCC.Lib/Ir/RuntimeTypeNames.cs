@@ -34,6 +34,25 @@ internal static class RuntimeTypeNames
         "Cond", "DotCcProgram", "DotCcGlobals", "DotCcExports", "DotCcImports", "DotCcStaticImports", "DotCcLib",
     };
 
+    /// <summary>The C aggregates the runtime OWNS: C# structs nested in <c>Libc</c> (<c>Libc.tm</c>,
+    /// <c>Libc.div_t</c>, ...) that the runtime's own functions take and return. The synthetic headers
+    /// declare their bodies so the IR knows every field's type and the layout model covers them
+    /// (<c>sizeof</c>, <c>offsetof</c>, initializers), but the backend emits no C# struct for one defined
+    /// there: the bare name keeps resolving to the runtime's type through <c>using static Libc;</c>.
+    /// <para>Kept in sync with the runtime by <c>RuntimeOwnedAggregateTests</c>, which checks each header
+    /// body against the nested C# type field by field, offset by offset.</para></summary>
+    private static readonly HashSet<string> RuntimeOwned = new(System.StringComparer.Ordinal)
+    {
+        "tm", "timespec", "lconv", "div_t", "ldiv_t", "lldiv_t", "imaxdiv_t",
+    };
+
+    /// <summary>The runtime-owned aggregate set, for the sync test.</summary>
+    internal static IReadOnlyCollection<string> RuntimeOwnedAggregates => RuntimeOwned;
+
+    /// <summary>True when <paramref name="name"/> is an aggregate the runtime supplies as a type nested in
+    /// <c>Libc</c>, whose body a synthetic header declares for the IR only.</summary>
+    internal static bool IsRuntimeOwnedAggregate(string name) => RuntimeOwned.Contains(name);
+
     /// <summary>The runtime-declared set, for the sync test (the shell names are separate).</summary>
     internal static IReadOnlyCollection<string> RuntimeDeclared => Names;
 

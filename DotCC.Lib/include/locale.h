@@ -11,18 +11,13 @@
    "C" locale's conventions (decimal_point ".", every other string empty, the
    numeric members CHAR_MAX). The category argument is accepted but ignored.
 
-   `struct lconv` is the runtime Libc.lconv struct — declared ONLY there (same
-   pattern as <time.h>'s struct tm): dotcc parses `struct lconv` via the usual
-   `struct ID` rule and emits the bare tag `lconv`, which resolves to Libc.lconv
-   through `using static Libc;`. A `struct lconv { … };` body here would make the
-   emitter produce a second, colliding top-level `lconv`. (And `lconv` must NOT
-   be seeded as a type name — that would break the `struct ID` parse.) Its
-   members, for reference, are the C90 set: the string members `decimal_point`,
-   `thousands_sep`, `grouping`, `int_curr_symbol`, `currency_symbol`,
-   `mon_decimal_point`, `mon_thousands_sep`, `mon_grouping`, `positive_sign`,
-   `negative_sign`, then the numeric `char` members `int_frac_digits`,
-   `frac_digits`, `p_cs_precedes`, `p_sep_by_space`, `n_cs_precedes`,
-   `n_sep_by_space`, `p_sign_posn`, `n_sign_posn` (plus the C99 `int_*` set). */
+   `struct lconv` is runtime-owned (same pattern as <time.h>'s struct tm): the
+   runtime supplies it as Libc.lconv, which the bare tag `lconv` resolves to
+   through `using static Libc;`. The body below is for the IR only (member
+   types, sizeof, offsetof); the backend emits no C# struct for it, and it must
+   match Libc.lconv field for field (RuntimeOwnedAggregateTests). (And `lconv`
+   must NOT be seeded as a type name — that would break the `struct ID`
+   parse.) */
 
 #ifndef NULL
 #define NULL ((void *)0)
@@ -31,6 +26,33 @@
 /* The six C-standard locale categories (7.4). Values are implementation-defined
    distinct ints (glibc's here); dotcc's setlocale ignores the category since
    there is only one locale. */
+struct lconv {
+    char *decimal_point;
+    char *thousands_sep;
+    char *grouping;
+    char *int_curr_symbol;
+    char *currency_symbol;
+    char *mon_decimal_point;
+    char *mon_thousands_sep;
+    char *mon_grouping;
+    char *positive_sign;
+    char *negative_sign;
+    char int_frac_digits;
+    char frac_digits;
+    char p_cs_precedes;
+    char p_sep_by_space;
+    char n_cs_precedes;
+    char n_sep_by_space;
+    char p_sign_posn;
+    char n_sign_posn;
+    char int_p_cs_precedes;
+    char int_n_cs_precedes;
+    char int_p_sep_by_space;
+    char int_n_sep_by_space;
+    char int_p_sign_posn;
+    char int_n_sign_posn;
+};
+
 #define LC_ALL      6
 #define LC_COLLATE  3
 #define LC_CTYPE    0
