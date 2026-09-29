@@ -264,6 +264,7 @@ public static unsafe partial class Libc
         if (!Directory.Exists(p)) { errno = ENOENT; return -1; }
         try { Directory.SetCurrentDirectory(p); return 0; }
         catch (UnauthorizedAccessException) { errno = EACCES; return -1; }
+        catch (PathTooLongException) { errno = ENAMETOOLONG; return -1; }   // past MAX_PATH without long-path support
         catch (IOException) { errno = EIO; return -1; }
     }
 

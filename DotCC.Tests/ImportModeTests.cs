@@ -185,6 +185,18 @@ public sealed class ImportModeTests
     }
 
     [Fact]
+    public void executable_csproj_uses_the_long_path_manifest_and_library_does_not()
+    {
+        // A NativeAOT exe has no manifest of its own, so without this a C program cannot
+        // chdir past MAX_PATH on Windows; a library runs in its host's process instead.
+        var exe = Compiler.BuildGeneratedCsproj(libraryMode: false, assemblyName: "app");
+        exe.ShouldContain($"<ApplicationManifest Condition=\"Exists('{Compiler.GeneratedAppManifestFile}')\">{Compiler.GeneratedAppManifestFile}</ApplicationManifest>");
+        Compiler.BuildGeneratedCsproj(libraryMode: true, assemblyName: "lib").ShouldNotContain("ApplicationManifest");
+        Compiler.GeneratedAppManifest.ShouldContain("<ws2:longPathAware>true</ws2:longPathAware>");
+        System.Xml.Linq.XDocument.Parse(Compiler.GeneratedAppManifest).Root.ShouldNotBeNull();
+    }
+
+    [Fact]
     public void mixing_static_and_dynamic_imports_throws()
     {
         var mixed = new ImportOptions(new[] { "foo" }, Array.Empty<string>(), new[] { "/opt/libblob.a" });
