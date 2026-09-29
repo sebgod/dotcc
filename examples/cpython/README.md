@@ -24,11 +24,19 @@ holds the probe that measures how much of the tree compiles, with the CI job
 dotnet build DotCC -c Release
 examples/cpython/fetch.sh
 PYTHON=python examples/cpython/generate.sh   # needs a host Python 3.13
-examples/cpython/build.sh                    # about 5 minutes on 16 cores
+examples/cpython/build.sh                    # about 5 minutes on 16 cores (BUILD_AOT=1: also NativeAOT)
 examples/cpython/run.sh -c "print('hello')"
 examples/cpython/run.sh examples/cpython/smoke.py | diff examples/cpython/smoke.expected -
 HOST_PYTHON=python examples/cpython/programs.sh   # every program, timed against host CPython
 ```
+
+The default build is a JIT assembly, which compiles the interpreter's startup
+path on every run (about 2 s before the first line of Python runs).
+`BUILD_AOT=1` also publishes a NativeAOT interpreter (`build/python-aot`, about
+two minutes more), which `run.sh` prefers when it is newer: it starts in under
+0.1 s, like host CPython. Both carry dotcc's `longPathAware` manifest, so on
+Windows they handle paths past 260 characters, a deep current directory
+included.
 
 `build.sh` recompiles a unit when its object is older than the source or than
 the dotcc build (`dotcc.dll` or `DotCC.Lib.dll`), so after a compiler change it
