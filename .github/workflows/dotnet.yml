@@ -79,7 +79,9 @@ name: ci
 #                 transport (direct zig spawn, no WSL hop). windows-11-arm is
 #                 deliberately omitted: zig 0.16.0's aarch64-windows build segfaults on
 #                 build-exe (the x86_64 build is fine) — arm64 emit/grammar coverage
-#                 still rides build-test-windows-arm64.
+#                 still rides build-test-windows-arm64. Sharded 4 ways (a matrix over
+#                 Scripts/run-functional-sharded.sh's SHARD), since each program costs
+#                 ~4 s on a Windows runner; zig's global cache is kept across runs.
 #   aot-publish — NativeAOT-publish the clang-shaped `dotcc` exe (PublishAot fires
 #                 only on `dotnet publish`, never on build/test), then smoke-test the
 #                 PUBLISHED binary end-to-end: a no-input run must give the clang-shaped
@@ -456,7 +458,19 @@ jobs:
     # 0.16.0 (validated locally, 9/9). windows-11-arm is NOT added: zig 0.16.0's
     # aarch64-windows build segfaults on build-exe (the x86_64 build is fine); arm64
     # emit/grammar coverage stays in build-test-windows-arm64.
+    #
+    # SHARDED 4 ways: a Windows runner pays ~4 s per oracle program (small-file I/O,
+    # Defender, process start; zig itself is not slower), and 451 programs made one job
+    # take 33 minutes. Each matrix job runs one slice through
+    # Scripts/run-functional-sharded.sh (SHARD=i of SHARDS): every i-th row of the
+    # program theories (TestShard) plus every i-th other test method, so the four
+    # together run each test once.
+    name: zig-oracle-windows (${{ matrix.shard }})
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     env:
       ZIG_VERSION: '0.16.0'
       ZIG_SHA256: '68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e'
@@ -512,12 +526,13 @@ jobs:
       # zig's GLOBAL cache holds what every oracle program shares: the libc (zig's
       # bundled mingw-w64) and compiler_rt builds for this zig version, target and mode
       # (every program is `zig build-exe ... -lc`, Debug, native). Built cold they cost
-      # the first program ~90 s on this runner, every run. Keep them across runs, keyed
-      # on the zig version: restore; on a miss, warm the cache with one program of the
-      # same shape (zig + a C file, so the C runtime pieces are built too) and save it
-      # at once, before the oracle adds its per-program entries (67 MB then). Bump the
-      # -vN suffix to rebuild it. (The Linux leg's cold build is ~4 s, so it does
-      # without.)
+      # the first program ~90 s on this runner, in every shard of every run. Keep them
+      # across runs, keyed on the zig version: restore; on a miss, warm the cache with
+      # one program of the same shape (zig + a C file, so the C runtime pieces are built
+      # too) and save it at once, before the oracle adds its per-program entries (67 MB
+      # then). On a first run every shard misses and one save wins; the others only
+      # warn. Bump the -vN suffix to rebuild it. (The Linux leg's cold build is ~4 s, so
+      # it does without.)
       - name: Restore zig global cache
         id: zig-cache
         uses: actions/cache/restore@v6
@@ -560,19 +575,23 @@ jobs:
       - name: Build (Release, NuGet path)
         run: dotnet build dotcc.sln -c Release --no-restore --nologo -p:UseLocalLalrCc=false
 
-      - name: Zig differential oracle
+      - name: Zig differential oracle (shard ${{ matrix.shard }} of ${{ strategy.job-total }})
         # Same shared-cache rationale as the Linux leg (each case's fresh work dir
         # would otherwise cold-start zig's local cache ~138 times) — but it matters
         # far more here: NTFS small-file I/O + Defender scanning make the re-derived
         # cache the dominant cost (this leg ran 4.4x slower than ubuntu on
         # identical-CPU runners while the compute-bound Build step ran 1.0x).
         # Step-level env because the `runner` context is not available in job env.
+        # The script runs the prebuilt test executable directly (no MSBuild), with this
+        # shard's slice of ZigOracleTests; its log is the step's output.
+        shell: bash
         env:
           ZIG_LOCAL_CACHE_DIR: ${{ runner.temp }}\zig-local-cache
           ZIG_GLOBAL_CACHE_DIR: ${{ runner.temp }}\zig-global-cache
-        run: >
-          dotnet test DotCC.FunctionalTests/DotCC.FunctionalTests.csproj
-          -c Release --no-build --nologo --filter "FullyQualifiedName~ZigOracleTests"
+          SHARDS: ${{ strategy.job-total }}
+          SHARD: ${{ matrix.shard }}
+          CLASS: DotCC.FunctionalTests.ZigOracleTests
+        run: bash Scripts/run-functional-sharded.sh
 
   aot-publish:
     # NativeAOT-publish the clang-shaped `dotcc` exe and smoke-test the produced

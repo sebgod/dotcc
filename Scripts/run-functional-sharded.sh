@@ -16,6 +16,8 @@
 #   SHARDS=12 Scripts/run-functional-sharded.sh
 #   HOST_THREADS=4 Scripts/run-functional-sharded.sh    # xunit threads per host (default 2)
 #   OUT_DIR=/tmp/func Scripts/run-functional-sharded.sh # keep the per-host logs + xunit XML there
+#   SHARDS=4 SHARD=2 CLASS=DotCC.FunctionalTests.ZigOracleTests Scripts/run-functional-sharded.sh
+#                                                       # only host 2 of 4, only that class (a CI matrix job)
 #
 # Exit status: 0 when every host reports no failures and no errors, 1 otherwise.
 set -uo pipefail
@@ -36,18 +38,36 @@ THREADS=${HOST_THREADS:-2}
 OUT=${OUT_DIR:-$(mktemp -d)}
 mkdir -p "$OUT"
 
+# One host per machine, for a CI matrix: SHARD=i runs only host i of the N, in the foreground with its
+# log on stdout, so N jobs together run every test once. CLASS limits the run to one test class (the
+# Windows zig-oracle leg: CLASS=DotCC.FunctionalTests.ZigOracleTests).
+ONLY=${SHARD:-}
+if [ -n "$ONLY" ] && ! { [[ "$ONLY" =~ ^[0-9]+$ ]] && [ "$ONLY" -lt "$N" ]; }; then
+  echo "run-functional-sharded: SHARD=$ONLY is not a host index below SHARDS=$N" >&2
+  exit 1
+fi
+PREFIX="DotCC."
+[ -n "${CLASS:-}" ] && PREFIX="$CLASS."
+
 # The data-driven theories: sharded by ROW inside every host (TestShard.Rows). Each needs at least N rows
 # (TestShard refuses fewer, since a host would get none); the 4-row Dotcc_matches_zig_mixed is left whole.
-SHARDED=(
-  DotCC.FunctionalTests.FixtureTests.Fixture_emits_csharp_runnable_with_matching_stdout
-  DotCC.FunctionalTests.ZigOracleTests.Dotcc_matches_zig
-  DotCC.FunctionalTests.ZigOracleTests.Dotcc_matches_zig_multifile
-  DotCC.FunctionalTests.GccWslOracleTests.Dotcc_matches_gcc_output
+SHARDED=()
+for s in \
+  DotCC.FunctionalTests.FixtureTests.Fixture_emits_csharp_runnable_with_matching_stdout \
+  DotCC.FunctionalTests.ZigOracleTests.Dotcc_matches_zig \
+  DotCC.FunctionalTests.ZigOracleTests.Dotcc_matches_zig_multifile \
+  DotCC.FunctionalTests.GccWslOracleTests.Dotcc_matches_gcc_output \
   DotCC.FunctionalTests.MsvcOracleTests.Dotcc_matches_msvc_output
-)
+do
+  [[ $s == "$PREFIX"* ]] && SHARDED+=("$s")
+done
 
 # Every other test method, dealt round-robin across the hosts.
-mapfile -t ALL < <("$EXE" -list methods | tr -d '\r' | grep '^DotCC\.')
+mapfile -t ALL < <("$EXE" -list methods | tr -d '\r' | awk -v p="$PREFIX" 'index($0, p) == 1')
+if [ ${#ALL[@]} -eq 0 ]; then
+  echo "run-functional-sharded: no test method starts with '$PREFIX'" >&2
+  exit 1
+fi
 OTHERS=()
 for m in "${ALL[@]}"; do
   skip=0
@@ -55,24 +75,39 @@ for m in "${ALL[@]}"; do
   [ $skip -eq 0 ] && OTHERS+=("$m")
 done
 
-echo "run-functional-sharded: $N hosts x $THREADS threads, ${#SHARDED[@]} row-sharded theories, ${#OTHERS[@]} other methods; logs in $OUT"
+HOSTS=()
+if [ -n "$ONLY" ]; then HOSTS=("$ONLY"); else for (( i = 0; i < N; i++ )); do HOSTS+=("$i"); done; fi
+
+echo "run-functional-sharded: ${#HOSTS[@]} of $N hosts x $THREADS threads, ${#SHARDED[@]} row-sharded theories, ${#OTHERS[@]} other methods under $PREFIX; logs in $OUT"
 start=$(date +%s)
+status=0
 pids=()
-for (( i = 0; i < N; i++ )); do
+for i in "${HOSTS[@]}"; do
+  methods=("${SHARDED[@]}")
+  for (( j = i; j < ${#OTHERS[@]}; j += N )); do methods+=("${OTHERS[$j]}"); done
+  # With no -method at all the host would run the whole assembly.
+  if [ ${#methods[@]} -eq 0 ]; then
+    echo "run-functional-sharded: host $i has no tests (fewer methods than hosts)" >&2
+    status=1
+    continue
+  fi
   args=(-noLogo -noColor -maxThreads "$THREADS")
-  for m in "${SHARDED[@]}"; do args+=(-method "$m"); done
-  for (( j = i; j < ${#OTHERS[@]}; j += N )); do args+=(-method "${OTHERS[$j]}"); done
-  DOTCC_TEST_SHARD="$i/$N" "$EXE" "${args[@]}" -xml "$OUT/shard$i.xml" > "$OUT/shard$i.log" 2>&1 &
-  pids+=($!)
+  for m in "${methods[@]}"; do args+=(-method "$m"); done
+  if [ -n "$ONLY" ]; then
+    DOTCC_TEST_SHARD="$i/$N" "$EXE" "${args[@]}" -xml "$OUT/shard$i.xml" 2>&1 | tee "$OUT/shard$i.log"
+    [ "${PIPESTATUS[0]}" -eq 0 ] || status=1
+  else
+    DOTCC_TEST_SHARD="$i/$N" "$EXE" "${args[@]}" -xml "$OUT/shard$i.xml" > "$OUT/shard$i.log" 2>&1 &
+    pids+=($!)
+  fi
 done
 
-status=0
-for (( i = 0; i < N; i++ )); do
-  wait "${pids[$i]}" || status=1
+for pid in "${pids[@]}"; do
+  wait "$pid" || status=1
 done
 
 total=0; failed=0; errors=0; skipped=0
-for (( i = 0; i < N; i++ )); do
+for i in "${HOSTS[@]}"; do
   line=$(grep -E 'Total: [0-9]+, Errors: [0-9]+, Failed: [0-9]+, Skipped: [0-9]+' "$OUT/shard$i.log" | tail -1)
   if [ -z "$line" ]; then
     echo "  shard $i: NO SUMMARY (host crashed?) see $OUT/shard$i.log"
