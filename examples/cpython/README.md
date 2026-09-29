@@ -12,6 +12,7 @@ holds the probe that measures how much of the tree compiles, with the CI job
 | `build.sh` | Compiles the interpreter's `core` and `boot` units to objects (`dotcc --emit=obj`, into `build/obj/`), links them into one C# program and builds it with `dotnet`. |
 | `run.sh` | Runs the built interpreter with the pinned tree's `Lib/` as its standard library. |
 | `smoke.py` | A script over core language features and the importable pure-Python library; its stdout must equal `smoke.expected`, which host CPython 3.13 prints too. |
+| `programs/`, `programs.sh` | Larger pure-Python programs (n-body, fannkuch, spectral-norm, a Richards-style scheduler, a Scheme interpreter, a language tour, the object model and GC, Unicode text and file I/O, tracebacks), each with the `.expected` output host CPython 3.13 prints. `programs.sh` runs them and diffs. |
 | `files.txt` | The 202 translation units: `group\|path\|flags`. `core` is the interpreter (Parser, Objects, Python), `boot` the `Setup.bootstrap` modules, `extra` modules beyond those. `@TREE@` in a flag is the source tree. |
 | `include/pyconfig.h` | dotcc's platform config: CPython's `./configure` output from Ubuntu x86_64, adjusted for dotcc (each change marked `dotcc:`). See its header. |
 | `probe.sh` | Compiles each unit with `dotcc --emit=obj` and compares the set that emits with `emits.txt`. |
@@ -26,6 +27,7 @@ PYTHON=python examples/cpython/generate.sh   # needs a host Python 3.13
 examples/cpython/build.sh                    # about 5 minutes on 16 cores
 examples/cpython/run.sh -c "print('hello')"
 examples/cpython/run.sh examples/cpython/smoke.py | diff examples/cpython/smoke.expected -
+HOST_PYTHON=python examples/cpython/programs.sh   # every program, timed against host CPython
 ```
 
 `build.sh` recompiles a unit when its object is older than the source or than
@@ -52,8 +54,14 @@ build, `CPYTHON_SRC` the tree. Per-unit logs land in `out/cs/<unit>.log`, and
 ## In CI
 
 `python.yml` runs the probe, then builds the interpreter from the probe's objects
-and runs `print('hello')` and `smoke.py` on it, on every push to a PR, nightly and
-on demand.
+and runs `print('hello')`, `smoke.py` and `programs.sh` on it, on every push to a
+PR, nightly and on demand.
+
+The programs use no C module outside the build (so no `math`, `random`,
+`struct`, `unicodedata`): they measure the interpreter core and the pure-Python
+library. Each prints only what is the same on every platform (no timings, ids,
+hash-ordered sets or host paths), so its `.expected` comes from a host CPython
+3.13 run (`python programs/<name>.py > programs/<name>.expected`).
 
 ## The ratchet
 

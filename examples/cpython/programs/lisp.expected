@@ -1,0 +1,7 @@
+fib 20 = 6765
+squares (1 4 9 16 25 36 49 64 81 100)
+evens (2 4 6 8 10 12 14 16 18 20)
+tail loop 5000050000
+compose 41
+apply 10 abc 3.5
+quote (1 (2 three) four)

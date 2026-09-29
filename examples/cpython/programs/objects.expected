@@ -1,0 +1,9 @@
+alive before collect: True
+collected something: True alive after: True
+['callback x', 'del xa', 'del xb']
+refcount drop: ['del plain'] None
+weak cache size: 5
+churn total: 20001188890
+399! digits: 867 sum of digits: 3627
+buckets: 997 longest: 51
+gc counts are ints: True

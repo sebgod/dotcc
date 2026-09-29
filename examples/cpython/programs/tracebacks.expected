@@ -1,0 +1,26 @@
+Traceback (most recent call last):
+  File "tracebacks.py", line 30, in <module>
+    outer()
+    ~~~~~^^
+  File "tracebacks.py", line 16, in outer
+    return inner({"key": "text"})
+  File "tracebacks.py", line 12, in inner
+    return data["key"] + 1
+           ~~~~~~~~~~~~^~~
+TypeError: can only concatenate str (not "int") to str
+--
+Traceback (most recent call last):
+  File "tracebacks.py", line 37, in <module>
+    {}["missing"]
+    ~~^^^^^^^^^^^
+KeyError: 'missing'
+
+The above exception was the direct cause of the following exception:
+Traceback (most recent call last):
+  File "tracebacks.py", line 39, in <module>
+    raise RuntimeError("lookup failed") from e
+RuntimeError: lookup failed
+--
+[('DeprecationWarning', 'careful')]
+--
+<module> summary = traceback.extract_stack(limit=1)[0]
