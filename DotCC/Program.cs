@@ -442,6 +442,11 @@ internal static class Program
                 var csprojFile = $"{asmName}.csproj";
                 File.WriteAllText(Path.Combine(outDir, "Program.cs"), program);
                 File.WriteAllText(Path.Combine(outDir, csprojFile), Compiler.BuildGeneratedCsproj(libraryMode, asmName, imports.StaticArchives));
+                if (!libraryMode)
+                {
+                    // An executable's manifest (long paths on Windows); a library runs in its host's process.
+                    File.WriteAllText(Path.Combine(outDir, Compiler.GeneratedAppManifestFile), Compiler.GeneratedAppManifest);
+                }
                 Console.Error.WriteLine($"dotcc: wrote {outDir}/Program.cs + {csprojFile}");
                 if (imports.StaticArchives.Count > 0)
                 {

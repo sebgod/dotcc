@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Windows application manifest for the dotcc CLI. A NativeAOT exe carries no
+     manifest by default, so the process is not long-path aware: Windows keeps it
+     to MAX_PATH (260) wherever the OS enforces that, such as the current
+     directory. Declaring longPathAware lifts it where the machine enables long
+     paths (LongPathsEnabled, on by default since Windows 11). Emitted programs get
+     the same manifest (Compiler.GeneratedAppManifest). -->
+<assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
+  <assemblyIdentity version="1.0.0.0" name="dotcc.app"/>
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings xmlns:ws2="http://schemas.microsoft.com/SMI/2016/WindowsSettings">
+      <ws2:longPathAware>true</ws2:longPathAware>
+    </windowsSettings>
+  </application>
+</assembly>
