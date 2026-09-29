@@ -8,9 +8,12 @@
 # cannot compile yet (pwd: no <pwd.h>), built as CPython's release build is
 # (-DNDEBUG). An object is recompiled when it is
 # older than its source or than the dotcc build, so re-running after a dotcc
-# fix redoes everything, and after a source edit only that unit.
+# fix redoes everything, and after a source edit only that unit. Only this
+# build's units are linked, so other objects in the directory stay out.
 #
-# Environment: DOTCC_DLL, CPYTHON_SRC, BUILD_OUT (default: build/), BUILD_JOBS
+# Environment: DOTCC_DLL, CPYTHON_SRC, BUILD_OUT (default: build/), BUILD_OBJ
+# (default: $BUILD_OUT/obj; probe.sh's out/cs holds the same objects, built with
+# the same flags, so CI links those instead of compiling again), BUILD_JOBS
 # (default: the CPU count).
 set -euo pipefail
 
@@ -26,8 +29,12 @@ LIBDLL="$(dirname "$DLL")/DotCC.Lib.dll"
 [ -f "$LIBDLL" ] || LIBDLL="$DLL"
 [ -f "$SRC/Modules/config.c" ] || { echo "build.sh: no Modules/config.c (run generate.sh)" >&2; exit 2; }
 
-mkdir -p "$OUT/obj"
-export DLL LIBDLL SRC OBJ="$OUT/obj" CFG="$HERE/include"
+OBJ="${BUILD_OBJ:-$OUT/obj}"
+mkdir -p "$OUT" "$OBJ"
+# Absolute, since the link runs from inside the object directory.
+OUT="$(cd "$OUT" && (pwd -W 2>/dev/null || pwd))"
+OBJ="$(cd "$OBJ" && (pwd -W 2>/dev/null || pwd))"
+export DLL LIBDLL SRC OBJ CFG="$HERE/include"
 
 # One unit, "<group>|<path>|<flags>", to $OBJ/<path with / as __>.cs.
 unit() {
@@ -50,11 +57,15 @@ unit() {
 }
 export -f unit
 
-grep -E '^(core|boot)\|' "$HERE/files.txt" | grep -v '|Modules/pwdmodule.c|' \
-  | xargs -d '\n' -P "$JOBS" -I{} bash -c 'unit "$1"' _ {}
-echo "build.sh: $(ls "$OBJ"/*.cs | wc -l) objects"
+UNITS="$(grep -E '^(core|boot)\|' "$HERE/files.txt" | grep -v '|Modules/pwdmodule.c|')"
+xargs -d '\n' -P "$JOBS" -I{} bash -c 'unit "$1"' _ {} <<< "$UNITS"
+objects=()
+while IFS='|' read -r _ rel _; do
+  name="${rel//\//__}"; objects+=("${name%.c}.cs")
+done <<< "$UNITS"
+echo "build.sh: ${#objects[@]} objects"
 
-# Link: every object into one program (shared types deduplicated), then build it.
-(cd "$OBJ" && dotnet "$DLL" --emit=csproj -o "$OUT/python" ./*.cs)
+# Link: this build's objects into one program (shared types deduplicated), then build it.
+(cd "$OBJ" && dotnet "$DLL" --emit=csproj -o "$OUT/python" "${objects[@]}")
 dotnet build "$OUT/python" -c Release --nologo -v quiet
 echo "build.sh: built $OUT/python"
