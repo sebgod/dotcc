@@ -15,6 +15,9 @@ obj/
 a.out-cs/
 examples/*/build/
 
+# BenchmarkDotNet results (examples/cpython/bench)
+BenchmarkDotNet.Artifacts/
+
 # OS noise
 .DS_Store
 Thumbs.db

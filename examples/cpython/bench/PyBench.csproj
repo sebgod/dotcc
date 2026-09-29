@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- BenchmarkDotNet harness for the dotcc-built CPython; see Program.cs. Outside
+       dotcc.sln (CI never builds it); run it with examples/cpython/bench/run.sh. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
+    <!-- The repo pins package versions centrally for the solution; this harness
+         is not part of it and names its one dependency itself. -->
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="BenchmarkDotNet" Version="0.15.8" />
+  </ItemGroup>
+</Project>
