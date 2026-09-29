@@ -11,6 +11,7 @@ holds the probe that measures how much of the tree compiles, with the CI job
 | `generate.sh` | The sources CPython's own build generates: the frozen modules (`Programs/_freeze_module.py` under a host Python 3.13) and `Modules/config.c`, the built-in module table. |
 | `build.sh` | Compiles the interpreter's `core` and `boot` units to objects (`dotcc --emit=obj`, into `build/obj/`), links them into one C# program and builds it with `dotnet`. |
 | `run.sh` | Runs the built interpreter with the pinned tree's `Lib/` as its standard library. |
+| `smoke.py` | A script over core language features and the importable pure-Python library; its stdout must equal `smoke.expected`, which host CPython 3.13 prints too. |
 | `files.txt` | The 202 translation units: `group\|path\|flags`. `core` is the interpreter (Parser, Objects, Python), `boot` the `Setup.bootstrap` modules, `extra` modules beyond those. `@TREE@` in a flag is the source tree. |
 | `include/pyconfig.h` | dotcc's platform config: CPython's `./configure` output from Ubuntu x86_64, adjusted for dotcc (each change marked `dotcc:`). See its header. |
 | `probe.sh` | Compiles each unit with `dotcc --emit=obj` and compares the set that emits with `emits.txt`. |
@@ -24,12 +25,15 @@ examples/cpython/fetch.sh
 PYTHON=python examples/cpython/generate.sh   # needs a host Python 3.13
 examples/cpython/build.sh                    # about 5 minutes on 16 cores
 examples/cpython/run.sh -c "print('hello')"
+examples/cpython/run.sh examples/cpython/smoke.py | diff examples/cpython/smoke.expected -
 ```
 
 `build.sh` recompiles a unit when its object is older than the source or than
 the dotcc build (`dotcc.dll` or `DotCC.Lib.dll`), so after a compiler change it
 redoes everything and after a source edit only that unit. `BUILD_JOBS` sets the
-parallelism. The pyconfig is Linux's, so `sys.platform` is `linux` even on a
+parallelism, and `BUILD_OBJ` the object directory: the probe's `out/cs` holds the
+same objects, compiled with the same flags, so CI builds the interpreter from
+those, and only this build's units are linked. The pyconfig is Linux's, so `sys.platform` is `linux` even on a
 Windows host, and a POSIX CPython splits `PYTHONHOME` on `:`: `run.sh` passes
 the home without its drive letter, and a script is best named by a relative
 path.
@@ -44,6 +48,12 @@ examples/cpython/probe.sh --update   # rewrite emits.txt from the result
 `PROBE_JOBS` sets the parallelism (default: the CPU count), `DOTCC_DLL` the dotcc
 build, `CPYTHON_SRC` the tree. Per-unit logs land in `out/cs/<unit>.log`, and
 `out/summary.txt` lists each unit that does not emit with its first diagnostic.
+
+## In CI
+
+`python.yml` runs the probe, then builds the interpreter from the probe's objects
+and runs `print('hello')` and `smoke.py` on it, on every push to a PR, nightly and
+on demand.
 
 ## The ratchet
 
