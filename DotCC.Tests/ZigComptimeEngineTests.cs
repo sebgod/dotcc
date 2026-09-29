@@ -160,7 +160,7 @@ public sealed class ZigComptimeEngineTests
                 return total + g;
             }
             """);
-        cs.ShouldMatch(@"if \(Cond\.B\(\(Cond\.B\(maybe\.HasValue\) \? 0 : 1\)\)\)\s*\{\s*byte __blk\d+ = default\(byte\);");
+        cs.ShouldMatch(@"if \(!Cond\.B\(maybe\.HasValue\)\)\s*\{\s*byte __blk\d+ = default\(byte\);");
         cs.ShouldContain("= maybe.Value;");
     }
 

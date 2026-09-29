@@ -159,7 +159,7 @@ public sealed class ZigStringShapesTests
     {
         var cs = EmitZig(Program);
         // n = 8, 16, 32 keep their `if`; n = 64 and 128 fail `n <= 32`, so their bodies are gone.
-        cs.ShouldContain("if (Cond.B(((CBool)(Cond.B(((CBool)(n__2 <= 32))) && Cond.B(((CBool)(a.Len <= (ulong)(n__2))))))))");
+        cs.ShouldContain("if (n__2 <= 32 && a.Len <= (ulong)(n__2))");
         cs.ShouldNotContain("n__3 <= 32");
         cs.ShouldNotContain("n__4 <= 32");
     }

@@ -30,8 +30,8 @@ namespace DotCC.Frontends;
 /// result type anyway, because the C# BACKEND promotes identically (<c>u8 + u8</c> is
 /// <c>int</c> in C# too) and inserts the narrowing cast back at the typed sink. A
 /// comparison / boolean op is typed <see cref="CType.Int"/>: the backend renders it as
-/// an integer-valued <c>(CBool)(…)</c> and wraps every condition in <c>Cond.B(…)</c>,
-/// so an <c>int</c>-typed relational feeds <c>if</c>/<c>while</c>/ternary cleanly.
+/// an integer-valued <c>(CBool)(…)</c> as a value and as the plain C# comparison in a
+/// condition, so an <c>int</c>-typed relational feeds <c>if</c>/<c>while</c>/ternary cleanly.
 /// </summary>
 internal sealed partial class ZigLowering
 {

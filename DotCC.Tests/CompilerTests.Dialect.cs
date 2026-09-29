@@ -471,7 +471,7 @@ public sealed partial class CompilerTests
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
             emitted.ShouldContain("int x = ((CBool)(a > b));");          // relational
-            emitted.ShouldContain("(CBool)(Cond.B(a) && Cond.B(b))");    // logical &&
+            emitted.ShouldContain("(CBool)(a != 0 && b != 0)");          // logical &&
             emitted.ShouldContain("(CBool)(a == b)");                    // equality
         }
         finally { File.Delete(src); }

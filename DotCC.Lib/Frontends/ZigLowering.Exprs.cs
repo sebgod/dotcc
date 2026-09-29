@@ -200,7 +200,7 @@ internal sealed partial class ZigLowering
             }
 
             // if (cond) a else b  — the if-EXPRESSION, lowered to a ternary. Both
-            // branches are RhsExpr; the backend wraps the condition in Cond.B.
+            // branches are RhsExpr; the backend renders the condition as a bool.
             case Zig.IfExpr e:
             {
                 // A comptime condition (a TYPE comparison `Result == Accumulate` in std.fmt.parseIntWithSign,

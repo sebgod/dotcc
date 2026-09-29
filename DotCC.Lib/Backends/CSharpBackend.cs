@@ -911,8 +911,8 @@ internal sealed class CSharpBackend
             case Continue: sb.Append(pad).Append("continue;\n"); break;
             case If f:
                 // The condition is evaluated once, so a value comma in it can hoist.
-                var ifc = Hoist(sb, pad, () => Expr(DecayEnum(f.Cond)));
-                sb.Append(pad).Append($"if (Cond.B({ifc}))\n");
+                var ifc = Hoist(sb, pad, () => Truth(f.Cond).Text);
+                sb.Append(pad).Append($"if ({ifc})\n");
                 Nested(sb, f.Then, ind);
                 if (f.Else is { } els)
                 {
@@ -923,13 +923,13 @@ internal sealed class CSharpBackend
             case While w:
                 // zig's `while (true)` renders bare, so C#'s flow analysis sees the loop never falls out (a function
                 // whose every exit is inside it, std.fmt.parse_float's scanDigit, would otherwise be CS0161).
-                sb.Append(pad).Append(w.Cond is LitBool { Value: true } ? "while (true)\n" : $"while (Cond.B({Expr(DecayEnum(w.Cond))}))\n");
+                sb.Append(pad).Append($"while ({Truth(w.Cond).Text})\n");
                 WithNormalBreak(() => Nested(sb, w.Body, ind));
                 break;
             case DoWhile dw:
                 sb.Append(pad).Append("do\n");
                 WithNormalBreak(() => Nested(sb, dw.Body, ind));
-                sb.Append(pad).Append($"while (Cond.B({Expr(DecayEnum(dw.Cond))}));\n");
+                sb.Append(pad).Append($"while ({Truth(dw.Cond).Text});\n");
                 break;
             case Goto g:
                 // A cross-section goto to a label that starts another case section
@@ -1021,7 +1021,7 @@ internal sealed class CSharpBackend
                 };
                 // zig's `while (true) : (i -= 1)` (std.mem.findLastLinear) has no condition to spell, so C# sees the loop
                 // never falls out, as a bare `while (true)` does (CS0161 otherwise).
-                var cond = fr.Cond is null or LitBool { Value: true } ? "" : $"Cond.B({Expr(DecayEnum(fr.Cond))})";
+                var cond = fr.Cond is null or LitBool { Value: true } ? "" : Truth(fr.Cond).Text;
                 var post = fr.Post is null ? "" : Expr(fr.Post);
                 sb.Append(pad).Append($"for ({init}; {cond}; {post})\n");
                 WithNormalBreak(() => Nested(sb, fr.Body, ind));
@@ -2392,8 +2392,9 @@ internal sealed class CSharpBackend
                     // CBool value type (CBool→int carries it elsewhere). A plain-int
                     // sibling then gives the two arms different C# types though their
                     // CType agrees, so the arithmetic-mismatch coercion below (keyed on
-                    // CType) doesn't fire — and a target-typed `Cond.B(cond ? … : …)`
-                    // finds both Cond.B(int) and Cond.B(CBool) viable (CS0121). When the
+                    // CType) doesn't fire, and C# cannot type the conditional: CBool and
+                    // int each convert to the other (CS0172; CS0121 when target-typed by
+                    // an overloaded call such as Cond.B). When the
                     // arms differ in CBool-rendering, decay the CBool one to the int
                     // result type so both arms share a C# type. (chibi srfi/69 hash.c:
                     // `sexp_pointerp(o) ? (tag == SYMBOL) : !sexp_fixnump(o)`.)
@@ -2420,7 +2421,7 @@ internal sealed class CSharpBackend
                             : IsFnPtrType(t.Type) && UnparenIsFunc(a)
                             ? $"({Cs(t.Type)})({Expr(a)})"
                             : Expr(a));
-                    return ($"(Cond.B({Expr(DecayEnum(t.Cond))}) ? {Arm(t.Then)} : {Arm(t.Else)})", PPrimary);
+                    return ($"({TruthSub(t.Cond, PCond + 1)} ? {Arm(t.Then)} : {Arm(t.Else)})", PPrimary);
                 }
             case SwitchExpr sw:
                 {
@@ -2671,18 +2672,19 @@ internal sealed class CSharpBackend
             case UnOp.PreDec: return ($"--{Sub(u.Operand, PUnary)}", PUnary);
             case UnOp.PostInc: return ($"{Sub(u.Operand, PPostfix)}++", PPostfix);
             case UnOp.PostDec: return ($"{Sub(u.Operand, PPostfix)}--", PPostfix);
-            // C's `!x` yields int 0/1 (never bool); Cond.B picks the truthy overload
-            // (no enum overload — decay an enum operand first). Wrapped → atomic.
-            case UnOp.LogNot: return ($"(Cond.B({Expr(DecayEnum(u.Operand))}) ? 0 : 1)", PPrimary);
+            // C's `!x` yields int 0/1 (never bool): the operand's truth, inverted
+            // into an int. Wrapped → atomic.
+            case UnOp.LogNot: return ($"({TruthSub(u.Operand, PCond + 1)} ? 0 : 1)", PPrimary);
             default: throw new IrUnsupportedException("unary " + u.Op);
         }
     }
 
     // C relational / equality yields int 0/1, NOT bool — `int x = a < b;` is legal
-    // C. Lower the result to CBool (the integer-typed _Bool): CBool→int carries it
-    // into arithmetic positions, and Cond.B(CBool) into conditional ones. `&&`/`||`
-    // likewise yield int 0/1, with each operand taken through Cond.B for C-truthy.
-    // All three forms render fully wrapped, so they're atomic to a parent.
+    // C. As a VALUE, lower the result to CBool (the integer-typed _Bool): CBool→int
+    // carries it into arithmetic positions. `&&`/`||` likewise yield int 0/1, each
+    // operand taken through its truth (Truth). All three forms render fully wrapped,
+    // so they're atomic to a parent. In a CONDITION they never get here: Truth
+    // renders them as the C# bool they already are.
     private (string, int) RenderBinary(Binary b)
     {
         // C treats an enum operand as its underlying integer in every binary
@@ -2691,27 +2693,9 @@ internal sealed class CSharpBackend
         switch (b.Op)
         {
             case BinOp.Eq or BinOp.Ne or BinOp.Lt or BinOp.Gt or BinOp.Le or BinOp.Ge:
-                {
-                    var p = Prec(b.Op);
-                    // Function-pointer comparison (`fp == fn`): a bare function
-                    // designator renders as the untyped method-group address
-                    // `&fn`, which C# can't compare without a target type
-                    // (CS0019). CmpOperand casts such an operand to its fn-ptr
-                    // type; integer operands keep usual-arithmetic reconcile.
-                    if (IsFnPtrType(b.Left.Type) || IsFnPtrType(b.Right.Type))
-                    {
-                        return ($"((CBool)({CmpOperand(b.Left, p)} {BinSym(b.Op)} {CmpOperand(b.Right, p + 1)}))", PPrimary);
-                    }
-                    var (l, r) = ReconcileOperands(b.Left, b.Right, p, p + 1);
-                    return ($"((CBool)({l} {BinSym(b.Op)} {r}))", PPrimary);
-                }
-            case BinOp.LogAnd:
-                // The right operand is short-circuited — render it WITHOUT hoisting so
-                // a comma there stays conditional (the left always evaluates). (Operands
-                // already enum-decayed at the top, so Cond.B picks an int overload.)
-                return ($"((CBool)(Cond.B({Expr(b.Left)}) && Cond.B({NoHoist(() => Expr(b.Right))})))", PPrimary);
-            case BinOp.LogOr:
-                return ($"((CBool)(Cond.B({Expr(b.Left)}) || Cond.B({NoHoist(() => Expr(b.Right))})))", PPrimary);
+                return ($"((CBool)({RelationalText(b)}))", PPrimary);
+            case BinOp.LogAnd or BinOp.LogOr:
+                return ($"((CBool)({Truth(b).Text}))", PPrimary);
             case BinOp.Shl or BinOp.Shr:
                 {
                     // A shift's operands are promoted INDEPENDENTLY (the right operand
@@ -2740,6 +2724,106 @@ internal sealed class CSharpBackend
                     return ($"{l} {BinSym(b.Op)} {r}", p);
                 }
         }
+    }
+
+    /// <summary>
+    /// Render a C condition as a C# <c>bool</c>: the controlling expression of
+    /// <c>if</c>, <c>while</c>, <c>do</c>, <c>for</c> and <c>?:</c>, and each operand of
+    /// <c>!</c>, <c>&amp;&amp;</c> and <c>||</c>. C's truth is "compares unequal to 0"
+    /// (C11 6.8.4.1, 6.5.3.3, 6.5.13); the IR carries each operand's type, so the test
+    /// is written out: a comparison is already a bool, <c>!</c>, <c>&amp;&amp;</c> and
+    /// <c>||</c> compose truths, a number tests <c>!= 0</c> and a pointer
+    /// <c>!= null</c>. Only a value with no such test in C# (a <c>_Bool</c>, which is
+    /// <c>CBool</c>; an array; a function designator) goes through <c>Cond.B</c>.
+    /// Writing the test out keeps a condition free of calls, which matters where the
+    /// JIT inlines nothing: it compiles a method as large as CPython's interpreter loop
+    /// without optimization, and there every <c>Cond.B</c> and <c>CBool</c> conversion
+    /// was a real call. With <paramref name="negate"/> it renders the condition's
+    /// falsity instead, which is how <c>!</c> composes: <c>!n</c> is <c>n == 0</c>,
+    /// <c>!!p</c> is <c>p != null</c>. Returns the text and its precedence, as
+    /// <see cref="Render"/>.
+    /// </summary>
+    private (string Text, int Prec) Truth(CExpr e, bool negate = false)
+    {
+        e = DecayEnum(e);
+        while (e is Paren p) { e = DecayEnum(p.Inner); }
+        switch (e)
+        {
+            case LitBool lb:
+                return (lb.Value != negate ? "true" : "false", PPrimary);
+            case LitInt { Value: { } lit }:
+                // `while (1)`, `if (0)`: the literal's truth is known here.
+                return ((lit != 0) != negate ? "true" : "false", PPrimary);
+            case Unary { Op: UnOp.LogNot } not:
+                return Truth(not.Operand, !negate);
+            case CommaOp co when _canHoist:
+                // At a hoistable position the leading operands become statements (as
+                // Render does) and the last one is the condition.
+                for (var i = 0; i < co.Items.Count - 1; i++) { _pending.Add(RenderStmtExpr(co.Items[i])); }
+                return Truth(co.Items[^1], negate);
+            case Binary { Op: BinOp.Eq or BinOp.Ne } eq when negate:
+                // Inverting equality is exact, NaN included: !(a == b) is a != b.
+                return Truth(eq with { Op = eq.Op == BinOp.Eq ? BinOp.Ne : BinOp.Eq });
+            case Binary { Op: BinOp.Eq or BinOp.Ne or BinOp.Lt or BinOp.Gt or BinOp.Le or BinOp.Ge } rel:
+                return Not((RelationalText(rel with { Left = DecayEnum(rel.Left), Right = DecayEnum(rel.Right) }), Prec(rel.Op)));
+            case Binary { Op: BinOp.LogAnd } and:
+                // The right operand is short-circuited: rendered WITHOUT hoisting, so a
+                // comma there stays conditional (the left always evaluates).
+                return Not(($"{TruthSub(and.Left, PLogAnd)} && {NoHoist(() => TruthSub(and.Right, PLogAnd + 1))}", PLogAnd));
+            case Binary { Op: BinOp.LogOr } or:
+                return Not(($"{TruthSub(or.Left, PLogOr)} || {NoHoist(() => TruthSub(or.Right, PLogOr + 1))}", PLogOr));
+        }
+        if (IsUntypedMember(e)) { return Not(($"Cond.B({Expr(e)})", PPostfix)); }
+        var op = negate ? "==" : "!=";
+        return e.Type.Unqualified switch
+        {
+            CType.Prim { Name: not "_Bool" } => ($"{Sub(e, PEq)} {op} 0", PEq),
+            CType.Pointer => ($"{Sub(e, PEq)} {op} null", PEq),
+            CType.Func when !UnparenIsFunc(e) => ($"{Sub(e, PEq)} {op} null", PEq),
+            _ => Not(($"Cond.B({Expr(e)})", PPostfix)),
+        };
+
+        (string Text, int Prec) Not((string Text, int Prec) t) =>
+            !negate ? t : t.Prec >= PUnary ? ($"!{t.Text}", PUnary) : ($"!({t.Text})", PUnary);
+    }
+
+    /// <summary>True when <paramref name="e"/> reads a member of an aggregate the IR has
+    /// no field list for. The member's IR type is then a placeholder <c>int</c>, not the
+    /// field's type, so <see cref="Truth"/> cannot write the test from it and lets
+    /// <c>Cond.B</c>'s overloads pick it. The C runtime's structs all have a field list
+    /// since GH #250 (their synthetic headers declare the bodies), so this guards only
+    /// the types that still do not.</summary>
+    private bool IsUntypedMember(CExpr e)
+    {
+        if (e is not Member m || _module is not { } module) { return false; }
+        var t = m.Base.Type.Unqualified;
+        while (t is CType.Pointer p) { t = p.Pointee.Unqualified; }
+        return t is CType.Named n && !module.StructFields.ContainsKey(n.Name);
+    }
+
+    /// <summary><see cref="Truth"/> as an operand that must bind at least as tightly
+    /// as <paramref name="minPrec"/>; parenthesized only when it does not.</summary>
+    private string TruthSub(CExpr e, int minPrec)
+    {
+        var (text, prec) = Truth(e);
+        return prec < minPrec ? $"({text})" : text;
+    }
+
+    /// <summary>A relational or equality operator as a C# <c>bool</c> (its operands
+    /// already enum-decayed). A function-pointer comparison (<c>fp == fn</c>) casts a
+    /// bare function designator, which renders as the untyped method-group address
+    /// <c>&amp;fn</c> that C# cannot compare without a target type (CS0019), to its
+    /// fn-ptr type (CmpOperand); integer operands keep the usual-arithmetic
+    /// reconcile.</summary>
+    private string RelationalText(Binary b)
+    {
+        var p = Prec(b.Op);
+        if (IsFnPtrType(b.Left.Type) || IsFnPtrType(b.Right.Type))
+        {
+            return $"{CmpOperand(b.Left, p)} {BinSym(b.Op)} {CmpOperand(b.Right, p + 1)}";
+        }
+        var (l, r) = ReconcileOperands(b.Left, b.Right, p, p + 1);
+        return $"{l} {BinSym(b.Op)} {r}";
     }
 
     /// <summary>Render the two operands of an arithmetic / bitwise / relational
@@ -3230,7 +3314,7 @@ internal sealed class CSharpBackend
         // (a nested void `?:`); each arm renders in statement position too.
         if (e is CondExpr ct && ct.Type.Unqualified is CType.VoidType)
         {
-            return $"if (Cond.B({Expr(ct.Cond)})) {{ {RenderStmtExpr(ct.Then)}; }} else {{ {RenderStmtExpr(ct.Else)}; }}";
+            return $"if ({Truth(ct.Cond).Text}) {{ {RenderStmtExpr(ct.Then)}; }} else {{ {RenderStmtExpr(ct.Else)}; }}";
         }
         return IsStmtExpr(e) ? Expr(e) : $"_ = {Sub(e, PAssign)}";
     }

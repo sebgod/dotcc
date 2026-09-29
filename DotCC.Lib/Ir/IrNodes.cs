@@ -132,8 +132,8 @@ public sealed record Cast(CType Target, CExpr Operand) : CExpr;
 /// which Zig never targets, leaves it on the default throw like <c>Slice</c>/<c>ErrorUnion</c>.</summary>
 public sealed record BitCast(CType Target, CExpr Operand) : CExpr;
 
-/// <summary>A conditional (ternary) expression <c>c ? a : b</c>. Codegen wraps
-/// the condition in <c>Cond.B(...)</c> for C-truthy semantics.</summary>
+/// <summary>A conditional (ternary) expression <c>c ? a : b</c>. Codegen renders
+/// the condition as a C# <c>bool</c> with C-truthy semantics.</summary>
 public sealed record CondExpr(CExpr Cond, CExpr Then, CExpr Else) : CExpr;
 
 /// <summary>A C# switch EXPRESSION — <c>subject switch { labels =&gt; value, …, _ =&gt; value }</c>

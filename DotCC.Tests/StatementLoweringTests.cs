@@ -40,8 +40,7 @@ public sealed class StatementLoweringTests
                 return n;
             }
             """);
-        emitted.ShouldContain("if (Cond.B(");
-        emitted.ShouldContain("act(&n);");
+        emitted.ShouldContain("if (n == 0)\n            act(&n);");
         // no literal void cast left as a (sub)expression
         emitted.ShouldNotContain("? act");   // not emitted as a C# ternary
     }
@@ -57,10 +56,9 @@ public sealed class StatementLoweringTests
                 return n;
             }
             """);
-        // outer if with a nested if in its then-branch (>= 2 `if (Cond.B(` —
-        // only user conditionals use Cond.B, so this counts the lowered ternaries)
-        emitted.ShouldContain("act(&n);");
-        emitted.Split("if (Cond.B(").Length.ShouldBeGreaterThanOrEqualTo(3);
+        // outer if with a nested if in its then-branch (the literal conditions
+        // fold to `true`)
+        emitted.ShouldContain("if (true)\n            if (true)\n                act(&n);");
     }
 
     [Fact]
@@ -76,7 +74,7 @@ public sealed class StatementLoweringTests
             }
             """);
         // the comma body is wrapped so the if takes the whole block
-        emitted.ShouldContain("if (Cond.B(((CBool)(n == 0))))");
+        emitted.ShouldContain("if (n == 0)");
         emitted.ShouldContain("{");
         emitted.ShouldContain("else");
     }
@@ -96,7 +94,7 @@ public sealed class StatementLoweringTests
             }
             """);
         // the guard lowered to an if/else statement, hoisted before the assignment
-        emitted.ShouldContain("if (Cond.B(");
+        emitted.ShouldContain("if (1 > 2) { g(); }");
         emitted.ShouldContain("p = ");
         emitted.ShouldNotContain(").Item2");   // not a tuple — a void operand can't be one
     }
@@ -110,7 +108,7 @@ public sealed class StatementLoweringTests
             int main(void) { int x = 9; return *pick(&x); }
             """);
         emitted.ShouldContain("return a");
-        emitted.ShouldContain("if (Cond.B(");
+        emitted.ShouldContain("if (1 > 2) { g(); }");
     }
 
     [Fact]

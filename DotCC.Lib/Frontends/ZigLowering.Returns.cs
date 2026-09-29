@@ -333,7 +333,7 @@ internal sealed partial class ZigLowering
     /// <see cref="LowerReturn"/>/<see cref="LowerReturnVoid"/>, so it wraps correctly in a <c>!T</c>
     /// function — incl. <c>return error.X</c>). On the success path the unwrapped payload is consumed
     /// by <paramref name="bind"/> (a decl initializer binds it; an expression-statement passes null
-    /// and discards it). Emitted as <c>{ var __cf = a; if (Cond.B(&lt;none/error&gt;)) { return …; }
+    /// and discards it). Emitted as <c>{ var __cf = a; if (&lt;none/error&gt;) { return …; }
     /// [bind(payload)] }</c>. <paramref name="resultSink"/> is the declared type of what binds the result, when there is
     /// one: an OPTIONAL there types a value arm's result (see below).</summary>
     private CStmt LowerControlFlowFallback(Item lhsItem, bool isCatch, string? capture, Item arm, Func<CExpr, CStmt>? bind,

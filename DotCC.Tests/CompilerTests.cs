@@ -157,7 +157,7 @@ public sealed partial class CompilerTests
             emitted.ShouldContain("case 7:");
             emitted.ShouldContain("case 1:");
             emitted.ShouldContain("do");
-            emitted.ShouldContain("while (Cond.B(");
+            emitted.ShouldContain("while (--n > 0);");
         }
         finally { File.Delete(src); }
     }

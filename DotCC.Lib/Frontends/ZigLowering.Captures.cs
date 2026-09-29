@@ -97,7 +97,7 @@ internal sealed partial class ZigLowering
                 throw new IrUnsupportedException(
                     "zig `if (optional pointer) |x| … else |e|`: a pointer optional has no error to capture (use a plain `else`)");
             }
-            test = condRef;        // Cond.B(void*) tests non-null
+            test = condRef;        // a pointer condition tests non-null
             payloadInit = condRef; // the unwrapped pointer is the same value
             payloadType = cond.Type;
             if (byRef)
@@ -343,7 +343,7 @@ internal sealed partial class ZigLowering
         }
         else if (ct is CType.Pointer)
         {
-            test = condRef;          // Cond.B(void*) tests non-null
+            test = condRef;          // a pointer condition tests non-null
             payloadInit = condRef;   // the unwrapped pointer is the same value
             payloadType = cond.Type;
         }
