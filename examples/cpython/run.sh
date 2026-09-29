@@ -10,6 +10,9 @@
 # current drive, which .NET resolves there. For the same reason a script is
 # best named by a relative path.
 #
+# The NativeAOT interpreter (BUILD_AOT=1 build.sh) is used when it is newer than
+# the JIT build, so a later plain build.sh is not shadowed by a stale one.
+#
 # Environment: CPYTHON_SRC, BUILD_OUT (default: build/).
 set -euo pipefail
 
@@ -19,6 +22,9 @@ OUT="${BUILD_OUT:-$HERE/build}"
 EXE="$OUT/python/bin/Release/net10.0/python"
 [ -f "$EXE.exe" ] && EXE="$EXE.exe"
 [ -f "$EXE" ] || { echo "run.sh: no interpreter at $EXE (run build.sh)" >&2; exit 2; }
+AOT="$OUT/python-aot/python"
+[ -f "$AOT.exe" ] && AOT="$AOT.exe"
+if [ -f "$AOT" ] && [ "$AOT" -nt "$EXE" ]; then EXE="$AOT"; fi
 
 LIB="$OUT/home/lib/python3.13"
 if [ ! -e "$LIB" ]; then

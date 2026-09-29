@@ -11,10 +11,14 @@
 # fix redoes everything, and after a source edit only that unit. Only this
 # build's units are linked, so other objects in the directory stay out.
 #
+# BUILD_AOT=1 also publishes a NativeAOT interpreter into build/python-aot
+# (about two minutes more), which run.sh then prefers: it starts in under 0.1 s,
+# where the JIT build compiles its startup path on every run (about 2 s).
+#
 # Environment: DOTCC_DLL, CPYTHON_SRC, BUILD_OUT (default: build/), BUILD_OBJ
 # (default: $BUILD_OUT/obj; probe.sh's out/cs holds the same objects, built with
 # the same flags, so CI links those instead of compiling again), BUILD_JOBS
-# (default: the CPU count).
+# (default: the CPU count), BUILD_AOT.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && (pwd -W 2>/dev/null || pwd))"
@@ -69,3 +73,13 @@ echo "build.sh: ${#objects[@]} objects"
 (cd "$OBJ" && dotnet "$DLL" --emit=csproj -o "$OUT/python" "${objects[@]}")
 dotnet build "$OUT/python" -c Release --nologo -v quiet
 echo "build.sh: built $OUT/python"
+
+if [ "${BUILD_AOT:-0}" = 1 ]; then
+  # NativeAOT links with the platform toolchain; on Windows it finds MSVC through
+  # vswhere, which is on PATH only inside a Developer prompt.
+  vs_installer="/c/Program Files (x86)/Microsoft Visual Studio/Installer"
+  if ! command -v vswhere >/dev/null 2>&1 && [ -d "$vs_installer" ]; then PATH="$vs_installer:$PATH"; fi
+  dotnet publish "$OUT/python" -c Release --use-current-runtime -p:PublishAot=true \
+    -o "$OUT/python-aot" --nologo -v quiet
+  echo "build.sh: published $OUT/python-aot (NativeAOT)"
+fi
