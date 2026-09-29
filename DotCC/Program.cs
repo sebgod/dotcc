@@ -106,6 +106,10 @@ internal static class Program
         {
             Description = "Enable a sanitizer. Only 'address' is modeled: routes the emitted program's malloc/calloc/realloc/free through a checked debug heap (redzone overflow + bad/double-free detection, a heap-only subset of clang's -fsanitize=address). DOTCC_DEBUG_HEAP=1 is the runtime-override equivalent.",
         };
+        var posixPathsOpt = new Option<bool>("-fposix-paths")
+        {
+            Description = "On Windows, show the program a POSIX view of paths, as MSYS2 does: getcwd, realpath, readlink, tmpnam, argv entries that are absolute Windows paths, and path-valued environment variables come out as /c/Users/... (//server/share for UNC), and every function taking a path accepts both forms. For POSIX-shaped C code that does its own path arithmetic (CPython's posixpath). Off by default, so paths behave as .NET's do; no effect on other hosts. Given when linking (the program's shell turns it on before main).",
+        };
         var mdOpt = new Option<bool>("-MD")
         {
             Description = "Write a Make-format dependency file (.d) listing the TU + every #included header, alongside compilation.",
@@ -136,7 +140,7 @@ internal static class Program
         var root = new RootCommand("dotcc — a C compiler frontend that transpiles to .NET 10 / C# 14.")
         {
             inputArg, outOpt, emitOpt, targetOpt, preprocessOpt, includeOpt, defineOpt, compileOpt, sharedOpt, stdOpt,
-            pedanticOpt, pedanticErrorsOpt, wconversionOpt, wnoDiscardedQualifiersOpt, wimplicitFallthroughOpt, sanitizeOpt, mdOpt, mmdOpt, mfOpt, mtOpt, linkOpt, libDirOpt,
+            pedanticOpt, pedanticErrorsOpt, wconversionOpt, wnoDiscardedQualifiersOpt, wimplicitFallthroughOpt, sanitizeOpt, posixPathsOpt, mdOpt, mmdOpt, mfOpt, mtOpt, linkOpt, libDirOpt,
         };
         // Accept-and-ignore unknown flags (-Wall, -O2, -g, -f*, -m*, …) instead
         // of erroring out, so dotcc survives being driven by ./configure / make,
@@ -206,6 +210,7 @@ internal static class Program
                     Console.Error.WriteLine($"dotcc: warning: ignoring unsupported -fsanitize={k}");
                 }
             }
+            var posixPathsFlag = parse.GetValue(posixPathsOpt);
             var mdFlag = parse.GetValue(mdOpt);
             var mmdFlag = parse.GetValue(mmdOpt);
             var depFile = parse.GetValue(mfOpt);
@@ -247,7 +252,7 @@ internal static class Program
             }
 
             return Run(inputs, output, emit, target, preprocessOnly, includes, defines, sharedFlag, dialect,
-                       mdFlag, mmdFlag, depFile, depTargets, debugHeapFlag, imports, warnings);
+                       mdFlag, mmdFlag, depFile, depTargets, debugHeapFlag, imports, warnings, posixPathsFlag);
         });
 
         return root.Parse(args).Invoke();
@@ -297,7 +302,8 @@ internal static class Program
         string[] depTargets,
         bool debugHeap = false,
         ImportOptions? imports = null,
-        WarningFlags warnings = WarningFlags.Default)
+        WarningFlags warnings = WarningFlags.Default,
+        bool posixPaths = false)
     {
         imports ??= ImportOptions.Empty;
         if (preprocessOnly)
@@ -383,7 +389,7 @@ internal static class Program
         try
         {
             program = linking
-                ? Compiler.LinkObjects(inputPaths, emit: emitMode, debugHeap: debugHeap, imports: imports)
+                ? Compiler.LinkObjects(inputPaths, emit: emitMode, debugHeap: debugHeap, imports: imports, posixPaths: posixPaths)
                 : Compiler.EmitCSharp(
                     inputPaths,
                     includeDirs,
@@ -392,7 +398,8 @@ internal static class Program
                     dialect: dialect,
                     debugHeap: debugHeap,
                     imports: imports,
-                    warnings: warnings);
+                    warnings: warnings,
+                    posixPaths: posixPaths);
         }
         catch (CompileException ex)
         {

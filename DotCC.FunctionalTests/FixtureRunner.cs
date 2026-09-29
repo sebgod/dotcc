@@ -31,9 +31,11 @@ internal static class FixtureRunner
     /// assembly that contains at least one <c>.c</c> file and an
     /// <c>expected-stdout.txt</c> sidecar. An optional <c>std.txt</c> sidecar
     /// (contents e.g. <c>c23</c>) selects the dialect for that fixture;
-    /// absent, it defaults to dotcc's default (<c>c17</c>).
+    /// absent, it defaults to dotcc's default (<c>c17</c>). An optional
+    /// <c>posix-paths.txt</c> sidecar (its text says why) builds the fixture with
+    /// <c>-fposix-paths</c>, the runtime's POSIX view of Windows paths.
     /// </summary>
-    public static IEnumerable<(string name, string dir, string[] sources, string expectedStdout, string std)> Discover()
+    public static IEnumerable<(string name, string dir, string[] sources, string expectedStdout, string std, bool posixPaths)> Discover()
     {
         var root = Path.Combine(AppContext.BaseDirectory, "Fixtures");
         if (!Directory.Exists(root)) { yield break; }
@@ -44,7 +46,8 @@ internal static class FixtureRunner
             if (sources.Length == 0 || !File.Exists(expectedPath)) { continue; }
             var stdPath = Path.Combine(dir, "std.txt");
             var std = File.Exists(stdPath) ? File.ReadAllText(stdPath).Trim() : "c17";
-            yield return (Path.GetFileName(dir), dir, sources, File.ReadAllText(expectedPath), std);
+            var posixPaths = File.Exists(Path.Combine(dir, "posix-paths.txt"));
+            yield return (Path.GetFileName(dir), dir, sources, File.ReadAllText(expectedPath), std, posixPaths);
         }
     }
 

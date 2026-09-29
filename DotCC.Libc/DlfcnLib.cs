@@ -53,7 +53,7 @@ public static partial class Libc
         {
             return (void*)NativeLibrary.GetMainProgramHandle();
         }
-        string path = Str(filename);
+        string path = HostPath(filename);
         if (NativeLibrary.TryLoad(path, out IntPtr handle))
         {
             return (void*)handle;

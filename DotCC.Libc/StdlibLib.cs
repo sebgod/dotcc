@@ -266,7 +266,7 @@ public static unsafe partial class Libc
     public static byte* getenv(byte* name)
     {
         var key = Encoding.UTF8.GetString(name, strlen(name));
-        return StashCString(Environment.GetEnvironmentVariable(key));
+        return StashCString(ViewEnvironmentValue(key, Environment.GetEnvironmentVariable(key)));
     }
 
     /// <summary>POSIX <c>setenv(name, value, overwrite)</c> — add or change an
@@ -329,11 +329,18 @@ public static unsafe partial class Libc
     private static byte** BuildEnviron()
     {
         var vars = Environment.GetEnvironmentVariables();
-        var arr = (byte**)NativeMemory.Alloc((nuint)(vars.Count + 1), (nuint)sizeof(byte*));
-        var i = 0;
+        var entries = new System.Collections.Generic.List<string>(vars.Count + 1);
         foreach (System.Collections.DictionaryEntry e in vars)
         {
-            var entry = $"{e.Key}={e.Value}";
+            var key = (string)e.Key;
+            entries.Add($"{key}={ViewEnvironmentValue(key, e.Value as string)}");
+        }
+        // The POSIX path view supplies HOME from USERPROFILE when it is unset (see getenv).
+        if (!vars.Contains("HOME") && ViewEnvironmentValue("HOME", null) is { } home) { entries.Add("HOME=" + home); }
+        var arr = (byte**)NativeMemory.Alloc((nuint)(entries.Count + 1), (nuint)sizeof(byte*));
+        var i = 0;
+        foreach (var entry in entries)
+        {
             var need = Encoding.UTF8.GetByteCount(entry) + 1;
             var p = (byte*)NativeMemory.Alloc((nuint)need);
             var n = Encoding.UTF8.GetBytes(entry, new Span<byte>(p, need));

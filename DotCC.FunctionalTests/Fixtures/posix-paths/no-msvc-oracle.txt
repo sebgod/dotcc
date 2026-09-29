@@ -1,0 +1,1 @@
+MSVC's CRT hands out Windows paths (C:\..., ; in PATH); this fixture checks the POSIX view dotcc gives with -fposix-paths.

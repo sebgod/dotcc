@@ -70,7 +70,7 @@ public static unsafe partial class Libc
     public static void* opendir(byte* name)
     {
         if (name == null) { errno = ENOENT; return null; }
-        var path = Encoding.UTF8.GetString(name, strlen(name));
+        var path = HostPath(name);
         string[] names;
         byte[] types;
         try
@@ -137,7 +137,7 @@ public static unsafe partial class Libc
     public static int utimes(byte* path, void* times)
     {
         if (path == null) { errno = EFAULT; return -1; }
-        var p = Encoding.UTF8.GetString(path, strlen(path));
+        var p = HostPath(path);
         var now = DateTime.UtcNow;
         var t = (long*)times;
         DateTime At(int i) => DateTime.UnixEpoch.AddTicks(t[2 * i] * TimeSpan.TicksPerSecond + t[2 * i + 1] * 10);
@@ -187,7 +187,7 @@ public static unsafe partial class Libc
     public static int open(byte* path, int flags, int mode)
     {
         if (path == null) { errno = ENOENT; return -1; }
-        var p = Encoding.UTF8.GetString(path, strlen(path));
+        var p = HostPath(path);
         const int oCreat = 0x40, oExcl = 0x80, oTrunc = 0x200, oAppend = 0x400;
         var access = (flags & 0x3) switch
         {
@@ -226,7 +226,7 @@ public static unsafe partial class Libc
     /// is applied best-effort.</summary>
     public static int mkdir(byte* path, uint mode)
     {
-        var p = Str(path);
+        var p = HostPath(path);
         if (Directory.Exists(p) || File.Exists(p)) { errno = EEXIST; return -1; }
         try { Directory.CreateDirectory(p); TrySetUnixMode(p, (int)mode); return 0; }
         catch (UnauthorizedAccessException) { errno = EACCES; return -1; }
@@ -238,7 +238,7 @@ public static unsafe partial class Libc
     /// errno dotcc carries to ENOTEMPTY).</summary>
     public static int rmdir(byte* path)
     {
-        var p = Str(path);
+        var p = HostPath(path);
         if (!Directory.Exists(p)) { errno = File.Exists(p) ? ENOTDIR : ENOENT; return -1; }
         try { Directory.Delete(p, recursive: false); return 0; }
         catch (IOException) { errno = EEXIST; return -1; }   // not empty
@@ -249,7 +249,7 @@ public static unsafe partial class Libc
     /// (ENOENT/EACCES/EIO).</summary>
     public static int unlink(byte* path)
     {
-        var p = Str(path);
+        var p = HostPath(path);
         if (!File.Exists(p)) { errno = ENOENT; return -1; }
         try { File.Delete(p); return 0; }
         catch (UnauthorizedAccessException) { errno = EACCES; return -1; }
@@ -260,7 +260,7 @@ public static unsafe partial class Libc
     /// -1 (ENOENT/EACCES).</summary>
     public static int chdir(byte* path)
     {
-        var p = Str(path);
+        var p = HostPath(path);
         if (!Directory.Exists(p)) { errno = ENOENT; return -1; }
         try { Directory.SetCurrentDirectory(p); return 0; }
         catch (UnauthorizedAccessException) { errno = EACCES; return -1; }
@@ -274,7 +274,7 @@ public static unsafe partial class Libc
     /// extension chibi relies on); the caller frees it.</summary>
     public static byte* getcwd(byte* buf, ulong size)
     {
-        var cwd = Directory.GetCurrentDirectory();
+        var cwd = ViewPath(Directory.GetCurrentDirectory());
         var need = Encoding.UTF8.GetByteCount(cwd) + 1;
         if (buf == null) { buf = (byte*)NativeMemory.Alloc((nuint)need); size = (ulong)need; }
         else if ((ulong)need > size) { errno = ERANGE; return null; }
@@ -288,7 +288,7 @@ public static unsafe partial class Libc
     /// (ENOENT) if the path doesn't exist.</summary>
     public static int chmod(byte* path, uint mode)
     {
-        var p = Str(path);
+        var p = HostPath(path);
         if (!File.Exists(p) && !Directory.Exists(p)) { errno = ENOENT; return -1; }
         TrySetUnixMode(p, (int)mode);
         return 0;
@@ -298,8 +298,8 @@ public static unsafe partial class Libc
     /// success, -1 (EEXIST/EACCES/EIO).</summary>
     public static int symlink(byte* target, byte* linkpath)
     {
-        var tgt = Str(target);
-        var lnk = Str(linkpath);
+        var tgt = HostPath(target);
+        var lnk = HostPath(linkpath);
         try { File.CreateSymbolicLink(lnk, tgt); return 0; }
         catch (IOException) when (File.Exists(lnk) || Directory.Exists(lnk)) { errno = EEXIST; return -1; }
         catch (UnauthorizedAccessException) { errno = EACCES; return -1; }
@@ -312,12 +312,12 @@ public static unsafe partial class Libc
     /// path is not a symlink).</summary>
     public static long readlink(byte* path, byte* buf, ulong bufsiz)
     {
-        var p = Str(path);
+        var p = HostPath(path);
         string? target;
         try { target = (File.Exists(p) ? new FileInfo(p) : (FileSystemInfo)new DirectoryInfo(p)).LinkTarget; }
         catch (IOException) { errno = EIO; return -1; }
         if (target == null) { errno = EINVAL; return -1; }
-        var bytes = Encoding.UTF8.GetBytes(target);
+        var bytes = Encoding.UTF8.GetBytes(ViewPath(target));
         var n = Math.Min(bytes.Length, (int)bufsiz);
         new Span<byte>(bytes, 0, n).CopyTo(new Span<byte>(buf, n));
         return n;
@@ -338,8 +338,8 @@ public static unsafe partial class Libc
             // `fixed` on a managed string pins its (NUL-terminated) UTF-16
             // buffer, so the W API gets a `char*` with no string marshalling —
             // the signature stays blittable and AOT-clean.
-            var existing = Str(oldpath);
-            var newLink = Str(newpath);
+            var existing = HostPath(oldpath);
+            var newLink = HostPath(newpath);
             fixed (char* e = existing)
             fixed (char* n = newLink)
             {
@@ -381,14 +381,15 @@ public static unsafe partial class Libc
     /// (ENOENT) if the path doesn't exist.</summary>
     public static byte* realpath(byte* path, byte* resolved)
     {
-        var p = Str(path);
+        var p = HostPath(path);
         string full;
         try { full = Path.GetFullPath(p); }
         catch (Exception) { errno = EINVAL; return null; }
         if (!File.Exists(full) && !Directory.Exists(full)) { errno = ENOENT; return null; }
-        var need = Encoding.UTF8.GetByteCount(full) + 1;
+        var shown = ViewPath(full);
+        var need = Encoding.UTF8.GetByteCount(shown) + 1;
         if (resolved == null) { resolved = (byte*)NativeMemory.Alloc((nuint)need); }
-        var n = Encoding.UTF8.GetBytes(full, new Span<byte>(resolved, need));
+        var n = Encoding.UTF8.GetBytes(shown, new Span<byte>(resolved, need));
         resolved[n] = 0;
         return resolved;
     }
@@ -407,7 +408,7 @@ public static unsafe partial class Libc
     /// suffices for them.</summary>
     public static int access(byte* path, int mode)
     {
-        var p = Str(path);
+        var p = HostPath(path);
         var isFile = File.Exists(p);
         if (!isFile && !Directory.Exists(p)) { errno = ENOENT; return -1; }
         const int wOk = 2;
@@ -428,7 +429,7 @@ public static unsafe partial class Libc
     {
         if (OperatingSystem.IsWindows())
         {
-            var p = Str(path);
+            var p = HostPath(path);
             if (!File.Exists(p) && !Directory.Exists(p)) { errno = ENOENT; return -1; }
             return 0;
         }
