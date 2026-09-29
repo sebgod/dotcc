@@ -551,6 +551,13 @@ public static unsafe partial class Libc
             return 6;
         }
         int len = strlen(s);
+        // A console stream shares its UTF-8 decoder with the byte writers, so a
+        // sequence split between a putchar / write and this fputs still assembles.
+        if (Slot(stream) is { Kind: FileSlot.K.Out or FileSlot.K.Err } console)
+        {
+            ConsoleWrite(console, new ReadOnlySpan<byte>(s, len));
+            return len;
+        }
         // For a file-backed stream WriterFor returns an unbuffered UTF-8
         // writer, so decode→write round-trips back to the original bytes.
         w.Write(System.Text.Encoding.UTF8.GetString(s, len));

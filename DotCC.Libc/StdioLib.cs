@@ -10,13 +10,13 @@ namespace DotCC.Libc;
 /// through <c>Console.*</c> on the std streams.
 /// </summary>
 /// <remarks>
-/// They operate on one byte at a time, so — like the rest of dotcc's UTF-8-in-
-/// <c>char*</c> model — they are exactly correct for ASCII (0..127). A byte
-/// &gt; 127 written via <see cref="putchar"/> / <see cref="fputc"/> to a
-/// console stream maps to the same-valued UTF-16 code unit rather than being
-/// assembled into a multi-byte UTF-8 sequence; use <c>fputs</c> / <c>printf</c>
-/// for non-ASCII console text. To a file-backed stream the raw byte is written
-/// verbatim (correct for binary). <c>EOF</c> is <c>-1</c>.
+/// They operate on one byte at a time. To a file-backed stream the raw byte is
+/// written or read verbatim (correct for binary). The console streams follow
+/// dotcc's UTF-8-in-<c>char*</c> model: bytes written to <c>stdout</c> /
+/// <c>stderr</c> go through a per-stream UTF-8 decoder, so a multi-byte
+/// sequence written a byte at a time still prints as its character, and each
+/// character read from <c>stdin</c> is handed out as its UTF-8 bytes.
+/// <c>EOF</c> is <c>-1</c>.
 /// </remarks>
 public static unsafe partial class Libc
 {
