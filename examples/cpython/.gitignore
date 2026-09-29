@@ -1,3 +1,4 @@
 cpython-src/
 out/
 build/
+*.tmp/

@@ -1,0 +1,17 @@
+17 GRÜSSE, ΩΜΈΓΑ! 🐍 FI grüße, ωμέγα! 🐍 ﬁ grüsse, ωμέγα! 🐍 fi gRÜSSE, ωΜΈΓΑ! 🐍 FI
+['0x1f40d', '0xe9'] 🐍 α 'Gr\xfc\xdfe, \u03a9\u03bc\u03ad\u03b3\u03b1! \U0001f40d \ufb01'
+utf-8 b'Gr\xc3\xbc\xc3\x9fe, \xce\xa9\xce\xbc\xce\xad\xce\xb3\xce\xb1! \xf0\x9f\x90' 29
+utf-16-le b'G\x00r\x00\xfc\x00\xdf\x00e\x00,\x00 \x00\xa9\x03\xbc\x03\xad\x03\xb3\x03\xb1\x03' 36
+latin-1 b'Gr\xfc\xdfe, ?????! ? ?' 56
+ascii b'Gr??e, ?????! ? ?' 62
+caf� café b'&#233;'
+[left      ] [     right] [   mid    ] [+003.142] [0x00ff] [1_234_567]
+True True True True x   y
+['A', 'Z', 'a', 'b', 'é'] ['A', 'a', 'b', 'Z', 'é']
+3 line 1: Grüße, Ωμέγα! 🐍 ﬁ
+bytes: 114 b'0' 6 3
+size: 131 exists: True
+tail: fcfdfeff head: fffe0203
+[('.', ['sub'], ['data.bin', 'notes.txt']), ('sub', ['deeper'], []), ('sub/deeper', [], ['leaf.txt'])]
+['data.bin.old', 'notes.txt', 'sub']
+cleaned: True

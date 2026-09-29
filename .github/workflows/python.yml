@@ -13,8 +13,9 @@ name: python
 #                  be added (probe.sh --update), so the list stays true. It
 #                  then links the interpreter from the probe's objects (the
 #                  same units, compiled with the same flags) and runs Python on
-#                  it: a hello, and smoke.py, whose stdout must equal
-#                  smoke.expected (what host CPython 3.13 prints).
+#                  it: a hello, smoke.py and the pure-Python programs in
+#                  programs/ (programs.sh), each of whose output must equal
+#                  what host CPython 3.13 prints.
 #   capi-oracle    the <Python.h> shim's differential oracle: CPythonOracleTests
 #                  builds each cpython-oracle.txt fixture with gcc against real
 #                  libpython 3.13 and requires dotcc's transcript to match it.
@@ -92,12 +93,13 @@ jobs:
       # A hang (the interpreter spinning at exit, say) fails in minutes, not at
       # the job's hour.
       - name: Run Python on it
-        timeout-minutes: 5
+        timeout-minutes: 10
         run: |
           set -euo pipefail
           bash examples/cpython/run.sh -c "print('hello from dotcc-built CPython')"
           bash examples/cpython/run.sh examples/cpython/smoke.py > smoke.out
           diff -u examples/cpython/smoke.expected smoke.out
+          PROGRAM_TIMEOUT=120 bash examples/cpython/programs.sh
 
       - name: Upload the probe's logs
         if: always()
