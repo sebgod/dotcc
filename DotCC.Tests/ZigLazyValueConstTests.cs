@@ -57,7 +57,8 @@ public sealed class ZigLazyValueConstTests
             """);
         cs.ShouldContain("return (byte)(40 + 2);");   // `base`, inlined at its annotation's type
         cs.ShouldContain("m__Mode.fast");             // `mode`, reached through `wide` and `use_wide`
-        cs.ShouldContain("Cond.B(false)");            // `!false`; `@inComptime()` is false too
+        cs.ShouldContain("if (true && (Cond.B(");      // `!@inComptime()`: it is false at runtime
+        cs.ShouldContain("_ => true })) && true))"); // `!false`
     }
 
     [Fact]

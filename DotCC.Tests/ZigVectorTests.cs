@@ -68,7 +68,7 @@ public sealed class ZigVectorTests
         cs.ShouldContain("ulong m = ZigVec.Eq(a, b);");
         cs.ShouldContain("ZigVec.Select(m, a,");
         cs.ShouldContain("m != 0UL");                    // `.Or` over a mask: any lane
-        cs.ShouldContain("m == ZigVec.Full(8)");         // `.And`: every lane
+        cs.ShouldContain("m != ZigVec.Full(8)");         // `!` of `.And`: not every lane
         cs.ShouldContain("ZigVec.ReduceAdd(picked)");
     }
 

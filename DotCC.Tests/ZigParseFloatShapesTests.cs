@@ -157,7 +157,7 @@ public sealed class ZigParseFloatShapesTests
     public void A_labeled_switch_over_a_comptime_subject_folds_to_the_taken_prong()
     {
         var cs = EmitZig(ShapesProgram);
-        cs.ShouldMatch(@"uint capped__u8\(uint amt\)\s*\{\s*uint __blk0 = default\(uint\);\s*\{\s*if \(Cond\.B\(\(\(CBool\)\(amt < \(uint\)\(8\)\)\)\)\)");
+        cs.ShouldMatch(@"uint capped__u8\(uint amt\)\s*\{\s*uint __blk0 = default\(uint\);\s*\{\s*if \(amt < \(uint\)\(8\)\)");
     }
 
     [Fact]

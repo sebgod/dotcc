@@ -376,7 +376,7 @@ internal sealed partial class ZigLowering
     /// <item>a value optional <c>?T</c> (<see cref="CType.Optional"/>) → test <c>__cap.HasValue</c>,
     /// bind <c>x = __cap.Value</c> at the top of the then-branch;</item>
     /// <item>a niche optional pointer (lowered to a bare <c>T*</c>) → test the pointer for non-null
-    /// (the <c>Cond.B(void*)</c> overload), bind <c>x = __cap</c> (the unwrapped pointer is the
+    /// (<c>__cap != null</c>), bind <c>x = __cap</c> (the unwrapped pointer is the
     /// same value);</item>
     /// <item>an error union <c>!T</c> (<see cref="CType.ErrorUnion"/>) → bind the success payload to
     /// <c>x</c> in the then-branch and (with <c>else |e|</c>) the error code to <c>e</c> in the

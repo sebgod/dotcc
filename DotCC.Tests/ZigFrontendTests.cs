@@ -792,7 +792,7 @@ public sealed class ZigFrontendTests
             "    while (i < 5) : (i += 1) { s += i; }\n" +
             "    return @intCast(s);\n" +
             "}\n");
-        cs.ShouldContain("for (; Cond.B(");   // the while → for lowering
+        cs.ShouldContain("for (; i < 5; i += 1)");   // the while → for lowering
         cs.ShouldContain("; i += 1)");         // compound-assign continue-expr in the post
     }
 
@@ -1151,7 +1151,7 @@ public sealed class ZigFrontendTests
     [Fact]
     public void Lowers_if_and_while_statements()
     {
-        // if/else + while lower to the C# forms, conditions wrapped in Cond.B for
+        // if/else + while lower to the C# forms, conditions tested in place for
         // C-truthy semantics (shared with the C backend).
         var cs = EmitZig(
             "pub fn main() u8 {\n" +
@@ -1159,19 +1159,19 @@ public sealed class ZigFrontendTests
             "    if (x < 2) { x = 42; } else { x = 1; }\n" +   // a RUNTIME condition (`3 > 2` folds, as in zig)
             "    while (x > 100) { x = x + 1; }\n" +
             "    return x;\n}\n");
-        cs.ShouldContain("if (Cond.B(");
+        cs.ShouldContain("if (x < 2)");
         cs.ShouldContain("else");
-        cs.ShouldContain("while (Cond.B(");
+        cs.ShouldContain("while (x > 100)");
     }
 
     [Fact]
     public void Lowers_if_expression_to_a_ternary()
     {
-        // const y = if (c) a else b;  → a C# ternary with the condition in Cond.B.
-        var cs = EmitZig("pub fn main() u8 { const x: u8 = 40; const y: u8 = if (x > 10) x else 0; return y + 2; }\n");
-        cs.ShouldContain("Cond.B(");
-        cs.ShouldContain("? ");
-        cs.ShouldContain(" : ");
+        // const y = if (c) a else b;  → a C# ternary whose condition is the plain comparison.
+        // `x` is a parameter so the condition is runtime (a comptime-known one folds the `if` away).
+        var cs = EmitZig("fn pick(x: u8) u8 { const y: u8 = if (x > 10) x else 0; return y + 2; }\n" +
+                         "pub fn main() u8 { return pick(40); }\n");
+        cs.ShouldContain("byte y = (x > 10 ? x : (byte)(0));");
     }
 
     [Fact]
@@ -3742,7 +3742,7 @@ public sealed class ZigFrontendTests
     public void Lowers_an_optional_pointer_capture_in_if()
     {
         // A niche optional pointer `?*T` is a bare `T*`, so the test is a plain non-null check
-        // (`Cond.B(void*)`) and the capture binds the unwrapped pointer itself (the same value).
+        // (`maybe != null`) and the capture binds the unwrapped pointer itself (the same value).
         var cs = EmitZig(
             "pub fn main() u8 {\n" +
             "    var k: i32 = 0;\n" +
@@ -3750,7 +3750,7 @@ public sealed class ZigFrontendTests
             "    if (maybe) |p| { p.* = 42; }\n" +
             "    return @as(u8, @intCast(k));\n" +
             "}\n");
-        cs.ShouldContain("if (Cond.B(maybe))");
+        cs.ShouldContain("if (maybe != null)");
         cs.ShouldContain("int* p = maybe;");
     }
 
@@ -4137,7 +4137,7 @@ public sealed class ZigFrontendTests
             "    return 0;\n" +
             "}\n");
         cs.ShouldContain("while (true)");
-        cs.ShouldContain("if (Cond.B(__cap))");
+        cs.ShouldContain("if (__cap != null)");
         cs.ShouldContain("int* q = __cap;");
     }
 

@@ -122,7 +122,7 @@ public sealed class ZigStdHelperShapesTests
     public void A_value_if_whose_then_arm_returns_hoists_the_return()
     {
         var cs = EmitZig(Program);
-        cs.ShouldMatch(@"byte\? firstOrNull\(ConstSlice<byte> s\)\s*\{\s*if \(Cond\.B\(\(\(CBool\)\(s\.Len > \(ulong\)\(0\)\)\)\)\)\s*return s\.Ptr\[0\];\s*return null;");
+        cs.ShouldMatch(@"byte\? firstOrNull\(ConstSlice<byte> s\)\s*\{\s*if \(s\.Len > \(ulong\)\(0\)\)\s*return s\.Ptr\[0\];\s*return null;");
     }
 
     [Fact]
@@ -239,7 +239,7 @@ public sealed class ZigStdHelperShapesTests
     public void A_type_comparison_folds_as_a_call_argument()
     {
         var cs = EmitZig(BiasedProgram);
-        cs.ShouldContain("assert(((CBool)(Cond.B(((CBool)(Cond.B(false) || Cond.B(false)))) || Cond.B(true))));");
+        cs.ShouldContain("assert(((CBool)(false || false || true)));");
     }
 
     [Fact]
@@ -980,7 +980,7 @@ public sealed class ZigStdHelperShapesTests
         // A comptime-const case label folds to a literal at the subject's type.
         cs.ShouldContain("(x switch { 12UL => 2, _ => 3 })");
         // `@inComptime()` is false in a function lowered for runtime.
-        cs.ShouldContain("if (Cond.B(false))");
+        cs.ShouldContain("if (false)");
     }
 
     [Fact]
@@ -3896,8 +3896,8 @@ public sealed class ZigStdHelperShapesTests
         // Task #141 (std.mem.ReverseIterator's `.one => if (…) @compileError("…"),`): a comptime subject keeps the
         // prong's expression or nothing, so the untaken @compileError never fires; a runtime subject gets an else-less
         // `if`. zig returns 15.
-        cs.ShouldContain("case 1:\n                if (Cond.B(((CBool)(*hits < 10))))\n                    inc(hits);\n                break;");
-        cs.ShouldContain("default:\n                if (Cond.B(((CBool)(v > 5))))\n                    inc(hits);\n                break;");
+        cs.ShouldContain("case 1:\n                if (*hits < 10)\n                    inc(hits);\n                break;");
+        cs.ShouldContain("default:\n                if (v > 5)\n                    inc(hits);\n                break;");
         cs.ShouldContain("internal static unsafe byte check__0_2()\n    {\n        return 2;");
     }
 
@@ -3954,7 +3954,7 @@ public sealed class ZigStdHelperShapesTests
             """);
         // Task #146: `catch |e| return if (c) a else b` is the condition, then one of two returns. The arms are BoolOr,
         // so a following `catch` never lands inside them (an RhsExpr arm broke every `x catch …`). zig returns 56.
-        cs.ShouldContain("ushort e = __cf.Code;\n            if (Cond.B(((CBool)(e == 1))))\n                return 7;\n            else\n                return 8;");
+        cs.ShouldContain("ushort e = __cf.Code;\n            if (e == 1)\n                return 7;\n            else\n                return 8;");
     }
 
     [Fact]
@@ -6022,7 +6022,7 @@ public sealed class ZigStdHelperShapesTests
         // Task #193: a call is no pure reread, so where the statement can hoist it the left operand is bound once, first.
         // zig returns 41.
         cs.ShouldContain("Node* __anf0 = get(1);");
-        cs.ShouldContain("Node* p = (Cond.B(((CBool)(__anf0 != null))) ? __anf0 : &fallback);");
+        cs.ShouldContain("Node* p = (__anf0 != null ? __anf0 : &fallback);");
         cs.ShouldContain("Node* __anf2 = get(bump());");
     }
 
@@ -6408,7 +6408,7 @@ public sealed class ZigStdHelperShapesTests
         cs.ShouldContain("""
                         else
                         {
-                            if (Cond.B((Cond.B(growable) ? 0 : 1)))
+                            if (!Cond.B(growable))
                                 return ErrUnion<byte>.Err(1);
                             __ifcap0 = 40;
                         }
@@ -6431,7 +6431,7 @@ public sealed class ZigStdHelperShapesTests
         cs.ShouldContain("""
                     if (Cond.B(a))
                     {
-                        if (Cond.B((Cond.B(opt.HasValue) ? 0 : 1)))
+                        if (!Cond.B(opt.HasValue))
                         {
                             return 20;
                         }
@@ -6458,7 +6458,7 @@ public sealed class ZigStdHelperShapesTests
         cs.ShouldContain("""
                         default:
                             {
-                                if (Cond.B((Cond.B(opt.HasValue) ? 0 : 1)))
+                                if (!Cond.B(opt.HasValue))
                                 {
                                     return 7;
                                 }
@@ -6486,7 +6486,7 @@ public sealed class ZigStdHelperShapesTests
         cs.ShouldContain("""
                     if (Cond.B(__cE.IsErr))
                     {
-                        if (Cond.B((Cond.B(opt.HasValue) ? 0 : 1)))
+                        if (!Cond.B(opt.HasValue))
                         {
                             return 8;
                         }

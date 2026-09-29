@@ -361,10 +361,10 @@ public static partial class Compiler
             {
             {{globals}}}
 
-            // C-truthy → C# bool. The visitor wraps every conditional context
-            // (`if`/`while`/`for`-cond) with `Cond.B(...)` so int- and
-            // pointer-valued conditions (`while (1)`, `if (p)`, `while (--n)`)
-            // typecheck. Overloads live on a static class because top-level
+            // C-truthy → C# bool, for a condition whose C# type has no test
+            // written out in place (a `_Bool`; a scalar or pointer condition
+            // is emitted as `x != 0` / `p != null` directly). Overloads live
+            // on a static class because top-level
             // local functions in file-scoped programs can't be overloaded
             // (CS0128). Overload resolution picks the right form at compile
             // time: bool stays bool; int/double compare against zero; any

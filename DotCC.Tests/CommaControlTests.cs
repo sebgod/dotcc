@@ -11,8 +11,7 @@ namespace DotCC.Tests;
 /// Unit tests for the comma operator in a CONTROLLING expression
 /// (`while`/`if`/`switch`) and the `(void)` discard cast. C# has no comma
 /// operator, and a void side-effect operand can't be a tuple element, so dotcc
-/// lifts the non-last operands into statements and tests the last with
-/// <c>Cond.B</c>. Lua's llex.c `while (cast_void(save_and_next(ls)),
+/// lifts the non-last operands into statements and tests the last. Lua's llex.c `while (cast_void(save_and_next(ls)),
 /// lisxdigit(ls-&gt;current))`. End-to-end in `comma-void-control/`.
 /// </summary>
 [Collection("CommaControl")]
@@ -37,7 +36,7 @@ public sealed class CommaControlTests
             // The IR keeps the comma inside the while condition as a tuple;
             // the side-effect assignment is the first element and the boolean
             // test on the last element drives the loop.
-            emitted.ShouldContain("while (Cond.B(((i = i + 1, ((CBool)(i < 3))).Item2)))");
+            emitted.ShouldContain("while (((i = i + 1, ((CBool)(i < 3))).Item2) != 0)");
         }
         finally { File.Delete(src); }
     }
@@ -90,7 +89,7 @@ public sealed class CommaControlTests
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
             emitted.ShouldContain("x = 7;");
-            emitted.ShouldContain("if (Cond.B(((CBool)(x > 3))))");
+            emitted.ShouldContain("if (x > 3)");
         }
         finally { File.Delete(src); }
     }

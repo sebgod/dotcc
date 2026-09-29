@@ -496,7 +496,7 @@ internal sealed partial class ZigLowering
             }
             else if (ct is CType.Pointer)
             {
-                test = capRef;        // Cond.B(void*) tests non-null
+                test = capRef;        // a pointer condition tests non-null
                 payloadInit = capRef; // the unwrapped pointer is the same value
                 payloadType = cond.Type;
             }

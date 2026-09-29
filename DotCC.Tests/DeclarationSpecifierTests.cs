@@ -128,7 +128,7 @@ public sealed class DeclarationSpecifierTests
     public void A_for_loop_may_declare_a_static_local_and_pedantic_diagnoses_it()
     {
         const string source = "int main(void) { int n = 0; for (static int i = 0; i < 2; i++) { n++; } return n; }";
-        Emit(source).ShouldContain("for (; Cond.B(");
+        Emit(source).ShouldContain("for (; i__s0 < 2; i__s0++)");
         Rejected(source, warnings: WarningFlags.Default | WarningFlags.PedanticErrors)
             .ShouldContain("declaration of static variable 'i' in 'for' loop initial declaration");
     }
@@ -206,6 +206,6 @@ public sealed class DeclarationSpecifierTests
             int main(void) { int i; for (i = 0; i++, i < 3;) {} return last(i, calls); }
             """);
         emitted.ShouldContain("count(a);\n        return count(b);");
-        emitted.ShouldContain("for (i = 0; Cond.B(((i++, ((CBool)(i < 3))).Item2)); )");
+        emitted.ShouldContain("for (i = 0; ((i++, ((CBool)(i < 3))).Item2) != 0; )");
     }
 }

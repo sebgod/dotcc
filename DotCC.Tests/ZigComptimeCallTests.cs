@@ -60,7 +60,7 @@ public sealed class ZigComptimeCallTests
         cs.ShouldContain("byte a = 255;");
         cs.ShouldContain("short b = (short)(-32768);");
         cs.ShouldContain("ulong c = 18446744073709551615UL;");   // a comptime_int past `long` is typed to fit
-        cs.ShouldContain("(255 == 255)");   // span(i8), a comptime-only call inside another
+        cs.ShouldContain("(255 == 255 ? ");   // span(i8), a comptime-only call inside another
         cs.ShouldNotContain("maxInt__");
         cs.ShouldNotContain("minInt__");
         cs.ShouldNotContain("span__");

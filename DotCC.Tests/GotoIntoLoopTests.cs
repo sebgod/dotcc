@@ -113,7 +113,7 @@ public sealed class GotoIntoLoopTests
             """), "int f(int start)");
         method.ShouldContain("case 1:\n                    acc += 10;\n                    goto __loop0_cont;");
         method.ShouldContain("acc += 100;\n                    break;");
-        method.ShouldContain("for (j = 0; Cond.B(((CBool)(j < 2))); j++)");
+        method.ShouldContain("for (j = 0; j < 2; j++)");
     }
 
     [Fact]
