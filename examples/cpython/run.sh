@@ -5,10 +5,9 @@
 #
 # The standard library is cpython-src/Lib, reached as build/home/lib/python3.13
 # (a junction on Windows, a symbolic link elsewhere, made on the first run).
-# CPython's POSIX build splits PYTHONHOME on ':' (prefix:exec_prefix), so on
-# Windows the home is passed without its drive letter: a rooted path on the
-# current drive, which .NET resolves there. For the same reason a script is
-# best named by a relative path.
+# The interpreter is linked with -fposix-paths, so on Windows it sees POSIX
+# paths: a PYTHONHOME of C:/... reads as /c/..., and a script may be named by
+# a relative, a Windows or a /c/... path.
 #
 # The NativeAOT interpreter (BUILD_AOT=1 build.sh) is used when it is newer than
 # the JIT build, so a later plain build.sh is not shadowed by a stale one.
@@ -37,6 +36,5 @@ if [ ! -e "$LIB" ]; then
 fi
 
 home="$(cd "$OUT/home" && (pwd -W 2>/dev/null || pwd))"
-case "$home" in ?:/*) home="${home:2}" ;; esac
 # MSYS would rewrite a /-rooted value into its own root for a native program.
 PYTHONHOME="$home" MSYS2_ENV_CONV_EXCL=PYTHONHOME exec "$EXE" "$@"

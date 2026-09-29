@@ -70,7 +70,9 @@ done <<< "$UNITS"
 echo "build.sh: ${#objects[@]} objects"
 
 # Link: this build's objects into one program (shared types deduplicated), then build it.
-(cd "$OBJ" && dotnet "$DLL" --emit=csproj -o "$OUT/python" "${objects[@]}")
+# -fposix-paths: on Windows the runtime shows the interpreter POSIX paths (/c/Users/...),
+# which is what this POSIX-configured CPython's posixpath can reason about (GH #254).
+(cd "$OBJ" && dotnet "$DLL" --emit=csproj -fposix-paths -o "$OUT/python" "${objects[@]}")
 dotnet build "$OUT/python" -c Release --nologo -v quiet
 echo "build.sh: built $OUT/python"
 

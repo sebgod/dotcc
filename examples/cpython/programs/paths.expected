@@ -1,0 +1,15 @@
+getcwd() is absolute: True
+abspath('x') is getcwd()/x: True
+the script's directory is absolute: True
+the script's directory is listable: True
+the script is a file: True
+sys.executable is set: True
+sys.executable is absolute: True
+sys.executable exists: True
+sys.prefix is absolute: True
+the stdlib is found: True
+TMPDIR, TEMP and TMP are unset or absolute: True
+a new file is listed: True
+its realpath is absolute: True
+its size is 1: True
+it is gone: True
