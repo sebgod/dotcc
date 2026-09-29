@@ -1,0 +1,4 @@
+won=1 again=0 want=1 v=1
+old=0x1234 h=0x234 prev=0xb2
+before=0xa1 after=b1 7f b3 b4
+c=c u=4 was=0 flag=1 lockfree=1

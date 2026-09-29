@@ -1,0 +1,3 @@
+MSVC's C frontend rejects `_Atomic` / <stdatomic.h> unless /experimental:c11atomics
+is passed (off by default, and unavailable on older toolsets). gcc -std=c17 handles
+_Atomic fully, so the gcc oracle validates this fixture instead.

@@ -195,6 +195,31 @@ public sealed class AtomicTests
     }
 
     [Fact]
+    public void narrow_stdatomic_objects_are_atomic_and_lock_free()
+    {
+        // 1-byte objects (a `uint8_t` behind a cast, as CPython's _PyOnceFlag, and an
+        // atomic_bool) load through Atomic.Load, not a plain read, and report lock-free
+        // like gcc; AtomicRuntimeTests pins that the helper touches only their byte.
+        var src = WriteTemp("""
+            #include <stdatomic.h>
+            #include <stdint.h>
+            int main(void) {
+                uint8_t v = 0; uint8_t want = 0;
+                int won = atomic_compare_exchange_strong((_Atomic(uint8_t) *)&v, &want, 1);
+                atomic_bool flag = 0;
+                return won + atomic_load((_Atomic(uint8_t) *)&v) + atomic_load(&flag) + atomic_is_lock_free(&flag);
+            }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("Atomic.CompareExchange(ref *((byte*)&v), ref *(&want), (byte)(1))");
+            emitted.ShouldContain("return won + Atomic.Load(ref *((byte*)&v)) + Atomic.Load(ref *(&flag)) + 1;");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void atomic_int_typedef_is_treated_as_atomic()
     {
         var src = WriteTemp("""

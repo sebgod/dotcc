@@ -3346,9 +3346,10 @@ internal sealed class CSharpBackend
     // trailing memory_order args are ignored (every order maps to a full barrier —
     // the safe over-approximation, same as volatile).
 
-    /// <summary>C# types Atomic.* covers (4-/8-byte unmanaged INumber scalars).</summary>
+    /// <summary>C# types Atomic.* covers: the 1-, 2-, 4- and 8-byte scalars.</summary>
     private static readonly HashSet<string> _atomicEligible = new(StringComparer.Ordinal)
     {
+        "byte", "sbyte", "short", "ushort", "char", "CBool",
         "int", "uint", "long", "ulong", "nint", "nuint", "float", "double",
     };
 
