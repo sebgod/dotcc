@@ -183,6 +183,23 @@ public sealed class LibraryModeTests
     internal static (Assembly Assembly, MetadataReference Reference) CompileLibrary(
         string csharpSource, string assemblyName, AssemblyLoadContext loadContext)
     {
+        // NON-collectible on purpose, for the reason FixtureRunner gives (GH #253): an
+        // emitted library takes the address of a file-scope static through
+        // `Unsafe.AsPointer(ref staticField)` (`PyModule_Create(&spammodule)`), which is
+        // only sound in non-moving storage. A collectible ALC keeps statics in a movable
+        // managed array, so a GC inside the callee (PyModule_Create2 allocates before it
+        // reads `m_slots`) can relocate the struct and leave the pointer reading whatever
+        // moved in: the shim then saw a non-null `m_slots` on a module that has none.
+        var image = CompileImage(csharpSource, assemblyName);
+        return (loadContext.LoadFromStream(new MemoryStream(image)), MetadataReference.CreateFromImage(image));
+    }
+
+    /// <summary>Compile a library named <paramref name="assemblyName"/> against
+    /// <paramref name="extraReferences"/> (the managed libraries it links) to its image, without
+    /// loading it: for a library a program loads itself, through <c>dlopen</c>.</summary>
+    internal static byte[] CompileImage(
+        string csharpSource, string assemblyName, IReadOnlyList<MetadataReference>? extraReferences = null)
+    {
         var syntax = CSharpSyntaxTree.ParseText(csharpSource,
             new CSharpParseOptions(LanguageVersion.Preview));
 
@@ -198,6 +215,7 @@ public sealed class LibraryModeTests
         FixtureRunner.AddReferenceByType(refs, typeof(System.Net.Sockets.Socket));
         FixtureRunner.AddReferenceByType(refs, typeof(System.Net.IPAddress));
         FixtureRunner.AddReferenceByType(refs, typeof(System.ComponentModel.Win32Exception));
+        if (extraReferences is not null) { refs.AddRange(extraReferences); }
 
         var options = new CSharpCompilationOptions(
             OutputKind.DynamicallyLinkedLibrary,
@@ -222,18 +240,7 @@ public sealed class LibraryModeTests
             throw new InvalidOperationException(
                 "Roslyn rejected lib-mode emitted C#:\n" + errs + "\n\n--- source ---\n" + csharpSource);
         }
-        pe.Position = 0;
-
-        // NON-collectible on purpose, for the reason FixtureRunner gives (GH #253): an
-        // emitted library takes the address of a file-scope static through
-        // `Unsafe.AsPointer(ref staticField)` (`PyModule_Create(&spammodule)`), which is
-        // only sound in non-moving storage. A collectible ALC keeps statics in a movable
-        // managed array, so a GC inside the callee (PyModule_Create2 allocates before it
-        // reads `m_slots`) can relocate the struct and leave the pointer reading whatever
-        // moved in: the shim then saw a non-null `m_slots` on a module that has none.
-        var image = pe.ToArray();
-        pe.Position = 0;
-        return (loadContext.LoadFromStream(pe), MetadataReference.CreateFromImage(image));
+        return pe.ToArray();
     }
 
     private static void AssertExport(Type exportsType, string name, int expectedParamCount)

@@ -50,6 +50,31 @@ public sealed class CoercionPinsTests
     }
 
     [Fact]
+    public void A_dlsym_pointer_stored_as_a_managed_function_pointer_goes_through_its_managed_entry()
+    {
+        // dynload_shlib.c's `p = (dl_funcptr)dlsym(handle, funcname);`, called later as a
+        // PyModInitFunction: when dlsym found the function in a .NET assembly, the managed call
+        // has to reach the function itself, not its [UnmanagedCallersOnly] wrapper.
+        var emitted = Emit("""
+            #include <dlfcn.h>
+            typedef void (*dl_funcptr)(void);
+            int main(void) { dl_funcptr p; p = (dl_funcptr)dlsym(0, "f"); p(); return 0; }
+            """);
+        emitted.ShouldContain("p = (delegate*<void>)Libc.ManagedEntry((void*)((delegate* unmanaged[Cdecl]<void>)dlsym(null, ");
+    }
+
+    [Fact]
+    public void A_dlsym_pointer_kept_native_is_called_through_the_C_convention()
+    {
+        var emitted = Emit("""
+            #include <dlfcn.h>
+            int main(void) { int (*f)(int) = (int (*)(int))dlsym(0, "f"); return f(1); }
+            """);
+        emitted.ShouldContain("delegate* unmanaged[Cdecl]<int, int> f = (delegate* unmanaged[Cdecl]<int, int>)");
+        emitted.ShouldNotContain("Libc.ManagedEntry(");
+    }
+
+    [Fact]
     public void A_function_compared_with_a_function_pointer_takes_its_pointer_type()
     {
         // typeobject.c's `tp->tp_iternext != &_PyObject_NextNotImplemented`.

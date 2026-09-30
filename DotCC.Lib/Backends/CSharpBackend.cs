@@ -110,7 +110,7 @@ internal sealed class CSharpBackend
             else if (fn.Sym.Storage != Storage.Static && !fn.Variadic)
             {
                 var ret = fn.Sym.Type is CType.Func f ? cg.Cs(f.Return) : "int";
-                var ps = string.Join(", ", fn.Params.Where(p => !IsVoidParam(p.Type)).Select(p => $"{cg.Cs(p.Type)} {p.TargetName}"));
+                var ps = fn.Params.Where(p => !IsVoidParam(p.Type)).Select(p => new DotCC.EmitHelpers.ExportParam(cg.Cs(p.Type), p.TargetName)).ToList();
                 exports.Add(new DotCC.EmitHelpers.Export(fn.Sym.Name, ret, ps));
             }
         }
@@ -1607,6 +1607,24 @@ internal sealed class CSharpBackend
         _ => false,
     };
 
+    /// <summary>True when <paramref name="value"/> is a C-convention function pointer (a
+    /// <c>dlsym</c> result, <see cref="CType.Func.IsNativeCallConv"/>) converted to a managed
+    /// one.</summary>
+    private static bool IsNativeToManagedFnPtr(CType target, CExpr value) =>
+        target.Unqualified is CType.Func { IsNativeCallConv: false }
+        && value.Type?.Unqualified is CType.Func { IsNativeCallConv: true };
+
+    /// <summary>Render the conversion of the function pointer <paramref name="value"/> to the
+    /// function pointer type <paramref name="target"/>. A C-convention pointer converted to a
+    /// managed one goes through <c>Libc.ManagedEntry</c>: when <c>dlsym</c> found it in a .NET
+    /// assembly, it is an <c>[UnmanagedCallersOnly]</c> wrapper, which a managed call cannot
+    /// reach, so the conversion yields the managed function it wraps (CPython's
+    /// <c>(dl_funcptr)dlsym(…)</c>, later called as a <c>PyModInitFunction</c>).</summary>
+    private string FnPtrConversion(CType target, CExpr value) =>
+        IsNativeToManagedFnPtr(target, value)
+            ? $"({Cs(target)})Libc.ManagedEntry((void*)({Expr(value)}))"
+            : $"({Cs(target)})({Expr(value)})";
+
     /// <summary>Coerce a call argument to its parameter type, falling back to the
     /// argument rendered at assignment precedence (so a bare comma operator can't
     /// be misread as an argument separator).</summary>
@@ -1660,7 +1678,7 @@ internal sealed class CSharpBackend
         // value only ever travels, so C# gets the explicit pointer conversion.
         if (tgt is CType.Func && src is CType.Func && !IsFunctionDesignator(value) && Cs(tgt) != Cs(src))
         {
-            text = $"({Cs(tgt)})({Expr(value)})";
+            text = FnPtrConversion(tgt, value);
             return true;
         }
         // void* into a function pointer (CPython's `freefunc f = PyType_GetSlot(tp, Py_tp_free);`):
@@ -2923,6 +2941,7 @@ internal sealed class CSharpBackend
             return ($"({Cs(c.Target)})({Cs(fv.Type)})&{fv.Sym.TargetName}", PUnary);
         }
         if (RenderFloat128Conversion(c) is { } quad) { return quad; }
+        if (IsNativeToManagedFnPtr(c.Target, c.Operand)) { return (FnPtrConversion(c.Target.Unqualified, c.Operand), PUnary); }
         var operandText = Sub(c.Operand, PUnary);
         var targetText = Cs(c.Target);
         // `(System.UInt128)*a` parses as a MULTIPLICATION in C#: a cast to a NON-keyword type followed by a unary
