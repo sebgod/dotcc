@@ -81,9 +81,14 @@ internal static class FixtureRunner
     /// As <see cref="CompileAndRunCapturingExit"/>, but captures <b>both</b>
     /// <c>Console.Out</c> and <c>Console.Error</c> so a caller can assert on
     /// stderr too — needed for <c>std.debug.print</c> (wall-plan W6), which (like
-    /// real Zig) writes to stderr, not stdout.
+    /// real Zig) writes to stderr, not stdout. A program linked against a managed
+    /// library compiles against <paramref name="extraReferences"/> and runs in
+    /// <paramref name="loadContext"/>, the context the library is loaded in, where its
+    /// reference to the library resolves.
     /// </summary>
-    public static (string stdout, string stderr, int exit) CompileAndRunCapturingStreams(string csharpSource, string[] args)
+    public static (string stdout, string stderr, int exit) CompileAndRunCapturingStreams(
+        string csharpSource, string[] args,
+        IReadOnlyList<MetadataReference>? extraReferences = null, AssemblyLoadContext? loadContext = null)
     {
         // Strip the file-based-program directive — Roslyn doesn't parse it
         // (it's a `dotnet run --file` thing). The rest of the source compiles
@@ -112,6 +117,7 @@ internal static class FixtureRunner
         // SocketException derives from System.ComponentModel.Win32Exception
         // (Microsoft.Win32.Primitives) — needed so `catch (SocketException)` binds.
         AddReferenceByType(refs, typeof(System.ComponentModel.Win32Exception));
+        if (extraReferences is not null) { refs.AddRange(extraReferences); }
 
         var options = new CSharpCompilationOptions(
             OutputKind.ConsoleApplication,
@@ -157,7 +163,7 @@ internal static class FixtureRunner
         // (sum=3979 not 4000). Loading non-collectibly matches the deployment
         // contract and removes the relocation, at the cost of not unloading the
         // per-fixture assemblies (they were never explicitly unloaded anyway).
-        var alc = new AssemblyLoadContext($"dotcc-fixture-{Guid.NewGuid():N}", isCollectible: false);
+        var alc = loadContext ?? new AssemblyLoadContext($"dotcc-fixture-{Guid.NewGuid():N}", isCollectible: false);
         var asm = alc.LoadFromStream(pe);
         var entry = asm.EntryPoint
             ?? throw new InvalidOperationException("emitted assembly has no entry point");

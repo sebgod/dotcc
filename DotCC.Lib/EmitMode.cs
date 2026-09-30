@@ -37,4 +37,11 @@ public enum EmitMode
     /// + globals with link markers, no shell or runtime — merged later by
     /// <see cref="Compiler.LinkObjects"/>.</summary>
     Object,
+
+    /// <summary>A managed library (<c>-shared -fassembly</c>): a .NET assembly that dotcc programs
+    /// and extension modules link against and load, the way a C program uses a shared library. Its
+    /// functions and objects with external linkage, its types and the runtime are <c>public</c>; a
+    /// name with internal linkage stays <c>internal</c>. No <c>main</c>, no native exports. Linked
+    /// from objects by <see cref="Compiler.LinkAssembly"/>.</summary>
+    Assembly,
 }

@@ -78,6 +78,10 @@ internal static class Program
         {
             Description = "Produce a shared library (NativeAOT-publishable, with [UnmanagedCallersOnly] exports for non-static C functions).",
         };
+        var assemblyOpt = new Option<bool>("-fassembly")
+        {
+            Description = "With -shared: link the objects into a managed library, a .NET assembly other dotcc programs and extension modules link against and load (JIT and ReadyToRun builds), instead of a NativeAOT native library. Functions and objects with external linkage, the types and the runtime are public; <name>.dotcc-lib, written beside the project, records what the library defines.",
+        };
         var stdOpt = new Option<string?>("-std")
         {
             Description = "C dialect: c90/c99/c11/c17/c18/c23. Default: c17.",
@@ -139,7 +143,7 @@ internal static class Program
         };
         var root = new RootCommand("dotcc — a C compiler frontend that transpiles to .NET 10 / C# 14.")
         {
-            inputArg, outOpt, emitOpt, targetOpt, preprocessOpt, includeOpt, defineOpt, compileOpt, sharedOpt, stdOpt,
+            inputArg, outOpt, emitOpt, targetOpt, preprocessOpt, includeOpt, defineOpt, compileOpt, sharedOpt, assemblyOpt, stdOpt,
             pedanticOpt, pedanticErrorsOpt, wconversionOpt, wnoDiscardedQualifiersOpt, wimplicitFallthroughOpt, sanitizeOpt, posixPathsOpt, mdOpt, mmdOpt, mfOpt, mtOpt, linkOpt, libDirOpt,
         };
         // Accept-and-ignore unknown flags (-Wall, -O2, -g, -f*, -m*, …) instead
@@ -187,6 +191,7 @@ internal static class Program
             var defines = parse.GetValue(defineOpt) ?? Array.Empty<string>();
             var compileFlag = parse.GetValue(compileOpt);
             var sharedFlag = parse.GetValue(sharedOpt);
+            var assemblyFlag = parse.GetValue(assemblyOpt);
             var stdValue = parse.GetValue(stdOpt);
             // Fold the individual -W / -pedantic flags into one WarningFlags value
             // threaded through the pipeline (see DotCC.WarningFlags).
@@ -221,6 +226,11 @@ internal static class Program
                 Console.Error.WriteLine("dotcc: error: no input files");
                 return 1;
             }
+            if (assemblyFlag && !sharedFlag)
+            {
+                Console.Error.WriteLine("dotcc: error: -fassembly makes the -shared library a .NET assembly; give -shared too");
+                return 1;
+            }
 
             CDialect dialect;
             try
@@ -252,7 +262,7 @@ internal static class Program
             }
 
             return Run(inputs, output, emit, target, preprocessOnly, includes, defines, sharedFlag, dialect,
-                       mdFlag, mmdFlag, depFile, depTargets, debugHeapFlag, imports, warnings, posixPathsFlag);
+                       mdFlag, mmdFlag, depFile, depTargets, debugHeapFlag, imports, warnings, posixPathsFlag, assemblyFlag);
         });
 
         return root.Parse(args).Invoke();
@@ -303,7 +313,8 @@ internal static class Program
         bool debugHeap = false,
         ImportOptions? imports = null,
         WarningFlags warnings = WarningFlags.Default,
-        bool posixPaths = false)
+        bool posixPaths = false,
+        bool managedLibrary = false)
     {
         imports ??= ImportOptions.Empty;
         if (preprocessOnly)
@@ -384,11 +395,48 @@ internal static class Program
             && System.Array.TrueForAll(inputPaths, p =>
                 !p.EndsWith(".c", System.StringComparison.OrdinalIgnoreCase)
                 && !p.EndsWith(".zig", System.StringComparison.OrdinalIgnoreCase));
+        var outDir = outputPath ?? "a.out-cs";
+        // Assembly name: last component of -o path (clang convention: -o foo → foo.exe)
+        var asmName = Path.GetFileName(outDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        if (asmName.Length == 0) asmName = "a.out";
+        // -shared -fassembly: a managed library, linked from objects into a project with its
+        // manifest beside it (a program links against both).
+        string? libraryManifest = null;
+        // The managed libraries among -l (a manifest in a -L dir): the link reads them, and the
+        // program's project references theirs, which sit beside the manifests.
+        var linkedLibraries = managedLibrary ? System.Array.Empty<string>() : Compiler.ManagedLibraryManifests(imports);
+        if (linkedLibraries.Count > 0 && !linking)
+        {
+            Console.Error.WriteLine("dotcc: error: linking against a managed library (-l with a .dotcc-lib manifest) links objects: compile each unit with --emit=obj first");
+            return 1;
+        }
+        if (managedLibrary)
+        {
+            if (!linking)
+            {
+                Console.Error.WriteLine("dotcc: error: -fassembly links objects: compile each unit with --emit=obj, then link the objects");
+                return 1;
+            }
+            if (emit == EmitKind.File)
+            {
+                Console.Error.WriteLine("dotcc: error: -fassembly writes a project and its manifest: give -o a directory");
+                return 1;
+            }
+            if (imports.HasAny)
+            {
+                Console.Error.WriteLine("dotcc: error: -fassembly does not link native libraries (-l, .a/.lib) yet");
+                return 1;
+            }
+        }
         string program;
         var emitMode = emit.ToEmitMode(libraryMode);
         try
         {
-            program = linking
+            if (managedLibrary)
+            {
+                (program, libraryManifest) = Compiler.LinkAssembly(inputPaths, asmName);
+            }
+            else program = linking
                 ? Compiler.LinkObjects(inputPaths, emit: emitMode, debugHeap: debugHeap, imports: imports, posixPaths: posixPaths)
                 : Compiler.EmitCSharp(
                     inputPaths,
@@ -422,10 +470,6 @@ internal static class Program
             if (rc != 0) { return rc; }
         }
 
-        var outDir = outputPath ?? "a.out-cs";
-        // Assembly name: last component of -o path (clang convention: -o foo → foo.exe)
-        var asmName = Path.GetFileName(outDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
-        if (asmName.Length == 0) asmName = "a.out";
         switch (emit)
         {
             case EmitKind.File:
@@ -448,7 +492,15 @@ internal static class Program
                 Directory.CreateDirectory(outDir);
                 var csprojFile = $"{asmName}.csproj";
                 File.WriteAllText(Path.Combine(outDir, "Program.cs"), program);
-                File.WriteAllText(Path.Combine(outDir, csprojFile), Compiler.BuildGeneratedCsproj(libraryMode, asmName, imports.StaticArchives));
+                var libraryProjects = linkedLibraries
+                    .Select(m => Path.GetRelativePath(outDir, Path.ChangeExtension(m, ".csproj")))
+                    .ToList();
+                File.WriteAllText(Path.Combine(outDir, csprojFile),
+                    Compiler.BuildGeneratedCsproj(libraryMode, asmName, imports.StaticArchives, managedLibrary, libraryProjects));
+                if (libraryManifest is not null)
+                {
+                    File.WriteAllText(Path.Combine(outDir, Compiler.LibraryManifestFile(asmName)), libraryManifest);
+                }
                 if (!libraryMode)
                 {
                     // An executable's manifest (long paths on Windows); a library runs in its host's process.
@@ -476,7 +528,9 @@ internal static class Program
                     using var proc = System.Diagnostics.Process.Start(psi);
                     proc!.WaitForExit();
                     if (proc.ExitCode != 0) { return proc.ExitCode; }
-                    var artifactNote = libraryMode
+                    var artifactNote = managedLibrary
+                        ? $"managed library at {outDir}/bin/Release/net10.0/{asmName}.dll; link a program against it with -L{outDir} -l{asmName}."
+                        : libraryMode
                         ? $"managed .dll at {outDir}/bin/Release/net10.0/{asmName}.dll. Run `dotnet publish -c Release` in {outDir}/ for the native shared library."
                         : $"dotnet {outDir}/bin/Release/net10.0/{asmName}.dll [args]";
                     Console.Error.WriteLine($"dotcc: OK. {artifactNote}");

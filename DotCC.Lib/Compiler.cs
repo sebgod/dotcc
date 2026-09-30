@@ -152,6 +152,11 @@ public static partial class Compiler
         bool testMode = false,
         bool posixPaths = false)
     {
+        if (emit == EmitMode.Assembly)
+        {
+            // Accessibility follows each name's linkage, which the link step reads from the objects.
+            throw new CompileException("a managed library (-fassembly) is linked from objects: compile each unit with --emit=obj, then link them");
+        }
         var libraryMode = emit == EmitMode.SharedLib;
         var asObject = emit == EmitMode.Object;
         var irBuilder = BuildIr(inputPaths, includeDirs, defines, dialect, warnings: warnings, testMode: testMode,
