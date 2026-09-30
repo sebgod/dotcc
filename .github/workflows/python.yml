@@ -15,7 +15,11 @@ name: python
 #                  same units, compiled with the same flags) and runs Python on
 #                  it: a hello, smoke.py and the pure-Python programs in
 #                  programs/ (programs.sh), each of whose output must equal
-#                  what host CPython 3.13 prints.
+#                  what host CPython 3.13 prints. The same objects also build
+#                  the shared interpreter (libpython as a managed library, a
+#                  thin python, _heapq as an extension module it dlopens),
+#                  which must import _heapq from its .so and pass the same
+#                  runs.
 #   capi-oracle    the <Python.h> shim's differential oracle: CPythonOracleTests
 #                  builds each cpython-oracle.txt fixture with gcc against real
 #                  libpython 3.13 and requires dotcc's transcript to match it.
@@ -87,8 +91,8 @@ jobs:
       - name: Compile every translation unit, compare with emits.txt
         run: bash examples/cpython/probe.sh
 
-      - name: Build the interpreter from the probe's objects
-        run: BUILD_OBJ=examples/cpython/out/cs bash examples/cpython/build.sh
+      - name: Build the interpreter from the probe's objects, static and shared
+        run: BUILD_OBJ=examples/cpython/out/cs BUILD_SHARED=1 bash examples/cpython/build.sh
 
       # A hang (the interpreter spinning at exit, say) fails in minutes, not at
       # the job's hour.
@@ -99,6 +103,19 @@ jobs:
           bash examples/cpython/run.sh -c "print('hello from dotcc-built CPython')"
           bash examples/cpython/run.sh examples/cpython/smoke.py > smoke.out
           diff -u examples/cpython/smoke.expected smoke.out
+          PROGRAM_TIMEOUT=120 bash examples/cpython/programs.sh
+
+      # The shared interpreter: _heapq has to come from its extension module (the
+      # static interpreter has none, so heapq would fall back to Python), and
+      # heapq has to pick it up.
+      - name: Run Python on the shared build
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          export PY_SHARED=1
+          bash examples/cpython/run.sh -c "import _heapq, heapq; assert _heapq.__file__.endswith('.so'), _heapq.__file__; assert heapq.heappush is _heapq.heappush; h = [5, 1, 4, 2, 3]; _heapq.heapify(h); print('_heapq from', _heapq.__file__, [_heapq.heappop(h) for _ in range(5)])"
+          bash examples/cpython/run.sh examples/cpython/smoke.py > smoke-shared.out
+          diff -u examples/cpython/smoke.expected smoke-shared.out
           PROGRAM_TIMEOUT=120 bash examples/cpython/programs.sh
 
       - name: Upload the probe's logs
