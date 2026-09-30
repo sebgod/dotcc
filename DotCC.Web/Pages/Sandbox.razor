@@ -5,13 +5,13 @@
 @inject IJSRuntime JS
 @inject NavigationManager Nav
 
-<PageTitle>dotcc sandbox — C &amp; Zig to .NET/wasm, in your browser</PageTitle>
+<PageTitle>dotcc sandbox: C &amp; Zig to .NET and wasm, in your browser</PageTitle>
 
 <header>
     <h1>dotcc <span class="tag">web sandbox</span></h1>
     <p class="blurb">
         A clang-shaped <strong>C&nbsp;→&nbsp;.NET/C#</strong> compiler with a
-        WebAssembly backend — compiled to wasm and running <em>entirely in this
+        WebAssembly backend, compiled to wasm and running <em>entirely in this
         tab</em>. Your code is transpiled by the real compiler, assembled to wasm,
         and executed here. Nothing leaves your browser.
     </p>
@@ -101,7 +101,7 @@
                 {
                     <div class="wasm-actions">
                         <button class="download" @onclick="DownloadWasmAsync">⬇ Download .wasm</button>
-                        <span class="hint">dotcc read its own assembled binary back — this is the WF0 wasm-frontend inventory (read-only; lifting is future work)</span>
+                        <span class="hint">dotcc read its own assembled binary back: this is the WF0 wasm-frontend inventory (read-only; lifting is future work)</span>
                     </div>
                     <pre class="code">@_wasmReport</pre>
                 }
@@ -116,7 +116,7 @@
                 {
                     <div class="emit-actions">
                         <button class="download" @onclick="DownloadCSharpAsync">⬇ Download .cs</button>
-                        <span class="hint">a self-contained .NET 10 file-based program — save it and replay natively with: dotnet run program.cs</span>
+                        <span class="hint">a self-contained .NET 10 file-based program; save it and replay it natively with: dotnet run program.cs</span>
                     </div>
                 }
                 <pre class="code">@(_csharp ?? "")</pre>
@@ -142,8 +142,8 @@
     // dialect, so those are hidden and the compile runs dialect=null / default warnings.
     private string _lang = "c";
 
-    // The tab set: run output, then the "look inside the compiler" views — the wat
-    // the backend emits, the C# projection, and (C only) the -E token stream.
+    // The tab set: run output, then the "look inside the compiler" views (the wat
+    // the backend emits, the C# projection, and, for C only, the -E token stream).
     private string[] Tabs => _lang == "zig"
         ? new[] { "Output", "wat", "wasm", "C#" }
         : new[] { "Output", "wat", "wasm", "C#", "-E" };
@@ -176,7 +176,7 @@
     private void Select(string t) => _tab = t;
 
     // dotcc reads inputs off the (Emscripten in-memory) filesystem, so we stage the
-    // editor buffer there — WEB0 confirmed the include-scan works over MEMFS. The file
+    // editor buffer there (WEB0 confirmed the include-scan works over MEMFS). The file
     // extension is load-bearing: dotcc dispatches frontend by it (.c → C, .zig → Zig).
     private const string WorkDir = "/work";
     private string SourcePath => WorkDir + (_lang == "zig" ? "/source.zig" : "/source.c");
@@ -191,9 +191,9 @@
     // authoritative C# copy, pulled from the editor right before each compile/share.
     private const string EditorId = "editor";
 
-    /// <summary>On first render, adopt any program the URL carries — a "#src=…" share
+    /// <summary>On first render, adopt any program the URL carries: a "#src=…" share
     /// link (round-tripped playground source) takes priority, else a "?lang=&amp;ex="
-    /// deep-link from the story pages pre-selects a language + starter example — then
+    /// deep-link from the story pages pre-selects a language + starter example. Then
     /// mount the CodeMirror editor with the resolved source. JS interop is only legal
     /// once the component has rendered (this app is client-side WASM, no prerender).</summary>
     protected override async Task OnAfterRenderAsync(bool firstRender)
@@ -232,7 +232,7 @@
     }
 
     /// <summary>Parse the <c>lang</c> / <c>ex</c> query parameters off the current URL
-    /// (a tiny hand-rolled split — no WebUtilities dependency needed for two keys).</summary>
+    /// (a tiny hand-rolled split; two keys need no WebUtilities dependency).</summary>
     private (string? lang, string? ex) ReadQuery()
     {
         string? lang = null, ex = null;
@@ -310,15 +310,15 @@
             Directory.CreateDirectory(WorkDir);
             File.WriteAllText(SourcePath, _source);
 
-            // Zig has no C preprocessor / -std dialect / C-warning gates — compile it
+            // Zig has no C preprocessor, -std dialect or C-warning gates, so compile it
             // with dialect=null and default warnings, and skip the -E pass entirely.
             CDialect? dialect = _lang == "c" ? Dialect() : null;
             var warnings = _lang == "c" ? Warnings() : WarningFlags.Default;
 
             wat = Emit(() => Compiler.EmitWat(new[] { SourcePath }, dialect: dialect, warnings: warnings), out var watWarnings);
             _wat = wat;
-            // The C# projection and -E token stream are pure string passes too — cheap
-            // to keep both view tabs live alongside a run. EmitCSharp is ALSO the source
+            // The C# projection and -E token stream are pure string passes too, cheap
+            // enough to keep both view tabs live alongside a run. EmitCSharp is ALSO the source
             // of -Wconversion (a codegen-time gate the wat path doesn't run), so capture
             // its warnings too; both run the shared dialect gate, so dedupe against wat's
             // to avoid repeating -pedantic lines.
@@ -363,7 +363,7 @@
                 SetDiag($"run host error: {ex.Message}", isError: true);
             }
 
-            // Inventory the binary the browser just assembled — dotcc reading back its
+            // Inventory the binary the browser just assembled: dotcc reads back its
             // own wasm output through the WF0 probe (read-only; no lifting yet). The
             // binary is null when assembly itself failed, in which case the tab stays empty.
             _wasmReport = null;
@@ -385,8 +385,8 @@
         StateHasChanged();
     }
 
-    /// <summary>Download the wasm binary the browser assembled on the last run —
-    /// the same bytes the wasm tab inventoried (a pure-JS Blob download).</summary>
+    /// <summary>Download the wasm binary the browser assembled on the last run, the
+    /// same bytes the wasm tab inventoried (a pure-JS Blob download).</summary>
     private async Task DownloadWasmAsync() =>
         await JS.InvokeVoidAsync("dotccSandbox.downloadLastWasm", "sandbox.wasm");
 
@@ -420,7 +420,7 @@
         return w;
     }
 
-    /// <summary>Merge diagnostic blocks into distinct, order-preserving lines — the
+    /// <summary>Merge diagnostic blocks into distinct, order-preserving lines. The
     /// wat and C# passes both run the shared dialect gate, so a -pedantic line would
     /// otherwise appear twice.</summary>
     private static string DedupeLines(params string[] blocks)
@@ -438,7 +438,7 @@
     }
 
     /// <summary>Render the -E preprocessor token stream for the current source
-    /// (best effort — a lex failure surfaces as a comment rather than blocking a run).</summary>
+    /// (best effort: a lex failure surfaces as a comment rather than blocking a run).</summary>
     private string Preprocess(CDialect dialect)
     {
         try
@@ -472,7 +472,7 @@
     }
 
     /// <summary>A named starter program (C or Zig). Kept to the surface the wat
-    /// backend runs today — integer arithmetic plus the <c>printf</c>/
+    /// backend runs today: integer arithmetic plus the <c>printf</c>/
     /// <c>std.debug.print</c> I/O the fd_write shim carries; wider constructs get
     /// added as the wat backend grows.</summary>
     private sealed record Example(string Name, string Source);
@@ -586,7 +586,7 @@
             """),
         new("Squares (extern printf)",
             """
-            // A variadic C extern — printf routes to stdout through dotcc's printf builder.
+            // A variadic C extern: printf routes to stdout through dotcc's printf builder.
             extern fn printf(format: [*c]const u8, ...) c_int;
 
             pub fn main() u8 {
@@ -600,7 +600,7 @@
             """),
         new("Sum (exit code)",
             """
-            // No I/O — the result is observed as the process exit code (see it below).
+            // No I/O: the result is observed as the process exit code (see it below).
             pub fn main() u8 {
                 var sum: u8 = 0;
                 var i: u8 = 1;

@@ -1,6 +1,6 @@
-// dotcc web sandbox — CodeMirror 6 editor bundle entry (fable-web.md WEB2 slice B).
+// dotcc web sandbox: the CodeMirror 6 editor bundle entry (fable-web.md WEB2 slice B).
 //
-// Bundled by esbuild into a single self-contained IIFE (no CDN, no ESM loader —
+// Bundled by esbuild into a single self-contained IIFE (no CDN, no ESM loader;
 // D3). Exposes a tiny imperative surface on `window.dotccEditor` that Home.razor
 // drives via JS interop: create the editor, pull its text on Run/Share, push
 // text on example-select / share-link load.

@@ -5,7 +5,7 @@ bundle**, loaded via a plain `<script>` in `index.html`, exposing a small impera
 global `window.dotccEditor` (`create` / `getValue` / `setValue`) that `Home.razor`
 drives through JS interop. CodeMirror 6 ships as ES modules meant to be bundled by the
 consuming app; there is no official pre-built browser file, so we bundle our own with
-esbuild and commit the result — no CDN, no ESM loader (fable-web.md D3). The bundle *is*
+esbuild and commit the result, with no CDN and no ESM loader (fable-web.md D3). The bundle *is*
 the reference; the recipe below reproduces it byte-for-similar.
 
 - **Packages (npm, all MIT):**
@@ -15,7 +15,7 @@ the reference; the recipe below reproduces it byte-for-similar.
   - `@codemirror/language` **6.12.4**
   - `@codemirror/lang-cpp` **6.0.3** (C/C++ highlighting)
   - `@codemirror/theme-one-dark` **6.1.3** (dark theme matching the sandbox)
-- **License:** MIT (see `LICENSE` alongside — same text for every `@codemirror/*`).
+- **License:** MIT (see `LICENSE` alongside; the same text for every `@codemirror/*`).
 - **Size:** ~410 KB minified (one file, no source map shipped).
 
 ## Regenerate (pinned, offline-safe)
@@ -39,7 +39,7 @@ In a scratch dir, with these two files:
 }
 ```
 
-**`entry.mjs`** — imports `EditorView`/`EditorState`, the default + history keymaps
+**`entry.mjs`** imports `EditorView`/`EditorState`, the default + history keymaps
 (with `indentWithTab`), `cpp()`, `oneDark`, line numbers, active-line + bracket
 matching, 4-space indent and line wrapping; assigns `window.dotccEditor = { create,
 getValue, setValue }` where `create(id, doc)` mounts an `EditorView` in element `id`,

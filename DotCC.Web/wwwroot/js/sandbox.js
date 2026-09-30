@@ -1,10 +1,10 @@
-// dotcc web sandbox — the JS half of the run pipeline (fable-web.md WEB1).
+// dotcc web sandbox: the JS half of the run pipeline (fable-web.md WEB1).
 //
 // Blazor lowers C/Zig to WebAssembly-text via Compiler.EmitWat; this module turns
 // that .wat into a running program entirely in the browser:
 //   wat text --> libwabt.js parseWat().toBinary() --> WebAssembly.instantiate
 //   --> call main(), capturing what it writes to fd 1/2 through a WASI fd_write shim.
-// The shim is the exact one the always-on WatOracleTests use, ported verbatim —
+// The shim is the exact one the always-on WatOracleTests use, ported verbatim;
 // fd_write is the only import dotcc's wat backend emits.
 //
 // `WabtModule` is the global exposed by the vendored lib/wabt/libwabt.js (a UMD
@@ -13,7 +13,7 @@
 window.dotccSandbox = (function () {
   let wabtPromise = null;
   // The most recently assembled wasm binary (Uint8Array), kept so the sandbox can
-  // probe it (Compiler.ProbeWasm — the read-only WF0 inventory, fable-web.md WEB6)
+  // probe it (Compiler.ProbeWasm, the read-only WF0 inventory, fable-web.md WEB6)
   // and offer it for download. Cleared at the start of every assemble; set only once
   // toBinary() succeeds, so it is null whenever the last compile failed to assemble.
   let lastWasm = null;
@@ -110,7 +110,7 @@ window.dotccSandbox = (function () {
 
   // --- share-links (WEB2) -------------------------------------------------
   // Source is deflate-compressed and base64url-packed into the URL fragment, so
-  // a playground link is fully self-contained — no server, no storage, no dep.
+  // a playground link is fully self-contained: no server, no storage, no dependency.
   // Uses the native CompressionStream API (no pako/lz-string vendoring).
 
   const enc = new TextEncoder();
