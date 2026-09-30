@@ -174,6 +174,14 @@ public sealed class LibraryModeTests
     }
 
     internal static Assembly CompileLibrary(string csharpSource)
+        => CompileLibrary(csharpSource, "DotCCLibTest_" + Guid.NewGuid().ToString("N"),
+                          new AssemblyLoadContext($"dotcc-lib-{Guid.NewGuid():N}", isCollectible: false)).Assembly;
+
+    /// <summary>Compile a library named <paramref name="assemblyName"/> into
+    /// <paramref name="loadContext"/>: the loaded assembly, and a reference to its image, for a
+    /// program that links against it.</summary>
+    internal static (Assembly Assembly, MetadataReference Reference) CompileLibrary(
+        string csharpSource, string assemblyName, AssemblyLoadContext loadContext)
     {
         var syntax = CSharpSyntaxTree.ParseText(csharpSource,
             new CSharpParseOptions(LanguageVersion.Preview));
@@ -198,7 +206,7 @@ public sealed class LibraryModeTests
             nullableContextOptions: NullableContextOptions.Disable);
 
         var comp = CSharpCompilation.Create(
-            assemblyName: "DotCCLibTest_" + Guid.NewGuid().ToString("N"),
+            assemblyName: assemblyName,
             syntaxTrees: new[] { syntax },
             references: refs,
             options: options);
@@ -223,8 +231,9 @@ public sealed class LibraryModeTests
         // managed array, so a GC inside the callee (PyModule_Create2 allocates before it
         // reads `m_slots`) can relocate the struct and leave the pointer reading whatever
         // moved in: the shim then saw a non-null `m_slots` on a module that has none.
-        var alc = new AssemblyLoadContext($"dotcc-lib-{Guid.NewGuid():N}", isCollectible: false);
-        return alc.LoadFromStream(pe);
+        var image = pe.ToArray();
+        pe.Position = 0;
+        return (loadContext.LoadFromStream(pe), MetadataReference.CreateFromImage(image));
     }
 
     private static void AssertExport(Type exportsType, string name, int expectedParamCount)
