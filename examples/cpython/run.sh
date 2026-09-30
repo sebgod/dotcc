@@ -12,7 +12,11 @@
 # The NativeAOT interpreter (BUILD_AOT=1 build.sh) is used when it is newer than
 # the JIT build, so a later plain build.sh is not shadowed by a stale one.
 #
-# Environment: CPYTHON_SRC, BUILD_OUT (default: build/).
+# PY_SHARED=1 runs the shared build instead (BUILD_SHARED=1 build.sh): the thin
+# interpreter over libpython, with its extension modules' lib-dynload directory
+# on PYTHONPATH.
+#
+# Environment: CPYTHON_SRC, BUILD_OUT (default: build/), PY_SHARED.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,6 +28,16 @@ EXE="$OUT/python/bin/Release/net10.0/python"
 AOT="$OUT/python-aot/python"
 [ -f "$AOT.exe" ] && AOT="$AOT.exe"
 if [ -f "$AOT" ] && [ "$AOT" -nt "$EXE" ]; then EXE="$AOT"; fi
+pythonpath="${PYTHONPATH:-}"
+if [ "${PY_SHARED:-0}" = 1 ]; then
+  EXE="$OUT/shared/python/bin/Release/net10.0/python"
+  [ -f "$EXE.exe" ] && EXE="$EXE.exe"
+  [ -f "$EXE" ] || { echo "run.sh: no shared interpreter at $EXE (run BUILD_SHARED=1 build.sh)" >&2; exit 2; }
+  # A Windows-form list separates with `;`, which -fposix-paths turns into the POSIX `:`.
+  sep=":"; dynload="$(cd "$OUT/shared/lib-dynload" && pwd)"
+  if windir="$(cd "$OUT/shared/lib-dynload" && pwd -W 2>/dev/null)"; then sep=";"; dynload="$windir"; fi
+  pythonpath="$dynload${pythonpath:+$sep$pythonpath}"
+fi
 
 LIB="$OUT/home/lib/python3.13"
 if [ ! -e "$LIB" ]; then
@@ -37,4 +51,4 @@ fi
 
 home="$(cd "$OUT/home" && (pwd -W 2>/dev/null || pwd))"
 # MSYS would rewrite a /-rooted value into its own root for a native program.
-PYTHONHOME="$home" MSYS2_ENV_CONV_EXCL=PYTHONHOME exec "$EXE" "$@"
+PYTHONHOME="$home" PYTHONPATH="$pythonpath" MSYS2_ENV_CONV_EXCL="PYTHONHOME;PYTHONPATH" exec "$EXE" "$@"

@@ -51,6 +51,29 @@ for `C:\Users\...`, `//server/share` for UNC) in `getcwd`, `sys.executable`,
 wherever a path goes in, so a script can be named by a Windows path too
 (GH #254).
 
+### The shared build: libpython and extension modules
+
+```bash
+BUILD_SHARED=1 examples/cpython/build.sh
+PY_SHARED=1 examples/cpython/run.sh -c "import _heapq; print(_heapq.__file__)"
+```
+
+`BUILD_SHARED=1` also builds the interpreter the way CPython's shared build is
+laid out, into `build/shared`. libpython is a managed library
+(`python3.13/`, `dotcc -shared -fassembly`), the interpreter a thin program
+linked against it (`python/`, only `Programs/python.c`), and each module in
+`SHARED_MODULES` an extension module of its own: an assembly linked against
+libpython, built with `Py_BUILD_CORE_MODULE` as CPython builds a shared stdlib
+module, and copied to `lib-dynload/<module>.cpython-313-x86_64-linux-gnu.so`.
+`PY_SHARED=1 run.sh` puts that directory on `PYTHONPATH`, so an import finds the
+file and CPython's `dynload_shlib.c` loads it with `dlopen`. dotcc's runtime
+loads a .NET assembly into its own load context, where the extension's reference
+to libpython binds to the interpreter's copy: one runtime, heap and set of
+globals for both. The default module is `_heapq`, which the static interpreter
+does not carry (there `import _heapq` fails, and `heapq` falls back to Python).
+A NativeAOT program cannot load an assembly, so the NativeAOT interpreter keeps
+to the static link.
+
 ## Probing the tree
 
 ```bash
