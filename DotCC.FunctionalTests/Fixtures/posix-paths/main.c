@@ -3,6 +3,10 @@
    taking a path accepts that form. Elsewhere the flag changes nothing, so the
    same checks hold on every host: paths the libc hands out are absolute POSIX
    paths, and handing them back works. (GH #254) */
+/* The gcc oracle builds with -std=, where glibc declares realpath only for an
+   XSI program (_XOPEN_SOURCE; _POSIX_C_SOURCE alone is not enough), so ask for
+   that surface (dotcc's synthetic headers declare it unconditionally). */
+#define _XOPEN_SOURCE 700
 #include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
