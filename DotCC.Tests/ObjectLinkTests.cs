@@ -194,8 +194,8 @@ public sealed class ObjectLinkTests : IDisposable
     public void An_object_of_another_format_asks_to_be_recompiled()
     {
         var obj = Objects(new[] { ("a.c", "int main(void) { return 0; }") })[0];
-        File.WriteAllText(obj, File.ReadAllText(obj).Replace("//!dotcc object 3", "//!dotcc object 1"));
+        File.WriteAllText(obj, File.ReadAllText(obj).Replace("//!dotcc object 4", "//!dotcc object 3"));
         Should.Throw<CompileException>(() => Compiler.LinkObjects(new[] { obj }))
-            .Message.ShouldContain("format 1; this dotcc links format 3");
+            .Message.ShouldContain("format 3; this dotcc links format 4");
     }
 }

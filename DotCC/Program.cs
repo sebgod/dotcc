@@ -404,7 +404,7 @@ internal static class Program
         string? libraryManifest = null;
         // The managed libraries among -l (a manifest in a -L dir): the link reads them, and the
         // program's project references theirs, which sit beside the manifests.
-        var linkedLibraries = managedLibrary ? System.Array.Empty<string>() : Compiler.ManagedLibraryManifests(imports);
+        var linkedLibraries = Compiler.ManagedLibraryManifests(imports);
         if (linkedLibraries.Count > 0 && !linking)
         {
             Console.Error.WriteLine("dotcc: error: linking against a managed library (-l with a .dotcc-lib manifest) links objects: compile each unit with --emit=obj first");
@@ -422,9 +422,9 @@ internal static class Program
                 Console.Error.WriteLine("dotcc: error: -fassembly writes a project and its manifest: give -o a directory");
                 return 1;
             }
-            if (imports.HasAny)
+            if (imports.StaticArchives.Count > 0 || imports.LinkLibraries.Count > linkedLibraries.Count)
             {
-                Console.Error.WriteLine("dotcc: error: -fassembly does not link native libraries (-l, .a/.lib) yet");
+                Console.Error.WriteLine("dotcc: error: -fassembly links only managed libraries (-l with a .dotcc-lib manifest), not native ones (-l, .a/.lib) yet");
                 return 1;
             }
         }
@@ -434,7 +434,7 @@ internal static class Program
         {
             if (managedLibrary)
             {
-                (program, libraryManifest) = Compiler.LinkAssembly(inputPaths, asmName);
+                (program, libraryManifest) = Compiler.LinkAssembly(inputPaths, asmName, imports);
             }
             else program = linking
                 ? Compiler.LinkObjects(inputPaths, emit: emitMode, debugHeap: debugHeap, imports: imports, posixPaths: posixPaths)

@@ -49,7 +49,7 @@ public static partial class Compiler
                     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
                     <Nullable>disable</Nullable>
                   </PropertyGroup>
-                </Project>
+                {referenceItems}</Project>
                 """;
         }
         // Static archives (.a/.lib): link them into the NativeAOT image. <DirectPInvoke>
@@ -458,18 +458,42 @@ public static partial class Compiler
     /// <c>&lt;prefix&gt;_Program</c>, <c>&lt;prefix&gt;_Program2</c>, ... (<see cref="FunctionsPerClass"/>
     /// per class), the objects in the public <c>&lt;prefix&gt;_Globals</c>, the types, and the
     /// runtime, which is public and so the one copy every assembly linked against the library
-    /// uses. No entry point. Returns the source and the classes a program surfaces by bare name,
-    /// the globals class first.
+    /// uses. No entry point. Each of <paramref name="exports"/> also gets an
+    /// <c>[UnmanagedCallersOnly]</c> wrapper in <c>&lt;prefix&gt;_Exports</c>, the native entry
+    /// point <c>dlsym</c> hands out for it (a C function pointer from <c>dlsym</c> is called with
+    /// the C calling convention). A library linked against managed libraries
+    /// (<paramref name="libraryClasses"/>, their classes) surfaces them by bare name and uses the
+    /// runtime they carry, as <see cref="BuildShell"/> does for a program. Returns the source and
+    /// the classes a program surfaces by bare name, the globals class first.
     /// </summary>
     private static (string Program, IReadOnlyList<string> Classes) BuildAssemblyShell(
-        string prefix, IReadOnlyList<string> fns, string structDecls, string globals, bool pythonShim)
+        string prefix, IReadOnlyList<string> fns, string structDecls, string globals, bool pythonShim,
+        IReadOnlyList<EmitHelpers.Export> exports, IReadOnlyList<string> libraryClasses)
     {
+        var runtimeBlock = libraryClasses.Count > 0
+            ? "// ---- the runtime is the linked managed library's"
+            : RuntimeBlock(pythonShim);
+        var exportsBlock = new StringBuilder();
+        var table = new StringBuilder();
+        foreach (var e in exports)
+        {
+            // The wrapper has a name of its own, so its body's bare call reaches the function
+            // (through `using static`), not the wrapper itself.
+            var csName = EmitHelpers.Id(e.Name);
+            exportsBlock.Append($"    [UnmanagedCallersOnly(EntryPoint = \"{e.Name}\", CallConvs = new[] {{ typeof(CallConvCdecl) }})]\n");
+            exportsBlock.Append($"    public static unsafe {e.ReturnType} __export_{e.Name}({e.ParamList}) => {csName}({e.ArgList});\n");
+            table.Append($"        (\"{e.Name}\", (nint)({e.PointerType(native: true)})&__export_{e.Name}, (nint)({e.PointerType(native: false)})&{csName}),\n");
+        }
+        // dlsym's table, which Libc.dlopen reads when a program loads this assembly: each
+        // export's C name, its native entry point and the managed function behind it.
+        exportsBlock.Append("    public static unsafe (string Name, nint Native, nint Managed)[] __dotcc_exports() =>\n");
+        exportsBlock.Append("    [\n").Append(table).Append("    ];\n");
         var fnChunks = fns.Count == 0 ? new[] { System.Array.Empty<string>() } : fns.Chunk(FunctionsPerClass).ToArray();
         var programClassNames = fnChunks.Select((_, i) => i == 0 ? $"{prefix}_Program" : $"{prefix}_Program{i + 1}").ToArray();
         var globalsClass = $"{prefix}_Globals";
         var classes = new List<string> { globalsClass };
         classes.AddRange(programClassNames);
-        var usings = string.Join("\n", classes.Select(n => $"using static {n};"));
+        var usings = string.Join("\n", classes.Concat(libraryClasses).Select(n => $"using static {n};"));
         var programClasses = string.Join("\n\n", fnChunks.Select((chunk, i) =>
             $"public static unsafe class {programClassNames[i]}\n{{\n" + IndentBlock(string.Join("\n\n", chunk), "    ") + "\n}"));
         var program = $$"""
@@ -504,9 +528,15 @@ public static partial class Compiler
             {
             {{globals}}}
 
+            // Native entry points of the functions with external linkage, which
+            // dlsym finds by EntryPoint when a program dlopens this assembly.
+            public static class {{prefix}}_Exports
+            {
+            {{exportsBlock}}}
+
             {{CondClass}}
 
-            {{RuntimeBlock(pythonShim)}}
+            {{runtimeBlock}}
             """;
         return (program, classes);
     }
@@ -553,17 +583,16 @@ public static partial class Compiler
         var exportsBlock = new StringBuilder();
         foreach (var e in exports)
         {
-            if (e.Params.Contains("params VaArg[]", StringComparison.Ordinal))
+            if (e.Params.Any(p => p.Type.StartsWith("params ", StringComparison.Ordinal)))
             {
                 exportsBlock.Append($"    // dotcc: '{e.Name}' has varargs — not exported (no UnmanagedCallersOnly support).\n");
                 continue;
             }
-            var argNames = ExtractArgNames(e.Params);
             // EntryPoint keeps the raw C name (the exported C-ABI symbol); the
             // C# wrapper method + the DotCcLib call escape any C#-keyword name.
             var csName = EmitHelpers.Id(e.Name);
             exportsBlock.Append($"    [UnmanagedCallersOnly(EntryPoint = \"{e.Name}\", CallConvs = new[] {{ typeof(CallConvCdecl) }})]\n");
-            exportsBlock.Append($"    public static unsafe {e.ReturnType} {csName}({e.Params}) => DotCcLib.{csName}({argNames});\n\n");
+            exportsBlock.Append($"    public static unsafe {e.ReturnType} {csName}({e.ParamList}) => DotCcLib.{csName}({e.ArgList});\n\n");
         }
 
         return $$"""
@@ -642,27 +671,6 @@ public static partial class Compiler
             first = false;
             if (line.Length == 0) { continue; }
             sb.Append(prefix).Append(line);
-        }
-        return sb.ToString();
-    }
-
-    /// <summary>
-    /// Extract bare argument names from a C# parameter list like
-    /// <c>"int* arr, int n, Comparator cmp"</c> → <c>"arr, n, cmp"</c>.
-    /// Used to generate <c>[UnmanagedCallersOnly]</c> wrapper call sites
-    /// that delegate to the underlying impl with matching argument order.
-    /// </summary>
-    private static string ExtractArgNames(string paramList)
-    {
-        if (string.IsNullOrEmpty(paramList)) { return string.Empty; }
-        var parts = paramList.Split(", ");
-        var sb = new StringBuilder();
-        for (var i = 0; i < parts.Length; i++)
-        {
-            var p = parts[i];
-            var sp = p.LastIndexOf(' ');
-            if (i > 0) { sb.Append(", "); }
-            sb.Append(sp < 0 ? p : p[(sp + 1)..]);
         }
         return sb.ToString();
     }

@@ -136,6 +136,78 @@ public sealed class ManagedLibraryLinkTests : IDisposable
         Should.Throw<ArgumentException>(() => Compiler.LinkObjects(Objects(("a.c", LibA)), emit: EmitMode.Assembly));
     }
 
+    [Fact]
+    public void Each_external_function_gets_a_native_entry_point_and_a_row_in_the_export_table()
+    {
+        var (program, _) = Compiler.LinkAssembly(Objects(("a.c", """
+            static int id(int x) { return x; }
+            int apply(int (*f)(int), int x) { return f(id(x)); }
+            int twice(int x) { return 2 * x; }
+            int main_like(void) { return 0; }
+            """)), "mylib");
+        program.ShouldContain("public static class DotCcLib_mylib_Exports\n");
+        program.ShouldContain("[UnmanagedCallersOnly(EntryPoint = \"twice\", CallConvs = new[] { typeof(CallConvCdecl) })]");
+        program.ShouldContain("public static unsafe int __export_twice(int x) => twice(x);");
+        // A function-pointer parameter's type has a `, ` of its own.
+        program.ShouldContain("public static unsafe int __export_apply(delegate*<int, int> f, int x) => apply(f, x);");
+        program.ShouldContain("(\"twice\", (nint)(delegate* unmanaged[Cdecl]<int, int>)&__export_twice, (nint)(delegate*<int, int>)&twice),");
+        program.ShouldContain("(\"main_like\", (nint)(delegate* unmanaged[Cdecl]<int>)&__export_main_like, (nint)(delegate*<int>)&main_like),");
+        // A unit's static function is not the library's to export.
+        program.ShouldNotContain("__export_id");
+    }
+
+    [Fact]
+    public void An_object_records_the_signature_of_each_function_it_exports()
+    {
+        var obj = Objects(("a.c", "static int id(int x) { return x; } int apply(int (*f)(int), int x) { return f(id(x)); }"))[0];
+        var lines = File.ReadAllLines(obj);
+        lines.ShouldContain("//!!dotcc-obj export:apply\tint\tdelegate*<int, int>\tf\tint\tx");
+        lines.ShouldNotContain(l => l.StartsWith("//!!dotcc-obj export:id", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_shared_library_linked_from_objects_exports_its_external_functions()
+    {
+        var program = Compiler.LinkObjects(Objects(("a.c", "int twice(int x) { return 2 * x; }")), EmitMode.SharedLib);
+        program.ShouldContain("public static unsafe int twice(int x) => DotCcLib.twice(x);");
+    }
+
+    [Fact]
+    public void A_library_linked_against_a_managed_library_uses_its_names_and_runtime()
+    {
+        var core = Library("core", ("a.c", "int counter = 0; int bump(int x) { counter += x; return counter; }"));
+        var (program, manifest) = Compiler.LinkAssembly(Objects(("p.c", """
+            extern int counter;
+            int bump(int x);
+            int plugin_twice(int x) { return bump(x) * 2; }
+            """)), "plugin", core);
+        program.ShouldContain("using static DotCcLib_core_Program;");
+        program.ShouldContain("using static DotCcLib_core_Globals;");
+        program.ShouldNotContain("partial class Libc");
+        program.ShouldNotContain("int bump(");
+        program.ShouldContain("public static unsafe int __export_plugin_twice(int x) => plugin_twice(x);");
+        var defs = manifest.Split('\n').Where(l => l.StartsWith("//!!dotcc-lib def:", StringComparison.Ordinal));
+        defs.ShouldBe(new[] { "//!!dotcc-lib def:plugin_twice" });
+    }
+
+    [Fact]
+    public void A_managed_library_links_no_native_library()
+    {
+        var ex = Should.Throw<CompileException>(() => Compiler.LinkAssembly(
+            Objects(("a.c", "int f(void) { return 1; }")), "plugin",
+            new ImportOptions(new[] { "m" }, new[] { _dir }, Array.Empty<string>())));
+        ex.Message.ShouldContain("-lm has no m.dotcc-lib in any -L directory");
+    }
+
+    [Fact]
+    public void The_managed_library_project_references_the_libraries_it_links()
+    {
+        var csproj = Compiler.BuildGeneratedCsproj(libraryMode: true, assemblyName: "plugin", managedLibrary: true,
+                                                   projectReferences: new[] { "../core/core.csproj" });
+        csproj.ShouldContain("<ProjectReference Include=\"../core/core.csproj\" />");
+        csproj.ShouldContain("<OutputType>Library</OutputType>");
+    }
+
     /// <summary>Link a library from the (file name, source) units and write its manifest into
     /// its own directory; the <c>-l</c>/<c>-L</c> options that link a program against it.</summary>
     private ImportOptions Library(string name, params (string Name, string Source)[] units)

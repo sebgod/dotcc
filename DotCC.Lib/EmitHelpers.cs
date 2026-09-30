@@ -23,12 +23,29 @@ namespace DotCC;
 internal static class EmitHelpers
 {
     // Exports list: each non-static (external-linkage) C function definition.
-    // Tuple is (cName, csharpReturnType, csharpParamList). Library mode reads
+    // It carries the C name, the C# return type and the C# parameters. Library mode reads
     // this list to emit a matching [UnmanagedCallersOnly(EntryPoint = "name")]
     // wrapper per entry; the wrappers delegate to the user-method body so
     // both internal C-to-C calls (direct method invocation) and external
     // C-to-native consumers work without each other knowing.
-    public readonly record struct Export(string Name, string ReturnType, string Params);
+    public readonly record struct Export(string Name, string ReturnType, IReadOnlyList<ExportParam> Params)
+    {
+        /// <summary>The C# parameter list, <c>T a, U b</c>.</summary>
+        public string ParamList => string.Join(", ", Params.Select(p => $"{p.Type} {p.Name}"));
+
+        /// <summary>The arguments that forward every parameter unchanged, <c>a, b</c>.</summary>
+        public string ArgList => string.Join(", ", Params.Select(p => p.Name));
+
+        /// <summary>The C# function-pointer type of the function, managed
+        /// (<c>delegate*&lt;T, U, R&gt;</c>) or C-convention
+        /// (<c>delegate* unmanaged[Cdecl]&lt;T, U, R&gt;</c>).</summary>
+        public string PointerType(bool native) =>
+            (native ? "delegate* unmanaged[Cdecl]<" : "delegate*<")
+            + string.Concat(Params.Select(p => p.Type + ", ")) + ReturnType + ">";
+    }
+
+    /// <summary>One parameter of an <see cref="Export"/>: its C# type and its C# name.</summary>
+    public readonly record struct ExportParam(string Type, string Name);
 
     // ---- C#-keyword escaping --------------------------------------------
     // A C identifier can be a C# reserved keyword (`new`, `lock`, `is`,

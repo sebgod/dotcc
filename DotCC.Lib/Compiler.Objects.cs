@@ -58,10 +58,17 @@ public static partial class Compiler
     // (A file-based program's `#:property` directives precede it; otherwise it's
     // line 1.) Scan the first few lines for these.
     private const string MagicObject = "//!dotcc object";
-    // The object format this dotcc writes and links: 3 carries one record per definition,
-    // with its linkage, and a global's storage apart from its initializer (2 had no
-    // storage records, 1 had one section of each kind and no types).
-    private const string ObjectFormat = "3";
+    // The object format this dotcc writes and links: 4 carries the C# signature of each
+    // function a library can export (3 carried none, so a library linked from objects
+    // exported nothing); 3 carries one record per definition, with its linkage, and a
+    // global's storage apart from its initializer (2 had no storage records, 1 had one
+    // section of each kind and no types).
+    private const string ObjectFormat = "4";
+    // `export:<name>TAB<return type>(TAB<parameter type>TAB<parameter name>)*`: a function with
+    // external linkage a shared or managed library exports, in its C# spelling (the export
+    // wrapper's signature; a C# type has no tab, though it can have `, `). Not variadic (an
+    // [UnmanagedCallersOnly] method takes no `params` array) and not `main`.
+    private const string FragExport = "//!!dotcc-obj export:";
 
     /// <summary>Emit a single translation unit as a `.cs` object fragment.</summary>
     public static string EmitObject(
@@ -90,7 +97,8 @@ public static partial class Compiler
 
     private static string SerializeFragment(
         IReadOnlyList<Backends.LinkRecord> records, int mainArity,
-        IReadOnlyList<(string Name, string FieldType)> importSpecs, IEnumerable<string> defNames, bool mainReturnsVoid = false,
+        IReadOnlyList<(string Name, string FieldType)> importSpecs, IEnumerable<string> defNames,
+        IReadOnlyList<EmitHelpers.Export> exports, bool mainReturnsVoid = false,
         bool mainReturnsErrUnion = false, bool mainErrPayloadIsVoid = false, bool pythonShim = false)
     {
         var sb = new StringBuilder();
@@ -104,6 +112,12 @@ public static partial class Compiler
         // unmanaged[Cdecl]<int, int>`) — is everything after the first space.
         foreach (var (name, ft) in importSpecs) { sb.Append(FragImport).Append(name).Append(' ').Append(ft).Append('\n'); }
         foreach (var d in defNames) { sb.Append(FragDef).Append(d).Append('\n'); }
+        foreach (var e in exports)
+        {
+            sb.Append(FragExport).Append(e.Name).Append('\t').Append(e.ReturnType);
+            foreach (var p in e.Params) { sb.Append('\t').Append(p.Type).Append('\t').Append(p.Name); }
+            sb.Append('\n');
+        }
         foreach (var r in records)
         {
             var linkage = r.TuLocal ? " local" : " extern";
@@ -178,6 +192,9 @@ public static partial class Compiler
 
         /// <summary>Every name some fragment defines (an import candidate survives only if none does).</summary>
         public HashSet<string> DefinedNames { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>The functions a library exports, with their C# signatures.</summary>
+        public List<EmitHelpers.Export> Exports { get; } = new();
 
         /// <summary>The parameter count of <c>main</c>, or -1 when no object defines it.</summary>
         public int MainArity { get; set; } = -1;
@@ -263,7 +280,7 @@ public static partial class Compiler
         }
         var globals = string.Concat(set.Storage.Select(r => r.Text)) + string.Concat(set.Globals.Select(r => r.Text));
         return BuildShell(set.MainArity, set.Functions.Select(f => f.Text.TrimEnd('\n')).ToList(), set.TypeDecls(t => t), "", globals,
-                          emit, System.Array.Empty<EmitHelpers.Export>(), debugHeap, importsClass,
+                          emit, set.Exports, debugHeap, importsClass,
                           importsAreStatic: false, mainReturnsVoid: set.MainReturnsVoid,
                           mainReturnsErrUnion: set.MainReturnsErrUnion, mainErrPayloadIsVoid: set.MainErrPayloadIsVoid,
                           pythonShim: set.PythonShim, posixPaths: posixPaths,
@@ -522,6 +539,17 @@ public static partial class Compiler
                 {
                     definedNames.Add(line[FragDef.Length..]);
                 }
+                else if (line.StartsWith(FragExport, StringComparison.Ordinal))
+                {
+                    var parts = line[FragExport.Length..].Split('\t');
+                    if (parts.Length < 2 || parts.Length % 2 != 0)
+                    {
+                        throw new CompileException($"malformed export record in object: {line}");
+                    }
+                    var ps = new List<EmitHelpers.ExportParam>();
+                    for (var i = 2; i < parts.Length; i += 2) { ps.Add(new EmitHelpers.ExportParam(parts[i], parts[i + 1])); }
+                    set.Exports.Add(new EmitHelpers.Export(parts[0], parts[1], ps));
+                }
                 else if (line == FragRuntimePython)
                 {
                     set.PythonShim = true;
@@ -579,23 +607,37 @@ public static partial class Compiler
     /// one with internal linkage (C <c>static</c>) <c>internal</c>, and every type
     /// <c>public</c>, since a public function's signature can only name public types. The
     /// classes carry the library's name (<see cref="LibraryClassPrefix"/>), so a program's own
-    /// <c>DotCcProgram</c> does not hide them. Returns the program and its manifest
-    /// (<see cref="LibraryManifestFile"/>).
+    /// <c>DotCcProgram</c> does not hide them. A library can itself link against managed
+    /// libraries (<paramref name="imports"/>), as a CPython extension module links against
+    /// libpython: it then uses their functions, objects, types and runtime, as a program linked
+    /// by <see cref="LinkObjects"/> does, and carries no runtime of its own. Returns the program
+    /// and its manifest (<see cref="LibraryManifestFile"/>).
     /// </summary>
-    public static (string Program, string Manifest) LinkAssembly(IReadOnlyList<string> objectPaths, string assemblyName)
+    public static (string Program, string Manifest) LinkAssembly(
+        IReadOnlyList<string> objectPaths, string assemblyName, ImportOptions? imports = null)
     {
         var set = ReadObjects(objectPaths);
+        var managed = ManagedLibraryManifests(imports).Select(ReadManagedLibrary).ToList();
+        var managedNames = managed.Select(l => l.AssemblyName).ToHashSet(StringComparer.Ordinal);
+        if (imports?.LinkLibraries.FirstOrDefault(n => !managedNames.Contains(n)) is { } native)
+        {
+            throw new CompileException($"a managed library links only managed libraries, and -l{native} has no "
+                + $"{LibraryManifestFile(native)} in any -L directory");
+        }
+        if (managed.Count > 0) { ResolveAgainst(set, managed); }
         var prefix = LibraryClassPrefix(assemblyName);
         var fns = set.Functions.Select(f => WithAccess(f.Text.TrimEnd('\n'), f.TuLocal ? "internal" : "public")).ToList();
         var globals = string.Concat(set.Storage.Concat(set.Globals).Select(r => r.TuLocal ? InternalMembers(r.Text) : r.Text));
-        var (program, classes) = BuildAssemblyShell(prefix, fns, set.TypeDecls(PublicTypes), globals, set.PythonShim);
+        var carriesRuntime = managed.Count == 0;
+        var (program, classes) = BuildAssemblyShell(prefix, fns, set.TypeDecls(PublicTypes), globals, set.PythonShim, set.Exports,
+                                                     managed.SelectMany(l => l.Classes).ToList());
 
         var manifest = new StringBuilder();
         manifest.Append(MagicLibrary).Append(' ').Append(LibraryFormat)
             .Append(" — link a program or extension module against it with `-L<dir> -l").Append(assemblyName).Append("`.\n");
         manifest.Append(LibAssembly).Append(assemblyName).Append('\n');
         foreach (var c in classes) { manifest.Append(LibClass).Append(c).Append('\n'); }
-        if (set.PythonShim) { manifest.Append(LibRuntimePython).Append('\n'); }
+        if (carriesRuntime && set.PythonShim) { manifest.Append(LibRuntimePython).Append('\n'); }
         foreach (var r in set.Functions.Concat(set.Globals).Where(r => !r.TuLocal))
         {
             manifest.Append(LibDef).Append(r.Name).Append('\n');

@@ -127,4 +127,76 @@ public sealed class ManagedLibraryTests : IDisposable
         exit.ShouldBe(0);
         stdout.ShouldBe("7 12 1\n");
     }
+
+    [Fact]
+    public void A_program_dlopens_an_extension_linked_against_its_library_and_calls_into_it()
+    {
+        var coreDir = Path.Combine(_dir, "core");
+        Directory.CreateDirectory(coreDir);
+        var (core, coreManifest) = Compiler.LinkAssembly(new[]
+        {
+            Object("core.c", """
+                int counter = 0;
+                int bump(int x) { counter += x; return counter; }
+                """),
+        }, "core");
+        File.WriteAllText(Path.Combine(coreDir, Compiler.LibraryManifestFile("core")), coreManifest);
+        var linkCore = new ImportOptions(new[] { "core" }, new[] { coreDir }, Array.Empty<string>());
+
+        // An extension module, as CPython's are: its own assembly, linked against the library
+        // the program links, and loaded by the program at run time.
+        var (extension, _) = Compiler.LinkAssembly(new[]
+        {
+            Object("ext.c", """
+                extern int counter;
+                int bump(int x);
+                int ext_twice(int x) { return bump(x) * 2; }
+                int *ext_counter(void) { return &counter; }
+                """),
+        }, "ext", linkCore);
+
+        // `twice` and `addr` keep the C convention the direct cast of dlsym gives them;
+        // `later` is a variable of the program's own function pointer type, assigned after its
+        // declaration, as dynload_shlib.c's `dl_funcptr p` is.
+        var program = Compiler.LinkObjects(new[]
+        {
+            Object("main.c", """
+                #include <stdio.h>
+                #include <dlfcn.h>
+                extern int counter;
+                int bump(int x);
+                typedef int (*twice_fn)(int);
+                int main(int argc, char **argv) {
+                    void *h = dlopen(argv[1], RTLD_NOW);
+                    if (!h) { printf("dlopen: %s\n", dlerror()); return 1; }
+                    int (*twice)(int) = (int (*)(int))dlsym(h, "ext_twice");
+                    int *(*addr)(void) = (int *(*)(void))dlsym(h, "ext_counter");
+                    twice_fn later;
+                    later = (twice_fn)dlsym(h, "ext_twice");
+                    bump(1);
+                    int a = twice(2);
+                    int b = later(3);
+                    printf("%d %d %d %d\n", a, b, counter, addr() == &counter);
+                    printf("%d %d\n", dlopen(argv[1], RTLD_NOW) == h, dlsym(h, "missing") == NULL);
+                    printf("%s\n", dlerror());
+                    return dlclose(h);
+                }
+                """),
+        }, EmitMode.Csproj, imports: linkCore);
+
+        var context = new System.Runtime.Loader.AssemblyLoadContext($"dotcc-dlopen-{Guid.NewGuid():N}", isCollectible: false);
+        var (_, coreReference) = LibraryModeTests.CompileLibrary(core, "core", context);
+        // The loaded extension stays mapped (a load context that is not collectible never
+        // unloads), so on Windows its directory outlives Dispose; it is left in the temp dir.
+        var extDir = Path.Combine(Path.GetTempPath(), $"dotcc-dlopen-ext-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(extDir);
+        var extPath = Path.Combine(extDir, "ext.dll");
+        File.WriteAllBytes(extPath, LibraryModeTests.CompileImage(extension, "ext", new[] { coreReference }));
+
+        var (stdout, stderr, exit) = FixtureRunner.CompileAndRunCapturingStreams(
+            program, new[] { extPath }, new[] { coreReference }, context);
+        stderr.ShouldBeEmpty();
+        stdout.ShouldBe("6 12 6 1\n1 1\nundefined symbol: missing\n");
+        exit.ShouldBe(0);
+    }
 }
