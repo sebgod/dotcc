@@ -157,6 +157,25 @@ public sealed class ManagedLibraryLinkTests : IDisposable
     }
 
     [Fact]
+    public void A_function_whose_signature_has_no_native_form_gets_no_native_entry_point()
+    {
+        // A va_list is a managed cursor over an argument array ([UnmanagedCallersOnly] cannot
+        // take it, CS8894), and a variadic function takes its tail as a managed array: CPython's
+        // PyErr_FormatV and PyErr_Format. Both stay public for assemblies linked against the library.
+        var (program, _) = Compiler.LinkAssembly(Objects(("a.c", """
+            #include <stdarg.h>
+            int vsum(int n, va_list ap) { int s = 0; while (n--) s += va_arg(ap, int); return s; }
+            int sum(int n, ...) { va_list ap; va_start(ap, n); int s = vsum(n, ap); va_end(ap); return s; }
+            int one(void) { return 1; }
+            """)), "mylib");
+        program.ShouldContain("public static unsafe int vsum(");
+        program.ShouldContain("public static unsafe int sum(");
+        program.ShouldNotContain("__export_vsum");
+        program.ShouldNotContain("__export_sum");
+        program.ShouldContain("public static unsafe int __export_one() => one();");
+    }
+
+    [Fact]
     public void An_object_records_the_signature_of_each_function_it_exports()
     {
         var obj = Objects(("a.c", "static int id(int x) { return x; } int apply(int (*f)(int), int x) { return f(id(x)); }"))[0];

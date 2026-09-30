@@ -72,6 +72,7 @@ internal sealed class CSharpBackend
         typeNames.UnionWith(unit.Enums.Select(e => e.Name));
         cg._typeShadowedGlobals = new HashSet<string>(
             unit.Globals.Select(g => g.Sym.TargetName).Where(typeNames.Contains), StringComparer.Ordinal);
+        cg._laidOutTypes = new HashSet<string>(unit.Types.Select(t => t.Name).Concat(unit.Enums.Select(e => e.Name)), StringComparer.Ordinal);
         var fns = new List<string>();
         var exports = new List<DotCC.EmitHelpers.Export>();
         var mainArity = -1;
@@ -106,12 +107,14 @@ internal sealed class CSharpBackend
                 }
             }
             // A variadic function's `params VaArg[]` tail isn't a valid
-            // [UnmanagedCallersOnly] signature, so it can't be exported.
-            else if (fn.Sym.Storage != Storage.Static && !fn.Variadic)
+            // [UnmanagedCallersOnly] signature, so it can't be exported, and neither can a
+            // function whose signature names a type with no native form (a `va_list`).
+            else if (fn.Sym.Storage != Storage.Static && !fn.Variadic
+                     && fn.Sym.Type is CType.Func f
+                     && cg.HasNativeForm(f.Return) && fn.Params.All(p => IsVoidParam(p.Type) || cg.HasNativeForm(p.Type)))
             {
-                var ret = fn.Sym.Type is CType.Func f ? cg.Cs(f.Return) : "int";
                 var ps = fn.Params.Where(p => !IsVoidParam(p.Type)).Select(p => new DotCC.EmitHelpers.ExportParam(cg.Cs(p.Type), p.TargetName)).ToList();
-                exports.Add(new DotCC.EmitHelpers.Export(fn.Sym.Name, ret, ps));
+                exports.Add(new DotCC.EmitHelpers.Export(fn.Sym.Name, cg.Cs(f.Return), ps));
             }
         }
 
@@ -1606,6 +1609,22 @@ internal sealed class CSharpBackend
         Paren p => IsNullPtr(p.Inner),
         _ => false,
     };
+
+    /// <summary>True when a value of type <paramref name="t"/> crosses a C calling convention
+    /// boundary as it is, so an <c>[UnmanagedCallersOnly]</c> export can take or return one: a
+    /// scalar, pointer, function pointer or enum, or an aggregate the program lays out (its own
+    /// structs and the runtime-owned ones). A name no aggregate registry defines is one the
+    /// runtime supplies as a managed type (<c>va_list</c>, a cursor over an argument array), which
+    /// has no native form.</summary>
+    private bool HasNativeForm(CType t) => t.Unqualified switch
+    {
+        CType.Named n => _laidOutTypes.Contains(n.Name),
+        _ => true,
+    };
+
+    /// <summary>The aggregates and enums the unit defines, runtime-owned ones included (see
+    /// <see cref="HasNativeForm"/>).</summary>
+    private HashSet<string> _laidOutTypes = new(StringComparer.Ordinal);
 
     /// <summary>True when <paramref name="value"/> is a C-convention function pointer (a
     /// <c>dlsym</c> result, <see cref="CType.Func.IsNativeCallConv"/>) converted to a managed
