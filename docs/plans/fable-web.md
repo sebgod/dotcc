@@ -414,6 +414,25 @@ exact, exit 0; Zig `std.debug.print` → stderr exact, exit 0), so the illink
 round-trip includes the unchanged JS half (wabt assemble + wasm execute), so
 the `EmitWat` core sped up by more than the end-to-end 4×.
 
+### WEB8: the Python page (S), DONE (2026-09-30)
+
+A **Python** page (`/python`) and nav link for the CPython milestone: what the
+dotcc-built interpreter is (178 CPython 3.13 units compiled to one .NET program),
+the static and shared builds (libpython as a managed library, `_heapq` as an
+extension module loaded with `dlopen`), the ten programs CI runs on it, and what is
+not there yet. Each program shows its docstring, source and the output host CPython
+prints, **embedded at build time from `examples/cpython/programs`** (an
+`EmbeddedResource` glob in `DotCC.Web.csproj`), so the page cannot drift from what
+the tests check; `pages.yml` redeploys when those programs change. Home gets a
+Python card and link, and Coverage a section on the three whole C code bases CI runs
+against their own tests (CPython, Lua 5.5, chibi-scheme). The site text was reworded
+without em-dashes in the same change. Verified in headless Edge: all ten programs
+render in order with their outputs, and the pages fit at 500 px and 1280 px (headless
+Edge will not lay out narrower than about 500 px, so phone widths are covered by the
+CSS rules rather than a screenshot). **Next (WEB9, a spike):** run Python in the tab
+by loading the interpreter assembly into the Blazor app, lazily, with the stdlib it
+needs in MEMFS; payload and startup under AOT are the unknowns.
+
 ## Validation story
 
 - **The corpus is the oracle.** The sandbox's run path is `EmitWat` (covered by

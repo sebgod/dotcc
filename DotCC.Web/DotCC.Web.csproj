@@ -27,6 +27,14 @@
     <ProjectReference Include="..\DotCC.Lib\DotCC.Lib.csproj" />
   </ItemGroup>
 
+  <!-- The Python page shows the programs CI runs on the dotcc-built CPython: their source
+       and the output host CPython prints, which the interpreter has to reproduce. They are
+       read from examples/cpython/programs, so the page and the tests cannot drift apart. -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\examples\cpython\programs\*.py;..\examples\cpython\programs\*.expected"
+                      LogicalName="python/%(Filename)%(Extension)" />
+  </ItemGroup>
+
   <!-- Keep DotCC.Lib whole: the parse tables + embedded system headers are reached
        structurally / via manifest resources, which the trimmer can't see. -->
   <ItemGroup>

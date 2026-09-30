@@ -3,13 +3,14 @@ name: pages
 # Deploy the DotCC.Web in-browser sandbox to GitHub Pages (fable-web.md WEB4).
 #
 # DotCC.Web is a standalone Blazor WebAssembly app that runs the dotcc compiler
-# (DotCC.Lib) in the browser and executes C via the wat backend + libwabt.js — a
+# (DotCC.Lib) in the browser and executes C via the wat backend + libwabt.js: a
 # fully static site, no server (see the project README under DotCC.Web/). It lives
 # OUTSIDE dotcc.sln + CPM, so the main `ci` workflow never builds it; this workflow
 # is its sole CI, and publishes it to https://sebgod.github.io/dotcc/.
 #
-# Runs on pushes to main that touch the app or the compiler it embeds (so the live
-# sandbox tracks the latest compiler), and on manual dispatch for a forced redeploy.
+# Runs on pushes to main that touch the app, the compiler it embeds (so the live
+# sandbox tracks the latest compiler) or the CPython programs the Python page shows,
+# and on manual dispatch for a forced redeploy.
 # Pure managed publish target is browser-wasm (OS-neutral), so ubuntu publishes fine.
 
 on:
@@ -19,6 +20,7 @@ on:
       - 'DotCC.Web/**'
       - 'DotCC.Lib/**'
       - 'DotCC.Libc/**'
+      - 'examples/cpython/programs/**'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
 
@@ -53,16 +55,16 @@ jobs:
       # NuGet LALR.CC path (no sibling checkout in CI), same as the main ci workflow.
       #
       # RunAOTCompilation: mono-aot-cross compiles the managed code to native wasm at
-      # publish time (fable-web.md WEB7) — the target is the ~3.4 s interpreted EmitWat
-      # latency measured in WEB0. Deliberately CI-only (never on the local win-arm64
-      # box); plain AOT on ubuntu-x64 first — if this job ever hits the sgen-alloc.c:409
+      # publish time (fable-web.md WEB7), aimed at the ~3.4 s interpreted EmitWat
+      # latency measured in WEB0. Deliberately CI-only (never on a local box); plain AOT
+      # on ubuntu-x64 first. If this job ever hits the sgen-alloc.c:409
       # 0xC0000409 assertion, the known workarounds are _AOT_InternalForceInterpretAssemblies
       # (identity = the .dll file name) plus -p:WasmDedup=false.
       - name: Publish DotCC.Web (Release, AOT)
         run: dotnet publish DotCC.Web/DotCC.Web.csproj -c Release -o publish -p:UseLocalLalrCc=false -p:RunAOTCompilation=true --nologo
 
       # The payload budget is part of the campaign's validation story: WEB0 measured
-      # 3.31 MB Brotli interpreted; AOT buys latency at a payload cost — keep it visible.
+      # 3.31 MB Brotli interpreted; AOT buys latency at a payload cost, so keep it visible.
       - name: Report published payload size
         run: |
           set -euo pipefail
@@ -83,7 +85,7 @@ jobs:
       - name: SPA 404 fallback + .nojekyll
         run: |
           set -euo pipefail
-          # Jekyll strips _framework/ (leading underscore) — .nojekyll disables Jekyll.
+          # Jekyll strips _framework/ (leading underscore); .nojekyll disables Jekyll.
           touch publish/wwwroot/.nojekyll
           # Static hosts 404 on client-side deep links; GitHub Pages serves 404.html
           # for unknown paths, so a copy of index.html makes routes resolve.
@@ -95,7 +97,7 @@ jobs:
           path: publish/wwwroot
 
   deploy:
-    # Deploy only from main — a branch workflow_dispatch is a build-only validation
+    # Deploy only from main: a branch workflow_dispatch is a build-only validation
     # run (e.g. proving an AOT publish compiles before it can touch the live site).
     if: github.ref == 'refs/heads/main'
     needs: build
