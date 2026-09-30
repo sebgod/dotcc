@@ -118,7 +118,7 @@ header .tag {
 /* The staged input file's name, sitting between the language + example selectors. */
 .filename { color: var(--muted); font-style: italic; }
 
-/* CodeMirror host — the vendored bundle mounts a .cm-editor inside. */
+/* CodeMirror host: the vendored bundle mounts a .cm-editor inside. */
 .cm-host {
     flex: 1;
     display: flex;
@@ -131,7 +131,7 @@ header .tag {
     font-family: var(--mono);
     font-size: .86rem;
     line-height: 1.45;
-    /* Show C operators as plain ASCII — no <=, >=, ++, -> ligatures. */
+    /* Show C operators as plain ASCII, with no <=, >=, ++, -> ligatures. */
     font-variant-ligatures: none;
     font-feature-settings: "liga" 0, "calt" 0;
 }
@@ -225,7 +225,7 @@ pre {
     line-height: 1.45;
     white-space: pre-wrap;
     word-break: break-word;
-    /* Show C operators as plain ASCII — no <=, >=, -> ligatures. */
+    /* Show C operators as plain ASCII, with no <=, >=, -> ligatures. */
     font-variant-ligatures: none;
     font-feature-settings: "liga" 0, "calt" 0;
 }
@@ -322,6 +322,7 @@ footer a { color: var(--accent); text-decoration: none; }
 .hl-c, .card-tag.c, .nm-node.c { color: var(--accent); }
 .hl-zig, .card-tag.zig, .nm-node.zig { color: var(--warn); }
 .hl-net, .nm-node.net { color: var(--ok); }
+.hl-py, .card-tag.py, .nm-node.py { color: var(--accent2); }
 .nm-node.wat { color: var(--accent2); }
 
 /* hero */
@@ -330,6 +331,9 @@ footer a { color: var(--accent); text-decoration: none; }
 .hero h1 .hl-c, .hero h1 .hl-zig, .hero h1 .hl-net { white-space: nowrap; }
 .lede { color: var(--muted); font-size: 1.05rem; line-height: 1.6; margin: 0 0 1.4rem; }
 .lede strong { color: var(--fg); }
+.lede a, .cov-note li a { color: var(--accent); text-decoration: none; }
+.lede a:hover, .cov-note li a:hover { text-decoration: underline; }
+.cov-note .cov-list { max-width: 76ch; }
 
 .cta-row { display: flex; flex-wrap: wrap; gap: .6rem; }
 .cta {
@@ -416,11 +420,25 @@ footer a { color: var(--accent); text-decoration: none; }
 .cov-note strong { color: var(--fg); }
 .cov-outscope { font-size: .85rem; }
 
+/* python page: the programs CI runs */
+.py-programs { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(340px, 100%), 1fr)); gap: 1rem; margin-top: 1rem; }
+.py-program { border: 1px solid var(--border); border-radius: .5rem; background: var(--panel); padding: 1rem; min-width: 0; }
+.py-program h3 { margin: 0 0 .5rem; font-size: 1rem; }
+.py-program p { margin: 0 0 .5rem; font-size: .86rem; }
+.py-program details { margin-top: .5rem; }
+.py-program summary { cursor: pointer; color: var(--accent); font-size: .84rem; }
+.py-program pre {
+    margin-top: .4rem; max-height: 22rem; overflow: auto;
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: .3rem; padding: .5rem .6rem;
+}
+
 /* inline code on the story pages */
 .hero code, .arch code, .cards code, .pipe code, .cov-grid code, .cov-note code {
     font-family: var(--mono); font-size: .86em; color: var(--fg);
     background: var(--panel-2); border: 1px solid var(--border); border-radius: .25rem; padding: 0 .28em;
-    /* Plain ASCII operators — no <=, >=, += ligatures (matches the editor + code panes). */
+    /* A long name (_heapq.cpython-313-x86_64-linux-gnu.so) breaks rather than widen a phone's page. */
+    overflow-wrap: anywhere;
+    /* Plain ASCII operators, with no <=, >=, += ligatures (as in the editor and code panes). */
     font-variant-ligatures: none;
     font-feature-settings: "liga" 0, "calt" 0;
 }
@@ -432,4 +450,12 @@ footer a { color: var(--accent); text-decoration: none; }
     .nm-arrow { transform: rotate(90deg); }
     .nm-label { position: static; margin-bottom: .2rem; }
     .brand-tag { display: none; }
+    /* Five nav links and the brand do not fit a phone's width on one line. */
+    .topnav-inner { padding: .45rem 1rem; gap: .5rem; }
+    .navlinks { flex-wrap: wrap; justify-content: flex-end; gap: 0; }
+    .navlink { padding: .3rem .45rem; }
 }
+
+/* Blazor's FocusOnNavigate focuses the page's h1 for screen readers; the heading is
+   not interactive, so it needs no focus ring. */
+h1:focus { outline: none; }

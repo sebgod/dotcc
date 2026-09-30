@@ -1,13 +1,13 @@
 @page "/coverage"
 
-<PageTitle>dotcc — language coverage (C &amp; Zig)</PageTitle>
+<PageTitle>dotcc: language coverage (C &amp; Zig)</PageTitle>
 
 <section class="cov-head">
     <h1>Language coverage</h1>
     <p class="lede">
-        dotcc's coverage is tracked feature-by-feature in the repo docs — <strong>the source
-        of truth</strong>. This is the highlight reel; the full tables (and what's deliberately
-        out of scope) live there, updated as each feature lands.
+        dotcc's coverage is tracked feature by feature in the repo docs, which are <strong>the
+        source of truth</strong>. This is the highlight reel; the full tables, and what is
+        deliberately out of scope, live there and are updated as each feature lands.
     </p>
     <div class="cta-row">
         <a class="cta" href="https://github.com/sebgod/dotcc/blob/main/docs/C-SUPPORT.md" target="_blank" rel="noopener">Full C support ↗</a>
@@ -19,12 +19,13 @@
     <section class="cov-panel">
         <h2><span class="card-tag c">C</span> C90 · C99 · C11 · C23</h2>
         <ul class="cov-list">
-            <li><b>Types</b> — integer / float / pointer (LP64, 8-byte pointers), <code>struct</code>/<code>union</code>/<code>enum</code>, <code>typedef</code>, const-correctness, <code>_Bool</code>, and the <code>char16_t</code>/<code>char32_t</code>/<code>char8_t</code>/<code>wchar_t</code> family.</li>
-            <li><b>Operators &amp; statements</b> — the full expression + statement set, <code>_Generic</code>, compound literals, <code>sizeof</code>/<code>_Alignof</code> folding.</li>
-            <li><b>Preprocessor</b> — <code>#include</code>/<code>#define</code>/<code>#if</code>, function-like macros, <code>__VA_OPT__</code>, <code>#elifdef</code>, C23 <code>#embed</code>, <code>__has_include</code>.</li>
-            <li><b>C11 / C23</b> — <code>_Static_assert</code>, <code>_Thread_local</code>, <code>constexpr</code>, and <code>[[attributes]]</code> (<code>noreturn</code>, <code>deprecated</code>, <code>nodiscard</code>, <code>maybe_unused</code>).</li>
-            <li><b>Standard library</b> — the <code>printf</code> family, <code>&lt;string.h&gt;</code>, <code>&lt;math.h&gt;</code>, <code>&lt;stdlib.h&gt;</code>, C11 <code>&lt;threads.h&gt;</code>, BSD sockets, POSIX stubs.</li>
-            <li><b>Dialects</b> — <code>-std=c90…c23</code>, <code>-pedantic</code>, and warning flags (<code>-Wconversion</code>, <code>-Wimplicit-fallthrough</code>).</li>
+            <li><b>Types</b>: integer, float and pointer (LP64, 8-byte pointers), <code>struct</code>/<code>union</code>/<code>enum</code>, <code>typedef</code>, const-correctness, <code>_Bool</code>, and the <code>char16_t</code>/<code>char32_t</code>/<code>char8_t</code>/<code>wchar_t</code> family.</li>
+            <li><b>Operators &amp; statements</b>: the full expression and statement set, <code>_Generic</code>, compound literals, <code>sizeof</code>/<code>_Alignof</code> folding.</li>
+            <li><b>Preprocessor</b>: <code>#include</code>/<code>#define</code>/<code>#if</code>, function-like macros, <code>__VA_OPT__</code>, <code>#elifdef</code>, C23 <code>#embed</code>, <code>__has_include</code>.</li>
+            <li><b>C11 / C23</b>: <code>_Static_assert</code>, <code>_Thread_local</code>, <code>constexpr</code>, and <code>[[attributes]]</code> (<code>noreturn</code>, <code>deprecated</code>, <code>nodiscard</code>, <code>maybe_unused</code>).</li>
+            <li><b>Standard library</b>: the <code>printf</code> family, <code>&lt;string.h&gt;</code>, <code>&lt;math.h&gt;</code>, <code>&lt;stdlib.h&gt;</code>, C11 <code>&lt;threads.h&gt;</code>, BSD sockets, POSIX stubs, and <code>dlopen</code> of native libraries and of dotcc-built .NET assemblies.</li>
+            <li><b>Linking</b>: separate compilation to objects, managed libraries other programs link against (<code>-shared -fassembly</code>), and native libraries imported with <code>-l</code>/<code>-L</code>.</li>
+            <li><b>Dialects</b>: <code>-std=c90…c23</code>, <code>-pedantic</code>, and warning flags (<code>-Wconversion</code>, <code>-Wimplicit-fallthrough</code>).</li>
         </ul>
         <p class="cov-try">Try:
             <a href="@Deep("c", "Factorial")">Factorial</a> ·
@@ -36,12 +37,12 @@
     <section class="cov-panel">
         <h2><span class="card-tag zig">Zig</span> 0.17 front-end</h2>
         <ul class="cov-list">
-            <li><b>Core</b> — <code>fn</code>, <code>const</code>/<code>var</code>, full arithmetic incl. wrapping / saturating ops, <code>if</code>/<code>while</code>/<code>for</code>/<code>switch</code>, labeled loops.</li>
-            <li><b>Aggregates</b> — <code>struct</code>/<code>enum</code>/<code>union</code> (tagged &amp; untagged) with methods (UFCS), tuples, slices &amp; sentinel-terminated types.</li>
-            <li><b>Error handling</b> — optionals (<code>?T</code>), error unions (<code>!T</code>), <code>try</code>/<code>catch</code>/<code>orelse</code>, <code>defer</code>/<code>errdefer</code>.</li>
-            <li><b>Allocators</b> — <code>std.mem.Allocator</code>, page / FixedBuffer / Arena, <code>create</code>/<code>destroy</code>/<code>realloc</code>, compile-time devirtualization of the default.</li>
-            <li><b>Comptime &amp; generics</b> — comptime values, comptime <em>type</em> params, type-returning functions, and <code>anytype</code> — the full generative core.</li>
-            <li><b>std &amp; interop</b> — curated <code>std.ArrayList(T)</code>, <code>std.mem.*</code>, <code>std.debug.print</code>; C ABI via <code>extern fn</code> + <code>-lc</code>.</li>
+            <li><b>Core</b>: <code>fn</code>, <code>const</code>/<code>var</code>, full arithmetic including wrapping and saturating ops, <code>if</code>/<code>while</code>/<code>for</code>/<code>switch</code>, labeled loops.</li>
+            <li><b>Aggregates</b>: <code>struct</code>/<code>enum</code>/<code>union</code> (tagged and untagged) with methods (UFCS), tuples, slices and sentinel-terminated types.</li>
+            <li><b>Error handling</b>: optionals (<code>?T</code>), error unions (<code>!T</code>), <code>try</code>/<code>catch</code>/<code>orelse</code>, <code>defer</code>/<code>errdefer</code>.</li>
+            <li><b>Allocators</b>: <code>std.mem.Allocator</code>, page / FixedBuffer / Arena, <code>create</code>/<code>destroy</code>/<code>realloc</code>, and compile-time devirtualization of the default.</li>
+            <li><b>Comptime &amp; generics</b>: comptime values, comptime <em>type</em> params, type-returning functions, and <code>anytype</code>, the full generative core.</li>
+            <li><b>std &amp; interop</b>: curated <code>std.ArrayList(T)</code>, <code>std.mem.*</code>, <code>std.debug.print</code>, a growing part of the real <code>std</code> compiled from source, and the C ABI via <code>extern fn</code> + <code>-lc</code>.</li>
         </ul>
         <p class="cov-try">Try:
             <a href="@Deep("zig", "Hello (std.debug.print)")">Hello</a> ·
@@ -52,19 +53,32 @@
 </div>
 
 <section class="cov-note">
+    <h2>Whole programs, checked by their own tests</h2>
+    <p>
+        Feature tables only go so far. CI also compiles three real C code bases with dotcc,
+        unchanged, and runs each against its own upstream tests:
+    </p>
+    <ul class="cov-list">
+        <li><b><a href="python">CPython 3.13</a></b>: the interpreter runs pure-Python programs with the same output as host CPython, on a static build and on a shared one that loads an extension module with <code>dlopen</code>.</li>
+        <li><b>Lua 5.5</b>: the core, standard library and standalone interpreter, run through Lua's own conformance suite (<code>testes/all.lua</code>).</li>
+        <li><b>chibi-scheme</b>: the R7RS-small reference implementation, whose R7RS test suite passes 1225 of 1225 tests with output identical to the gcc build.</li>
+    </ul>
+</section>
+
+<section class="cov-note">
     <h2>Two back-ends, one IR</h2>
     <p>
-        <strong>C# / .NET</strong> is the full-fidelity target — everything above lowers to
+        <strong>C# / .NET</strong> is the full-fidelity target: everything above lowers to
         AOT-clean, <code>unsafe</code> C# 14 that preserves C's observable semantics (overflow,
-        signedness, evaluation order). The <strong>wat</strong> back-end runs the integer +
-        <code>printf</code> / <code>std.debug.print</code> core, and it's what powers the
-        in-browser <a href="sandbox">sandbox</a> — a browser can execute WebAssembly with no
-        server. Both realize the <em>same</em> typed IR; the difference is the substrate.
+        signedness, evaluation order). The <strong>wat</strong> back-end runs the integer and
+        <code>printf</code> / <code>std.debug.print</code> core, and it powers the in-browser
+        <a href="sandbox">sandbox</a>, since a browser can execute WebAssembly with no server.
+        Both realize the <em>same</em> typed IR; the difference is the substrate.
     </p>
     <p class="cov-outscope">
-        Deliberately out of scope (see the docs for the reasoning): async / <code>inline asm</code>,
-        and — for now — the parts of a language's standard library that bottom out in platform
-        syscalls (they get BCL-redirected, not compiled from source).
+        Deliberately out of scope (the docs give the reasoning): async, <code>inline asm</code>,
+        and for now the parts of a language's standard library that bottom out in platform
+        syscalls, which are redirected to the BCL rather than compiled from source.
     </p>
 </section>
 
