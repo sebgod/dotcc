@@ -943,6 +943,26 @@ public sealed class WatBackendTests
     }
 
     [Fact]
+    public void An_undefined_wasi_prototype_is_a_wasi_import()
+    {
+        // __wasi_<name>, declared and never defined, is wasi_snapshot_preview1.<name>, typed
+        // by the prototype; the memory it writes into is exported.
+        var wat = Wat("int __wasi_clock_time_get(unsigned id, unsigned long precision, unsigned long *time);\n"
+            + "int main(void) { unsigned long ns; return __wasi_clock_time_get(0, 1, &ns) == 0 && ns > 0; }");
+        wat.ShouldContain("(import \"wasi_snapshot_preview1\" \"clock_time_get\" (func $__wasi_clock_time_get (param i32) (param i64) (param i32) (result i32)))");
+        wat.ShouldContain("(memory (export \"memory\")");
+        wat.ShouldContain("call $__wasi_clock_time_get");
+    }
+
+    [Fact]
+    public void Time_reads_the_wasi_realtime_clock()
+    {
+        var wat = Wat("#include <time.h>\nint main(void) { return time(0) > 1000000000; }");
+        wat.ShouldContain("(func $time ");
+        wat.ShouldContain("\"clock_time_get\"");
+    }
+
+    [Fact]
     public void A_binary_literal_is_written_in_decimal()
     {
         // wat reads decimal and 0x hex, not C23's 0b: wat2wasm rejected `i32.const 0b1011`.
