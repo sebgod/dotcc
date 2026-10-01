@@ -191,21 +191,77 @@ internal sealed partial class IrModule
     }
 
     /// <summary>The byte offset of <paramref name="member"/> within struct
-    /// <paramref name="structName"/> (0 for any union member), or null if unknown.</summary>
-    internal int? OffsetOfConst(string structName, string member)
+    /// <paramref name="structName"/> (0 for any union member), or null if unknown. For a
+    /// bit-field, the offset of its storage unit.</summary>
+    internal int? OffsetOfConst(string structName, string member) =>
+        FieldPlaceOf(structName, member)?.Offset;
+
+    /// <summary>Where one field of a struct or union lives in the layout model: the byte
+    /// <see cref="Offset"/> of the field, or, for a bit-field, of the storage unit it shares
+    /// (<see cref="UnitBytes"/> wide, its declared type's size), with its lowest bit at
+    /// <see cref="BitOffset"/> within the unit, the first field of a unit taking the low bits.</summary>
+    internal readonly record struct FieldPlace(StructField Field, int Offset, int BitOffset, int UnitBytes);
+
+    /// <summary>The place of <paramref name="member"/> in <paramref name="structName"/>, or
+    /// null when either is unknown.</summary>
+    internal FieldPlace? FieldPlaceOf(string structName, string member)
+    {
+        if (FieldPlaces(structName) is not { } places) { return null; }
+        foreach (var p in places)
+        {
+            if (p.Field.Name == member) { return p; }
+        }
+        return null;
+    }
+
+    /// <summary>Every field's place in <paramref name="structName"/>, laid out as
+    /// <see cref="LayoutAggregate"/> sizes it: a struct's fields in order, each aligned (none
+    /// when packed), consecutive bit-fields sharing a unit of their type's size while they
+    /// fit and a zero-width one closing it; a union's every field at 0. Null when unknown.</summary>
+    internal IReadOnlyList<FieldPlace>? FieldPlaces(string structName)
     {
         if (!StructFields.TryGetValue(structName, out var fields)) { return null; }
-        if (StructIsUnion.GetValueOrDefault(structName)) { return 0; }
+        var isUnion = StructIsUnion.GetValueOrDefault(structName);
         var packed = PackedStructs.Contains(structName);   // byte-packed: no inter-field padding
-        var off = 0;
+        var places = new List<FieldPlace>(fields.Count);
+        int off = 0, unitOff = 0, unitBytes = -1, unitUsed = 0;
         foreach (var f in fields)
         {
             var (fs, fa) = Layout(f.Type);
-            if (!packed) { off = RoundUp(off, fa); }
-            if (f.Name == member) { return off; }
+            if (packed) { fa = 1; }
+            if (isUnion)
+            {
+                places.Add(new FieldPlace(f, 0, 0, f.IsBitField ? fs : 0));
+                continue;
+            }
+            if (f.BitWidth is { } width)
+            {
+                if (width == 0)
+                {
+                    unitBytes = -1;
+                    places.Add(new FieldPlace(f, off, 0, 0));
+                    continue;
+                }
+                if (unitBytes == fs && unitUsed + width <= fs * 8)
+                {
+                    places.Add(new FieldPlace(f, unitOff, unitUsed, fs));
+                    unitUsed += width;
+                    continue;
+                }
+                off = RoundUp(off, fa);
+                unitOff = off;
+                unitBytes = fs;
+                unitUsed = width;
+                places.Add(new FieldPlace(f, off, 0, fs));
+                off += fs;
+                continue;
+            }
+            unitBytes = -1;
+            off = RoundUp(off, fa);
+            places.Add(new FieldPlace(f, off, 0, 0));
             off += fs;
         }
-        return null;
+        return places;
     }
 
     private static int RoundUp(int v, int align) => align <= 1 ? v : (v + align - 1) / align * align;

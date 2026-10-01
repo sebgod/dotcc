@@ -5,6 +5,7 @@
 addr-of-global
 align-union
 anon-aggregates-across-headers
+anon-members-nested
 anon-struct-decl
 anon-struct-member
 anon-union-decl
@@ -23,6 +24,8 @@ atomic-counter
 atomic-narrow
 atomic-stdlib
 auto-infer
+bitfield-lists
+bitfields
 bitwise
 block-comment-close
 bool-as-int

@@ -328,6 +328,19 @@ public sealed class WatOracleTests
         + " printf(\"r=%d sum=%d|\", r, sum(3)); jmp_buf local; volatile int tries = 0;"
         + " if (setjmp(local) == 0) { tries++; longjmp(local, 5); } else { tries += 10; } printf(\"tries=%d\", tries); return 0; }",
         "r=1 sum=84|tries=11")]
+    // Bit-fields: a signed field sign-extends, a store truncates to the width (and the
+    // assignment's value is what was stored), compound and ++ read-modify-write the unit,
+    // 64-bit units, a global's initializer, and the offset of a member after a bit-field
+    // run (== gcc's output).
+    [InlineData("#include <stdio.h>\n#include <stddef.h>\n"
+        + "struct S { int a : 3; unsigned b : 5; int c; unsigned long long big : 40; long long sbig : 20; };\n"
+        + "static struct S g = { -2, 17, 99, 0xABCDE12345ULL, -5 };\n"
+        + "int main(void){ struct S s = { 3, 31, 7, 1, 0 }; s.a = 5; s.b += 3; int post = s.a++; int pre = ++s.b;"
+        + " s.sbig = -300000; s.big = (1ULL << 40) + 7;"
+        + " printf(\"%d %u %d %d %d %llu %lld|\", s.a, s.b, s.c, post, pre, s.big, (long long)s.sbig);"
+        + " printf(\"%d %u %d %llx %lld|\", g.a, g.b, g.c, g.big, (long long)g.sbig);"
+        + " printf(\"%d %d\", (int)offsetof(struct S, c), (int)sizeof(struct S)); return 0; }",
+        "-2 3 7 -3 3 7 -300000|-2 17 99 abcde12345 -5|4 16")]
     // strerror's glibc wording, strtoimax past 32 bits, the one "C" locale, and time() from
     // WASI's clock.
     [InlineData("#include <stdio.h>\n#include <string.h>\n#include <errno.h>\n#include <inttypes.h>\n#include <locale.h>\n#include <time.h>\n"

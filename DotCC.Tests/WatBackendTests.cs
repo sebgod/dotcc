@@ -1018,6 +1018,23 @@ public sealed class WatBackendTests
     }
 
     [Fact]
+    public void A_signed_bit_field_reads_sign_extended_from_its_unit()
+    {
+        // `int b : 5` at bit 3 of a 4-byte unit: shift its top bit to bit 31, then back.
+        var wat = Wat("struct S { unsigned a : 3; int b : 5; };\nint f(struct S *p) { return p->b; }\nint main(void) { struct S s = { 1, -2 }; return f(&s) == -2; }");
+        wat.ShouldContain("i32.load\n    i32.const 24\n    i32.shl\n    i32.const 27\n    i32.shr_s");
+    }
+
+    [Fact]
+    public void A_member_after_a_bit_field_run_is_past_one_unit()
+    {
+        // `unsigned a : 3, b : 5` share one 4-byte unit, so `c` is at 4 (not at 8, as when
+        // each bit-field was counted as a field of its own), as sizeof already had it.
+        var wat = Wat("struct S { unsigned a : 3; unsigned b : 5; int c; };\nint f(struct S *p) { return p->c; }\nint main(void) { struct S s = { 1, 2, 3 }; return f(&s); }");
+        wat.ShouldContain("(func $f (param $p i32) (result i32)\n    local.get $p\n    i32.const 4\n    i32.add\n    i32.load");
+    }
+
+    [Fact]
     public void A_binary_literal_is_written_in_decimal()
     {
         // wat reads decimal and 0x hex, not C23's 0b: wat2wasm rejected `i32.const 0b1011`.

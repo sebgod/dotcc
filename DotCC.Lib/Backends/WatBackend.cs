@@ -804,10 +804,23 @@ internal sealed partial class WatBackend
         foreach (var m in si.Members)
         {
             if (m.FieldType.Unqualified is CType.VoidType) { continue; }
-            if (Unit.StructFields.TryGetValue(name, out var fields)
-                && fields.FirstOrDefault(f => f.Name == m.Name) is { BitWidth: not null })
+            if (Unit.FieldPlaceOf(name, m.Name) is { Field.IsBitField: true } bitField)
             {
-                throw new IrUnsupportedException($"the wat target does not yet support bit-field members ('{m.Name}')");
+                // The unit is zeroed and may hold other fields already: or this one in.
+                if (bitField.Field.BitWidth == 0 || m.Value is DefaultLit) { continue; }
+                var unit = BitUnitType(bitField);
+                var addr = AcquireScratch("addr");
+                var value = AcquireScratch(unit);
+                EmitInitAddr(offset + bitField.Offset);
+                Line($"local.set {addr}");
+                EmitExpr(m.Value);
+                EmitConvert(m.Value.Type, bitField.Field.Type);
+                EmitConvert(bitField.Field.Type, unit);
+                Line($"local.set {value}");
+                EmitBitFieldInsert(bitField, addr, value);
+                ReleaseScratch(unit);
+                ReleaseScratch("addr");
+                continue;
             }
             var at = offset + (Unit.OffsetOfConst(name, m.Name)
                 ?? throw new IrUnsupportedException($"the wat target cannot place member '{m.Name}' of {name}"));
@@ -1783,7 +1796,12 @@ internal sealed partial class WatBackend
                 break;
             case Member m:
                 EmitAddress(m);
-                if (!IsAddressValued(e.Type)) { Line(LoadInstr(e.Type)); }
+                if (BitFieldPlace(m) is { } bitField)
+                {
+                    Line(LoadInstr(BitUnitType(bitField)));
+                    EmitBitFieldExtract(bitField, bitField.BitOffset);
+                }
+                else if (!IsAddressValued(e.Type)) { Line(LoadInstr(e.Type)); }
                 break;
             case IndirectCall ic:
                 EmitCallIndirect(ic.Callee, ic.Args, ic.ParamTypes, ic);
@@ -2003,6 +2021,12 @@ internal sealed partial class WatBackend
             return;
         }
 
+        if (u.Operand is Member bm && BitFieldPlace(bm) is { } bitField)
+        {
+            EmitBitFieldAssign(bm, bitField, null, null, u.Op);
+            return;
+        }
+
         // Memory lvalue: addr (saved), load old, compute new, store, leave old|new.
         EmitAddress(u.Operand);
         var addr = AcquireScratch("addr");
@@ -2148,6 +2172,12 @@ internal sealed partial class WatBackend
             }
             EmitConvert(produced, vr.Type);
             Line($"local.tee ${vr.Sym.TargetName}");
+            return;
+        }
+
+        if (a.Target is Member bm && BitFieldPlace(bm) is { } bitField)
+        {
+            EmitBitFieldAssign(bm, bitField, a.CompoundOp, a.Value);
             return;
         }
 
@@ -4663,9 +4693,22 @@ internal sealed partial class WatBackend
     private static bool IsAddressValued(CType t) => t.Unqualified is CType.Array || IsAggregate(t);
 
     /// <summary>The byte offset of member <paramref name="m"/> within its struct or union,
-    /// from the layout model. A bit-field has no byte address of its own, which this
-    /// slice does not lower yet.</summary>
+    /// from the layout model; for a bit-field, the offset of the storage unit it shares,
+    /// which <see cref="BitFieldPlace"/> places within.</summary>
     private int MemberOffset(Member m)
+    {
+        var name = MemberOwner(m);
+        return Unit.OffsetOfConst(name, m.Field)
+            ?? throw new IrUnsupportedException($"the wat target cannot place member '{m.Field}' of {name}");
+    }
+
+    /// <summary>The place of the bit-field <paramref name="m"/> names, or null when the member
+    /// is not a bit-field.</summary>
+    private IrModule.FieldPlace? BitFieldPlace(Member m) =>
+        Unit.FieldPlaceOf(MemberOwner(m), m.Field) is { Field.IsBitField: true } place ? place : null;
+
+    /// <summary>The struct or union a member access reads from.</summary>
+    private string MemberOwner(Member m)
     {
         var owner = m.Arrow
             ? m.Base.Type.Unqualified switch
@@ -4679,13 +4722,124 @@ internal sealed partial class WatBackend
         {
             throw new IrUnsupportedException($"the wat target cannot take member '{m.Field}' of a {owner.Describe()}");
         }
-        if (Unit.StructFields.TryGetValue(n.Name, out var fields)
-            && fields.FirstOrDefault(f => f.Name == m.Field) is { BitWidth: not null })
+        return n.Name;
+    }
+
+    /// <summary>The unsigned integer type a bit-field's storage unit is read and written as.</summary>
+    private static CType BitUnitType(IrModule.FieldPlace place) => place.UnitBytes switch
+    {
+        1 => CType.UChar,
+        2 => CType.UShort,
+        8 => CType.ULong,
+        _ => CType.UInt,
+    };
+
+    /// <summary>With a storage unit's value on the stack (as its <see cref="BitUnitType"/>),
+    /// leave the bit-field at <paramref name="bitOffset"/> as the field's type: shifted down
+    /// and masked, or, for a signed field, sign-extended from its top bit.</summary>
+    private void EmitBitFieldExtract(IrModule.FieldPlace place, int bitOffset)
+    {
+        var unit = BitUnitType(place);
+        var vt = ValType(unit);
+        var bits = vt == "i64" ? 64 : 32;
+        var width = place.Field.BitWidth!.Value;
+        var fieldType = place.Field.Type;
+        if (IsSignedInt(fieldType))
         {
-            throw new IrUnsupportedException($"the wat target does not yet support bit-field members ('{m.Field}')");
+            if (bits - bitOffset - width != 0) { Line($"{vt}.const {bits - bitOffset - width}"); Line($"{vt}.shl"); }
+            if (bits - width != 0) { Line($"{vt}.const {bits - width}"); Line($"{vt}.shr_s"); }
+            EmitConvert(vt == "i64" ? CType.Long : CType.Int, fieldType);
+            return;
         }
-        return Unit.OffsetOfConst(n.Name, m.Field)
-            ?? throw new IrUnsupportedException($"the wat target cannot place member '{m.Field}' of {n.Name}");
+        if (bitOffset != 0) { Line($"{vt}.const {bitOffset}"); Line($"{vt}.shr_u"); }
+        if (width < bits) { Line($"{vt}.const {BitMask(width)}"); Line($"{vt}.and"); }
+        EmitConvert(unit, fieldType);
+    }
+
+    /// <summary>The low <paramref name="width"/> bits set, as a wat integer literal.</summary>
+    private static string BitMask(int width) =>
+        width >= 64 ? "-1" : ((1UL << width) - 1).ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    /// <summary>Store <paramref name="value"/> (a local holding the new value as the unit's
+    /// type) into the bit-field of the unit at the address in <paramref name="addr"/>: the
+    /// unit's other bits kept, the field's replaced by the value's low bits.</summary>
+    private void EmitBitFieldInsert(IrModule.FieldPlace place, string addr, string value)
+    {
+        var unit = BitUnitType(place);
+        var vt = ValType(unit);
+        var width = place.Field.BitWidth!.Value;
+        var mask = width >= 64 ? ulong.MaxValue : (1UL << width) - 1;
+        var keep = ~(mask << place.BitOffset);
+        if (vt == "i32") { keep &= 0xFFFFFFFFUL; }
+        Line($"local.get {addr}");
+        Line($"local.get {addr}");
+        Line(LoadInstr(unit));
+        Line($"{vt}.const {(vt == "i64" ? unchecked((long)keep).ToString(System.Globalization.CultureInfo.InvariantCulture) : unchecked((int)(uint)keep).ToString(System.Globalization.CultureInfo.InvariantCulture))}");
+        Line($"{vt}.and");
+        Line($"local.get {value}");
+        if (width < (vt == "i64" ? 64 : 32)) { Line($"{vt}.const {BitMask(width)}"); Line($"{vt}.and"); }
+        if (place.BitOffset != 0) { Line($"{vt}.const {place.BitOffset}"); Line($"{vt}.shl"); }
+        Line($"{vt}.or");
+        Line(StoreInstr(unit));
+    }
+
+    /// <summary>Assign to a bit-field (plain, compound, or the <c>++</c>/<c>--</c> forms when
+    /// <paramref name="incDec"/> says so): read-modify-write its unit, and leave the
+    /// expression's value, the field's new value as stored (truncated to its width), or its
+    /// old one for a postfix step.</summary>
+    private void EmitBitFieldAssign(Member target, IrModule.FieldPlace place, BinOp? op, CExpr? rhs, UnOp? incDec = null)
+    {
+        var fieldType = place.Field.Type;
+        var unit = BitUnitType(place);
+        var addr = AcquireScratch("addr");
+        var value = AcquireScratch(unit);
+        EmitAddress(target);
+        Line($"local.set {addr}");
+        string? old = null;
+        if (op is not null || incDec is not null)
+        {
+            Line($"local.get {addr}");
+            Line(LoadInstr(unit));
+            EmitBitFieldExtract(place, place.BitOffset);
+        }
+        if (incDec is { } step)
+        {
+            old = AcquireScratch(fieldType);
+            Line($"local.tee {old}");
+            Line($"{ValType(fieldType)}.const 1");
+            Line($"{ValType(fieldType)}.{(step is UnOp.PreInc or UnOp.PostInc ? "add" : "sub")}");
+            EmitConvert(fieldType, unit);
+        }
+        else if (op is { } bop && rhs is not null)
+        {
+            var common = CType.UsualArithmetic(fieldType, rhs.Type);
+            EmitConvert(fieldType, common);
+            EmitExpr(rhs);
+            EmitConvert(rhs.Type, common);
+            Line(ArithBinOp(bop, common));
+            EmitConvert(common, fieldType);
+            EmitConvert(fieldType, unit);
+        }
+        else if (rhs is not null)
+        {
+            EmitExpr(rhs);
+            EmitConvert(rhs.Type, fieldType);
+            EmitConvert(fieldType, unit);
+        }
+        Line($"local.set {value}");
+        EmitBitFieldInsert(place, addr, value);
+        if (incDec is UnOp.PostInc or UnOp.PostDec)
+        {
+            Line($"local.get {old}");
+        }
+        else
+        {
+            Line($"local.get {value}");
+            EmitBitFieldExtract(place with { BitOffset = 0 }, 0);
+        }
+        if (old is not null) { ReleaseScratch(fieldType); }
+        ReleaseScratch(unit);
+        ReleaseScratch("addr");
     }
 
     private static int AlignUp(int x, int a) => (x + a - 1) & ~(a - 1);
