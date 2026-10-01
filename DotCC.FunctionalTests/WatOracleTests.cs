@@ -135,6 +135,9 @@ public sealed class WatOracleTests
     // (the non-ASCII forms run in the char16-literals and c11-char32 fixtures)
     [InlineData("#include <uchar.h>\nint main(void){ const char16_t *s = u\"hi\"; const char32_t *t = U\"ok\"; return (s[1] == 'i') * 100 + (t[1] == 'k') * 10 + (t[2] == 0); }", 111)]
     [InlineData("#include <errno.h>\nint x;\nint main(void){ (x) = 5; errno = 0; errno = 34; return (x) * 100 + errno; }", 534)]
+    // Pointer compound assignment steps by elements: a local, through memory, and -=.
+    [InlineData("int main(void){ int a[4] = {1,2,3,4}; int *p = a; p += 2; int *q = &a[3]; q -= 1; int *arr[1]; arr[0] = a; arr[0] += 3;"
+        + " long *l = (long *)0 + 0; l += 1; return *p * 100 + *q * 10 + *arr[0] + (int)(long)l; }", 342)]
     public void Wat_program_returns_expected_value(string source, int expected)
     {
         if (!Requested)
