@@ -963,6 +963,35 @@ public sealed class WatBackendTests
     }
 
     [Fact]
+    public void A_variadic_function_takes_its_arguments_in_the_callers_buffer()
+    {
+        // emscripten's ABI: the caller stores each variadic argument, promoted, in an 8-byte
+        // slot of a buffer in its frame and passes the buffer's address as a last parameter;
+        // va_arg reads the slot the va_list's cursor points at and steps it by 8.
+        var wat = Wat("#include <stdarg.h>\nint first(int n, ...) { va_list ap; va_start(ap, n); int v = va_arg(ap, int); va_end(ap); return v; }\n"
+            + "int main(void) { char c = 'a'; return first(2, c, 2.5f); }");
+        wat.ShouldContain("(func $first (param $n i32) (param $__va i32) (result i32)");
+        wat.ShouldContain("local.get $__va\n    i32.store");
+        wat.ShouldContain("f64.promote_f32\n    f64.store");
+        wat.ShouldContain("i32.const 8\n    i32.add\n    i32.store");
+    }
+
+    [Fact]
+    public void A_variadic_function_pointer_signature_has_the_buffer_parameter()
+    {
+        var wat = Wat("int f(int n, ...) { return n; }\nint main(void) { int (*fp)(int, ...) = f; return fp(1, 2); }");
+        wat.ShouldContain("(type $__sig0 (func (param i32) (param i32) (result i32)))");
+        wat.ShouldContain("call_indirect (type $__sig0)");
+    }
+
+    [Fact]
+    public void Va_start_outside_a_variadic_function_is_refused()
+    {
+        Should.Throw<CompileException>(() => Wat("#include <stdarg.h>\nint f(int n) { va_list ap; va_start(ap, n); return 0; }\nint main(void) { return f(1); }"))
+            .Message.ShouldContain("va_start used in a function that is not variadic");
+    }
+
+    [Fact]
     public void A_binary_literal_is_written_in_decimal()
     {
         // wat reads decimal and 0x hex, not C23's 0b: wat2wasm rejected `i32.const 0b1011`.

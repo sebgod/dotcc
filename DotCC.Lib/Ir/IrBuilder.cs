@@ -3202,9 +3202,10 @@ internal sealed partial class IrBuilder
             // mangled `name__sN` field, a CS0136 rename), and the call must use that.
             var calleeSym = sym is { Kind: SymKind.Func }
                 || sym is { Kind: SymKind.Var or SymKind.Param } && fn is not null ? sym : null;
-            // No header declares C11's atomic generic functions (their operand types vary):
-            // an undeclared one has its standard result type, not an implicit int.
-            var type = fn?.Return ?? (sym is null ? AtomicGenericResult(name, args) : null) ?? CType.Int;
+            // No header declares C11's atomic generic functions or <stdarg.h>'s macros (their
+            // operand types vary): an undeclared one has its standard result type, not an
+            // implicit int.
+            var type = fn?.Return ?? (sym is null ? GenericBuiltinResult(name, args) : null) ?? CType.Int;
             return new Call(name, args, fn?.Params, calleeSym) { Type = type };
         }
 
@@ -3239,9 +3240,11 @@ internal sealed partial class IrBuilder
     /// <summary>The result type of a C11 <c>&lt;stdatomic.h&gt;</c> generic function (7.17):
     /// the atomic object's non-atomic type for a load, an exchange or a fetch-and-modify,
     /// <c>_Bool</c> for a compare-exchange, a flag test or the lock-free query, <c>void</c> for a
-    /// store, an init, a flag clear or a fence. Null for any other name.</summary>
-    private static CType? AtomicGenericResult(string name, IReadOnlyList<CExpr> args)
+    /// store, an init, a flag clear or a fence. And <c>void</c> for <c>&lt;stdarg.h&gt;</c>'s
+    /// <c>va_start</c>, <c>va_end</c> and <c>va_copy</c> (7.16.1). Null for any other name.</summary>
+    private static CType? GenericBuiltinResult(string name, IReadOnlyList<CExpr> args)
     {
+        if (name is "va_start" or "va_end" or "va_copy") { return CType.Void; }
         var generic = name.EndsWith("_explicit", StringComparison.Ordinal) ? name[..^"_explicit".Length] : name;
         CType? Object() => args.Count > 0 && args[0].Type.Unqualified is CType.Pointer p ? p.Pointee.Unqualified : null;
         return generic switch

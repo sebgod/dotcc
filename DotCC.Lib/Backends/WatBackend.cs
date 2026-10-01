@@ -97,6 +97,10 @@ internal sealed partial class WatBackend
     private readonly HashSet<string> _defined = new(StringComparer.Ordinal);
     private CType _currentRet = CType.Int;
 
+    /// <summary>True while a variadic function is emitted: it has the hidden
+    /// <c>$__va</c> parameter, the address of its variadic arguments, that <c>va_start</c> reads.</summary>
+    private bool _currentVariadic;
+
     /// <summary>The module being emitted: its layout model sizes and places aggregates
     /// (<see cref="IrModule.SizeOfConst"/>, <see cref="IrModule.OffsetOfConst"/>), the same
     /// model <c>sizeof</c> and <c>offsetof</c> fold from.</summary>
@@ -157,7 +161,7 @@ internal sealed partial class WatBackend
     /// <summary>The frame slots each call that passes or returns a struct by value uses: the
     /// copy of each aggregate argument, and the result's slot, by call node (reference
     /// identity), placed with the function's frame before its body is emitted.</summary>
-    private readonly Dictionary<CExpr, (int? Result, Dictionary<int, int> Args)> _callTemps = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<CExpr, (int? Result, Dictionary<int, int> Args, int? Varargs)> _callTemps = new(ReferenceEqualityComparer.Instance);
 
     /// <summary>The frame slot of each compound literal in an expression (<c>(struct P){1, 2}</c>,
     /// <c>(int[]){1, 2}</c>), by node; a declaration's initializer is stored into its own slot.</summary>
@@ -361,10 +365,7 @@ internal sealed partial class WatBackend
     /// restored on every exit (so recursion is sound).</summary>
     private void EmitFunc(FuncDef fn)
     {
-        if (fn.Variadic)
-        {
-            throw new IrUnsupportedException("variadic functions are not supported on the wat target");
-        }
+        _currentVariadic = fn.Variadic;
         _breakTargets.Clear();
         _contTargets.Clear();
         _labelSeq = 0;
@@ -426,15 +427,24 @@ internal sealed partial class WatBackend
                 }
                 if (e is StructInit or DefaultLit && IsAggregate(e.Type)) { _literalSlots[e] = PlaceTemp(e.Type); return; }
                 if (e is StackArray sa) { _literalSlots[e] = PlaceTemp(new CType.Array(sa.Element, sa.Elems.Count)); return; }
-                if (AggregateCallShape(e) is not { } shape) { return; }
+                if (CallShape(e) is not { } shape) { return; }
                 int? result = IsAggregate(shape.Fn.Return) ? PlaceTemp(shape.Fn.Return) : null;
                 var args = new Dictionary<int, int>();
-                for (var i = 0; i < shape.Args.Count; i++)
+                var fixedCount = shape.Fn.Variadic ? shape.Fn.Params.Count : shape.Args.Count;
+                for (var i = 0; i < fixedCount && i < shape.Args.Count; i++)
                 {
                     var pt = i < shape.Fn.Params.Count ? shape.Fn.Params[i] : shape.Args[i].Type;
                     if (IsAggregate(pt)) { args[i] = PlaceTemp(pt); }
                 }
-                _callTemps[e] = (result, args);
+                // The variadic arguments, one 8-byte slot each (see StoreVararg).
+                int? va = null;
+                if (shape.Args.Count > fixedCount)
+                {
+                    cursor = AlignUp(cursor, 8);
+                    va = cursor;
+                    cursor += VaSlot * (shape.Args.Count - fixedCount);
+                }
+                _callTemps[e] = (result, args, va);
             });
         }
         _frameSize = AlignUp(cursor, 8);
@@ -443,7 +453,8 @@ internal sealed partial class WatBackend
         // A struct result goes to the caller's slot, whose address is a hidden first parameter;
         // the function returns that address, the struct's value as a caller sees it.
         var ps = (IsAggregate(ret) ? " (param $__sret i32)" : "")
-            + string.Concat(fn.Params.Select(p => $" (param ${p.TargetName} {_wat.RenderType(p.Type)})"));
+            + string.Concat(fn.Params.Select(p => $" (param ${p.TargetName} {_wat.RenderType(p.Type)})"))
+            + (fn.Variadic ? " (param $__va i32)" : "");
         var result = ret.Unqualified is CType.VoidType ? "" : $" (result {_wat.RenderType(ret)})";
         Line($"(func ${fn.Sym.TargetName}{ps}{result}");
         _indent++;
@@ -820,31 +831,80 @@ internal sealed partial class WatBackend
         if (e.Type.Unqualified is not CType.VoidType) { Line("drop"); }
     }
 
-    /// <summary>The function type and arguments of a call that passes or returns a struct by
-    /// value (and so needs frame slots, see <see cref="_callTemps"/>), or null.</summary>
-    private static (CType.Func Fn, IReadOnlyList<CExpr> Args)? AggregateCallShape(CExpr e)
+    /// <summary>The function type and arguments of a call that needs frame slots (see
+    /// <see cref="_callTemps"/>): one that passes or returns a struct by value, or passes
+    /// variadic arguments. Null for any other expression.</summary>
+    private static (CType.Func Fn, IReadOnlyList<CExpr> Args)? CallShape(CExpr e)
     {
-        var (fnType, args) = e switch
+        if (CalleeFunc(e) is not { } fnType) { return null; }
+        var args = e switch
         {
-            Call { CalleeSym.Type: var t } c => (t.Unqualified switch
-            {
-                CType.Func f => f,
-                CType.Pointer { Pointee: var pt } => pt.Unqualified as CType.Func,
-                _ => null,
-            }, (IReadOnlyList<CExpr>)c.Args),
-            IndirectCall ic => (ic.Callee.Type.Unqualified switch
-            {
-                CType.Func f => f,
-                CType.Pointer { Pointee: var pt } => pt.Unqualified as CType.Func,
-                _ => null,
-            }, ic.Args),
-            _ => ((CType.Func?)null, (IReadOnlyList<CExpr>)System.Array.Empty<CExpr>()),
+            Call c => c.Args,
+            IndirectCall ic => ic.Args,
+            _ => System.Array.Empty<CExpr>(),
         };
-        if (fnType is null) { return null; }
         var any = IsAggregate(fnType.Return)
             || fnType.Params.Any(IsAggregate)
-            || args.Any(a => IsAggregate(a.Type));
+            || args.Any(a => IsAggregate(a.Type))
+            || fnType.Variadic && args.Count > fnType.Params.Count;
         return any ? (fnType, args) : null;
+    }
+
+    /// <summary>The function type a call calls (through a pointer, its pointee), when the IR
+    /// knows it: a direct call to a declared function, or any call through a pointer.</summary>
+    private static CType.Func? CalleeFunc(CExpr e) => e switch
+    {
+        Call { CalleeSym.Type: var t } => t.Unqualified switch
+        {
+            CType.Func f => f,
+            CType.Pointer { Pointee: var pt } => pt.Unqualified as CType.Func,
+            _ => null,
+        },
+        IndirectCall ic => ic.Callee.Type.Unqualified switch
+        {
+            CType.Func f => f,
+            CType.Pointer { Pointee: var pt } => pt.Unqualified as CType.Func,
+            _ => null,
+        },
+        _ => null,
+    };
+
+    /// <summary>The bytes each variadic argument takes in its call's buffer: every promoted
+    /// argument (int, long, double, a pointer) fits one 8-byte, 8-aligned slot, which is what
+    /// <c>va_arg</c> steps by.</summary>
+    private const int VaSlot = 8;
+
+    /// <summary>Store a variadic argument, after the default argument promotions (6.5.2.2p6:
+    /// a narrow integer to int, float to double), in its slot of the call's buffer: an int in
+    /// the slot's low four bytes, a long or a double in all eight, an address as the eight
+    /// bytes a pointer takes in memory.</summary>
+    private void StoreVararg(int slot, CExpr arg)
+    {
+        var t = arg.Type.Unqualified;
+        if (IsAggregate(t))
+        {
+            throw new IrUnsupportedException("the wat target does not yet pass a struct as a variadic argument");
+        }
+        EmitFrameAddr(slot);
+        EmitExpr(arg);
+        switch (t)
+        {
+            case CType.Pointer or CType.Array or CType.Func:
+                Line(StoreInstr(new CType.Pointer(CType.Void)));
+                break;
+            case CType.Prim { Integer: false } p:
+                if (p.Bytes <= 4) { EmitConvert(arg.Type, CType.Double); }
+                Line("f64.store");
+                break;
+            default:
+                if (WasmSizeOf(t) == 8) { Line("i64.store"); }
+                else
+                {
+                    EmitConvert(arg.Type, CType.Int);
+                    Line("i32.store");
+                }
+                break;
+        }
     }
 
     /// <summary>A call's arguments, each converted to its parameter's type: first the address of
@@ -854,8 +914,16 @@ internal sealed partial class WatBackend
     {
         _callTemps.TryGetValue(call, out var temps);
         if (temps.Result is { } resultSlot) { EmitFrameAddr(resultSlot); }
+        // A variadic callee takes its variadic arguments in a buffer in this frame, whose
+        // address is its last (hidden) parameter, as emscripten's ABI passes them.
+        var variadic = CalleeFunc(call) is { Variadic: true } vf ? vf : null;
         for (var i = 0; i < args.Count; i++)
         {
+            if (variadic is not null && i >= variadic.Params.Count)
+            {
+                StoreVararg(temps.Varargs!.Value + VaSlot * (i - variadic.Params.Count), args[i]);
+                continue;
+            }
             if (temps.Args is { } argSlots && argSlots.TryGetValue(i, out var slot))
             {
                 EmitFrameAddr(slot);
@@ -871,6 +939,11 @@ internal sealed partial class WatBackend
             }
             EmitExpr(args[i]);
             if (paramTypes is { } pts && i < pts.Count) { EmitConvert(args[i].Type, pts[i]); }
+        }
+        if (variadic is not null)
+        {
+            if (temps.Varargs is { } va) { EmitFrameAddr(va); }
+            else { Line("i32.const 0"); }
         }
     }
 
@@ -917,6 +990,7 @@ internal sealed partial class WatBackend
                 case CommaSeq cs: foreach (var a in cs.Items) { E(a); } break;
                 case StructInit si: foreach (var m in si.Members) { E(m.Value); } break;
                 case ArrayValue av: foreach (var x in av.Elems) { E(x); } break;
+                case VaArgGet va: E(va.Ap); break;
             }
         }
         void Init(CExpr? init)
@@ -964,6 +1038,77 @@ internal sealed partial class WatBackend
         "ceilf" => ("f32.ceil", 1), "truncf" => ("f32.trunc", 1), "copysignf" => ("f32.copysign", 2),
         _ => null,
     };
+
+    /// <summary><c>&lt;stdarg.h&gt;</c>'s <c>va_start(ap, last)</c>, <c>va_end(ap)</c> and
+    /// <c>va_copy(dst, src)</c>. A <c>va_list</c> is an 8-byte object holding a cursor, the
+    /// address of the next variadic argument's slot: <c>va_start</c> points it at the
+    /// function's buffer (its hidden <c>$__va</c> parameter), <c>va_copy</c> copies it, and
+    /// <c>va_end</c> has nothing to release.</summary>
+    private void EmitVaMacro(Call c)
+    {
+        switch (c.Callee)
+        {
+            case "va_start":
+                if (!_currentVariadic)
+                {
+                    throw new IrUnsupportedException("va_start used in a function that is not variadic");
+                }
+                EmitExpr(c.Args[0]);
+                Line("local.get $__va");
+                Line("i32.store");
+                break;
+            case "va_copy":
+                EmitExpr(c.Args[0]);
+                EmitExpr(c.Args[1]);
+                Line($"i32.const {VaSlot}");
+                Line("memory.copy");
+                break;
+        }
+        if (c.Type.Unqualified is not CType.VoidType) { Line($"{ValType(c.Type)}.const 0"); }
+    }
+
+    /// <summary><c>va_arg(ap, T)</c>: the argument in the slot the cursor points at, read as
+    /// the promoted type it was stored as (see <see cref="StoreVararg"/>) and converted to
+    /// <c>T</c>; the cursor steps to the next slot.</summary>
+    private void EmitVaArg(VaArgGet v)
+    {
+        var t = v.Target.Unqualified;
+        if (IsAggregate(t))
+        {
+            throw new IrUnsupportedException("the wat target does not yet read a struct with va_arg");
+        }
+        var ap = AcquireScratch("addr");
+        var at = AcquireScratch("addr");
+        EmitExpr(v.Ap);
+        Line($"local.tee {ap}");
+        Line("i32.load");
+        Line($"local.tee {at}");
+        switch (t)
+        {
+            case CType.Pointer or CType.Func:
+                Line(LoadInstr(t));
+                break;
+            case CType.Prim { Integer: false }:
+                Line("f64.load");
+                EmitConvert(CType.Double, v.Target);
+                break;
+            default:
+                if (WasmSizeOf(t) == 8) { Line("i64.load"); }
+                else
+                {
+                    Line("i32.load");
+                    EmitConvert(CType.Int, v.Target);
+                }
+                break;
+        }
+        Line($"local.get {ap}");
+        Line($"local.get {at}");
+        Line($"i32.const {VaSlot}");
+        Line("i32.add");
+        Line("i32.store");
+        ReleaseScratch("addr");
+        ReleaseScratch("addr");
+    }
 
     /// <summary>A C11 <c>&lt;stdatomic.h&gt;</c> generic function, or false when
     /// <paramref name="c"/> is not one. The module runs on one thread over memory nothing else
@@ -1311,11 +1456,8 @@ internal sealed partial class WatBackend
             CType.Pointer { Pointee: var pt } when pt.Unqualified is CType.Func pf => pf,
             _ => throw new IrUnsupportedException($"the wat target cannot call through a {fnType.Describe()}"),
         };
-        if (f.Variadic)
-        {
-            throw new IrUnsupportedException("the wat target does not yet call a variadic function through a pointer");
-        }
         var sig = (IsAggregate(f.Return) ? " (param i32)" : "") + string.Concat(f.Params.Where(p => p.Unqualified is not CType.VoidType).Select(p => $" (param {ValType(p)})"))
+            + (f.Variadic ? " (param i32)" : "")
             + (f.Return.Unqualified is CType.VoidType ? "" : $" (result {ValType(f.Return)})");
         if (!_sigTypes.TryGetValue(sig, out var name))
         {
@@ -1472,6 +1614,9 @@ internal sealed partial class WatBackend
                 break;
             case LitInt n:
                 Line($"{ValType(e.Type)}.const {_wat.RenderIntLit(n)}");
+                break;
+            case VaArgGet va:
+                EmitVaArg(va);
                 break;
             case LitFloat lf:
                 Line($"{ValType(e.Type)}.const {_wat.RenderFloatLit(lf)}");
@@ -2005,6 +2150,7 @@ internal sealed partial class WatBackend
         if (c.Callee == "sprintf" && !_defined.Contains("sprintf")) { EmitSprintf(c, bounded: false); return; }
         if (c.Callee == "snprintf" && !_defined.Contains("snprintf")) { EmitSprintf(c, bounded: true); return; }
         if (!_defined.Contains(c.Callee) && EmitAtomic(c)) { return; }
+        if (c.Callee is "va_start" or "va_end" or "va_copy" && !_defined.Contains(c.Callee)) { EmitVaMacro(c); return; }
 
         // The heap allocators lower to calls into the hand-written bump allocator;
         // free is a no-op drop. A user-defined one wins and routes through below.
@@ -4338,6 +4484,7 @@ internal sealed partial class WatBackend
     private int WasmSizeOf(CType t) => t.Unqualified switch
     {
         CType.Pointer or CType.Func => 8,
+        CType.Named { Name: VaListName } => VaSlot,
         CType.Array a => (a.Count ?? 0) * WasmSizeOf(a.Element),
         CType.Named => checked((int)(Unit.SizeOfConst(t) ?? 0)),
         CType.Enum e => WasmSizeOf(e.Underlying),
@@ -4350,7 +4497,7 @@ internal sealed partial class WatBackend
     private int SlotAlign(CType t)
     {
         var u = t.Unqualified is CType.Array a ? a.FlatElement.Unqualified : t.Unqualified;
-        var align = u is CType.Named ? Unit.AlignOfConst(u) : WasmSizeOf(u);
+        var align = u is CType.Named { Name: VaListName } ? VaSlot : u is CType.Named ? Unit.AlignOfConst(u) : WasmSizeOf(u);
         return Math.Min(8, Math.Max(1, align));
     }
 
@@ -4358,6 +4505,10 @@ internal sealed partial class WatBackend
     /// (an aggregate has no wasm value type), so reading one loads nothing, assigning
     /// one copies its bytes, and a member is an offset from that address.</summary>
     private static bool IsAggregate(CType t) => t.Unqualified is CType.Named;
+
+    /// <summary>The runtime type <c>&lt;stdarg.h&gt;</c> names <c>va_list</c>: here an 8-byte
+    /// object in memory (an aggregate, so it is passed as a copy) holding the cursor.</summary>
+    private const string VaListName = "VaList";
 
     /// <summary>True when an expression of type <paramref name="t"/> evaluates to an
     /// address rather than a loaded value: an array (it decays) or an aggregate.</summary>

@@ -203,6 +203,7 @@ typeof-c23
 unary-plus
 union-bits
 usual-arith-conv
+varargs
 void-ternary-stmt
 volatile-access
 volatile-pointer

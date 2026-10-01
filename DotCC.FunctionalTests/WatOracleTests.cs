@@ -304,6 +304,19 @@ public sealed class WatOracleTests
         + " long now = atomic_load(&n); long swapped = atomic_exchange(&n, 3);"
         + " printf(\"%ld %ld %d %ld %d %d %ld %ld\", old, now, ok, e, first, second, swapped, atomic_load(&n)); return 0; }",
         "5000000000 5000000007 0 5000000007 0 1 5000000007 3")]
+    // Variadic functions: each argument promoted into an 8-byte slot of the caller's buffer;
+    // va_copy, a va_list handed on, a call through a pointer, one nested in another's arguments.
+    [InlineData("#include <stdio.h>\n#include <stdarg.h>\n"
+        + "static long mix(int n, ...){ va_list ap, again; va_start(ap, n); va_copy(again, ap); long t = 0;"
+        + " for (int i = 0; i < n; i++) t += va_arg(ap, int); t *= 1000; t += va_arg(again, int); va_end(again); va_end(ap); return t; }\n"
+        + "static double avg(const char *tag, ...){ va_list ap; va_start(ap, tag); char c = (char)va_arg(ap, int); float f = (float)va_arg(ap, double);"
+        + " long l = va_arg(ap, long); unsigned u = va_arg(ap, unsigned); const char *s = va_arg(ap, const char *); va_end(ap);"
+        + " printf(\"%s:%c %.2f %ld %u %s|\", tag, c, f, l, u, s); return (f + (double)l) / 2; }\n"
+        + "static int count(int n, ...){ return n; }\n"
+        + "int main(void){ char c = 'q'; float f = 2.5f; long (*fp)(int, ...) = mix;"
+        + " printf(\"%ld|\", fp(3, 1, 2, 3)); printf(\"%.2f|\", avg(\"t\", c, f, 10000000000L, 4000000000u, \"ok\"));"
+        + " printf(\"%d\", count(count(7, 1.0, 'x'), mix(1, 5))); return 0; }",
+        "6001|t:q 2.50 10000000000 4000000000 ok|5000000001.25|7")]
     // strerror's glibc wording, strtoimax past 32 bits, the one "C" locale, and time() from
     // WASI's clock.
     [InlineData("#include <stdio.h>\n#include <string.h>\n#include <errno.h>\n#include <inttypes.h>\n#include <locale.h>\n#include <time.h>\n"
