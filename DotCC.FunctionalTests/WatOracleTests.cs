@@ -365,6 +365,23 @@ public sealed class WatOracleTests
         + " printf(\"%g %g %g %g|\", strtod(\"0x1.8p3\", 0), strtod(\"1e400\", 0), strtod(\"-nan\", 0) != strtod(\"-nan\", 0) ? 1.0 : 0.0, atof(\"4.9e-324\") > 0 ? 1.0 : 0.0);"
         + " printf(\"%.17g\", strtod(\"0.1\", 0)); return 0; }",
         "-1250 10|3f800001 000fffffffffffff|12 inf 1 1|0.10000000000000001")]
+    // double _Complex as two doubles: division both ways (Smith's algorithm, as the C# build's
+    // System.Numerics.Complex), real operands, negation, ==, by-value passing and returning, a
+    // real converted where a complex is wanted, a complex member, and the casts to real.
+    [InlineData("#include <complex.h>\n#include <stdio.h>\n"
+        + "struct holder { int tag; double _Complex z; };\n"
+        + "static double _Complex twice(double _Complex z) { return z * 2.0; }\n"
+        + "static double _Complex lift(double r) { return r; }\n"
+        + "static double re_of(double _Complex z) { return creal(z); }\n"
+        + "int main(void){ double _Complex a = 1.0 + 2.0 * I; double _Complex b = 3.0 - 4.0 * I; double _Complex q = a / b;"
+        + " double _Complex q2 = b / (5.0 + 1.0 * I); double _Complex r = 10.0 / a; double _Complex s = a / 2.0; double _Complex n = -a;"
+        + " double _Complex t; t = 7.0; struct holder h = { 1, 0 }; h.z = twice(a); double x = (double)b; _Bool nz = (_Bool)(0.0 * I), nz2 = (_Bool)a;"
+        + " printf(\"%.6f %.6f|%.6f %.6f|%.6f %.6f|%.6f %.6f\\n\", creal(q), cimag(q), creal(q2), cimag(q2), creal(r), cimag(r), creal(s), cimag(s));"
+        + " printf(\"%.1f %.1f|%.1f %.1f|%.1f %.1f|%.1f|%d %d|%d %d\\n\", creal(n), cimag(n), creal(t), cimag(t), creal(h.z), cimag(h.z), x, nz, nz2, a == a, a != b);"
+        + " printf(\"%.1f %.1f %.1f %d\", re_of(4.5), creal(lift(2.5)), cimag(lift(2.5)), (int)sizeof(double _Complex)); return 0; }",
+        "-0.200000 0.400000|0.423077 -0.884615|2.000000 -4.000000|0.500000 1.000000\n"
+        + "-1.0 -2.0|7.0 0.0|2.0 4.0|3.0|0 1|1 1\n"
+        + "4.5 2.5 0.0 16")]
     // strerror's glibc wording, strtoimax past 32 bits, the one "C" locale, and time() from
     // WASI's clock.
     [InlineData("#include <stdio.h>\n#include <string.h>\n#include <errno.h>\n#include <inttypes.h>\n#include <locale.h>\n#include <time.h>\n"

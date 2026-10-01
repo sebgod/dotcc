@@ -25,8 +25,9 @@ internal sealed class WatTarget : ITarget
         // Addresses are linear-memory offsets (wasm32: i32). Pointer/array support
         // itself arrives with linear memory in milestone 2 — gated before then.
         CType.Pointer or CType.Func or CType.Array => "i32",
-        // A struct or union has no wasm value type: on the stack it is its address.
-        CType.Named => "i32",
+        // A struct or union, or a double _Complex (two doubles), has no wasm value type: on the
+        // stack it is its address.
+        CType.Named or CType.ComplexType => "i32",
         CType.VoidType => throw new IrUnsupportedException("void has no wasm value type"),
         _ => throw new IrUnsupportedException("wat target cannot render type " + t.Describe()),
     };

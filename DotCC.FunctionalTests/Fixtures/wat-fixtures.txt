@@ -58,6 +58,7 @@ comma-void-call
 comma-void-control
 comma-void-value
 comparison-as-int
+complex-numbers
 compound-literals
 comptime-const-fold
 cond-int-types
