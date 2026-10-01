@@ -678,6 +678,35 @@ public sealed class WatBackendTests
     }
 
     [Fact]
+    public void A_global_lives_at_a_fixed_address_and_a_start_function_initializes_it()
+    {
+        // C's static storage: a fixed address in the data area (from 1024 up), zero until
+        // the start function stores its initializer, and read and written through memory.
+        var wat = Wat("int counter = 5;\nint main(void){ counter++; return counter; }");
+        wat.ShouldContain("(start $__init_globals)");
+        wat.ShouldContain("(func $__init_globals\n    i32.const 1024\n    i32.const 5\n    i32.store");
+        wat.ShouldContain("i32.const 1024\n    i32.load");
+        wat.ShouldNotContain("local.get $counter");
+    }
+
+    [Fact]
+    public void A_zero_global_needs_no_start_function()
+    {
+        // Linear memory starts zeroed, as C's static storage does.
+        Wat("int z;\nint main(void){ return z; }").ShouldNotContain("__init_globals");
+    }
+
+    [Fact]
+    public void Data_past_half_the_first_page_moves_the_stack_past_it()
+    {
+        // 40 KB of globals would run into a stack topped at 64 KB: the stack then starts
+        // past the data with 1 MiB of its own, and the memory grows to hold it.
+        var wat = Wat("static char big[40000];\nint main(void){ big[39999] = 1; return big[39999]; }");
+        wat.ShouldContain("(memory 17)");
+        wat.ShouldContain("(global $__sp (mut i32) (i32.const 1089600))");
+    }
+
+    [Fact]
     public void A_struct_passed_by_value_is_refused_loudly()
     {
         // No calling convention for aggregates yet: refused, never miscompiled.

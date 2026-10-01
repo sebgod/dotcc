@@ -33,13 +33,13 @@ using DotCC.Ir;
 /// </summary>
 internal sealed partial class WatBackend
 {
-    // Top of the shadow stack — it grows DOWN from the end of the first page; string
-    // data grows UP from a 1 KiB null guard. Small programs never collide.
+    // Top of the shadow stack while the data leaves it room: it grows DOWN from the end
+    // of the first page, while the data (strings, globals) grows UP from a 1 KiB null
+    // guard. Data past half the page moves the stack top past the data (StackBytes).
+    // The heap lives ABOVE the stack top: $__hp bumps UP from there and malloc grows
+    // linear memory on demand, while the stack grows DOWN from the same point, so the
+    // two never collide.
     private const int StackTop = 65536;
-    // The heap lives ABOVE the shadow stack: $__hp bumps UP from here (the end of the
-    // initial page) and malloc grows linear memory on demand, while the stack grows
-    // DOWN from the same point inside page 1 — so the two never collide.
-    private const int HeapBase = StackTop;
     private const int DataBase = 1024;
     // A 16-byte I/O scratch block at the top of the null-guard page (just below the
     // string data at DataBase): a single WASI iovec (ptr | len), the fd_write
@@ -103,6 +103,18 @@ internal sealed partial class WatBackend
     private IrModule? _unit;
 
     private IrModule Unit => _unit ?? throw new InvalidOperationException("the wat backend has no module");
+
+    /// <summary>Each file-scope object (and block-scope static) → its fixed address in the
+    /// data area, where it lives for the program (see <see cref="PlaceGlobals"/>).</summary>
+    private readonly Dictionary<Symbol, int> _globals = new();
+
+    /// <summary>True while the initializer stores address absolute memory (the globals'
+    /// start function) rather than the current frame.</summary>
+    private bool _absoluteInit;
+
+    /// <summary>The C stack the program gets when its data does not fit below the default
+    /// stack top: the stack then starts past the data and grows down through this.</summary>
+    private const int StackBytes = 1 << 20;
 
     // Per-function shadow-stack frame: symbol → byte offset within the frame, the
     // frame's total size, and whether the function has one at all. Memory-resident
@@ -196,6 +208,7 @@ internal sealed partial class WatBackend
     {
         _unit = unit;
         foreach (var fn in unit.Functions) { _defined.Add(fn.Sym.Name); }
+        PlaceGlobals(unit);
 
         _indent = 1;
         var hasMain = false;
@@ -204,6 +217,7 @@ internal sealed partial class WatBackend
             EmitFunc(fn);
             if (fn.Sym.Name == "main") { hasMain = true; }
         }
+        var initGlobals = GlobalsInitFunc(unit);
         var funcs = _sb.ToString();
         // I/O pulls the WASI import + exported memory + sink globals; the heap only
         // needs its bump-pointer global. A program can use either, both, or neither.
@@ -222,13 +236,18 @@ internal sealed partial class WatBackend
         }
         // Export the memory only when the WASI shim needs to read iovecs out of it;
         // non-I/O modules keep the byte-identical plain `(memory 1)`.
-        m.Append(usesIo ? "  (memory (export \"memory\") 1)\n" : "  (memory 1)\n");
-        m.Append($"  (global $__sp (mut i32) (i32.const {StackTop}))\n");
+        // The data (strings, globals) sits from DataBase up; the stack tops at StackTop
+        // while the data leaves it room (every small program), else past the data, and
+        // the heap starts where the stack tops.
+        var stackTop = _dataEnd <= StackTop / 2 ? StackTop : AlignUp(_dataEnd, 16) + StackBytes;
+        var pages = (stackTop + 65535) / 65536;
+        m.Append(usesIo ? $"  (memory (export \"memory\") {pages})\n" : $"  (memory {pages})\n");
+        m.Append($"  (global $__sp (mut i32) (i32.const {stackTop}))\n");
         if (usesHeap)
         {
             // The bump-allocation pointer: next free heap byte, growing UP from the end
             // of the initial page (malloc grows linear memory past it on demand).
-            m.Append($"  (global $__hp (mut i32) (i32.const {HeapBase}))\n");
+            m.Append($"  (global $__hp (mut i32) (i32.const {stackTop}))\n");
         }
         if (usesIo)
         {
@@ -251,6 +270,11 @@ internal sealed partial class WatBackend
             m.Append("  (data (i32.const ").Append(off).Append(") \"").Append(hex).Append("\")\n");
         }
         m.Append(funcs);
+        if (initGlobals.Length > 0)
+        {
+            m.Append(initGlobals);
+            m.Append("  (start $__init_globals)\n");
+        }
         m.Append(RuntimeFuncDefs());
         if (hasMain) { m.Append("  (export \"main\" (func $main))\n"); }
         m.Append(")\n");
@@ -602,20 +626,20 @@ internal sealed partial class WatBackend
         switch (init)
         {
             case StructInit si:
-                EmitFrameAddr(offset);
+                EmitInitAddr(offset);
                 Line("i32.const 0");
                 Line($"i32.const {size}");
                 Line("memory.fill");
                 StoreAggregateMembers(offset, type, si);
                 break;
             case StackNew or DefaultLit:
-                EmitFrameAddr(offset);
+                EmitInitAddr(offset);
                 Line("i32.const 0");
                 Line($"i32.const {size}");
                 Line("memory.fill");
                 break;
             default:
-                EmitFrameAddr(offset);
+                EmitInitAddr(offset);
                 EmitExpr(init);
                 Line($"i32.const {size}");
                 Line("memory.copy");
@@ -664,16 +688,104 @@ internal sealed partial class WatBackend
         }
         if (IsAggregate(type))
         {
-            EmitFrameAddr(at);
+            EmitInitAddr(at);
             EmitExpr(value);
             Line($"i32.const {WasmSizeOf(type)}");
             Line("memory.copy");
             return;
         }
-        EmitFrameAddr(at);
+        EmitInitAddr(at);
         EmitExpr(value);
         EmitConvert(value.Type, type);
         Line(StoreInstr(type));
+    }
+
+    /// <summary>Push the address an initializer store goes to: an offset in the current
+    /// frame, or an absolute address while the globals' start function is emitted.</summary>
+    private void EmitInitAddr(int at)
+    {
+        if (_absoluteInit) { Line($"i32.const {at}"); }
+        else { EmitFrameAddr(at); }
+    }
+
+    /// <summary>Give every file-scope object (and block-scope static) a fixed address in the
+    /// data area, before any function refers to one: C's static storage, which lives for the
+    /// program and starts zeroed (wasm memory does).</summary>
+    private void PlaceGlobals(IrModule unit)
+    {
+        foreach (var g in unit.Globals)
+        {
+            if (g.Flexible is not null)
+            {
+                throw new IrUnsupportedException($"the wat target does not yet support an initialized flexible array member ('{g.Sym.Name}')");
+            }
+            _dataEnd = AlignUp(_dataEnd, SlotAlign(g.Sym.Type));
+            _globals[g.Sym] = _dataEnd;
+            _dataEnd += Math.Max(1, WasmSizeOf(g.Sym.Type));
+        }
+    }
+
+    /// <summary>Push a global's address (its value, for an array or an aggregate).</summary>
+    private void EmitGlobalAddr(Symbol sym)
+    {
+        if (!_globals.TryGetValue(sym, out var addr))
+        {
+            throw new IrUnsupportedException($"the wat target has no definition of the global '{sym.Name}'");
+        }
+        Line($"i32.const {addr}");
+    }
+
+    /// <summary>The start function (<c>$__init_globals</c>, run when the module is
+    /// instantiated) that stores each global's initializer at its address, or empty when
+    /// none needs a store (zero storage is already zero). An array's elements and a
+    /// struct's members are stored one by one, as a local's are.</summary>
+    private string GlobalsInitFunc(IrModule unit)
+    {
+        var prev = _out;
+        var body = new StringBuilder();
+        _out = body;
+        _indent = 2;
+        _hasFrame = false;
+        _absoluteInit = true;
+        _scratch32 = _scratch64 = _scratchF32 = _scratchF64 = _scratchAddr = false;
+        try
+        {
+            foreach (var g in unit.Globals)
+            {
+                if (g.Init is not { } init) { continue; }
+                var at = _globals[g.Sym];
+                switch (init)
+                {
+                    case PinnedArray pa:
+                        if (pa.Elems is { } elems)
+                        {
+                            var step = WasmSizeOf(pa.Element);
+                            for (var i = 0; i < elems.Count; i++) { StoreInitValue(at + i * step, pa.Element, elems[i]); }
+                        }
+                        break;
+                    case StructInit si when IsAggregate(g.Sym.Type):
+                        StoreAggregateMembers(at, g.Sym.Type, si);
+                        break;
+                    default:
+                        StoreInitValue(at, g.Sym.Type, init);
+                        break;
+                }
+            }
+        }
+        finally
+        {
+            _absoluteInit = false;
+            _out = prev;
+        }
+        if (body.Length == 0) { return ""; }
+        var func = new StringBuilder("  (func $__init_globals\n");
+        if (_scratch32) { func.Append("    (local $__t32 i32)\n"); }
+        if (_scratch64) { func.Append("    (local $__t64 i64)\n"); }
+        if (_scratchF32) { func.Append("    (local $__tf32 f32)\n"); }
+        if (_scratchF64) { func.Append("    (local $__tf64 f64)\n"); }
+        if (_scratchAddr) { func.Append("    (local $__taddr i32)\n"); }
+        func.Append(body).Append("  )\n");
+        return func.ToString();
     }
 
     private void EmitLoop(CExpr? cond, CStmt body, CExpr? post, bool testAtTop)
@@ -881,7 +993,9 @@ internal sealed partial class WatBackend
     {
         if (v.Sym.IsGlobal)
         {
-            throw new IrUnsupportedException("global variables are not yet supported on the wat target");
+            EmitGlobalAddr(v.Sym);
+            if (!IsAddressValued(v.Sym.Type)) { Line(LoadInstr(v.Sym.Type)); }
+            return;
         }
         if (_frame.TryGetValue(v.Sym, out var off))
         {
@@ -1661,6 +1775,9 @@ internal sealed partial class WatBackend
         {
             case Paren p:
                 EmitAddress(p.Inner);
+                break;
+            case VarRef { Sym.IsGlobal: true } g:
+                EmitGlobalAddr(g.Sym);
                 break;
             case VarRef v when _frame.TryGetValue(v.Sym, out var off):
                 EmitFrameAddr(off);
@@ -3203,8 +3320,8 @@ internal sealed partial class WatBackend
         }
 
         // ---- heap: a bump allocator over the region above the shadow stack --------
-        // $__hp bumps UP from HeapBase (end of page 1); the stack grows DOWN inside
-        // page 1, so they never meet. Each block carries an i32 size header (payload at
+        // $__hp bumps UP from the stack top; the stack grows DOWN below it, so they
+        // never meet. Each block carries an i32 size header (payload at
         // block+8, kept 8-aligned) so realloc can copy the old bytes; free never
         // reclaims. malloc grows linear memory on demand and returns NULL if it can't.
         if (_runtimeUsed.Contains("malloc"))
