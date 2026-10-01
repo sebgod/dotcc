@@ -118,6 +118,18 @@ internal sealed partial class WatBackend
     /// under one name (musl's <c>__sin.c</c> and <c>__sindf.c</c>).</summary>
     private readonly Dictionary<Symbol, int> _tuGlobals = new(ReferenceEqualityComparer.Instance);
 
+    /// <summary>The external-linkage objects whose definition is an array. The binder types an
+    /// <c>extern T x[];</c> declaration a pointer (the array it names decays to one), but the
+    /// storage is the definition's, as a linker resolves it: the name is the array's address,
+    /// not a pointer stored there (see <see cref="IsExternArray"/>).</summary>
+    private readonly HashSet<string> _globalArrays = new(StringComparer.Ordinal);
+
+    /// <summary>True when <paramref name="sym"/> is an <c>extern</c> declaration, typed a pointer,
+    /// of an object some unit defines as an array.</summary>
+    private bool IsExternArray(Symbol sym) =>
+        sym is { Storage: Storage.Extern, IsTuLocal: false } && sym.Type.Unqualified is CType.Pointer
+        && _globalArrays.Contains(sym.TargetName);
+
     /// <summary>The address <see cref="PlaceGlobals"/> gave <paramref name="sym"/>.</summary>
     private bool TryGlobalAddr(Symbol sym, out int addr) =>
         sym.IsTuLocal ? _tuGlobals.TryGetValue(sym, out addr) : _globals.TryGetValue(sym.TargetName, out addr);
@@ -845,6 +857,7 @@ internal sealed partial class WatBackend
             }
             case LitInt { Value: 0 }:
             case NullPtr:
+            case DefaultLit:
                 return;   // the storage is already zero
         }
         if (IsAggregate(type))
@@ -1515,13 +1528,18 @@ internal sealed partial class WatBackend
     {
         foreach (var g in unit.Globals)
         {
-            if (g.Flexible is not null)
-            {
-                throw new IrUnsupportedException($"the wat target does not yet support an initialized flexible array member ('{g.Sym.Name}')");
-            }
             _dataEnd = AlignUp(_dataEnd, SlotAlign(g.Sym.Type));
             if (g.Sym.IsTuLocal) { _tuGlobals[g.Sym] = _dataEnd; } else { _globals[g.Sym.TargetName] = _dataEnd; }
-            _dataEnd += Math.Max(1, WasmSizeOf(g.Sym.Type));
+            if (!g.Sym.IsTuLocal && g.Sym.Type.Unqualified is CType.Array) { _globalArrays.Add(g.Sym.TargetName); }
+            var size = Math.Max(1, WasmSizeOf(g.Sym.Type));
+            // An initialized flexible array member (a GNU extension) gives the object storage
+            // for its elements, from the member's offset, which may lie inside the struct's
+            // tail padding, as gcc lays it out.
+            if (g.Flexible is { } tail)
+            {
+                size = Math.Max(size, FlexibleOffset(g.Sym.Type, tail) + tail.Elems.Count * WasmSizeOf(tail.Element));
+            }
+            _dataEnd += size;
         }
     }
 
@@ -1570,6 +1588,12 @@ internal sealed partial class WatBackend
                         StoreInitValue(at, g.Sym.Type, init);
                         break;
                 }
+                if (g.Flexible is { } tail)
+                {
+                    var first = at + FlexibleOffset(g.Sym.Type, tail);
+                    var step = WasmSizeOf(tail.Element);
+                    for (var i = 0; i < tail.Elems.Count; i++) { StoreInitValue(first + i * step, tail.Element, tail.Elems[i]); }
+                }
             }
         }
         finally
@@ -1583,6 +1607,13 @@ internal sealed partial class WatBackend
         func.Append(body).Append("  )\n");
         return func.ToString();
     }
+
+    /// <summary>The byte offset of the flexible array member <paramref name="tail"/> initializes
+    /// within the struct <paramref name="type"/>.</summary>
+    private int FlexibleOffset(CType type, FlexibleTail tail) =>
+        type.Unqualified is CType.Named n && Unit.OffsetOfConst(n.Name, tail.Field) is { } offset
+            ? offset
+            : throw new IrUnsupportedException($"the wat target cannot place the flexible array member '{tail.Field}'");
 
     /// <summary>The table index of function <paramref name="fn"/>, the value a pointer to it
     /// holds, given it on first use.</summary>
@@ -1921,7 +1952,7 @@ internal sealed partial class WatBackend
         if (v.Sym.IsGlobal)
         {
             EmitGlobalAddr(v.Sym);
-            if (!IsAddressValued(v.Sym.Type)) { Line(LoadInstr(v.Sym.Type)); }
+            if (!IsAddressValued(v.Sym.Type) && !IsExternArray(v.Sym)) { Line(LoadInstr(v.Sym.Type)); }
             return;
         }
         if (_frame.TryGetValue(v.Sym, out var off))

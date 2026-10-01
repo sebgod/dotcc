@@ -1043,6 +1043,40 @@ public sealed class WatBackendTests
     }
 
     [Fact]
+    public void An_extern_open_array_is_the_address_of_its_definition()
+    {
+        // `extern int table[];` is typed a pointer, but its storage is the array another unit
+        // defines: reading the name gives the array's address, not a pointer loaded from it.
+        var a = Path.Combine(Path.GetTempPath(), $"dotcc-wat-{System.Guid.NewGuid():N}.c");
+        var b = Path.Combine(Path.GetTempPath(), $"dotcc-wat-{System.Guid.NewGuid():N}.c");
+        File.WriteAllText(a, "extern int table[];\nint *first(void) { return table; }\nint main(void) { return *first(); }\n");
+        File.WriteAllText(b, "int table[3] = { 4, 5, 6 };\n");
+        try
+        {
+            var wat = Compiler.EmitWat(new[] { a, b });
+            wat.ShouldContain("(func $first (result i32)\n    i32.const 1024\n    return");
+        }
+        finally { File.Delete(a); File.Delete(b); }
+    }
+
+    [Fact]
+    public void An_initialized_flexible_array_member_gets_storage_past_the_struct()
+    {
+        // `{ 3, { 7, 8, 9 } }` for `struct { int n; int items[]; }`: 4 + 3 * 4 bytes, the
+        // elements stored from the member's offset.
+        var wat = Wat("struct counted { int n; int items[]; };\nstruct counted bag = { 3, { 7, 8, 9 } };\nint other = 1;\nint main(void) { return bag.items[2] + other; }");
+        wat.ShouldContain("i32.const 1036\n    i32.const 9\n    i32.store");
+        wat.ShouldContain("i32.const 1040\n    i32.const 1\n    i32.store");
+    }
+
+    [Fact]
+    public void A_hole_in_a_static_aggregate_array_stays_zero()
+    {
+        var wat = Wat("struct meta { int valid; int fmt; };\nstatic const struct meta md[3] = { [2] = { 1, 3 } };\nint main(void) { return md[0].fmt + md[2].fmt; }");
+        wat.ShouldContain("(start $__init_globals)");
+    }
+
+    [Fact]
     public void A_binary_literal_is_written_in_decimal()
     {
         // wat reads decimal and 0x hex, not C23's 0b: wat2wasm rejected `i32.const 0b1011`.
