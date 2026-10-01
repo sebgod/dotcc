@@ -992,6 +992,32 @@ public sealed class WatBackendTests
     }
 
     [Fact]
+    public void A_setjmp_guard_is_a_try_and_longjmp_a_throw()
+    {
+        // setjmp arms the jmp_buf with a fresh token; longjmp throws the token and the value
+        // (0 made 1); the handler throws on any other setjmp's token and restores the stack
+        // pointer the unwound frames left behind.
+        var wat = Wat("#include <setjmp.h>\nstatic jmp_buf env;\nstatic void fail(void) { longjmp(env, 0); }\n"
+            + "int main(void) { if (setjmp(env) == 0) { fail(); return 1; } return 0; }");
+        wat.ShouldContain("(tag $__longjmp (param i32 i32))");
+        wat.ShouldContain("global.set $__jmpseq\n    global.get $__jmpseq\n    i32.store");
+        wat.ShouldContain("i32.eqz\n    i32.add\n    throw $__longjmp");
+        wat.ShouldContain("catch $__longjmp");
+        wat.ShouldContain("rethrow 1");
+        wat.ShouldContain("global.set $__sp");
+    }
+
+    [Fact]
+    public void A_value_keeping_setjmp_reruns_its_region_in_a_loop()
+    {
+        var wat = Wat("#include <setjmp.h>\n#include <stdio.h>\nstatic jmp_buf env;\n"
+            + "int main(void) { int r = setjmp(env); if (r < 3) longjmp(env, r + 1); printf(\"%d\", r); return 0; }");
+        wat.ShouldContain("loop $__sj");
+        wat.ShouldContain("(local $__sjv");
+        wat.ShouldContain("br $__sj");
+    }
+
+    [Fact]
     public void A_binary_literal_is_written_in_decimal()
     {
         // wat reads decimal and 0x hex, not C23's 0b: wat2wasm rejected `i32.const 0b1011`.

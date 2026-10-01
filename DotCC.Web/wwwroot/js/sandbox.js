@@ -35,7 +35,8 @@ window.dotccSandbox = (function () {
    *   { ok:true, exitCode, stdout, stderr }  on success
    *   { ok:false, stage:"assemble"|"run", error }  otherwise
    * The feature flags match what dotcc's wat backend emits (WF0's histogram):
-   * sign-extension + non-trapping float→int + bulk-memory + mutable globals.
+   * sign-extension + non-trapping float→int + bulk-memory + mutable globals, and
+   * exception handling (setjmp/longjmp).
    */
   async function assembleAndRun(wat) {
     let mod = null;
@@ -47,6 +48,7 @@ window.dotccSandbox = (function () {
         sat_float_to_int: true,
         bulk_memory: true,
         mutable_globals: true,
+        exceptions: true,
       });
       const { buffer } = mod.toBinary({ log: false });
       // Keep a copy: toBinary()'s buffer is a view over wabt-owned memory freed by
