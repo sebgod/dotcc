@@ -96,16 +96,16 @@ public sealed unsafe class LibcFileTests
     {
         FILE* fp = tmpfile();
         byte* src = stackalloc byte[5] { 1, 2, 254, 0, 255 };
-        fwrite(src, 1, 5, fp).ShouldBe(5);
+        fwrite(src, 1, 5, fp).ShouldBe(5UL);
 
         rewind(fp);
         byte* dst = stackalloc byte[5];
-        fread(dst, 1, 5, fp).ShouldBe(5);
+        fread(dst, 1, 5, fp).ShouldBe(5UL);
         for (int i = 0; i < 5; i++) { dst[i].ShouldBe(src[i]); }
 
         // Reading past the end returns a short count and sets EOF.
         byte* extra = stackalloc byte[4];
-        fread(extra, 1, 4, fp).ShouldBe(0);
+        fread(extra, 1, 4, fp).ShouldBe(0UL);
         feof(fp).ShouldBe(1);
         fclose(fp);
     }
@@ -196,7 +196,7 @@ public sealed unsafe class LibcFileTests
             ((nint)r).ShouldNotBe((nint)0);
             byte* buf = stackalloc byte[4] { (byte)'a', (byte)'b', (byte)'c', (byte)'d' };
             errno = 0;
-            fwrite(buf, 1, 4, r).ShouldBe(0);   // nothing written
+            fwrite(buf, 1, 4, r).ShouldBe(0UL);   // nothing written
             fputc((byte)'x', r).ShouldBe(-1);   // EOF
             ferror(r).ShouldNotBe(0);           // error indicator set
             fclose(r);

@@ -677,7 +677,7 @@ public static unsafe partial class Libc
     /// validated no-op: returns 0 for a valid stream + recognized mode, nonzero
     /// otherwise. The caller's buffer is never adopted.
     /// </summary>
-    public static int setvbuf(FILE* stream, byte* buf, int mode, int size)
+    public static int setvbuf(FILE* stream, byte* buf, int mode, ulong size)
     {
         if (Slot(stream) == null || mode < 0 || mode > 2) { return -1; }
         return 0;
@@ -755,19 +755,19 @@ public static unsafe partial class Libc
     /// Returns the number of complete elements read (&lt; nmemb at EOF). Sets
     /// the EOF indicator when input runs out.
     /// </summary>
-    public static int fread(void* ptr, int size, int nmemb, FILE* stream)
+    public static ulong fread(void* ptr, ulong size, ulong nmemb, FILE* stream)
     {
-        if (size <= 0 || nmemb <= 0) { return 0; }
+        if (size == 0 || nmemb == 0) { return 0; }
         var dst = (byte*)ptr;
-        long total = (long)size * nmemb;
-        long got = 0;
+        ulong total = size * nmemb;
+        ulong got = 0;
         for (; got < total; got++)
         {
             int b = ReadByteFrom(stream);
             if (b < 0) { break; }
             dst[got] = (byte)b;
         }
-        return (int)(got / size); // complete elements
+        return got / size; // complete elements
     }
 
     /// <summary>
@@ -775,21 +775,21 @@ public static unsafe partial class Libc
     /// <paramref name="nmemb"/> elements of <paramref name="size"/> bytes.
     /// Returns the number of complete elements written.
     /// </summary>
-    public static int fwrite(void* ptr, int size, int nmemb, FILE* stream)
+    public static ulong fwrite(void* ptr, ulong size, ulong nmemb, FILE* stream)
     {
-        if (size <= 0 || nmemb <= 0) { return 0; }
+        if (size == 0 || nmemb == 0) { return 0; }
         var src = (byte*)ptr;
-        long total = (long)size * nmemb;
+        ulong total = size * nmemb;
         // Stop at the first byte that can't be written (e.g. a read-only stream):
         // C's fwrite returns the count of COMPLETE elements written, and the
         // partial element is lost. errno / the error indicator are set by
         // WriteByteTo, so g_write's `numbytes < len` check reports the failure.
-        long written = 0;
+        ulong written = 0;
         for (; written < total; written++)
         {
             if (!WriteByteTo(stream, src[written])) { break; }
         }
-        return (int)(written / size);
+        return written / size;
     }
 
     // ---------------------------------------------------------------------

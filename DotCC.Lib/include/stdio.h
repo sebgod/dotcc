@@ -13,13 +13,14 @@
    name is pre-registered (Compiler.PredefinedTypeNames) so it needs no
    typedef here. stdin/stdout/stderr are FILE* and resolve through
    `using static Libc;`; their text routes through Console.In/Out/Error
-   (so redirection is honored), while fopen'd streams wrap a real file.
-   stdin/stdout/stderr/fopen/fprintf/fputs/fputc/fgetc/fgets/fscanf all
-   resolve at C# overload-resolution time and so aren't re-declared. */
+   (so redirection is honored), while fopen'd streams wrap a real file. */
 
 #ifndef NULL
 #define NULL ((void *)0)
 #endif
+
+/* size_t (C11 7.21.1), the same typedef as <stddef.h>'s (C11 6.7p3 allows the repeat). */
+typedef unsigned long size_t;
 
 /* off_t — POSIX (<sys/types.h>), but glibc's <stdio.h> exposes it and
    portable code (chibi-scheme's gc_heap.h) relies on that. LP64: long. */
@@ -55,16 +56,17 @@ typedef long off_t;
 #define _IONBF 2
 
 /* Formatted output (to stdout / a buffer). */
-int printf(char* fmt, ...);
-int sprintf(char* dst, char* fmt, ...);
-int snprintf(char* dst, int n, char* fmt, ...);
+int printf(const char* fmt, ...);
+int fprintf(FILE* stream, const char* fmt, ...);
+int sprintf(char* dst, const char* fmt, ...);
+int snprintf(char* dst, size_t n, const char* fmt, ...);
 
 /* The same with the arguments in a va_list (C99 7.21.6.8-13). VaList is the
    predefined type name <stdarg.h>'s va_list aliases, so these need no include. */
 int vprintf(const char* fmt, VaList ap);
 int vfprintf(FILE* stream, const char* fmt, VaList ap);
 int vsprintf(char* dst, const char* fmt, VaList ap);
-int vsnprintf(char* dst, unsigned long n, const char* fmt, VaList ap);
+int vsnprintf(char* dst, size_t n, const char* fmt, VaList ap);
 
 /* Formatted input (from stdin / a buffer / a stream). */
 int scanf(char* fmt, ...);
@@ -72,8 +74,8 @@ int sscanf(char* src, char* fmt, ...);
 int fscanf(FILE* stream, char* fmt, ...);
 
 /* Whole-string output. */
-int puts(char* s);
-int fputs(char* s, FILE* stream);
+int puts(const char* s);
+int fputs(const char* s, FILE* stream);
 
 /* Character I/O. Declared so dotcc knows the `int`/`FILE*` parameter types and
    coerces arguments (e.g. a `size_t` sizeof passed to fgets's `int n`). */
@@ -91,8 +93,8 @@ FILE* freopen(const char* path, const char* mode, FILE* stream);
 FILE* tmpfile(void);
 int fclose(FILE* stream);
 int fflush(FILE* stream);
-int fread(void* ptr, int size, int nmemb, FILE* stream);
-int fwrite(void* ptr, int size, int nmemb, FILE* stream);
+size_t fread(void* ptr, size_t size, size_t nmemb, FILE* stream);
+size_t fwrite(const void* ptr, size_t size, size_t nmemb, FILE* stream);
 int fseek(FILE* stream, long offset, int whence);
 long ftell(FILE* stream);
 void rewind(FILE* stream);
@@ -100,7 +102,7 @@ int feof(FILE* stream);
 int ferror(FILE* stream);
 void clearerr(FILE* stream);
 int ungetc(int c, FILE* stream);
-int setvbuf(FILE* stream, char* buf, int mode, int size);
+int setvbuf(FILE* stream, char* buf, int mode, size_t size);
 char* tmpnam(char* s);
 int remove(const char* path);
 int rename(const char* oldp, const char* newp);
