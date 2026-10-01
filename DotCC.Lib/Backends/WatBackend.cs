@@ -97,6 +97,13 @@ internal sealed partial class WatBackend
     private readonly HashSet<string> _defined = new(StringComparer.Ordinal);
     private CType _currentRet = CType.Int;
 
+    /// <summary>The module being emitted: its layout model sizes and places aggregates
+    /// (<see cref="IrModule.SizeOfConst"/>, <see cref="IrModule.OffsetOfConst"/>), the same
+    /// model <c>sizeof</c> and <c>offsetof</c> fold from.</summary>
+    private IrModule? _unit;
+
+    private IrModule Unit => _unit ?? throw new InvalidOperationException("the wat backend has no module");
+
     // Per-function shadow-stack frame: symbol → byte offset within the frame, the
     // frame's total size, and whether the function has one at all. Memory-resident
     // symbols are the address-taken ones (Symbol.AddressTaken) plus all arrays.
@@ -187,6 +194,7 @@ internal sealed partial class WatBackend
     /// pointer global, the data segments, and the <c>main</c> export.</summary>
     private string Module(IrModule unit)
     {
+        _unit = unit;
         foreach (var fn in unit.Functions) { _defined.Add(fn.Sym.Name); }
 
         _indent = 1;
@@ -269,6 +277,12 @@ internal sealed partial class WatBackend
 
         var ret = fn.Sym.Type is CType.Func f ? f.Return : CType.Int;
         _currentRet = ret;
+        // A struct passed or returned by value needs a calling convention for aggregates
+        // (an address to a caller's copy, a caller-provided result slot), not built yet.
+        if (IsAggregate(ret) || fn.Params.Any(p => IsAggregate(p.Type)))
+        {
+            throw new IrUnsupportedException($"the wat target does not yet pass or return a struct by value ('{fn.Sym.Name}')");
+        }
 
         // Classify storage: address-taken symbols (params or locals) and arrays live
         // in the frame; every other scalar local is a fast wasm value local.
@@ -295,7 +309,7 @@ internal sealed partial class WatBackend
         foreach (var s in fn.Body.Stmts) { CollectLocals(s, bodyLocals); }
         foreach (var loc in bodyLocals)
         {
-            if (loc.AddressTaken || loc.Type.Unqualified is CType.Array) { Place(loc); }
+            if (loc.AddressTaken || IsAddressValued(loc.Type)) { Place(loc); }
             else { valueLocals.Add(loc); }
         }
         _frameSize = AlignUp(cursor, 8);
@@ -446,7 +460,11 @@ internal sealed partial class WatBackend
                 foreach (var ld in d.Decls)
                 {
                     if (ld.Init is not { } init) { continue; }
-                    if (_frame.TryGetValue(ld.Sym, out var off))
+                    if (_frame.TryGetValue(ld.Sym, out var off) && IsAggregate(ld.Sym.Type))
+                    {
+                        EmitAggregateInit(off, ld.Sym.Type, init);
+                    }
+                    else if (_frame.TryGetValue(ld.Sym, out off))
                     {
                         // Address-taken scalar initialised in its frame slot.
                         EmitFrameAddr(off);
@@ -561,11 +579,101 @@ internal sealed partial class WatBackend
         var elemSize = WasmSizeOf(ad.Element);
         for (var i = 0; i < inits.Count; i++)
         {
+            if (IsAggregate(ad.Element))
+            {
+                EmitAggregateInit(baseOff + i * elemSize, ad.Element, inits[i]);
+                continue;
+            }
             EmitFrameAddr(baseOff + i * elemSize);
             EmitExpr(inits[i]);
             EmitConvert(inits[i].Type, ad.Element);
             Line(StoreInstr(ad.Element));
         }
+    }
+
+    /// <summary>Initialise the struct or union in the frame slot at <paramref name="offset"/>
+    /// from <paramref name="init"/>: a brace initializer zeroes the slot (the members it
+    /// does not reach are zero, C11 6.7.9p21) and stores each member it gives; a zeroed
+    /// stack value (a promoted <c>malloc</c>) is the zeroing alone; any other aggregate
+    /// expression is copied.</summary>
+    private void EmitAggregateInit(int offset, CType type, CExpr init)
+    {
+        var size = WasmSizeOf(type);
+        switch (init)
+        {
+            case StructInit si:
+                EmitFrameAddr(offset);
+                Line("i32.const 0");
+                Line($"i32.const {size}");
+                Line("memory.fill");
+                StoreAggregateMembers(offset, type, si);
+                break;
+            case StackNew or DefaultLit:
+                EmitFrameAddr(offset);
+                Line("i32.const 0");
+                Line($"i32.const {size}");
+                Line("memory.fill");
+                break;
+            default:
+                EmitFrameAddr(offset);
+                EmitExpr(init);
+                Line($"i32.const {size}");
+                Line("memory.copy");
+                break;
+        }
+    }
+
+    /// <summary>Store the members <paramref name="si"/> gives into the (zeroed) aggregate of
+    /// type <paramref name="type"/> at frame offset <paramref name="offset"/>: a nested struct
+    /// member recursively, an array member element by element, a zero store skipped.</summary>
+    private void StoreAggregateMembers(int offset, CType type, StructInit si)
+    {
+        var name = ((CType.Named)type.Unqualified).Name;
+        foreach (var m in si.Members)
+        {
+            if (m.FieldType.Unqualified is CType.VoidType) { continue; }
+            if (Unit.StructFields.TryGetValue(name, out var fields)
+                && fields.FirstOrDefault(f => f.Name == m.Name) is { BitWidth: not null })
+            {
+                throw new IrUnsupportedException($"the wat target does not yet support bit-field members ('{m.Name}')");
+            }
+            var at = offset + (Unit.OffsetOfConst(name, m.Name)
+                ?? throw new IrUnsupportedException($"the wat target cannot place member '{m.Name}' of {name}"));
+            StoreInitValue(at, m.FieldType, m.Value);
+        }
+    }
+
+    /// <summary>Store one initializer value of type <paramref name="type"/> at frame offset
+    /// <paramref name="at"/> into storage already zeroed.</summary>
+    private void StoreInitValue(int at, CType type, CExpr value)
+    {
+        switch (value)
+        {
+            case StructInit nested when IsAggregate(type):
+                StoreAggregateMembers(at, type, nested);
+                return;
+            case ArrayValue av when type.Unqualified is CType.Array:
+            {
+                var step = WasmSizeOf(av.Element);
+                for (var i = 0; i < av.Elems.Count; i++) { StoreInitValue(at + i * step, av.Element, av.Elems[i]); }
+                return;
+            }
+            case LitInt { Value: 0 }:
+            case NullPtr:
+                return;   // the storage is already zero
+        }
+        if (IsAggregate(type))
+        {
+            EmitFrameAddr(at);
+            EmitExpr(value);
+            Line($"i32.const {WasmSizeOf(type)}");
+            Line("memory.copy");
+            return;
+        }
+        EmitFrameAddr(at);
+        EmitExpr(value);
+        EmitConvert(value.Type, type);
+        Line(StoreInstr(type));
     }
 
     private void EmitLoop(CExpr? cond, CStmt body, CExpr? post, bool testAtTop)
@@ -713,9 +821,25 @@ internal sealed partial class WatBackend
                 EmitVarRead(v);
                 break;
             case Index ix:
-                if (e.Type.Unqualified is CType.Array) { EmitAddress(ix); break; }  // nested-array decay
                 EmitAddress(ix);
-                Line(LoadInstr(e.Type));
+                // A nested array decays, an aggregate element is its address.
+                if (!IsAddressValued(e.Type)) { Line(LoadInstr(e.Type)); }
+                break;
+            case Member m:
+                EmitAddress(m);
+                if (!IsAddressValued(e.Type)) { Line(LoadInstr(e.Type)); }
+                break;
+            case SizeOfExpr so:
+                // The layout model's size (sizeof of a struct, an array, a pointer is 8).
+                Line($"{ValType(e.Type)}.const {WasmSizeOf(so.Of)}");
+                break;
+            case OffsetOf oo:
+                if (oo.StructType.Unqualified is not CType.Named on
+                    || Unit.OffsetOfConstPath(on.Name, oo.Path) is not { } offset)
+                {
+                    throw new IrUnsupportedException($"the wat target cannot place offsetof({oo.StructType.Describe()}, {string.Join(".", oo.Path)})");
+                }
+                Line($"{ValType(e.Type)}.const {offset}");
                 break;
             case Unary u:
                 EmitUnary(u);
@@ -762,7 +886,7 @@ internal sealed partial class WatBackend
         if (_frame.TryGetValue(v.Sym, out var off))
         {
             EmitFrameAddr(off);
-            if (v.Sym.Type.Unqualified is not CType.Array) { Line(LoadInstr(v.Sym.Type)); }
+            if (!IsAddressValued(v.Sym.Type)) { Line(LoadInstr(v.Sym.Type)); }
             return;
         }
         Line($"local.get ${v.Sym.TargetName}");
@@ -811,7 +935,7 @@ internal sealed partial class WatBackend
                 break;
             case UnOp.Deref:
                 EmitExpr(u.Operand);
-                if (u.Type.Unqualified is not CType.Array) { Line(LoadInstr(u.Type)); }
+                if (!IsAddressValued(u.Type)) { Line(LoadInstr(u.Type)); }
                 break;
             case UnOp.PreInc:
             case UnOp.PreDec:
@@ -1000,10 +1124,22 @@ internal sealed partial class WatBackend
             return;
         }
 
-        // Memory lvalue: a frame-resident variable, *p, or a[i].
-        if (a.Target is not (VarRef or Index or Unary { Op: UnOp.Deref }))
+        // Memory lvalue: a frame-resident variable, *p, a[i], or s.f / p->f.
+        if (a.Target is not (VarRef or Index or Member or Unary { Op: UnOp.Deref }))
         {
             throw new IrUnsupportedException($"the wat target cannot assign to {a.Target.GetType().Name}");
+        }
+        if (IsAggregate(a.Target.Type))
+        {
+            // A struct or union assignment copies its bytes; its value is the target.
+            _scratchAddr = true;
+            EmitAddress(a.Target);
+            Line("local.tee $__taddr");
+            EmitExpr(a.Value);
+            Line($"i32.const {WasmSizeOf(a.Target.Type)}");
+            Line("memory.copy");
+            Line("local.get $__taddr");
+            return;
         }
         var tt = a.Target.Type;
         var scratch = ScratchFor(tt);
@@ -1537,6 +1673,14 @@ internal sealed partial class WatBackend
                 EmitScaledIndex(ix.Idx, ElementType(ix.Base.Type));
                 Line("i32.add");
                 break;
+            case Member m:
+            {
+                // `s.f`: a struct's value is its address; `p->f`: the pointer is.
+                var offset = MemberOffset(m);
+                EmitExpr(m.Base);
+                if (offset != 0) { Line($"i32.const {offset}"); Line("i32.add"); }
+                break;
+            }
             default:
                 throw new IrUnsupportedException($"the wat target cannot take the address of {lv.GetType().Name}");
         }
@@ -3356,21 +3500,59 @@ internal sealed partial class WatBackend
 
     /// <summary>The bytes a <paramref name="t"/> takes in linear memory: C's LP64 sizes, so a
     /// pointer is eight bytes (an i32 address zero-extended), as <c>sizeof</c> and the layout
-    /// model say.</summary>
-    private static int WasmSizeOf(CType t) => t.Unqualified switch
+    /// model say; a struct or union is the layout model's size.</summary>
+    private int WasmSizeOf(CType t) => t.Unqualified switch
     {
         CType.Pointer or CType.Func => 8,
         CType.Array a => (a.Count ?? 0) * WasmSizeOf(a.Element),
+        CType.Named => checked((int)(Unit.SizeOfConst(t) ?? 0)),
+        CType.Enum e => WasmSizeOf(e.Underlying),
         _ => t.SizeOf,
     };
 
     /// <summary>Natural alignment for a frame slot (a power-of-two ≤ 8): an array
-    /// aligns to its element, a scalar to its own size.</summary>
-    private static int SlotAlign(CType t)
+    /// aligns to its element, a struct or union to its widest member (the layout
+    /// model's), a scalar to its own size.</summary>
+    private int SlotAlign(CType t)
     {
-        var u = t.Unqualified;
-        var sz = u is CType.Array a ? WasmSizeOf(a.FlatElement) : WasmSizeOf(u);
-        return Math.Min(8, Math.Max(1, sz));
+        var u = t.Unqualified is CType.Array a ? a.FlatElement.Unqualified : t.Unqualified;
+        var align = u is CType.Named ? Unit.AlignOfConst(u) : WasmSizeOf(u);
+        return Math.Min(8, Math.Max(1, align));
+    }
+
+    /// <summary>True for a struct or union: on the wasm stack its value is its address
+    /// (an aggregate has no wasm value type), so reading one loads nothing, assigning
+    /// one copies its bytes, and a member is an offset from that address.</summary>
+    private static bool IsAggregate(CType t) => t.Unqualified is CType.Named;
+
+    /// <summary>True when an expression of type <paramref name="t"/> evaluates to an
+    /// address rather than a loaded value: an array (it decays) or an aggregate.</summary>
+    private static bool IsAddressValued(CType t) => t.Unqualified is CType.Array || IsAggregate(t);
+
+    /// <summary>The byte offset of member <paramref name="m"/> within its struct or union,
+    /// from the layout model. A bit-field has no byte address of its own, which this
+    /// slice does not lower yet.</summary>
+    private int MemberOffset(Member m)
+    {
+        var owner = m.Arrow
+            ? m.Base.Type.Unqualified switch
+            {
+                CType.Pointer p => p.Pointee,
+                CType.Array a => a.Element,
+                var other => other,
+            }
+            : m.Base.Type;
+        if (owner.Unqualified is not CType.Named n)
+        {
+            throw new IrUnsupportedException($"the wat target cannot take member '{m.Field}' of a {owner.Describe()}");
+        }
+        if (Unit.StructFields.TryGetValue(n.Name, out var fields)
+            && fields.FirstOrDefault(f => f.Name == m.Field) is { BitWidth: not null })
+        {
+            throw new IrUnsupportedException($"the wat target does not yet support bit-field members ('{m.Field}')");
+        }
+        return Unit.OffsetOfConst(n.Name, m.Field)
+            ?? throw new IrUnsupportedException($"the wat target cannot place member '{m.Field}' of {n.Name}");
     }
 
     private static int AlignUp(int x, int a) => (x + a - 1) & ~(a - 1);

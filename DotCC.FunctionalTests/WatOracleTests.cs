@@ -103,6 +103,12 @@ public sealed class WatOracleTests
     [InlineData("int main(void){ return (int)(1. + 2.); }", 3)]
     [InlineData("int main(void){ return (int)(2.e3); }", 2000)]
     [InlineData("int main(void){ float f=1e3f; return (int)f; }", 1000)]
+    // structs and unions in linear memory: members at the layout model's offsets, a brace
+    // initializer zeroing then storing, assignment copying bytes, `->` through a pointer.
+    [InlineData("#include <stddef.h>\nstruct P { int x; long y; char *n; };\nint main(void){ struct P p; p.x = 3; p.y = 4; struct P q = { 1, 2, \"hi\" }; p = q; return (int)(sizeof(struct P) + offsetof(struct P, n) + p.x + p.y + p.n[1]); }", 148)]
+    [InlineData("struct N { int v; struct N *next; };\nint main(void){ struct N c = {3, 0}, b = {2, &c}, a = {1, &b}; int s = 0; for (struct N *p = &a; p; p = p->next) s += p->v * 10; return s; }", 60)]
+    [InlineData("union U { int i; unsigned char b[4]; };\nint main(void){ union U u; u.i = 0x01020304; return u.b[0] + u.b[3]; }", 5)]
+    [InlineData("struct In { int a, b; }; struct Out { struct In in[2]; int t; };\nint main(void){ struct Out o = { { {1, 2}, {3, 4} }, 5 }; struct Out *p = &o; return p->in[1].b * 10 + o.in[0].a + p->t; }", 46)]
     public void Wat_program_returns_expected_value(string source, int expected)
     {
         if (!Requested)
