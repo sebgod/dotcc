@@ -135,7 +135,14 @@ internal sealed partial class WatBackend
     // Scratch locals, declared only when used (the body buffer makes that possible):
     // a saved store value (one per wasm value type) and a saved store address (i32)
     // for the read-modify-write of a compound assignment / ++/-- through memory.
-    private bool _scratch32, _scratch64, _scratchF32, _scratchF64, _scratchAddr;
+    /// <summary>The scratch locals in use at this point of the emit, and the most of each kind
+    /// one function held at once (its declarations), by kind: <c>i32</c>, <c>i64</c>,
+    /// <c>f32</c>, <c>f64</c>, or <c>addr</c> (an i32 address). A use acquires one and releases
+    /// it when done, so an expression evaluated while an outer one holds a scratch (the
+    /// <c>li++</c> inside <c>log_[li++] = v</c>, evaluated while the stored value waits) gets
+    /// its own instead of overwriting it.</summary>
+    private readonly Dictionary<string, int> _scratchInUse = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, int> _scratchMax = new(StringComparer.Ordinal);
     // The label/dispatch variable for the CFG dispatch-loop lowering of a function that
     // uses goto/labels (see WatBackend.Cfg.cs). Declared only for such functions.
     private bool _scratchLbl;
@@ -313,8 +320,9 @@ internal sealed partial class WatBackend
         _labelSeq = 0;
         _frame.Clear();
         _frameSize = 0;
-        _scratch32 = _scratch64 = _scratchF32 = _scratchF64 = _scratchAddr = false;
+        _scratchInUse.Clear(); _scratchMax.Clear();
         _scratchLbl = false;
+        _cfgSwitchLocals.Clear();
 
         var ret = fn.Sym.Type is CType.Func f ? f.Return : CType.Int;
         _currentRet = ret;
@@ -395,12 +403,9 @@ internal sealed partial class WatBackend
         _out = prev;
 
         foreach (var v in valueLocals) { Line($"(local ${v.TargetName} {_wat.RenderType(v.Type)})"); }
+        foreach (var v in _cfgSwitchLocals) { Line($"(local ${v.TargetName} {_wat.RenderType(v.Type)})"); }
         if (_hasFrame) { Line("(local $__fp i32)"); }
-        if (_scratch32) { Line("(local $__t32 i32)"); }
-        if (_scratch64) { Line("(local $__t64 i64)"); }
-        if (_scratchF32) { Line("(local $__tf32 f32)"); }
-        if (_scratchF64) { Line("(local $__tf64 f64)"); }
-        if (_scratchAddr) { Line("(local $__taddr i32)"); }
+        foreach (var local in ScratchLocals()) { Line(local); }
         if (_scratchLbl) { Line("(local $__lbl i32)"); }
         _out.Append(body);
 
@@ -527,8 +532,7 @@ internal sealed partial class WatBackend
                 break;
 
             case ExprStmt es:
-                EmitExpr(es.Expr);
-                if (es.Expr.Type.Unqualified is not CType.VoidType) { Line("drop"); }
+                EmitDiscarded(es.Expr);
                 break;
 
             case Return r:
@@ -717,6 +721,14 @@ internal sealed partial class WatBackend
         Line(StoreInstr(type));
     }
 
+    /// <summary>Evaluate <paramref name="e"/> for its effects: whatever value it leaves is
+    /// dropped (a void expression, a void call or a <c>(void)</c> cast, leaves none).</summary>
+    private void EmitDiscarded(CExpr e)
+    {
+        EmitExpr(e);
+        if (e.Type.Unqualified is not CType.VoidType) { Line("drop"); }
+    }
+
     /// <summary>Push the address an initializer store goes to: an offset in the current
     /// frame, or an absolute address while the globals' start function is emitted.</summary>
     private void EmitInitAddr(int at)
@@ -764,7 +776,7 @@ internal sealed partial class WatBackend
         _indent = 2;
         _hasFrame = false;
         _absoluteInit = true;
-        _scratch32 = _scratch64 = _scratchF32 = _scratchF64 = _scratchAddr = false;
+        _scratchInUse.Clear(); _scratchMax.Clear();
         try
         {
             foreach (var g in unit.Globals)
@@ -796,11 +808,7 @@ internal sealed partial class WatBackend
         }
         if (body.Length == 0) { return ""; }
         var func = new StringBuilder("  (func $__init_globals\n");
-        if (_scratch32) { func.Append("    (local $__t32 i32)\n"); }
-        if (_scratch64) { func.Append("    (local $__t64 i64)\n"); }
-        if (_scratchF32) { func.Append("    (local $__tf32 f32)\n"); }
-        if (_scratchF64) { func.Append("    (local $__tf64 f64)\n"); }
-        if (_scratchAddr) { func.Append("    (local $__taddr i32)\n"); }
+        foreach (var local in ScratchLocals()) { func.Append("    ").Append(local).Append('\n'); }
         func.Append(body).Append("  )\n");
         return func.ToString();
     }
@@ -935,8 +943,8 @@ internal sealed partial class WatBackend
         var k = sw.Sections.Count;
         var subjType = sw.Subject.Type;
         var vt = ValType(subjType);
-        var subj = ScratchFor(subjType);          // subject is read once per case; cache it
         EmitExpr(sw.Subject);
+        var subj = AcquireScratch(subjType);      // subject is read once per case; cache it
         Line($"local.set {subj}");
 
         var secLabel = new string[k];
@@ -975,6 +983,7 @@ internal sealed partial class WatBackend
             }
         }
         Line(defaultIdx >= 0 ? $"br {secLabel[defaultIdx]}" : $"br {brk}");
+        ReleaseScratch(subjType);                 // the sections never read the subject
 
         // Close each section block in forward order, emitting its body right after the
         // `end` (so it runs on a hit AND falls into the next section — C fall-through).
@@ -1028,6 +1037,19 @@ internal sealed partial class WatBackend
                 break;
             case IndirectCall ic:
                 EmitCallIndirect(ic.Callee, ic.Args, ic.ParamTypes);
+                break;
+            case CommaOp co:
+                // Every operand left to right; all but the last are discarded.
+                for (var i = 0; i < co.Items.Count - 1; i++) { EmitDiscarded(co.Items[i]); }
+                EmitExpr(co.Items[^1]);
+                break;
+            case CommaSeq cs:
+                for (var i = 0; i < cs.Items.Count - 1; i++) { EmitDiscarded(cs.Items[i]); }
+                EmitExpr(cs.Items[^1]);
+                break;
+            case DefaultLit when !IsAddressValued(e.Type):
+                // C23 `{}` of a scalar: its zero.
+                Line($"{ValType(e.Type)}.const 0");
                 break;
             case SizeOfExpr so:
                 // The layout model's size (sizeof of a struct, an array, a pointer is 8).
@@ -1188,20 +1210,22 @@ internal sealed partial class WatBackend
         }
 
         // Memory lvalue: addr (saved), load old, compute new, store, leave old|new.
-        var valScratch = ScratchFor(u.Operand.Type);
-        _scratchAddr = true;
         EmitAddress(u.Operand);
-        Line("local.set $__taddr");
-        Line("local.get $__taddr");
+        var addr = AcquireScratch("addr");
+        var valScratch = AcquireScratch(u.Operand.Type);
+        Line($"local.set {addr}");
+        Line($"local.get {addr}");
         Line(LoadInstr(u.Operand.Type));   // old value
         Line($"local.set {valScratch}");   // keep it
-        Line("local.get $__taddr");
+        Line($"local.get {addr}");
         Line($"local.get {valScratch}");
         Line($"{vt}.const {step}");
         Line($"{vt}.{op}");                 // new value
         if (!post) { Line($"local.tee {valScratch}"); }   // pre: result is the new value
         Line(StoreInstr(u.Operand.Type));
         Line($"local.get {valScratch}");    // post: old; pre: new (tee'd above)
+        ReleaseScratch(u.Operand.Type);
+        ReleaseScratch("addr");
     }
 
     private void EmitBinary(Binary b)
@@ -1339,47 +1363,54 @@ internal sealed partial class WatBackend
         if (IsAggregate(a.Target.Type))
         {
             // A struct or union assignment copies its bytes; its value is the target.
-            _scratchAddr = true;
             EmitAddress(a.Target);
-            Line("local.tee $__taddr");
+            var target = AcquireScratch("addr");
+            Line($"local.tee {target}");
             EmitExpr(a.Value);
             Line($"i32.const {WasmSizeOf(a.Target.Type)}");
             Line("memory.copy");
-            Line("local.get $__taddr");
+            Line($"local.get {target}");
+            ReleaseScratch("addr");
             return;
         }
         var tt = a.Target.Type;
-        var scratch = ScratchFor(tt);
 
+        // A scratch holds a value or an address while another operand is evaluated; that
+        // operand acquires its own (see AcquireScratch), so it cannot overwrite this one.
         if (a.CompoundOp is { } mop)
         {
             // *lv OP= v  — compute the address once, read-modify-write through it.
-            _scratchAddr = true;
             var common = CType.UsualArithmetic(tt, a.Value.Type);
             EmitAddress(a.Target);
-            Line("local.set $__taddr");
-            Line("local.get $__taddr");
+            var addr = AcquireScratch("addr");
+            Line($"local.set {addr}");
+            Line($"local.get {addr}");
             Line(LoadInstr(tt));
             EmitConvert(tt, common);
             EmitExpr(a.Value);
             EmitConvert(a.Value.Type, common);
             Line(ArithBinOp(mop, common));
             EmitConvert(common, tt);
+            var scratch = AcquireScratch(tt);
             Line($"local.set {scratch}");
-            Line("local.get $__taddr");
+            Line($"local.get {addr}");
             Line($"local.get {scratch}");
             Line(StoreInstr(tt));
             Line($"local.get {scratch}");   // assignment is an expression
+            ReleaseScratch(tt);
+            ReleaseScratch("addr");
         }
         else
         {
             EmitExpr(a.Value);
             EmitConvert(a.Value.Type, tt);
+            var scratch = AcquireScratch(tt);
             Line($"local.set {scratch}");
             EmitAddress(a.Target);
             Line($"local.get {scratch}");
             Line(StoreInstr(tt));
             Line($"local.get {scratch}");   // leave the stored value
+            ReleaseScratch(tt);
         }
     }
 
@@ -3586,14 +3617,42 @@ internal sealed partial class WatBackend
 
     /// <summary>The scratch value-local for a store of type <paramref name="t"/>
     /// (i32/i64), marking it for declaration.</summary>
-    private string ScratchFor(CType t)
+    /// <summary>Acquire a scratch local of kind <paramref name="kind"/> (a wasm value type, or
+    /// <c>addr</c>), free until <see cref="ReleaseScratch"/>: the first of a kind keeps the plain
+    /// name (<c>$__t32</c>, <c>$__taddr</c>), a nested one gets a suffix (<c>$__t32_1</c>).</summary>
+    private string AcquireScratch(string kind)
     {
-        switch (ValType(t))
+        var n = _scratchInUse.GetValueOrDefault(kind);
+        _scratchInUse[kind] = n + 1;
+        if (n + 1 > _scratchMax.GetValueOrDefault(kind)) { _scratchMax[kind] = n + 1; }
+        return ScratchName(kind, n);
+    }
+
+    /// <summary>A scratch local for a value of type <paramref name="t"/>.</summary>
+    private string AcquireScratch(CType t) => AcquireScratch(ValType(t));
+
+    private void ReleaseScratch(string kind) => _scratchInUse[kind] = _scratchInUse[kind] - 1;
+
+    private void ReleaseScratch(CType t) => ReleaseScratch(ValType(t));
+
+    private static string ScratchName(string kind, int n) => kind switch
+    {
+        "i64" => "$__t64",
+        "f32" => "$__tf32",
+        "f64" => "$__tf64",
+        "addr" => "$__taddr",
+        _ => "$__t32",
+    } + (n == 0 ? "" : $"_{n}");
+
+    /// <summary>The <c>(local …)</c> declarations of the scratch locals the function used.</summary>
+    private IEnumerable<string> ScratchLocals()
+    {
+        foreach (var kind in new[] { "i32", "i64", "f32", "f64", "addr" })
         {
-            case "i64": _scratch64 = true; return "$__t64";
-            case "f32": _scratchF32 = true; return "$__tf32";
-            case "f64": _scratchF64 = true; return "$__tf64";
-            default: _scratch32 = true; return "$__t32";
+            for (var n = 0; n < _scratchMax.GetValueOrDefault(kind); n++)
+            {
+                yield return $"(local {ScratchName(kind, n)} {(kind == "addr" ? "i32" : kind)})";
+            }
         }
     }
 

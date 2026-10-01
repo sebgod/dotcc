@@ -143,11 +143,34 @@ public sealed class WatBackendTests
     }
 
     [Fact]
-    public void switch_inside_a_goto_function_fails_loud()
+    public void A_switch_in_a_goto_function_dispatches_through_the_cfg()
     {
-        // A switch in a function lowered via the CFG isn't modelled yet — fail loud.
-        Should.Throw<CompileException>(() => Wat(
-            "int f(int x){ if(x) goto l; return 0; l: switch(x){ case 1: return 1; default: return 2; } } int main(void){ return f(1); }"));
+        // The subject goes into a local of its own once; a chain of CFG blocks compares it
+        // with each case, and the sections fall into each other as C's do.
+        var wat = Wat("int f(int x){ int r = 0; if (x < 0) goto neg; switch (x) { case 1: r = 10; case 2: r += 2; break; default: r = 99; } return r; neg: return -1; }\nint main(void){ return f(1); }");
+        wat.ShouldContain("(local $__sw0 i32)");
+        wat.ShouldContain("local.tee $__sw0");
+        wat.ShouldContain("loop $__disp");
+    }
+
+    [Fact]
+    public void A_value_waiting_in_a_scratch_is_not_overwritten_by_a_nested_one()
+    {
+        // `log_[li++] = v`: v waits in a scratch while the target's address is computed, and
+        // that computation (li++ on a global) needs scratch locals of its own. It gets
+        // $__t32_1, not the $__t32 holding v (which it used to overwrite with li).
+        var wat = Wat("int log_[4]; int li;\nvoid record(int v){ log_[li++] = v; }\nint main(void){ record(7); return log_[0]; }");
+        wat.ShouldContain("(local $__t32 i32)\n    (local $__t32_1 i32)");
+        wat.ShouldContain("local.get $v\n    local.set $__t32\n");
+    }
+
+    [Fact]
+    public void A_comma_operator_discards_all_but_its_last_operand()
+    {
+        // `(g(&a), g(&a), a * 10)`: each leading operand runs and its value is dropped;
+        // a `(void)` cast drops its operand's value too.
+        var wat = Wat("int g(int *p){ return ++*p; }\nint main(void){ int a = 1, b; (void)g(&a); b = (g(&a), g(&a), a * 10); return b; }");
+        wat.ShouldContain("call $g\n    drop\n    global.get $__sp\n    call $g\n    drop\n    global.get $__sp\n    call $g\n    drop");
     }
 
     [Fact]

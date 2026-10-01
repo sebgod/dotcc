@@ -33,9 +33,10 @@ using DotCC.Ir;
 /// structured emit; only goto-using functions pay this. (Producing nicer nested
 /// structure here — a relooper — is a possible later quality pass; it has no
 /// correctness stakes, since this lowering is already correct.)
-/// <para>A <c>switch</c> nested inside a goto-using function is not yet modelled in
-/// the CFG (its multi-way dispatch would need synthetic-local plumbing); it fails
-/// loud rather than miscompile. The two appearing together is rare.</para>
+/// <para>A <c>switch</c> in a goto-using function becomes blocks too: its subject is
+/// stored once in a local of its own, a chain of branch blocks compares it with each
+/// case and enters that case's section (the default's, or past the switch, when none
+/// matches), and each section falls into the next, as C's do.</para>
 /// </summary>
 internal sealed partial class WatBackend
 {
@@ -62,7 +63,11 @@ internal sealed partial class WatBackend
     private List<CfgBlock> _cfgAll = new();
     private CfgBlock _cfgCur = null!;
     private readonly Dictionary<string, CfgBlock> _cfgLabels = new(System.StringComparer.Ordinal);
-    private readonly List<(CfgBlock Brk, CfgBlock Cont)> _cfgLoops = new();
+    private readonly List<(CfgBlock Brk, CfgBlock? Cont)> _cfgLoops = new();
+
+    /// <summary>The locals that hold a CFG switch's subject, one per switch, declared with
+    /// the function's other locals.</summary>
+    private readonly List<Symbol> _cfgSwitchLocals = new();
 
     /// <summary>True when a statement tree contains a labeled statement (a goto target)
     /// anywhere — the trigger for the CFG dispatch-loop lowering.</summary>
@@ -196,8 +201,8 @@ internal sealed partial class WatBackend
                 break;
 
             case Continue:
-                if (_cfgLoops.Count == 0) { throw new IrUnsupportedException("`continue` outside a loop"); }
-                LinkGoto(_cfgCur, _cfgLoops[^1].Cont);
+                if (_cfgLoops.Count == 0 || _cfgLoops[^1].Cont is not { } cont) { throw new IrUnsupportedException("`continue` outside a loop"); }
+                LinkGoto(_cfgCur, cont);
                 _cfgCur = NewCfgBlock();
                 break;
 
@@ -220,8 +225,44 @@ internal sealed partial class WatBackend
                 _cfgCur = NewCfgBlock();
                 break;
 
-            case Switch:
-                throw new IrUnsupportedException("a switch inside a function that uses goto/labels is not yet supported on the wat target");
+            case Switch sw:
+            {
+                // The subject, once, into a local of its own; then one test block per case.
+                var subject = new Symbol
+                {
+                    Name = $"__sw{_cfgSwitchLocals.Count}", Kind = SymKind.Var, Type = sw.Subject.Type,
+                    TargetName = $"__sw{_cfgSwitchLocals.Count}",
+                };
+                _cfgSwitchLocals.Add(subject);
+                var subjectRef = new VarRef(subject) { Type = sw.Subject.Type, IsLValue = true };
+                _cfgCur.Code.Add(new ExprStmt(new Assign(null, subjectRef, sw.Subject) { Type = sw.Subject.Type }));
+                var sections = sw.Sections.Select(_ => NewCfgBlock()).ToList();
+                var after = NewCfgBlock();
+                CfgBlock? fallback = null;
+                for (var i = 0; i < sw.Sections.Count; i++)
+                {
+                    foreach (var lab in sw.Sections[i].Labels)
+                    {
+                        if (lab.CaseExpr is not { } ce) { fallback = sections[i]; continue; }
+                        var next = NewCfgBlock();
+                        var hit = new Binary(BinOp.Eq, subjectRef, ce) { Type = CType.Int };
+                        BranchTo(_cfgCur, hit, sections[i], next);
+                        _cfgCur = next;
+                    }
+                }
+                LinkGoto(_cfgCur, fallback ?? after);
+                // `break` leaves the switch; `continue` still steps the enclosing loop.
+                _cfgLoops.Add((after, _cfgLoops.Count > 0 ? _cfgLoops[^1].Cont : null));
+                for (var i = 0; i < sw.Sections.Count; i++)
+                {
+                    _cfgCur = sections[i];
+                    foreach (var st in sw.Sections[i].Body) { BuildCfg(st); }
+                    LinkGoto(_cfgCur, i + 1 < sections.Count ? sections[i + 1] : after);
+                }
+                _cfgLoops.RemoveAt(_cfgLoops.Count - 1);
+                _cfgCur = after;
+                break;
+            }
 
             case CaseLabelStmt:
                 throw new IrUnsupportedException("a case/default label nested inside another statement (Duff's device) is not supported on the wat target");
