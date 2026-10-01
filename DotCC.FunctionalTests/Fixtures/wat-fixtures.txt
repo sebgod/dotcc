@@ -46,6 +46,7 @@ c23-static-assert
 c23-unreachable
 c23-va-opt
 c99-stdint-fast
+calc
 call-arg-conv
 char-array-init
 char16-literals
@@ -189,6 +190,7 @@ string-h-extended
 string-high-byte-escapes
 string-init-parenthesized
 string-literal-L-collision
+strtod-parse
 struct-array-member-init
 struct-hack-array
 struct-init
