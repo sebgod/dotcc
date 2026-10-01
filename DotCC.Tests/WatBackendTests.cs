@@ -663,6 +663,36 @@ public sealed class WatBackendTests
     }
 
     [Fact]
+    public void A_binary_literal_is_written_in_decimal()
+    {
+        // wat reads decimal and 0x hex, not C23's 0b: wat2wasm rejected `i32.const 0b1011`.
+        var wat = Wat("int main(void){ return 0b1011 + 0B1; }");
+        wat.ShouldContain("i32.const 11");
+        wat.ShouldContain("i32.const 1\n");
+        wat.ShouldNotContain("0b");
+        wat.ShouldNotContain("0B");
+    }
+
+    [Fact]
+    public void A_renamed_static_is_called_by_its_emitted_name()
+    {
+        // A static `helper` in one unit and an external `helper` in another: the static
+        // one is renamed out of the way, and its unit's call must reach that body.
+        var a = Path.Combine(Path.GetTempPath(), $"dotcc-wat-{System.Guid.NewGuid():N}.c");
+        var b = Path.Combine(Path.GetTempPath(), $"dotcc-wat-{System.Guid.NewGuid():N}.c");
+        File.WriteAllText(a, "static int helper(int x) { return x + 1; }\nint use_static(void) { return helper(10); }\n");
+        File.WriteAllText(b, "int helper(int a, int b) { return a * b; }\nint use_static(void);\nint main(void) { return use_static() + helper(6, 7); }\n");
+        try
+        {
+            var wat = Compiler.EmitWat(new[] { a, b });
+            wat.ShouldContain("(func $helper__1 (param $x i32) (result i32)");
+            wat.ShouldContain("call $helper__1");
+            wat.ShouldContain("(func $helper (param $a i32) (param $b i32) (result i32)");
+        }
+        finally { File.Delete(a); File.Delete(b); }
+    }
+
+    [Fact]
     public void shift_result_keeps_the_left_operand_width()
     {
         // C99 6.5.7: a shift's type is the promoted LEFT operand's, regardless of the
