@@ -65,9 +65,9 @@ internal sealed partial class WatBackend
     private readonly Dictionary<string, CfgBlock> _cfgLabels = new(System.StringComparer.Ordinal);
     private readonly List<(CfgBlock Brk, CfgBlock? Cont)> _cfgLoops = new();
 
-    /// <summary>The locals that hold a CFG switch's subject, one per switch, declared with
-    /// the function's other locals.</summary>
-    private readonly List<Symbol> _cfgSwitchLocals = new();
+    /// <summary>The locals the backend makes up, declared with the function's other locals:
+    /// a CFG switch's subject (one per switch) and a value-keeping setjmp's value.</summary>
+    private readonly List<Symbol> _syntheticLocals = new();
 
     /// <summary>True when a statement tree contains a labeled statement (a goto target)
     /// anywhere — the trigger for the CFG dispatch-loop lowering.</summary>
@@ -83,6 +83,8 @@ internal sealed partial class WatBackend
         For f => (f.Init is { } init && StmtHasLabel(init)) || StmtHasLabel(f.Body),
         Switch sw => sw.Sections.Any(sec => sec.Body.Any(StmtHasLabel)),
         CaseLabelStmt cl => StmtHasLabel(cl.Body),
+        SetjmpGuard sj => (sj.TryBody is { } tb && StmtHasLabel(tb)) || (sj.CatchBody is { } cb && StmtHasLabel(cb)),
+        SetjmpCapture sc => StmtHasLabel(sc.Body),
         _ => false,
     };
 
@@ -234,10 +236,10 @@ internal sealed partial class WatBackend
                 // The subject, once, into a local of its own; then one test block per case.
                 var subject = new Symbol
                 {
-                    Name = $"__sw{_cfgSwitchLocals.Count}", Kind = SymKind.Var, Type = sw.Subject.Type,
-                    TargetName = $"__sw{_cfgSwitchLocals.Count}",
+                    Name = $"__sw{_syntheticLocals.Count}", Kind = SymKind.Var, Type = sw.Subject.Type,
+                    TargetName = $"__sw{_syntheticLocals.Count}",
                 };
-                _cfgSwitchLocals.Add(subject);
+                _syntheticLocals.Add(subject);
                 var subjectRef = new VarRef(subject) { Type = sw.Subject.Type, IsLValue = true };
                 _cfgCur.Code.Add(new ExprStmt(new Assign(null, subjectRef, sw.Subject) { Type = sw.Subject.Type }));
                 var sections = sw.Sections.Select(_ => NewCfgBlock()).ToList();

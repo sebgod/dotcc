@@ -33,7 +33,7 @@ one() {
     local why; why=$(grep -m1 -oE "does not (yet )?support: .*" "$w.emit.log" | sed 's/^does not yet support: //' | cut -c1-140)
     echo -e "$name\tEMIT\t${why:-$(tail -1 "$w.emit.log" | cut -c1-140)}"; return 0
   fi
-  if ! "$WAT2WASM" "$w.wat" -o "$w.wasm" > "$w.asm.log" 2>&1; then
+  if ! "$WAT2WASM" --enable-exceptions "$w.wat" -o "$w.wasm" > "$w.asm.log" 2>&1; then
     echo -e "$name\tASM\t$(grep -m1 -E "error" "$w.asm.log" | sed 's/.*error: //' | cut -c1-140)"; return 0
   fi
   timeout 20 "$NODE" "$RUNJS" "$w.wasm" > "$w.out" 2> "$w.err"

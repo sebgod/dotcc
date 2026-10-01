@@ -153,6 +153,12 @@ qsort-bsearch
 restrict-qualifier
 runtime-owned-structs
 runtime-type-name-clash
+setjmp-capture-if
+setjmp-cleanup
+setjmp-nested
+setjmp-no-else
+setjmp-switch-value
+setjmp-try-body
 sig-atomic
 sizeof-charbit
 sizeof-expr

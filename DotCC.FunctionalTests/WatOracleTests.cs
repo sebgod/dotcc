@@ -317,6 +317,17 @@ public sealed class WatOracleTests
         + " printf(\"%ld|\", fp(3, 1, 2, 3)); printf(\"%.2f|\", avg(\"t\", c, f, 10000000000L, 4000000000u, \"ok\"));"
         + " printf(\"%d\", count(count(7, 1.0, 'x'), mix(1, 5))); return 0; }",
         "6001|t:q 2.50 10000000000 4000000000 ok|5000000001.25|7")]
+    // setjmp/longjmp on wasm exception handling: a longjmp out of a deep recursion whose
+    // frames hold arrays leaves the stack pointer where the setjmp's frame had it (the calls
+    // after it still get sound frames), longjmp(env, 0) resumes with 1, and a jmp_buf local.
+    [InlineData("#include <stdio.h>\n#include <setjmp.h>\n"
+        + "static jmp_buf top;\n"
+        + "static int dive(int n){ int pad[16]; for (int i = 0; i < 16; i++) pad[i] = n + i; if (n == 0) longjmp(top, 0); return dive(n - 1) + pad[15]; }\n"
+        + "static int sum(int n){ int a[8]; int s = 0; for (int i = 0; i < 8; i++) a[i] = i * n; for (int i = 0; i < 8; i++) s += a[i]; return s; }\n"
+        + "int main(void){ int r = setjmp(top); if (r == 0) { dive(20); printf(\"unreachable\"); }"
+        + " printf(\"r=%d sum=%d|\", r, sum(3)); jmp_buf local; volatile int tries = 0;"
+        + " if (setjmp(local) == 0) { tries++; longjmp(local, 5); } else { tries += 10; } printf(\"tries=%d\", tries); return 0; }",
+        "r=1 sum=84|tries=11")]
     // strerror's glibc wording, strtoimax past 32 bits, the one "C" locale, and time() from
     // WASI's clock.
     [InlineData("#include <stdio.h>\n#include <string.h>\n#include <errno.h>\n#include <inttypes.h>\n#include <locale.h>\n#include <time.h>\n"
@@ -368,7 +379,7 @@ public sealed class WatOracleTests
         try
         {
             File.WriteAllText(wat, Compiler.EmitWat(new[] { c }));
-            Exec("wat2wasm", wat, "-o", wasm);   // validates (parse + typecheck) and assembles
+            Exec("wat2wasm", "--enable-exceptions", wat, "-o", wasm);   // validates (parse + typecheck) and assembles
             // exit(n) (WASI proc_exit) ends the run with n as its value.
             const string js =
                 "const fs=require('fs');" + WasiShimJs +
@@ -409,7 +420,7 @@ public sealed class WatOracleTests
         try
         {
             File.WriteAllText(wat, watText);
-            Exec("wat2wasm", wat, "-o", wasm);
+            Exec("wat2wasm", "--enable-exceptions", wat, "-o", wasm);
             var js =
                 "const fs=require('fs');" + WasiShimJs +
                 "WebAssembly.instantiate(fs.readFileSync(process.argv[1]),{wasi_snapshot_preview1:wasi})" +

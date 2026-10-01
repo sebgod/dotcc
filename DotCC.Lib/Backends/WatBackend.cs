@@ -155,6 +155,11 @@ internal sealed partial class WatBackend
     /// address it is on the stack and a 64-bit integer as an i64, as WASI's ABI has them.</summary>
     private const string WasiPrefix = "__wasi_";
 
+    /// <summary>True once the program uses <c>setjmp</c> or <c>longjmp</c>, which need the
+    /// <c>$__longjmp</c> exception tag and the <c>$__jmpseq</c> token counter (see
+    /// <see cref="EmitSetjmpGuard"/>).</summary>
+    private bool _usesLongjmp;
+
     /// <summary>True once the program calls <c>exit</c>, which imports WASI's <c>proc_exit</c>.</summary>
     private bool _usesProcExit;
 
@@ -314,6 +319,13 @@ internal sealed partial class WatBackend
         var pages = (stackTop + 65535) / 65536;
         m.Append(usesIo || _wasiImports.Count > 0 ? $"  (memory (export \"memory\") {pages})\n" : $"  (memory {pages})\n");
         foreach (var (sig, name) in _sigTypes) { m.Append($"  (type {name} (func{sig}))\n"); }
+        if (_usesLongjmp)
+        {
+            // longjmp throws the jmp_buf's token and the value; each setjmp arms its jmp_buf
+            // with a token of its own from the counter.
+            m.Append("  (tag $__longjmp (param i32 i32))\n");
+            m.Append("  (global $__jmpseq (mut i32) (i32.const 0))\n");
+        }
         if (_fnTable.Count > 0)
         {
             // Slot 0 stays empty: the null function pointer, which call_indirect traps on.
@@ -373,7 +385,7 @@ internal sealed partial class WatBackend
         _frameSize = 0;
         _scratchInUse.Clear(); _scratchMax.Clear();
         _scratchLbl = false;
-        _cfgSwitchLocals.Clear();
+        _syntheticLocals.Clear();
 
         var ret = fn.Sym.Type is CType.Func f ? f.Return : CType.Int;
         _currentRet = ret;
@@ -493,7 +505,7 @@ internal sealed partial class WatBackend
         _out = prev;
 
         foreach (var v in valueLocals) { Line($"(local ${v.TargetName} {_wat.RenderType(v.Type)})"); }
-        foreach (var v in _cfgSwitchLocals) { Line($"(local ${v.TargetName} {_wat.RenderType(v.Type)})"); }
+        foreach (var v in _syntheticLocals) { Line($"(local ${v.TargetName} {_wat.RenderType(v.Type)})"); }
         if (_hasFrame) { Line("(local $__fp i32)"); }
         foreach (var local in ScratchLocals()) { Line(local); }
         if (_scratchLbl) { Line("(local $__lbl i32)"); }
@@ -570,6 +582,13 @@ internal sealed partial class WatBackend
             case CaseLabelStmt cl:
                 CollectLocals(cl.Body, acc);
                 break;
+            case SetjmpGuard sj:
+                if (sj.TryBody is { } tb) { CollectLocals(tb, acc); }
+                if (sj.CatchBody is { } cb) { CollectLocals(cb, acc); }
+                break;
+            case SetjmpCapture sc:
+                CollectLocals(sc.Body, acc);
+                break;
             default:
                 break;
         }
@@ -590,6 +609,12 @@ internal sealed partial class WatBackend
             // anyway (CollectLocals hoists them), so emit flat like Block.
             case Seq q:
                 foreach (var inner in q.Stmts) { EmitStmt(inner); }
+                break;
+            case SetjmpGuard sj:
+                EmitSetjmpGuard(sj);
+                break;
+            case SetjmpCapture sc:
+                EmitSetjmpCapture(sc);
                 break;
 
             case DeclStmt d:
@@ -1020,6 +1045,8 @@ internal sealed partial class WatBackend
                 case Switch sw: E(sw.Subject); foreach (var sec in sw.Sections) { foreach (var x in sec.Body) { S(x); } } break;
                 case Labeled lab: S(lab.Body); break;
                 case CaseLabelStmt cl: S(cl.Body); break;
+                case SetjmpGuard sj: E(sj.Env); S(sj.TryBody); S(sj.CatchBody); break;
+                case SetjmpCapture sc: E(sc.Env); E(sc.Target); S(sc.Body); break;
             }
         }
         S(s);
@@ -1038,6 +1065,120 @@ internal sealed partial class WatBackend
         "ceilf" => ("f32.ceil", 1), "truncf" => ("f32.trunc", 1), "copysignf" => ("f32.copysign", 2),
         _ => null,
     };
+
+    /// <summary>Arm the <c>jmp_buf</c> <paramref name="env"/> for a <c>setjmp</c>: a fresh token
+    /// from the counter, which a <c>longjmp</c> through it throws and only this setjmp's handler
+    /// matches, so a nested setjmp on another buffer passes it on.</summary>
+    private void EmitArmJmpBuf(CExpr env)
+    {
+        _usesLongjmp = true;
+        EmitExpr(env);
+        Line("global.get $__jmpseq");
+        Line("i32.const 1");
+        Line("i32.add");
+        Line("global.set $__jmpseq");
+        Line("global.get $__jmpseq");
+        Line("i32.store");
+    }
+
+    /// <summary>The start of a <c>setjmp</c> handler, inside <c>catch $__longjmp</c> with the
+    /// thrown token and value on the stack: a token that is not <paramref name="env"/>'s is
+    /// another setjmp's, so it is thrown on; otherwise the value goes to
+    /// <paramref name="value"/> and the stack pointer comes back to this frame's, which the
+    /// frames the throw unwound never restored.</summary>
+    private void EmitSetjmpCatch(CExpr env, string value, string sp)
+    {
+        var token = AcquireScratch("i32");
+        Line($"local.set {value}");
+        Line($"local.set {token}");
+        Line($"local.get {token}");
+        EmitExpr(env);
+        Line("i32.load");
+        Line("i32.ne");
+        Line("if");
+        Line("  rethrow 1");
+        Line("end");
+        Line($"local.get {sp}");
+        Line("global.set $__sp");
+        ReleaseScratch("i32");
+    }
+
+    /// <summary><c>if (setjmp(env) [== 0]) …</c>, which the IR has as a guard: the direct
+    /// return's path (<see cref="SetjmpGuard.TryBody"/>) in a wasm <c>try</c>, and the path a
+    /// <c>longjmp(env, v)</c> resumes on (<see cref="SetjmpGuard.CatchBody"/>, or nothing) in
+    /// its <c>catch</c>, on wasm's exception handling.</summary>
+    private void EmitSetjmpGuard(SetjmpGuard sj)
+    {
+        var sp = AcquireScratch("addr");
+        var value = AcquireScratch("i32");
+        EmitArmJmpBuf(sj.Env);
+        Line("global.get $__sp");
+        Line($"local.set {sp}");
+        Line("try");
+        _indent++;
+        if (sj.TryBody is { } tb) { EmitStmt(tb); }
+        _indent--;
+        Line("catch $__longjmp");
+        _indent++;
+        EmitSetjmpCatch(sj.Env, value, sp);
+        if (sj.CatchBody is { } cb) { EmitStmt(cb); }
+        _indent--;
+        Line("end");
+        ReleaseScratch("i32");
+        ReleaseScratch("addr");
+    }
+
+    /// <summary>A <c>setjmp</c> whose value the program keeps (<c>r = setjmp(env);</c> and what
+    /// follows, or <c>switch (setjmp(env))</c>): its region runs in a <c>try</c> inside a
+    /// <c>loop</c>, and a <c>longjmp(env, v)</c> stores <c>v</c> in the target and runs the
+    /// region again, as C's setjmp returns a second time with the value.</summary>
+    private void EmitSetjmpCapture(SetjmpCapture sc)
+    {
+        var sp = AcquireScratch("addr");
+        var value = new Symbol
+        {
+            Name = $"__sjv{sc.Id}", Kind = SymKind.Var, Type = CType.Int, TargetName = $"__sjv{sc.Id}",
+        };
+        _syntheticLocals.Add(value);
+        EmitArmJmpBuf(sc.Env);
+        Line("global.get $__sp");
+        Line($"local.set {sp}");
+        Line($"loop $__sj{sc.Id}");
+        _indent++;
+        Line("try");
+        _indent++;
+        EmitStmt(sc.Body);
+        _indent--;
+        Line("catch $__longjmp");
+        _indent++;
+        EmitSetjmpCatch(sc.Env, "$" + value.TargetName, sp);
+        EmitDiscarded(new Assign(null, sc.Target, new VarRef(value) { Type = CType.Int }) { Type = sc.Target.Type });
+        Line($"br $__sj{sc.Id}");
+        _indent--;
+        Line("end");
+        _indent--;
+        Line("end");
+        ReleaseScratch("addr");
+    }
+
+    /// <summary><c>longjmp(env, value)</c>: throw <c>env</c>'s token with the value, which C
+    /// makes 1 when it is 0 (7.13.2.1p4), so the setjmp it resumes never returns 0 twice.</summary>
+    private void EmitLongjmp(Call c)
+    {
+        _usesLongjmp = true;
+        var value = AcquireScratch("i32");
+        EmitExpr(c.Args[0]);
+        Line("i32.load");
+        EmitExpr(c.Args[1]);
+        EmitConvert(c.Args[1].Type, CType.Int);
+        Line($"local.tee {value}");
+        Line($"local.get {value}");
+        Line("i32.eqz");
+        Line("i32.add");
+        Line("throw $__longjmp");
+        ReleaseScratch("i32");
+        if (c.Type.Unqualified is not CType.VoidType) { Line($"{ValType(c.Type)}.const 0"); }
+    }
 
     /// <summary><c>&lt;stdarg.h&gt;</c>'s <c>va_start(ap, last)</c>, <c>va_end(ap)</c> and
     /// <c>va_copy(dst, src)</c>. A <c>va_list</c> is an 8-byte object holding a cursor, the
@@ -1304,6 +1445,8 @@ internal sealed partial class WatBackend
                 case Switch sw: foreach (var sec in sw.Sections) { foreach (var x in sec.Body) { Walk(x); } } break;
                 case Labeled lab: Walk(lab.Body); break;
                 case CaseLabelStmt cl: Walk(cl.Body); break;
+                case SetjmpGuard sj: Walk(sj.TryBody); Walk(sj.CatchBody); break;
+                case SetjmpCapture sc: Walk(sc.Body); break;
             }
         }
         Walk(s);
@@ -2151,6 +2294,7 @@ internal sealed partial class WatBackend
         if (c.Callee == "snprintf" && !_defined.Contains("snprintf")) { EmitSprintf(c, bounded: true); return; }
         if (!_defined.Contains(c.Callee) && EmitAtomic(c)) { return; }
         if (c.Callee is "va_start" or "va_end" or "va_copy" && !_defined.Contains(c.Callee)) { EmitVaMacro(c); return; }
+        if (c.Callee == "longjmp" && !_defined.Contains("longjmp") && c.Args.Count == 2) { EmitLongjmp(c); return; }
 
         // The heap allocators lower to calls into the hand-written bump allocator;
         // free is a no-op drop. A user-defined one wins and routes through below.
@@ -4484,7 +4628,7 @@ internal sealed partial class WatBackend
     private int WasmSizeOf(CType t) => t.Unqualified switch
     {
         CType.Pointer or CType.Func => 8,
-        CType.Named { Name: VaListName } => VaSlot,
+        CType.Named { Name: VaListName or JmpBufName } => 8,
         CType.Array a => (a.Count ?? 0) * WasmSizeOf(a.Element),
         CType.Named => checked((int)(Unit.SizeOfConst(t) ?? 0)),
         CType.Enum e => WasmSizeOf(e.Underlying),
@@ -4497,7 +4641,7 @@ internal sealed partial class WatBackend
     private int SlotAlign(CType t)
     {
         var u = t.Unqualified is CType.Array a ? a.FlatElement.Unqualified : t.Unqualified;
-        var align = u is CType.Named { Name: VaListName } ? VaSlot : u is CType.Named ? Unit.AlignOfConst(u) : WasmSizeOf(u);
+        var align = u is CType.Named { Name: VaListName or JmpBufName } ? 8 : u is CType.Named ? Unit.AlignOfConst(u) : WasmSizeOf(u);
         return Math.Min(8, Math.Max(1, align));
     }
 
@@ -4509,6 +4653,10 @@ internal sealed partial class WatBackend
     /// <summary>The runtime type <c>&lt;stdarg.h&gt;</c> names <c>va_list</c>: here an 8-byte
     /// object in memory (an aggregate, so it is passed as a copy) holding the cursor.</summary>
     private const string VaListName = "VaList";
+
+    /// <summary>The runtime type <c>&lt;setjmp.h&gt;</c> names <c>jmp_buf</c>: here an 8-byte
+    /// object holding the token its latest <c>setjmp</c> armed it with.</summary>
+    private const string JmpBufName = "LongJmpToken";
 
     /// <summary>True when an expression of type <paramref name="t"/> evaluates to an
     /// address rather than a loaded value: an array (it decays) or an aggregate.</summary>
