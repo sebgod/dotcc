@@ -125,6 +125,29 @@ public sealed class StaticStructInitTests
     }
 
     [Fact]
+    public void a_large_initializer_is_split_into_parts()
+    {
+        // 600 pointer stores (no block copy for addresses): past 512 the helper calls parts,
+        // so no one method holds them all (clang took 25 GB on CPython's 13,000 in one).
+        var ptrs = string.Join(", ", System.Linq.Enumerable.Repeat("&g", 600));
+        var src = WriteTemp($$"""
+            static int g;
+            struct S { int *p[600]; };
+            static struct S s = { { {{ptrs}} } };
+            int main(void) { return s.p[599] == &g ? 0 : 1; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("        s__init1(__o);\n        s__init2(__o);\n        return true;\n");
+            emitted.ShouldContain("private static unsafe void s__init1(S* __o)");
+            emitted.ShouldContain("private static unsafe void s__init2(S* __o)");
+            emitted.ShouldNotContain("s__init3");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void non_static_nested_struct_init_also_recurses()
     {
         // The DeclStructInit refactor: a non-static local nested aggregate init

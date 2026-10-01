@@ -3266,26 +3266,51 @@ internal sealed partial class CSharpBackend
         globals.Append($"    internal static readonly bool {mem}_filled = {mem}_init();\n");
     }
 
+    /// <summary>The most stores <see cref="InPlaceStructInit"/> puts in one method. A compiler's
+    /// cost grows faster than a method's size: CPython's runtime state, 13,000 stores in one
+    /// method (twice), took clang 25 GB when the browser build compiled it ahead of time.</summary>
+    private const int StoresPerInitPart = 512;
+
     /// <summary>A static struct or union object's initializer as stores into its storage: a
     /// helper that stores each member through a pointer to the object, called from a field in
     /// <paramref name="globals"/> so it runs at the object's place in the initialization order.
     /// The object's storage is zero before any initializer runs (C11 6.7.9p10), so a zero
-    /// member stores nothing.</summary>
+    /// member stores nothing. Past <see cref="StoresPerInitPart"/> stores the helper calls parts
+    /// <c>{name}__init1</c>, <c>{name}__init2</c>, ..., each storing a slice through the pointer
+    /// it is handed.</summary>
     private void InPlaceStructInit(string name, string fieldType, StructInit si, StringBuilder globals)
     {
+        var stores = new List<string>();
+        StoreMembers(stores, "__o->", si);
         globals.Append($"    private static unsafe bool {name}__init()\n    {{\n");
         globals.Append($"        var __o = ({fieldType}*)System.Runtime.CompilerServices.Unsafe.AsPointer(ref {name});\n");
-        StoreMembers(globals, "__o->", si);
-        globals.Append("        return true;\n    }\n");
+        if (stores.Count <= StoresPerInitPart)
+        {
+            foreach (var store in stores) { globals.Append($"        {store}\n"); }
+            globals.Append("        return true;\n    }\n");
+        }
+        else
+        {
+            var parts = (stores.Count + StoresPerInitPart - 1) / StoresPerInitPart;
+            for (var p = 1; p <= parts; p++) { globals.Append($"        {name}__init{p}(__o);\n"); }
+            globals.Append("        return true;\n    }\n");
+            for (var p = 1; p <= parts; p++)
+            {
+                globals.Append($"    private static unsafe void {name}__init{p}({fieldType}* __o)\n    {{\n");
+                foreach (var store in stores.Skip((p - 1) * StoresPerInitPart).Take(StoresPerInitPart)) { globals.Append($"        {store}\n"); }
+                globals.Append("    }\n");
+            }
+        }
         globals.Append($"    internal static readonly bool {name}__filled = {name}__init();\n");
     }
 
-    /// <summary>The stores <see cref="InPlaceStructInit"/> makes for one aggregate: each member of
+    /// <summary>The stores <see cref="InPlaceStructInit"/> makes for one aggregate, one statement each
+    /// into <paramref name="stores"/>: each member of
     /// <paramref name="si"/> is stored at <paramref name="prefix"/> plus its name, a nested
     /// struct or union member member by member, an array member element by element (a
     /// <c>fixed</c> buffer indexed directly, an <c>[InlineArray]</c> through its element
     /// pointer, as <see cref="ArrayMemberInitHelper"/> does).</summary>
-    private void StoreMembers(StringBuilder body, string prefix, StructInit si)
+    private void StoreMembers(List<string> stores, string prefix, StructInit si)
     {
         foreach (var m in si.Members)
         {
@@ -3294,7 +3319,7 @@ internal sealed partial class CSharpBackend
             switch (m.Value)
             {
                 case StructInit nested when m.FieldType.Unqualified is CType.Named:
-                    StoreMembers(body, at + ".", nested);
+                    StoreMembers(stores, at + ".", nested);
                     break;
                 case ArrayValue av:
                     if (FlatCount(m.FieldType) == 0)
@@ -3316,18 +3341,18 @@ internal sealed partial class CSharpBackend
                             && DotCC.EmitHelpers.U8Literal(elems.Select(e => (int)((((LitInt)e).Value ?? 0) & 0xFF)).ToList()) is { } u8
                                 ? u8
                                 : $"new {elemCs}[] {{ {string.Join(", ", elems.Select(e => StaticInit(e, av.Element)))} }}";
-                        body.Append($"        System.Runtime.CompilerServices.Unsafe.CopyBlockUnaligned({slot}, L({source}), {run} * (uint)sizeof({elemCs}));\n");
+                        stores.Add($"System.Runtime.CompilerServices.Unsafe.CopyBlockUnaligned({slot}, L({source}), {run} * (uint)sizeof({elemCs}));");
                         break;
                     }
                     for (var i = 0; i < av.Elems.Count; i++)
                     {
                         var e = av.Elems[i];
-                        if (e is StructInit esi) { StoreMembers(body, $"{slot}[{i}].", esi); }
-                        else if (!IsZeroStore(e)) { body.Append($"        {slot}[{i}] = {StaticInit(e, av.Element)};\n"); }
+                        if (e is StructInit esi) { StoreMembers(stores, $"{slot}[{i}].", esi); }
+                        else if (!IsZeroStore(e)) { stores.Add($"{slot}[{i}] = {StaticInit(e, av.Element)};"); }
                     }
                     break;
                 default:
-                    if (!IsZeroStore(m.Value)) { body.Append($"        {at} = {StaticInit(m.Value, m.FieldType)};\n"); }
+                    if (!IsZeroStore(m.Value)) { stores.Add($"{at} = {StaticInit(m.Value, m.FieldType)};"); }
                     break;
             }
         }
