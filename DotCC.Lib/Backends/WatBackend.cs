@@ -112,6 +112,16 @@ internal sealed partial class WatBackend
     /// start function) rather than the current frame.</summary>
     private bool _absoluteInit;
 
+    /// <summary>The functions used as values, in table order: a function pointer is its index
+    /// in the module's <c>funcref</c> table, from 1 (0 is the null pointer, which traps when
+    /// called), handed out as functions are first referred to.</summary>
+    private readonly List<string> _fnTable = new();
+    private readonly Dictionary<string, int> _fnTableIndex = new(StringComparer.Ordinal);
+
+    /// <summary>The function signatures <c>call_indirect</c> checks against, each declared
+    /// once as a module <c>(type …)</c>: signature text → type name.</summary>
+    private readonly Dictionary<string, string> _sigTypes = new(StringComparer.Ordinal);
+
     /// <summary>The C stack the program gets when its data does not fit below the default
     /// stack top: the stack then starts past the data and grows down through this.</summary>
     private const int StackBytes = 1 << 20;
@@ -242,6 +252,13 @@ internal sealed partial class WatBackend
         var stackTop = _dataEnd <= StackTop / 2 ? StackTop : AlignUp(_dataEnd, 16) + StackBytes;
         var pages = (stackTop + 65535) / 65536;
         m.Append(usesIo ? $"  (memory (export \"memory\") {pages})\n" : $"  (memory {pages})\n");
+        foreach (var (sig, name) in _sigTypes) { m.Append($"  (type {name} (func{sig}))\n"); }
+        if (_fnTable.Count > 0)
+        {
+            // Slot 0 stays empty: the null function pointer, which call_indirect traps on.
+            m.Append($"  (table {_fnTable.Count + 1} funcref)\n");
+            m.Append($"  (elem (i32.const 1) func {string.Join(" ", _fnTable.Select(n => "$" + n))})\n");
+        }
         m.Append($"  (global $__sp (mut i32) (i32.const {stackTop}))\n");
         if (usesHeap)
         {
@@ -788,6 +805,74 @@ internal sealed partial class WatBackend
         return func.ToString();
     }
 
+    /// <summary>The table index of function <paramref name="fn"/>, the value a pointer to it
+    /// holds, given it on first use.</summary>
+    private int TableIndex(Symbol fn)
+    {
+        var name = fn.TargetName;
+        if (!_defined.Contains(fn.Name))
+        {
+            throw new IrUnsupportedException($"the wat target cannot take the address of '{fn.Name}', which the program does not define");
+        }
+        if (!_fnTableIndex.TryGetValue(name, out var index))
+        {
+            _fnTable.Add(name);
+            index = _fnTable.Count;
+            _fnTableIndex[name] = index;
+        }
+        return index;
+    }
+
+    /// <summary>The module type name of the signature a call through a pointer of type
+    /// <paramref name="fnType"/> checks: its parameters' and result's wasm value types.</summary>
+    private string SigType(CType fnType)
+    {
+        var f = fnType.Unqualified switch
+        {
+            CType.Func ft => ft,
+            CType.Pointer { Pointee: var pt } when pt.Unqualified is CType.Func pf => pf,
+            _ => throw new IrUnsupportedException($"the wat target cannot call through a {fnType.Describe()}"),
+        };
+        if (f.Variadic)
+        {
+            throw new IrUnsupportedException("the wat target does not yet call a variadic function through a pointer");
+        }
+        if (IsAggregate(f.Return) || f.Params.Any(IsAggregate))
+        {
+            throw new IrUnsupportedException("the wat target does not yet pass or return a struct by value (through a pointer)");
+        }
+        var sig = string.Concat(f.Params.Where(p => p.Unqualified is not CType.VoidType).Select(p => $" (param {ValType(p)})"))
+            + (f.Return.Unqualified is CType.VoidType ? "" : $" (result {ValType(f.Return)})");
+        if (!_sigTypes.TryGetValue(sig, out var name))
+        {
+            name = $"$__sig{_sigTypes.Count}";
+            _sigTypes[sig] = name;
+        }
+        return name;
+    }
+
+    /// <summary>A call through a function pointer: the arguments (each converted to its
+    /// parameter's type when the pointer's type gives them), then the pointer (a table
+    /// index), then <c>call_indirect</c>, which traps on a null or mistyped one.</summary>
+    private void EmitCallIndirect(CExpr callee, IReadOnlyList<CExpr> args, IReadOnlyList<CType>? paramTypes)
+    {
+        var sig = SigType(callee.Type);
+        var fnParams = (callee.Type.Unqualified switch
+        {
+            CType.Func ft => ft,
+            CType.Pointer { Pointee: var pt } => pt.Unqualified as CType.Func,
+            _ => null,
+        })?.Params;
+        var types = paramTypes ?? fnParams;
+        for (var i = 0; i < args.Count; i++)
+        {
+            EmitExpr(args[i]);
+            if (types is { } pts && i < pts.Count) { EmitConvert(args[i].Type, pts[i]); }
+        }
+        EmitExpr(callee);
+        Line($"call_indirect (type {sig})");
+    }
+
     private void EmitLoop(CExpr? cond, CStmt body, CExpr? post, bool testAtTop)
     {
         var n = _labelSeq++;
@@ -941,6 +1026,9 @@ internal sealed partial class WatBackend
                 EmitAddress(m);
                 if (!IsAddressValued(e.Type)) { Line(LoadInstr(e.Type)); }
                 break;
+            case IndirectCall ic:
+                EmitCallIndirect(ic.Callee, ic.Args, ic.ParamTypes);
+                break;
             case SizeOfExpr so:
                 // The layout model's size (sizeof of a struct, an array, a pointer is 8).
                 Line($"{ValType(e.Type)}.const {WasmSizeOf(so.Of)}");
@@ -991,6 +1079,11 @@ internal sealed partial class WatBackend
     /// frame-resident scalar loads from its slot, a fast local is a <c>local.get</c>.</summary>
     private void EmitVarRead(VarRef v)
     {
+        if (v.Sym.Kind == SymKind.Func)
+        {
+            Line($"i32.const {TableIndex(v.Sym)}");
+            return;
+        }
         if (v.Sym.IsGlobal)
         {
             EmitGlobalAddr(v.Sym);
@@ -1359,6 +1452,12 @@ internal sealed partial class WatBackend
 
     private void EmitCall(Call c)
     {
+        // A call through a function-pointer variable (`fp(x)`): its value is a table index.
+        if (c.CalleeSym is { Kind: SymKind.Var or SymKind.Param } fpVar)
+        {
+            EmitCallIndirect(new VarRef(fpVar) { Type = fpVar.Type }, c.Args, c.ParamTypes);
+            return;
+        }
         // The printf family with a string-literal format is expanded inline (no
         // runtime function); a user-defined one, if any, wins and routes through the
         // generic path below.
@@ -1775,6 +1874,9 @@ internal sealed partial class WatBackend
         {
             case Paren p:
                 EmitAddress(p.Inner);
+                break;
+            case VarRef { Sym.Kind: SymKind.Func } fn:
+                Line($"i32.const {TableIndex(fn.Sym)}");
                 break;
             case VarRef { Sym.IsGlobal: true } g:
                 EmitGlobalAddr(g.Sym);
