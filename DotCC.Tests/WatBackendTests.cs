@@ -210,9 +210,9 @@ public sealed class WatBackendTests
     [Fact]
     public void library_call_is_rejected_not_miscompiled()
     {
-        // An unwired libc call (scanf needs host imports we don't emit) fails loudly
-        // rather than miscompiling.
-        Should.Throw<CompileException>(() => Wat("int main(void){ int x; scanf(\"%d\", &x); return 0; }"));
+        // A libc call the wat libc has no source for (system: WASI cannot start a process)
+        // fails loudly rather than miscompiling.
+        Should.Throw<CompileException>(() => Wat("#include <stdlib.h>\nint main(void){ return system(\"ls\"); }"));
     }
 
     [Fact]
@@ -312,6 +312,16 @@ public sealed class WatBackendTests
         wat.ShouldContain("call $printf");
         wat.ShouldContain("(func $vsnprintf");
         wat.ShouldContain("call $__pf_int_s");
+    }
+
+    [Fact]
+    public void library_units_keep_their_own_statics()
+    {
+        // musl's strtod.c and strtol.c each define a static strtox, with different signatures:
+        // each unit calls its own, as two programs' units would.
+        var wat = Wat("#include <stdlib.h>\nint main(void){ return (int)strtod(\"1.5\", 0) + (int)strtol(\"2\", 0, 10); }");
+        wat.ShouldContain("(func $strtox ");
+        wat.ShouldContain("(func $strtox__2 ");
     }
 
     [Fact]
@@ -792,11 +802,11 @@ public sealed class WatBackendTests
     {
         // The wat target's libc is C (DotCC.Lib/WatLibc, one function per file) compiled with
         // the program: a called function brings its file, and what that calls, in turn
-        // (atoi -> strtol -> __strtox), and nothing else comes along.
+        // (atoi -> strtol -> __intscan), and nothing else comes along.
         var wat = Wat("#include <stdlib.h>\n#include <string.h>\nint main(void){ return atoi(\"42\") + (int)strlen(\"ab\"); }");
         wat.ShouldContain("(func $atoi ");
         wat.ShouldContain("(func $strtol ");
-        wat.ShouldContain("(func $__strtox ");
+        wat.ShouldContain("(func $__intscan ");
         wat.ShouldContain("(func $strlen ");
         wat.ShouldNotContain("$strcmp");
         Wat("int main(void){ return 0; }").ShouldNotContain("$strlen");

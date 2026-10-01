@@ -43,6 +43,12 @@ bit-identical results to the same sources built natively (checked against gcc in
     `__stdin_FILE`-style objects are `static`.
   `tmpfile` (in memory, after `fmemopen`), `vsnprintf`, `vfprintf` and the open-file list are
   dotcc's own, in `..`.
+- **scanf** (`src/stdio/vfscanf.c`, `vsscanf.c`, `sscanf.c`, `fscanf.c`, `scanf.c`, `vscanf.c`,
+  `src/internal/intscan.c` as `__intscan.c`) and the **strtol family** (`src/stdlib/strtol.c`,
+  its `__intscan` path, split one function per file). Edits: no weak aliases; `vfscanf`
+  includes `../include/mbstate.h` (the conversion state and `mbrtowc`, UTF-8 to dotcc's 16-bit
+  `wchar_t`, which are dotcc's own) where it included `<wctype.h>`, from which it used nothing;
+  the `va_list` forms are declared in `../include/scanf_impl.h`.
 
 What musl's build gets from its own headers, these get from `../include/`: `libm.h` and
 `features.h` adapted from musl's `src/internal/` and `src/include/`, a `math.h` with

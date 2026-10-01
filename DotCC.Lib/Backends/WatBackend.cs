@@ -770,6 +770,13 @@ internal sealed partial class WatBackend
                 }
                 if (e is StructInit or DefaultLit && IsAggregate(e.Type)) { _literalSlots[e] = PlaceTemp(e.Type); return; }
                 if (e is StackArray sa) { _literalSlots[e] = PlaceTemp(new CType.Array(sa.Element, sa.Elems.Count)); return; }
+                // A scalar compound literal whose address is taken ((char){c}, which the IR has
+                // as the cast it converts like) is an object: it gets a slot its value goes to.
+                if (e is Unary { Op: UnOp.AddrOf, Operand: Cast scalar } && !IsAggregate(scalar.Type))
+                {
+                    _literalSlots[scalar] = PlaceTemp(scalar.Type);
+                    return;
+                }
                 // Complex arithmetic and a real converted to complex leave their value in a slot.
                 if (IsComplex(e.Type) && e is Binary or Unary { Op: UnOp.Neg or UnOp.Plus } or Cast)
                 {
@@ -3769,6 +3776,13 @@ internal sealed partial class WatBackend
                 break;
             case NameRef { RawName: "errno" }:
                 EmitErrnoAddr();
+                break;
+            case Cast scalar when !IsAggregate(scalar.Type) && _literalSlots.TryGetValue(scalar, out var scalarSlot):
+                // A scalar compound literal: its value, stored in its slot, which is the address.
+                EmitFrameAddr(scalarSlot);
+                EmitExpr(scalar);
+                Line(StoreInstr(scalar.Type));
+                EmitFrameAddr(scalarSlot);
                 break;
             case StructInit or StackArray when _literalSlots.ContainsKey(lv):
                 EmitExpr(lv);   // a compound literal is an lvalue: its slot, filled
