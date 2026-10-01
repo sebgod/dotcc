@@ -68,6 +68,7 @@ ctype-predicates
 declaration-specifiers
 declarator-lists
 deref-incr-decr
+designated-paths
 digit-separators
 embed-basic
 empty-initializer
@@ -87,6 +88,7 @@ file-scope-arrays
 file-scope-multi-decl
 fizzbuzz
 flexible-array-member
+flexible-array-storage
 float-limits
 float-literal-suffix
 fn-typed-params
@@ -173,6 +175,7 @@ sizeof-struct
 sizeof-unsigned
 small-ops
 sprintf-snprintf
+static-address-order
 static-extern-same-name
 static-local-array
 static-locals
