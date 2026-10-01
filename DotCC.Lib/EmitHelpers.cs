@@ -259,6 +259,20 @@ internal static class EmitHelpers
         return (sb.ToString(), bytes.Count);
     }
 
+    /// <summary>A C# u8 literal (<c>"…"u8</c>) holding exactly <paramref name="bytes"/>, with no
+    /// terminator of its own, or null when one is past 0x7F (a u8 literal UTF-8-encodes such a
+    /// byte as two). Each byte is an ASCII character, so the text reads as the string it is.</summary>
+    internal static string? U8Literal(IReadOnlyList<int> bytes)
+    {
+        var items = new List<StrItem>(bytes.Count);
+        foreach (var b in bytes)
+        {
+            if (b is < 0 or > 0x7F) { return null; }
+            items.Add(new StrItem(false, b));
+        }
+        return $"\"{EmitU8(items).Escaped}\"u8";
+    }
+
     /// <summary>Decode adjacent C string-literal segments to their exact byte
     /// values — UTF-8 for source chars, verbatim for escapes — EXCLUDING the NUL
     /// terminator (the caller appends and zero-pads). Used by the IR to lower

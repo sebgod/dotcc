@@ -3304,6 +3304,21 @@ internal sealed partial class CSharpBackend
                     }
                     var elemCs = Cs(av.Element);
                     var slot = IsFixedBufferType(elemCs) ? at : $"(({elemCs}*)&{at})";
+                    if (elemCs is "byte" or "sbyte" or "short" or "ushort" or "int" or "uint" or "long" or "ulong"
+                        && ConstantRun(av) is { } run)
+                    {
+                        // One copy from read-only data (`L` over a u8 literal or a constant array of a
+                        // C# primitive is the PE's own bytes) instead of a store per element: a string's
+                        // characters in CPython's static objects were 6,700 single-byte stores in one
+                        // method. A byte run that is ASCII is spelled as the string it is.
+                        var elems = av.Elems.Take(run).ToList();
+                        var source = av.Element.SizeOf == 1
+                            && DotCC.EmitHelpers.U8Literal(elems.Select(e => (int)((((LitInt)e).Value ?? 0) & 0xFF)).ToList()) is { } u8
+                                ? u8
+                                : $"new {elemCs}[] {{ {string.Join(", ", elems.Select(e => StaticInit(e, av.Element)))} }}";
+                        body.Append($"        System.Runtime.CompilerServices.Unsafe.CopyBlockUnaligned({slot}, L({source}), {run} * (uint)sizeof({elemCs}));\n");
+                        break;
+                    }
                     for (var i = 0; i < av.Elems.Count; i++)
                     {
                         var e = av.Elems[i];
@@ -3316,6 +3331,23 @@ internal sealed partial class CSharpBackend
                     break;
             }
         }
+    }
+
+    /// <summary>The element count up to the last non-zero element of an integer array member whose
+    /// elements are all integer constants, when there are at least two (one copy reaches the member
+    /// once where each store walks its whole member path again); null otherwise. The zero tail past
+    /// it is left to the object's zeroed storage.</summary>
+    private static int? ConstantRun(ArrayValue av)
+    {
+        const int MinRun = 2;
+        if (av.Element.Unqualified is not CType.Prim { IsInteger: true } || av.Elems.Count < MinRun) { return null; }
+        var run = 0;
+        for (var i = 0; i < av.Elems.Count; i++)
+        {
+            if (av.Elems[i] is not LitInt li) { return null; }
+            if (li.Value != 0) { run = i + 1; }
+        }
+        return run >= MinRun ? run : null;
     }
 
     /// <summary>Whether a static member's value is an integer zero or a null pointer, which the
