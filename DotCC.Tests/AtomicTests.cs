@@ -214,7 +214,9 @@ public sealed class AtomicTests
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
             emitted.ShouldContain("Atomic.CompareExchange(ref *((byte*)&v), ref *(&want), (byte)(1))");
-            emitted.ShouldContain("return won + Atomic.Load(ref *((byte*)&v)) + Atomic.Load(ref *(&flag)) + 1;");
+            // atomic_load of an atomic_bool is a _Bool and atomic_is_lock_free a _Bool (C11
+            // 7.17), each promoted to int in the sum.
+            emitted.ShouldContain("return won + Atomic.Load(ref *((byte*)&v)) + (int)(Atomic.Load(ref *(&flag))) + (int)(1);");
         }
         finally { File.Delete(src); }
     }

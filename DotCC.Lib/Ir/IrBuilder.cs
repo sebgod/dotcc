@@ -3202,7 +3202,10 @@ internal sealed partial class IrBuilder
             // mangled `name__sN` field, a CS0136 rename), and the call must use that.
             var calleeSym = sym is { Kind: SymKind.Func }
                 || sym is { Kind: SymKind.Var or SymKind.Param } && fn is not null ? sym : null;
-            return new Call(name, args, fn?.Params, calleeSym) { Type = fn?.Return ?? CType.Int };
+            // No header declares C11's atomic generic functions (their operand types vary):
+            // an undeclared one has its standard result type, not an implicit int.
+            var type = fn?.Return ?? (sym is null ? AtomicGenericResult(name, args) : null) ?? CType.Int;
+            return new Call(name, args, fn?.Params, calleeSym) { Type = type };
         }
 
         // Indirect call through a computed fn-ptr expression: `(*fp)(x)`,
@@ -3231,6 +3234,26 @@ internal sealed partial class IrBuilder
         // The function pointer's parameter types drive the same call-argument
         // coercion as a direct call's (GH #230: `s.fn(0)` passes `null`).
         return new IndirectCall(callee, args, calleeFn?.Params) { Type = calleeFn?.Return ?? CType.Int };
+    }
+
+    /// <summary>The result type of a C11 <c>&lt;stdatomic.h&gt;</c> generic function (7.17):
+    /// the atomic object's non-atomic type for a load, an exchange or a fetch-and-modify,
+    /// <c>_Bool</c> for a compare-exchange, a flag test or the lock-free query, <c>void</c> for a
+    /// store, an init, a flag clear or a fence. Null for any other name.</summary>
+    private static CType? AtomicGenericResult(string name, IReadOnlyList<CExpr> args)
+    {
+        var generic = name.EndsWith("_explicit", StringComparison.Ordinal) ? name[..^"_explicit".Length] : name;
+        CType? Object() => args.Count > 0 && args[0].Type.Unqualified is CType.Pointer p ? p.Pointee.Unqualified : null;
+        return generic switch
+        {
+            "atomic_load" or "atomic_exchange" or "atomic_fetch_add" or "atomic_fetch_sub"
+                or "atomic_fetch_or" or "atomic_fetch_and" or "atomic_fetch_xor" => Object(),
+            "atomic_compare_exchange_strong" or "atomic_compare_exchange_weak"
+                or "atomic_flag_test_and_set" or "atomic_is_lock_free" => CType.Bool,
+            "atomic_store" or "atomic_init" or "atomic_flag_clear"
+                or "atomic_thread_fence" or "atomic_signal_fence" => CType.Void,
+            _ => null,
+        };
     }
 
     /// <summary>True when <paramref name="t"/> is a function pointer (or a bare
