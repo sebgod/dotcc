@@ -3499,10 +3499,12 @@ internal sealed partial class WatBackend
 
     /// <summary>True for a conversion the inline expansion lays out (<see cref="EmitConversion"/>):
     /// not a width or precision taken from an argument (<c>*</c>), nor a <c>%n</c>, nor a
-    /// precision wider than the formatter stages, nor <c>#</c> where C gives it no meaning.</summary>
+    /// precision wider than the formatter stages, nor <c>#</c> where C gives it no meaning, nor
+    /// a wide character or string (<c>%lc</c>, <c>%ls</c>), which the libc writes as UTF-8.</summary>
     private static bool ExpandsInline(PrintfFormat.Spec spec) => spec.Conv switch
     {
-        'c' or 's' or 'p' => !spec.Alt,
+        'c' or 's' => !spec.Alt && spec.Length != 'l',
+        'p' => !spec.Alt,
         'd' or 'i' or 'u' => !spec.Alt && spec.Precision <= MaxNumDigits,
         'x' or 'X' or 'o' => spec.Precision <= MaxNumDigits,
         'f' or 'F' or 'e' or 'E' or 'g' or 'G' or 'a' or 'A' => spec.Precision <= MaxFloatPrec,
