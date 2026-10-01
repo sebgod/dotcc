@@ -840,6 +840,24 @@ public sealed class WatBackendTests
     }
 
     [Fact]
+    public void Two_units_statics_of_one_name_are_two_objects()
+    {
+        // musl's __sin.c and __sindf.c both define `static const double S1`: each unit reads
+        // its own, at its own address (one shared slot made sin() wrong from the 10th digit).
+        var a = Path.Combine(Path.GetTempPath(), $"dotcc-wat-{System.Guid.NewGuid():N}.c");
+        var b = Path.Combine(Path.GetTempPath(), $"dotcc-wat-{System.Guid.NewGuid():N}.c");
+        File.WriteAllText(a, "static const double K = 1.5;\ndouble fa(void) { return K; }\n");
+        File.WriteAllText(b, "static const double K = 2.5;\ndouble fb(void) { return K; }\nint main(void) { return fb() > 0; }\n");
+        try
+        {
+            var wat = Compiler.EmitWat(new[] { a, b });
+            wat.ShouldContain("(func $fa (result f64)\n    i32.const 1024\n    f64.load");
+            wat.ShouldContain("(func $fb (result f64)\n    i32.const 1032\n    f64.load");
+        }
+        finally { File.Delete(a); File.Delete(b); }
+    }
+
+    [Fact]
     public void A_binary_literal_is_written_in_decimal()
     {
         // wat reads decimal and 0x hex, not C23's 0b: wat2wasm rejected `i32.const 0b1011`.
