@@ -14,4 +14,7 @@
 /* The time of a clock, in nanoseconds, into *time; precision is a hint. */
 int __wasi_clock_time_get(unsigned clock_id, unsigned long precision, unsigned long *time);
 
+/* buf_len random bytes from the host's secure source into buf (a WASI size is 32 bits). */
+int __wasi_random_get(void *buf, unsigned buf_len);
+
 #endif

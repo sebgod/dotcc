@@ -955,6 +955,14 @@ public sealed class WatBackendTests
     }
 
     [Fact]
+    public void Getrandom_fills_from_wasi_random_get()
+    {
+        // A WASI size is 32 bits: the prototype's `unsigned` makes the import's i32.
+        var wat = Wat("#include <sys/random.h>\nint main(void) { unsigned char b[8]; return getrandom(b, sizeof b, 0) == 8; }");
+        wat.ShouldContain("(import \"wasi_snapshot_preview1\" \"random_get\" (func $__wasi_random_get (param i32) (param i32) (result i32)))");
+    }
+
+    [Fact]
     public void Time_reads_the_wasi_realtime_clock()
     {
         var wat = Wat("#include <time.h>\nint main(void) { return time(0) > 1000000000; }");

@@ -341,6 +341,16 @@ public sealed class WatOracleTests
         + " printf(\"%d %u %d %llx %lld|\", g.a, g.b, g.c, g.big, (long long)g.sbig);"
         + " printf(\"%d %d\", (int)offsetof(struct S, c), (int)sizeof(struct S)); return 0; }",
         "-2 3 7 -3 3 7 -300000|-2 17 99 abcde12345 -5|4 16")]
+    // The calendar in C: gmtime of a leap day and of the second before the Epoch, strftime's
+    // conversions (and 0 when the result does not fit), asctime (== gcc with TZ=UTC).
+    [InlineData("#include <stdio.h>\n#include <time.h>\n"
+        + "int main(void){ time_t leap = 951782400; time_t before = -1; char b[160]; struct tm g = *gmtime(&leap);"
+        + " strftime(b, sizeof b, \"%F %T %j %u %w %a %A %b %B %e %I%p %y %C %D %R %%\", &g); printf(\"%s|\", b);"
+        + " struct tm *n = gmtime(&before);"
+        + " printf(\"%d-%d-%d %d:%d:%d wday=%d yday=%d|\", n->tm_year + 1900, n->tm_mon + 1, n->tm_mday, n->tm_hour, n->tm_min, n->tm_sec, n->tm_wday, n->tm_yday);"
+        + " printf(\"%d|\", (int)strftime(b, 5, \"%Y-%m\", &g)); printf(\"%s\", asctime(&g)); printf(\"%s\", asctime(n)); return 0; }",
+        "2000-02-29 00:00:00 060 2 2 Tue Tuesday Feb February 29 12AM 00 20 02/29/00 00:00 %|1969-12-31 23:59:59 wday=3 yday=364|0|"
+        + "Tue Feb 29 00:00:00 2000\nWed Dec 31 23:59:59 1969\n")]
     // strerror's glibc wording, strtoimax past 32 bits, the one "C" locale, and time() from
     // WASI's clock.
     [InlineData("#include <stdio.h>\n#include <string.h>\n#include <errno.h>\n#include <inttypes.h>\n#include <locale.h>\n#include <time.h>\n"
@@ -360,8 +370,9 @@ public sealed class WatOracleTests
 
     /// <summary>The WASI preview1 functions a dotcc module imports, as JavaScript for node:
     /// <c>fd_write</c> keeps what is written to fd 1 in <c>out</c>, <c>proc_exit</c> unwinds
-    /// with the status, and <c>clock_time_get</c> reads node's clocks (0 realtime, 1 monotonic,
-    /// 2 and 3 CPU time, in nanoseconds). <c>inst</c> must be set before <c>main</c> runs.</summary>
+    /// with the status, <c>clock_time_get</c> reads node's clocks (0 realtime, 1 monotonic,
+    /// 2 and 3 CPU time, in nanoseconds), and <c>random_get</c> fills from node's secure source.
+    /// <c>inst</c> must be set before <c>main</c> runs.</summary>
     private const string WasiShimJs =
         "let inst; const out=[];" +
         "const wasi={" +
@@ -381,7 +392,8 @@ public sealed class WatOracleTests
         "else if(id===1){ns=process.hrtime.bigint();}" +
         "else if(id===2||id===3){const u=process.cpuUsage();ns=BigInt(u.user+u.system)*1000n;}" +
         "else{return 28;}" +
-        "new DataView(inst.exports.memory.buffer).setBigUint64(timePtr,ns,true);return 0;}};";
+        "new DataView(inst.exports.memory.buffer).setBigUint64(timePtr,ns,true);return 0;}," +
+        "random_get:(buf,len)=>{require('crypto').randomFillSync(new Uint8Array(inst.exports.memory.buffer,buf,len));return 0;}};";
 
     /// <summary>EmitWat → wat2wasm → node, returning <c>main()</c>'s value.</summary>
     private static int RunWat(string source)

@@ -102,6 +102,7 @@ fnptr-table
 for-shadow
 fprintf-streams
 function-declarators
+getrandom
 goto-cleanup
 goto-into-block-decl
 goto-into-loop
@@ -200,6 +201,7 @@ tag-declarations
 ternary-cmp-arm
 tgmath-overload
 time-basic
+time-calendar
 truthy
 typedef-alias-resolve
 typedef-anon-struct
