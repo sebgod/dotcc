@@ -1085,6 +1085,24 @@ public sealed class WatBackendTests
     }
 
     [Fact]
+    public void A_complex_product_writes_both_parts_into_a_frame_slot()
+    {
+        // (a + bi)(c + di): ac - bd and bc + ad, stored at the slot and slot + 8, whose
+        // address is the product's value.
+        var wat = Wat("#include <complex.h>\ndouble f(double _Complex x, double _Complex y) { return creal(x * y); }\nint main(void) { return (int)f(1.0 + 2.0 * I, 3.0); }");
+        wat.ShouldContain("f64.mul\n    f64.sub\n    f64.store");
+        wat.ShouldContain("f64.mul\n    f64.add\n    f64.store");
+        wat.ShouldContain("(func $creal ");
+    }
+
+    [Fact]
+    public void A_real_passed_for_a_complex_parameter_gets_a_zero_imaginary_part()
+    {
+        var wat = Wat("#include <complex.h>\nint main(void) { return (int)creal(2.5); }");
+        wat.ShouldContain("f64.const 0\n    f64.store");
+    }
+
+    [Fact]
     public void A_binary_literal_is_written_in_decimal()
     {
         // wat reads decimal and 0x hex, not C23's 0b: wat2wasm rejected `i32.const 0b1011`.

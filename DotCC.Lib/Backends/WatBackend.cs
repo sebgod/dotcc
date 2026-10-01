@@ -451,6 +451,12 @@ internal sealed partial class WatBackend
                 }
                 if (e is StructInit or DefaultLit && IsAggregate(e.Type)) { _literalSlots[e] = PlaceTemp(e.Type); return; }
                 if (e is StackArray sa) { _literalSlots[e] = PlaceTemp(new CType.Array(sa.Element, sa.Elems.Count)); return; }
+                // Complex arithmetic and a real converted to complex leave their value in a slot.
+                if (IsComplex(e.Type) && e is Binary or Unary { Op: UnOp.Neg or UnOp.Plus } or Cast)
+                {
+                    _literalSlots[e] = PlaceTemp(e.Type);
+                    return;
+                }
                 if (CallShape(e) is not { } shape) { return; }
                 int? result = IsAggregate(shape.Fn.Return) ? PlaceTemp(shape.Fn.Return) : null;
                 var args = new Dictionary<int, int>();
@@ -799,12 +805,229 @@ internal sealed partial class WatBackend
                 Line("memory.fill");
                 break;
             default:
-                EmitInitAddr(offset);
-                EmitExpr(init);
-                Line($"i32.const {size}");
-                Line("memory.copy");
+                EmitCopyInto(() => EmitInitAddr(offset), init, type);
                 break;
         }
+    }
+
+    /// <summary>The frame slot a complex expression's value is written to (see the layout pass).</summary>
+    private int ComplexSlot(CExpr e) =>
+        _literalSlots.TryGetValue(e, out var slot)
+            ? slot
+            : throw new IrUnsupportedException("the wat target has no frame slot for this complex value (complex arithmetic in a static initializer)");
+
+    /// <summary>The address of a complex constant <c>re + im·i</c> in the data area.</summary>
+    private int ComplexConstant(double re, double im)
+    {
+        var bytes = new List<int>(16);
+        foreach (var b in BitConverter.GetBytes(re)) { bytes.Add(b); }
+        foreach (var b in BitConverter.GetBytes(im)) { bytes.Add(b); }
+        return InternBytes(bytes);
+    }
+
+    /// <summary>Evaluate <paramref name="x"/> into two f64 scratch locals: a complex operand's
+    /// real and imaginary parts, or a real operand converted to double with a zero imaginary
+    /// part. With <paramref name="alreadyAddress"/>, the complex operand's address is on the
+    /// stack already, and what is left is whether either part is non-zero (a _Bool).</summary>
+    private void EmitComplexParts(CExpr x, out string re, out string im, bool alreadyAddress = false)
+    {
+        re = AcquireScratch(CType.Double);
+        im = AcquireScratch(CType.Double);
+        if (IsComplex(x.Type))
+        {
+            var addr = AcquireScratch("addr");
+            if (!alreadyAddress) { EmitExpr(x); }
+            Line($"local.tee {addr}");
+            Line("f64.load");
+            Line($"local.set {re}");
+            Line($"local.get {addr}");
+            Line("i32.const 8");
+            Line("i32.add");
+            Line("f64.load");
+            Line($"local.set {im}");
+            ReleaseScratch("addr");
+        }
+        else
+        {
+            EmitExpr(x);
+            EmitConvert(x.Type, CType.Double);
+            Line($"local.set {re}");
+            Line("f64.const 0");
+            Line($"local.set {im}");
+        }
+        if (alreadyAddress)
+        {
+            Line($"local.get {re}");
+            Line("f64.const 0");
+            Line("f64.ne");
+            Line($"local.get {im}");
+            Line("f64.const 0");
+            Line("f64.ne");
+            Line("i32.or");
+            ReleaseScratch(CType.Double);
+            ReleaseScratch(CType.Double);
+        }
+    }
+
+    /// <summary>Store the two f64 expressions <paramref name="re"/> and <paramref name="im"/> leave
+    /// into complex slot <paramref name="slot"/>, and leave the slot's address.</summary>
+    private void StoreComplex(int slot, Action re, Action im)
+    {
+        EmitFrameAddr(slot);
+        re();
+        Line("f64.store");
+        EmitFrameAddr(slot);
+        Line("i32.const 8");
+        Line("i32.add");
+        im();
+        Line("f64.store");
+        EmitFrameAddr(slot);
+    }
+
+    /// <summary>Complex <c>+ - * /</c>, each operand complex or real, into the expression's slot:
+    /// the formulas of the C# backend's System.Numerics.Complex, so the two targets agree, a real
+    /// operand as its own overload treats it (<c>z * r</c> scales both parts, <c>z / r</c> divides
+    /// them) and a complex divisor by Smith's algorithm.</summary>
+    private void EmitComplexArith(Binary b)
+    {
+        var slot = ComplexSlot(b);
+        var leftReal = !IsComplex(b.Left.Type);
+        var rightReal = !IsComplex(b.Right.Type);
+        EmitComplexParts(b.Left, out var a, out var bi);
+        EmitComplexParts(b.Right, out var c, out var d);
+        void Op(string x, string op, string y) { Line($"local.get {x}"); Line($"local.get {y}"); Line($"f64.{op}"); }
+        switch (b.Op)
+        {
+            case BinOp.Add or BinOp.Sub:
+            {
+                var op = b.Op == BinOp.Add ? "add" : "sub";
+                StoreComplex(slot, () => Op(a, op, c), () => Op(bi, op, d));
+                break;
+            }
+            case BinOp.Mul when rightReal:
+                StoreComplex(slot, () => Op(a, "mul", c), () => Op(bi, "mul", c));
+                break;
+            case BinOp.Mul when leftReal:
+                StoreComplex(slot, () => Op(a, "mul", c), () => Op(a, "mul", d));
+                break;
+            case BinOp.Mul:
+                StoreComplex(slot,
+                    () => { Op(a, "mul", c); Op(bi, "mul", d); Line("f64.sub"); },
+                    () => { Op(bi, "mul", c); Op(a, "mul", d); Line("f64.add"); });
+                break;
+            case BinOp.Div when rightReal:
+                StoreComplex(slot, () => Op(a, "div", c), () => Op(bi, "div", c));
+                break;
+            case BinOp.Div:
+                EmitComplexDivide(slot, a, bi, c, d, leftReal);
+                break;
+            default:
+                throw new IrUnsupportedException($"the wat target does not support the complex operator {b.Op}");
+        }
+        ReleaseScratch(CType.Double); ReleaseScratch(CType.Double);
+        ReleaseScratch(CType.Double); ReleaseScratch(CType.Double);
+    }
+
+    /// <summary>(a + bi) / (c + di) by Smith's algorithm, as System.Numerics.Complex divides
+    /// (its <c>double / Complex</c> overload for a real dividend), into <paramref name="slot"/>.</summary>
+    private void EmitComplexDivide(int slot, string a, string b, string c, string d, bool leftReal)
+    {
+        var ratio = AcquireScratch(CType.Double);
+        var denom = AcquireScratch(CType.Double);
+        void Get(string x) => Line($"local.get {x}");
+        // |d| < |c|: doc = d / c, denominator c + d·doc; else cod = c / d, denominator d + c·cod.
+        Get(d); Line("f64.abs"); Get(c); Line("f64.abs"); Line("f64.lt");
+        Line("if");
+        _indent++;
+        Get(d); Get(c); Line("f64.div"); Line($"local.set {ratio}");
+        Get(c); Get(d); Get(ratio); Line("f64.mul"); Line("f64.add"); Line($"local.set {denom}");
+        if (leftReal)
+        {
+            StoreComplex(slot,
+                () => { Get(a); Get(denom); Line("f64.div"); },
+                () => { Get(a); Line("f64.neg"); Get(ratio); Line("f64.mul"); Get(denom); Line("f64.div"); });
+        }
+        else
+        {
+            StoreComplex(slot,
+                () => { Get(a); Get(b); Get(ratio); Line("f64.mul"); Line("f64.add"); Get(denom); Line("f64.div"); },
+                () => { Get(b); Get(a); Get(ratio); Line("f64.mul"); Line("f64.sub"); Get(denom); Line("f64.div"); });
+        }
+        Line("drop");
+        _indent--;
+        Line("else");
+        _indent++;
+        Get(c); Get(d); Line("f64.div"); Line($"local.set {ratio}");
+        Get(d); Get(c); Get(ratio); Line("f64.mul"); Line("f64.add"); Line($"local.set {denom}");
+        if (leftReal)
+        {
+            StoreComplex(slot,
+                () => { Get(a); Get(ratio); Line("f64.mul"); Get(denom); Line("f64.div"); },
+                () => { Get(a); Line("f64.neg"); Get(denom); Line("f64.div"); });
+        }
+        else
+        {
+            StoreComplex(slot,
+                () => { Get(b); Get(a); Get(ratio); Line("f64.mul"); Line("f64.add"); Get(denom); Line("f64.div"); },
+                () => { Get(a); Line("f64.neg"); Get(b); Get(ratio); Line("f64.mul"); Line("f64.add"); Get(denom); Line("f64.div"); });
+        }
+        Line("drop");
+        _indent--;
+        Line("end");
+        EmitFrameAddr(slot);
+        ReleaseScratch(CType.Double);
+        ReleaseScratch(CType.Double);
+    }
+
+    /// <summary>Complex <c>==</c> and <c>!=</c>: both parts equal.</summary>
+    private void EmitComplexCompare(Binary b)
+    {
+        EmitComplexParts(b.Left, out var a, out var bi);
+        EmitComplexParts(b.Right, out var c, out var d);
+        Line($"local.get {a}"); Line($"local.get {c}"); Line("f64.eq");
+        Line($"local.get {bi}"); Line($"local.get {d}"); Line("f64.eq");
+        Line("i32.and");
+        if (b.Op == BinOp.Ne) { Line("i32.eqz"); }
+        ReleaseScratch(CType.Double); ReleaseScratch(CType.Double);
+        ReleaseScratch(CType.Double); ReleaseScratch(CType.Double);
+        EmitConvert(CType.Int, b.Type);
+    }
+
+    /// <summary>Complex unary <c>-</c> (both parts negated) and <c>+</c>, into the slot.</summary>
+    private void EmitComplexUnary(Unary u)
+    {
+        var slot = ComplexSlot(u);
+        EmitComplexParts(u.Operand, out var re, out var im);
+        var neg = u.Op == UnOp.Neg;
+        StoreComplex(slot,
+            () => { Line($"local.get {re}"); if (neg) { Line("f64.neg"); } },
+            () => { Line($"local.get {im}"); if (neg) { Line("f64.neg"); } });
+        ReleaseScratch(CType.Double); ReleaseScratch(CType.Double);
+    }
+
+    /// <summary>Copy <paramref name="value"/> into the <paramref name="type"/> object whose address
+    /// <paramref name="dest"/> pushes: an aggregate's bytes, or, for a real value where a
+    /// <c>double _Complex</c> is wanted (C converts it, 6.3.1.7), the value as the real part and
+    /// a zero imaginary part.</summary>
+    private void EmitCopyInto(Action dest, CExpr value, CType type)
+    {
+        if (IsComplex(type) && !IsComplex(value.Type))
+        {
+            dest();
+            EmitExpr(value);
+            EmitConvert(value.Type, CType.Double);
+            Line("f64.store");
+            dest();
+            Line("i32.const 8");
+            Line("i32.add");
+            Line("f64.const 0");
+            Line("f64.store");
+            return;
+        }
+        dest();
+        EmitExpr(value);
+        Line($"i32.const {WasmSizeOf(type)}");
+        Line("memory.copy");
     }
 
     /// <summary>Store the members <paramref name="si"/> gives into the (zeroed) aggregate of
@@ -862,10 +1085,7 @@ internal sealed partial class WatBackend
         }
         if (IsAggregate(type))
         {
-            EmitInitAddr(at);
-            EmitExpr(value);
-            Line($"i32.const {WasmSizeOf(type)}");
-            Line("memory.copy");
+            EmitCopyInto(() => EmitInitAddr(at), value, type);
             return;
         }
         EmitInitAddr(at);
@@ -977,10 +1197,8 @@ internal sealed partial class WatBackend
             }
             if (temps.Args is { } argSlots && argSlots.TryGetValue(i, out var slot))
             {
-                EmitFrameAddr(slot);
-                EmitExpr(args[i]);
-                Line($"i32.const {WasmSizeOf(args[i].Type)}");
-                Line("memory.copy");
+                var pt = paramTypes is { } ptypes && i < ptypes.Count ? ptypes[i] : args[i].Type;
+                EmitCopyInto(() => EmitFrameAddr(slot), args[i], pt);
                 EmitFrameAddr(slot);
                 continue;
             }
@@ -1005,10 +1223,7 @@ internal sealed partial class WatBackend
         if (value is null) { return; }
         if (IsAggregate(_currentRet))
         {
-            Line("local.get $__sret");
-            EmitExpr(value);
-            Line($"i32.const {WasmSizeOf(_currentRet)}");
-            Line("memory.copy");
+            EmitCopyInto(() => Line("local.get $__sret"), value, _currentRet);
             Line("local.get $__sret");
             return;
         }
@@ -1799,6 +2014,37 @@ internal sealed partial class WatBackend
             case Paren p:
                 EmitExpr(p.Inner);
                 break;
+            case NameRef { RawName: "__dotcc_complex_I" }:
+                Line($"i32.const {ComplexConstant(0.0, 1.0)}");
+                break;
+            case Binary cb when IsComplex(cb.Type):
+                EmitComplexArith(cb);
+                break;
+            case Binary { Op: BinOp.Eq or BinOp.Ne } cc when IsComplex(cc.Left.Type) || IsComplex(cc.Right.Type):
+                EmitComplexCompare(cc);
+                break;
+            case Unary { Op: UnOp.Neg or UnOp.Plus } cu when IsComplex(cu.Type):
+                EmitComplexUnary(cu);
+                break;
+            case Cast cr when IsComplex(cr.Target) && !IsComplex(cr.Operand.Type):
+                EmitCopyInto(() => EmitFrameAddr(ComplexSlot(cr)), cr.Operand, cr.Target);
+                EmitFrameAddr(ComplexSlot(cr));
+                break;
+            case Cast cr when IsComplex(cr.Target):
+                EmitExpr(cr.Operand);
+                break;
+            case Cast cr when IsComplex(cr.Operand.Type) && cr.Target.Unqualified is not CType.VoidType:
+                // A complex converted to a real type is its real part (6.3.1.7p2); to _Bool, not
+                // zero when either part is.
+                EmitExpr(cr.Operand);
+                if (cr.Target.Unqualified is CType.Prim { Name: "_Bool" })
+                {
+                    EmitComplexParts(cr.Operand, out _, out _, alreadyAddress: true);
+                    break;
+                }
+                Line("f64.load");
+                EmitConvert(CType.Double, cr.Target);
+                break;
             case LitInt n:
                 Line($"{ValType(e.Type)}.const {_wat.RenderIntLit(n)}");
                 break;
@@ -2218,10 +2464,13 @@ internal sealed partial class WatBackend
             // A struct or union assignment copies its bytes; its value is the target.
             EmitAddress(a.Target);
             var target = AcquireScratch("addr");
-            Line($"local.tee {target}");
-            EmitExpr(a.Value);
-            Line($"i32.const {WasmSizeOf(a.Target.Type)}");
-            Line("memory.copy");
+            Line($"local.set {target}");
+            if (a.CompoundOp is { } cop && IsComplex(a.Target.Type))
+            {
+                // z OP= v is z = z OP v (6.5.16.2): the arithmetic writes its slot, then the copy.
+                throw new IrUnsupportedException("the wat target does not yet support a compound assignment to a complex object");
+            }
+            EmitCopyInto(() => Line($"local.get {target}"), a.Value, a.Target.Type);
             Line($"local.get {target}");
             ReleaseScratch("addr");
             return;
@@ -4701,6 +4950,7 @@ internal sealed partial class WatBackend
     {
         CType.Pointer or CType.Func => 8,
         CType.Named { Name: VaListName or JmpBufName } => 8,
+        CType.ComplexType => 16,
         CType.Array a => (a.Count ?? 0) * WasmSizeOf(a.Element),
         CType.Named => checked((int)(Unit.SizeOfConst(t) ?? 0)),
         CType.Enum e => WasmSizeOf(e.Underlying),
@@ -4713,14 +4963,19 @@ internal sealed partial class WatBackend
     private int SlotAlign(CType t)
     {
         var u = t.Unqualified is CType.Array a ? a.FlatElement.Unqualified : t.Unqualified;
-        var align = u is CType.Named { Name: VaListName or JmpBufName } ? 8 : u is CType.Named ? Unit.AlignOfConst(u) : WasmSizeOf(u);
+        var align = u is CType.Named { Name: VaListName or JmpBufName } or CType.ComplexType ? 8 : u is CType.Named ? Unit.AlignOfConst(u) : WasmSizeOf(u);
         return Math.Min(8, Math.Max(1, align));
     }
 
     /// <summary>True for a struct or union: on the wasm stack its value is its address
     /// (an aggregate has no wasm value type), so reading one loads nothing, assigning
     /// one copies its bytes, and a member is an offset from that address.</summary>
-    private static bool IsAggregate(CType t) => t.Unqualified is CType.Named;
+    private static bool IsAggregate(CType t) => t.Unqualified is CType.Named or CType.ComplexType;
+
+    /// <summary>True for <c>double _Complex</c>: an aggregate of two doubles, the real part at 0
+    /// and the imaginary at 8, which is copied, passed and returned as a struct is and whose
+    /// arithmetic writes a frame slot (see <see cref="EmitComplexArith"/>).</summary>
+    private static bool IsComplex(CType t) => t.Unqualified is CType.ComplexType;
 
     /// <summary>The runtime type <c>&lt;stdarg.h&gt;</c> names <c>va_list</c>: here an 8-byte
     /// object in memory (an aggregate, so it is passed as a copy) holding the cursor.</summary>
