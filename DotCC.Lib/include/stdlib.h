@@ -30,6 +30,8 @@ void free(void* p);
 /* String -> number conversions. strtod parses a leading double and (if endptr
    is non-null) reports where parsing stopped; atof is strtod without endptr. */
 double strtod(const char *nptr, char **endptr);
+float strtof(const char *nptr, char **endptr);
+long double strtold(const char *nptr, char **endptr);
 double atof(const char *nptr);
 long strtol(const char *nptr, char **endptr, int base);
 long strtoll(const char *nptr, char **endptr, int base);
