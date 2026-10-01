@@ -351,6 +351,17 @@ public sealed class WatOracleTests
         + " printf(\"%d|\", (int)strftime(b, 5, \"%Y-%m\", &g)); printf(\"%s\", asctime(&g)); printf(\"%s\", asctime(n)); return 0; }",
         "2000-02-29 00:00:00 060 2 2 Tue Tuesday Feb February 29 12AM 00 20 02/29/00 00:00 %|1969-12-31 23:59:59 wday=3 yday=364|0|"
         + "Tue Feb 29 00:00:00 2000\nWed Dec 31 23:59:59 1969\n")]
+    // strtod and strtof: musl's __floatscan through a string pseudo-FILE. Correct rounding at a
+    // float halfway point, the largest subnormal's neighbour, hex floats, an overflow, endptr.
+    [InlineData("#include <stdio.h>\n#include <stdlib.h>\n"
+        + "static unsigned long long b(double d){ union { double d; unsigned long long i; } u; u.d = d; return u.i; }\n"
+        + "static unsigned bf(float f){ union { float f; unsigned i; } u; u.f = f; return u.i; }\n"
+        + "int main(void){ char *end; const char *s = \"  -12.5e+2xyz\"; double d = strtod(s, &end);"
+        + " printf(\"%g %d|\", d, (int)(end - s));"
+        + " printf(\"%08x %016llx|\", bf(strtof(\"1.0000001788139343261718749999\", 0)), b(strtod(\"2.2250738585072011e-308\", 0)));"
+        + " printf(\"%g %g %g %g|\", strtod(\"0x1.8p3\", 0), strtod(\"1e400\", 0), strtod(\"-nan\", 0) != strtod(\"-nan\", 0) ? 1.0 : 0.0, atof(\"4.9e-324\") > 0 ? 1.0 : 0.0);"
+        + " printf(\"%.17g\", strtod(\"0.1\", 0)); return 0; }",
+        "-1250 10|3f800001 000fffffffffffff|12 inf 1 1|0.10000000000000001")]
     // strerror's glibc wording, strtoimax past 32 bits, the one "C" locale, and time() from
     // WASI's clock.
     [InlineData("#include <stdio.h>\n#include <string.h>\n#include <errno.h>\n#include <inttypes.h>\n#include <locale.h>\n#include <time.h>\n"

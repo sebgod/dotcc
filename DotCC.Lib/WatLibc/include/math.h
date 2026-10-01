@@ -86,6 +86,9 @@ double trunc(double x); float truncf(float x);
 
 double fabs(double x);          float fabsf(float x);
 long double fabsl(long double x);
+long double copysignl(long double x, long double y);
+long double fmodl(long double x, long double y);
+long double scalbnl(long double x, int n);
 double fmod(double x, double y); float fmodf(float x, float y);
 double fmin(double x, double y); float fminf(float x, float y);
 double fmax(double x, double y); float fmaxf(float x, float y);
