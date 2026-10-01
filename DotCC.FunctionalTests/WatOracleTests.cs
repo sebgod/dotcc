@@ -277,14 +277,25 @@ public sealed class WatOracleTests
     /// need. The captured bytes are what the test asserts (not main's return value).</summary>
     private static string RunWatStdout(string source)
     {
-        var stem = Path.Combine(Path.GetTempPath(), $"dotcc-wat-{Guid.NewGuid():N}");
-        string c = stem + ".c", wat = stem + ".wat", wasm = stem + ".wasm";
+        var c = Path.Combine(Path.GetTempPath(), $"dotcc-wat-{Guid.NewGuid():N}.c");
         File.WriteAllText(c, source);
+        try { return RunWatModuleStdout(Compiler.EmitWat(new[] { c }), latin1: true); }
+        finally { try { File.Delete(c); } catch { /* best effort */ } }
+    }
+
+    /// <summary>wat2wasm → node with the WASI <c>fd_write</c> shim over an emitted module,
+    /// returning what it wrote to fd 1: its bytes decoded as UTF-8 (as a fixture's
+    /// <c>expected-stdout.txt</c> is read), or, for the inline programs above, one char per
+    /// byte (<paramref name="latin1"/>).</summary>
+    internal static string RunWatModuleStdout(string watText, bool latin1 = false)
+    {
+        var stem = Path.Combine(Path.GetTempPath(), $"dotcc-wat-{Guid.NewGuid():N}");
+        string wat = stem + ".wat", wasm = stem + ".wasm";
         try
         {
-            File.WriteAllText(wat, Compiler.EmitWat(new[] { c }));
+            File.WriteAllText(wat, watText);
             Exec("wat2wasm", wat, "-o", wasm);
-            const string js =
+            var js =
                 "const fs=require('fs');" +
                 "let inst; const out=[];" +
                 "const fd_write=(fd,iovs,iovsLen,nwrittenPtr)=>{" +
@@ -299,13 +310,13 @@ public sealed class WatOracleTests
                 "dv.setUint32(nwrittenPtr,written,true);return 0;};" +
                 "WebAssembly.instantiate(fs.readFileSync(process.argv[1]),{wasi_snapshot_preview1:{fd_write}})" +
                 ".then(r=>{inst=r.instance;inst.exports.main();" +
-                "process.stdout.write(Buffer.from(out).toString('latin1'));})" +
+                (latin1 ? "process.stdout.write(Buffer.from(out).toString('latin1'));})" : "process.stdout.write(Buffer.from(out));})") +
                 ".catch(e=>{console.error(e);process.exit(1);});";
             return Exec("node", "-e", js, wasm);
         }
         finally
         {
-            foreach (var f in new[] { c, wat, wasm }) { try { File.Delete(f); } catch { /* best effort */ } }
+            foreach (var f in new[] { wat, wasm }) { try { File.Delete(f); } catch { /* best effort */ } }
         }
     }
 
