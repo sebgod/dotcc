@@ -66,11 +66,19 @@ internal sealed class WatTarget : ITarget
     /// the literal), a leading <c>.</c> (<c>.5</c> — wat requires a digit before the
     /// point), and a trailing <c>.</c> (<c>1.</c> — wat requires a digit, or nothing,
     /// after the point but not a dangling one). Exponent forms (<c>1E+21</c>, and now
-    /// the point-free <c>1e10</c>) and bare integers (<c>1024</c>) are already legal.</summary>
+    /// the point-free <c>1e10</c>) and bare integers (<c>1024</c>) are already legal. A
+    /// literal too large for its type is infinity in C (Annex F, musl's
+    /// <c>INFINITY</c> is <c>1e5000f</c>) and an invalid literal to wat, which spells it
+    /// <c>inf</c>.</summary>
     public string RenderFloatLit(LitFloat lit)
     {
         var t = lit.Text;
         if (t.Length > 0 && t[^1] is 'f' or 'F') { t = t[..^1]; }
+        if (double.TryParse(t, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var value)
+            && (RenderType(lit.Type) == "f32" ? float.IsInfinity((float)value) : double.IsInfinity(value)))
+        {
+            return value < 0 ? "-inf" : "inf";
+        }
         if (t.Length > 0 && t[0] == '.') { t = "0" + t; }   // .5 -> 0.5
         // A `.` with no fractional digit after it — dangling at the end (`1.`) or
         // sitting right before the exponent (`1.e5`) — is rejected by the wat

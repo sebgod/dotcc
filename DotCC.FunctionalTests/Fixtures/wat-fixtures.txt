@@ -121,6 +121,7 @@ malloc-no-cast
 malloc-promote-keyword-var
 malloc-stack-promote
 malloc-stackalloc
+math-basic
 multi-decl
 multi-declarator
 multi-tu-struct
@@ -183,6 +184,7 @@ switch-fallthrough
 switch-goto-fallthrough
 tag-declarations
 ternary-cmp-arm
+tgmath-overload
 truthy
 typedef-alias-resolve
 typedef-anon-struct

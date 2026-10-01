@@ -271,6 +271,32 @@ public sealed class WatOracleTests
         + "int main(void){ char s[] = \"  a,bb,,ccc \"; for (char *t = strtok(s, \" ,\"); t; t = strtok(NULL, \" ,\")) printf(\"[%s]\", t);"
         + " printf(\" %d\", (int)imaxabs(-7)); return 0; }",
         "[a][bb][ccc] 7")]
+    // musl's libm, compiled with the program. The expected text is the same musl sources built
+    // natively by gcc (bit-identical); C's fmin/fmax skip a NaN, and isnan/isinf/isfinite are
+    // functions of the program's <math.h>.
+    [InlineData("#include <stdio.h>\n#include <math.h>\n"
+        + "int main(void){ double z = 0.0; int e; double ip;"
+        + " printf(\"%.17g %.17g %.17g %.17g\\n\", sin(0.5), cos(0.5), tan(1.0), sin(1e6));"
+        + " printf(\"%.17g %.17g %.17g %.17g\\n\", exp(1.0), log(10.0), log10(2.0), log2(10.0));"
+        + " printf(\"%.17g %.17g %.17g %.17g\\n\", pow(2.0, 0.5), cbrt(2.0), atan2(1.0, 1.0) * 4, hypot(3.0, 4.0));"
+        + " printf(\"%.17g %.17g %.17g\\n\", asin(0.5), acos(0.5), atan(1.0));"
+        + " printf(\"%.17g %.17g %.17g\\n\", sinh(1.0), cosh(1.0), tanh(0.5));"
+        + " printf(\"%g %g %g %g %g\\n\", round(2.5), round(-2.5), fmod(7.5, 2.0), fmin(z / z, 2.0), fmax(3.0, z / z));"
+        + " double m = frexp(48.0, &e); double frac = modf(3.25, &ip);"
+        + " printf(\"%g %d %g %g %g\\n\", m, e, ldexp(0.75, 6), frac, ip);"
+        + " printf(\"%d %d %d %d\\n\", isnan(z / z), isinf(1.0 / z), isfinite(1.0), isnan(1.0));"
+        + " printf(\"%.9g %.9g %.9g %.9g %.9g\\n\", sinf(1.0f), cosf(1.0f), expf(1.0f), logf(10.0f), powf(2.0f, 0.5f));"
+        + " printf(\"%.9g %.9g %g\", cbrtf(2.0f), atan2f(1.0f, 2.0f), roundf(-0.5f)); return 0; }",
+        "0.47942553860420301 0.87758256189037276 1.5574077246549023 -0.34999350217129294\n"
+        + "2.7182818284590451 2.3025850929940459 0.3010299956639812 3.3219280948873622\n"
+        + "1.4142135623730951 1.2599210498948732 3.1415926535897931 5\n"
+        + "0.52359877559829893 1.0471975511965979 0.78539816339744828\n"
+        + "1.1752011936438014 1.5430806348152437 0.46211715726000974\n"
+        + "3 -3 1.5 2 3\n"
+        + "0.75 6 48 0.25 3\n"
+        + "1 1 1 0\n"
+        + "0.841470957 0.540302277 2.71828175 2.30258512 1.41421354\n"
+        + "1.25992107 0.463647604 -1")]
     public void Wat_program_writes_expected_stdout(string source, string expected)
     {
         if (!Requested)

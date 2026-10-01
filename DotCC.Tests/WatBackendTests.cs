@@ -858,6 +858,69 @@ public sealed class WatBackendTests
     }
 
     [Fact]
+    public void A_math_function_comes_from_musl_with_the_kernels_it_calls()
+    {
+        var wat = Wat("#include <math.h>\ndouble f(double x) { return sin(x); }\nint main(void) { return f(0.5) > 0; }");
+        wat.ShouldContain("(func $sin ");
+        wat.ShouldContain("(func $__sin ");
+        wat.ShouldContain("(func $__rem_pio2 ");
+        wat.ShouldContain("(func $__rem_pio2_large ");
+        wat.ShouldNotContain("(func $exp ");
+    }
+
+    [Fact]
+    public void A_library_data_object_is_bound_by_its_name()
+    {
+        // exp reads __exp_data, a table defined by a unit of its own: the library binds that
+        // unit for the extern object as it binds a unit for a called function.
+        var wat = Wat("#include <math.h>\nint main(void) { return exp(1.0) > 2.0; }");
+        wat.ShouldContain("(func $exp ");
+        wat.ShouldContain("(func $__init_globals");
+    }
+
+    [Fact]
+    public void The_library_builds_the_same_whatever_the_program_includes()
+    {
+        // A library unit's includes find the library's headers and dotcc's, never the
+        // program's -I directories, so a user libm.h, math.h or features.h cannot reach musl.
+        var dir = Directory.CreateTempSubdirectory("dotcc-wat-inc").FullName;
+        var src = Path.Combine(dir, "main.c");
+        foreach (var h in new[] { "libm.h", "math.h", "features.h", "stdint.h" })
+        {
+            File.WriteAllText(Path.Combine(dir, h), $"#error the program's {h}\n");
+        }
+        File.WriteAllText(src, "double cos(double);\nint main(void) { return cos(0.0) == 1.0; }\n");
+        try
+        {
+            var wat = Compiler.EmitWat(new[] { src }, includeDirs: new[] { dir });
+            wat.ShouldContain("(func $__cos ");
+        }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
+
+    [Fact]
+    public void A_float_literal_too_large_for_its_type_is_infinity()
+    {
+        // musl's INFINITY is 1e5000f; wat's const grammar rejects an out-of-range literal.
+        var wat = Wat("float f(void) { return 1e5000f; }\nfloat g(void) { return 1e39f; }\ndouble h(void) { return 1e999; }\nint main(void) { return f() > h(); }");
+        wat.ShouldContain("f32.const inf\n");
+        wat.ShouldContain("f64.const inf\n");
+        wat.ShouldNotContain("1e5000");
+        wat.ShouldNotContain("1e39");
+    }
+
+    [Fact]
+    public void Copysign_and_fabsl_are_single_instructions()
+    {
+        var wat = Wat("#include <math.h>\ndouble f(double x, double y) { return copysign(x, y) + fabsl(x); }\nfloat g(float x, float y) { return copysignf(x, y); }\nint main(void) { return f(1.0, -2.0) < 0; }");
+        wat.ShouldContain("f64.copysign");
+        wat.ShouldContain("f32.copysign");
+        wat.ShouldContain("f64.abs");
+        wat.ShouldNotContain("call $copysign");
+        wat.ShouldNotContain("call $fabsl");
+    }
+
+    [Fact]
     public void A_binary_literal_is_written_in_decimal()
     {
         // wat reads decimal and 0x hex, not C23's 0b: wat2wasm rejected `i32.const 0b1011`.

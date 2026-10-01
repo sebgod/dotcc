@@ -129,6 +129,10 @@ internal sealed partial class WatBackend
                 foreach (var inner in b.Stmts) { BuildCfg(inner); }
                 break;
 
+            case Seq q:
+                foreach (var inner in q.Stmts) { BuildCfg(inner); }
+                break;
+
             // Straight-line statements accumulate into the current block.
             case DeclStmt:
             case ArrayDecl:

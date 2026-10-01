@@ -36,31 +36,39 @@ public static partial class Compiler
         new(LoadEmbeddedSystemHeaders);
 
     /// <summary>
-    /// The wat target's libc: the C source (<c>DotCC.Lib/WatLibc/</c>, embedded as
-    /// <c>DotCC.WatLibc.&lt;name&gt;.c</c>) that defines <paramref name="function"/>, or null when the
-    /// library has none. One function per file, named after it, as musl lays its sources out:
-    /// <see cref="EmitWat"/> binds the file of each function a program calls and defines nowhere,
-    /// so a program carries only the library it uses, and its own definition of a name wins.
+    /// The wat target's libc, compiled from C with the program (<c>DotCC.Lib/WatLibc/</c>, each
+    /// file embedded as <c>DotCC.WatLibc.&lt;file&gt;</c>). A unit defines one function or data
+    /// object and is named after it, as musl lays its sources out: <see cref="EmitWat"/> binds the
+    /// unit of each name a program uses and defines nowhere, so a program carries only the library
+    /// it uses, and its own definition of a name wins. The headers are the library's own
+    /// (musl's <c>libm.h</c>, and a <c>math.h</c> with musl's classification macros), seen only
+    /// by library units.
     /// </summary>
-    internal static string? WatLibcSource(string function) =>
-        _watLibc.Value.TryGetValue(function, out var text) ? text : null;
+    internal static Frontends.SourceLibrary WatLibc { get; } = new(
+        name => _watLibc.Value.Units.TryGetValue(name, out var text) ? text : null,
+        name => _watLibc.Value.Headers.TryGetValue(name, out var text) ? text : null);
 
-    private static readonly Lazy<Dictionary<string, string>> _watLibc = new(LoadWatLibc);
+    private static readonly Lazy<(Dictionary<string, string> Units, Dictionary<string, string> Headers)> _watLibc =
+        new(LoadWatLibc);
 
-    private static Dictionary<string, string> LoadWatLibc()
+    private static (Dictionary<string, string> Units, Dictionary<string, string> Headers) LoadWatLibc()
     {
         const string prefix = "DotCC.WatLibc.";
         var asm = typeof(Compiler).Assembly;
-        var map = new Dictionary<string, string>(StringComparer.Ordinal);
+        var units = new Dictionary<string, string>(StringComparer.Ordinal);
+        var headers = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var name in asm.GetManifestResourceNames())
         {
-            if (!name.StartsWith(prefix, StringComparison.Ordinal) || !name.EndsWith(".c", StringComparison.Ordinal)) { continue; }
+            if (!name.StartsWith(prefix, StringComparison.Ordinal)) { continue; }
+            var fileName = name[prefix.Length..];
             using var stream = asm.GetManifestResourceStream(name)
                 ?? throw new InvalidOperationException($"missing embedded libc resource: {name}");
             using var reader = new StreamReader(stream);
-            map[name[prefix.Length..^2]] = reader.ReadToEnd();
+            var text = reader.ReadToEnd();
+            if (fileName.EndsWith(".c", StringComparison.Ordinal)) { units[fileName[..^2]] = text; }
+            else if (fileName.EndsWith(".h", StringComparison.Ordinal)) { headers[fileName] = SpliceLineContinuations(text); }
         }
-        return map;
+        return (units, headers);
     }
 
     private static Dictionary<string, string> LoadEmbeddedSystemHeaders()

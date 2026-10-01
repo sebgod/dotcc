@@ -936,13 +936,17 @@ internal sealed partial class WatBackend
         S(s);
     }
 
-    /// <summary>The wasm instruction a one-argument <c>&lt;math.h&gt;</c> function is, exactly
-    /// (IEEE-754 square root, absolute value and the directed roundings), or null. C's
-    /// <c>round</c> is not <c>nearest</c>, which rounds halves to even.</summary>
-    private static string? MathInstr(string callee) => callee switch
+    /// <summary>The wasm instruction a <c>&lt;math.h&gt;</c> function is, exactly, with its
+    /// operand count, or null: IEEE-754 square root, absolute value, the directed roundings
+    /// and <c>copysign</c> (<c>long double</c> is <c>double</c> here). C's <c>round</c> is not
+    /// <c>nearest</c>, which rounds halves to even, and <c>fmin</c>/<c>fmax</c> are not
+    /// <c>min</c>/<c>max</c>, which return NaN for a NaN operand; those come from the libc.</summary>
+    private static (string Instr, int Arity)? MathInstr(string callee) => callee switch
     {
-        "sqrt" => "f64.sqrt", "fabs" => "f64.abs", "floor" => "f64.floor", "ceil" => "f64.ceil", "trunc" => "f64.trunc",
-        "sqrtf" => "f32.sqrt", "fabsf" => "f32.abs", "floorf" => "f32.floor", "ceilf" => "f32.ceil", "truncf" => "f32.trunc",
+        "sqrt" => ("f64.sqrt", 1), "fabs" or "fabsl" => ("f64.abs", 1), "floor" => ("f64.floor", 1),
+        "ceil" => ("f64.ceil", 1), "trunc" => ("f64.trunc", 1), "copysign" => ("f64.copysign", 2),
+        "sqrtf" => ("f32.sqrt", 1), "fabsf" => ("f32.abs", 1), "floorf" => ("f32.floor", 1),
+        "ceilf" => ("f32.ceil", 1), "truncf" => ("f32.trunc", 1), "copysignf" => ("f32.copysign", 2),
         _ => null,
     };
 
@@ -1866,12 +1870,15 @@ internal sealed partial class WatBackend
         }
         if (c.Callee is "__dotcc_unreachable" or "__builtin_unreachable" && !_defined.Contains(c.Callee)) { Line("unreachable"); return; }
         // <math.h> functions that are one wasm instruction.
-        if (MathInstr(c.Callee) is { } math && !_defined.Contains(c.Callee) && c.Args.Count == 1)
+        if (MathInstr(c.Callee) is { } math && !_defined.Contains(c.Callee) && c.Args.Count == math.Arity)
         {
-            var operand = math.StartsWith("f32", StringComparison.Ordinal) ? CType.Float : CType.Double;
-            EmitExpr(c.Args[0]);
-            EmitConvert(c.Args[0].Type, operand);
-            Line(math);
+            var operand = math.Instr.StartsWith("f32", StringComparison.Ordinal) ? CType.Float : CType.Double;
+            foreach (var arg in c.Args)
+            {
+                EmitExpr(arg);
+                EmitConvert(arg.Type, operand);
+            }
+            Line(math.Instr);
             EmitConvert(operand, c.Type);
             return;
         }

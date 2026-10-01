@@ -17,8 +17,9 @@ public static partial class Compiler
     /// order) and the embedded system headers. One resolver serves every
     /// translation unit of the compile, so a header read once is cached.
     /// </summary>
-    internal static IncludeResolver BuildIncludeResolver(IReadOnlyList<string>? includeDirs)
-        => new(includeDirs ?? Array.Empty<string>(), SystemHeaders);
+    internal static IncludeResolver BuildIncludeResolver(
+        IReadOnlyList<string>? includeDirs, Func<string, string?>? libraryHeader = null)
+        => new(includeDirs ?? Array.Empty<string>(), SystemHeaders, libraryHeader);
 
     /// <summary>One file an <c>#include</c> resolved to.</summary>
     /// <param name="Key">Identity for <c>#pragma once</c> and the header-guard
@@ -27,7 +28,8 @@ public static partial class Compiler
     /// <param name="Path">The full disk path, or null for an embedded header
     /// (which has nothing for a dependency file to list).</param>
     /// <param name="Directory">Where a quoted <c>#include</c> inside this file
-    /// looks first, or null for an embedded header.</param>
+    /// looks first, or null for an embedded header; <see cref="IncludeResolver.LibraryDir"/>
+    /// for any file a library unit includes.</param>
     /// <param name="IsSynthetic">One of dotcc's embedded system headers, whose
     /// declarations are runtime-provided.</param>
     internal sealed record IncludeFile(string Key, string? Path, string? Directory, bool IsSynthetic);
@@ -48,14 +50,22 @@ public static partial class Compiler
     /// file's own directory is NOT a search directory for <c>&lt;name&gt;</c>, as
     /// in gcc and clang (a quoted include from it finds its neighbours through the
     /// includer rule).
+    /// <para>A unit of a library compiled with the program (<see cref="Frontends.SourceLibrary"/>)
+    /// sits in <see cref="LibraryDir"/>, and so does everything it includes. Its includes, quoted
+    /// or angle, find the library's own headers first and then the embedded system headers, and
+    /// never the user's <c>-I</c> directories, so the library builds the same in every program.</para>
     /// </remarks>
     internal sealed class IncludeResolver
     {
+        /// <summary>The directory a library unit and its headers live in: not a disk path.</summary>
+        internal const string LibraryDir = "<libc>";
+
         private static readonly StringComparer PathComparer =
             OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
 
         private readonly string[] _dirs;
         private readonly IReadOnlyDictionary<string, string> _builtins;
+        private readonly Func<string, string?>? _libraryHeader;
         private readonly Dictionary<string, bool> _exists = new(PathComparer);
         private readonly Dictionary<string, string> _content = new(PathComparer);
 
@@ -66,9 +76,13 @@ public static partial class Compiler
 
         /// <summary>Resolve against <paramref name="includeDirs"/> (command-line
         /// order, duplicates dropped) and then <paramref name="builtins"/> (embedded
-        /// header name to content).</summary>
-        internal IncludeResolver(IReadOnlyList<string> includeDirs, IReadOnlyDictionary<string, string> builtins)
+        /// header name to content); a library unit's includes against
+        /// <paramref name="libraryHeader"/> and then <paramref name="builtins"/>.</summary>
+        internal IncludeResolver(
+            IReadOnlyList<string> includeDirs, IReadOnlyDictionary<string, string> builtins,
+            Func<string, string?>? libraryHeader = null)
         {
+            _libraryHeader = libraryHeader;
             var dirs = new List<string>();
             var seen = new HashSet<string>(PathComparer);
             foreach (var dir in includeDirs)
@@ -87,6 +101,16 @@ public static partial class Compiler
         public IncludeFile? Resolve(string name, bool isAngle, string? includerDir)
         {
             if (name.Length == 0) { return null; }
+            if (includerDir == LibraryDir)
+            {
+                if (_libraryHeader?.Invoke(name) is not null)
+                {
+                    return new IncludeFile(LibraryDir + "/" + name, Path: null, LibraryDir, IsSynthetic: true);
+                }
+                return _builtins.ContainsKey(name)
+                    ? new IncludeFile("<builtin>/" + name, Path: null, LibraryDir, IsSynthetic: true)
+                    : null;
+            }
             if (Path.IsPathRooted(name)) { return FileAt(name); }
             if (!isAngle && includerDir is not null && FileAt(Path.Combine(includerDir, name)) is { } local)
             {
@@ -109,6 +133,10 @@ public static partial class Compiler
             error = null;
             if (file.Path is not { } path)
             {
+                if (file.Key.StartsWith(LibraryDir + "/", StringComparison.Ordinal))
+                {
+                    return _libraryHeader?.Invoke(name) is { } text ? Found(text, out content) : Fail(out content);
+                }
                 return _builtins.TryGetValue(name, out content!) || Fail(out content);
             }
             if (_content.TryGetValue(path, out content!)) { return true; }
@@ -125,6 +153,12 @@ public static partial class Compiler
             {
                 content = "";
                 return false;
+            }
+
+            static bool Found(string text, out string content)
+            {
+                content = text;
+                return true;
             }
         }
 

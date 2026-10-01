@@ -44,4 +44,13 @@ internal sealed record FrontendRequest(
     WarningFlags Warnings = WarningFlags.Default,
     bool TestMode = false,
     string? ObjectKey = null,
-    Func<string, string?>? LibrarySource = null);
+    SourceLibrary? Library = null);
+
+/// <summary>
+/// A library compiled from C together with the program, the way the wat target carries its
+/// libc. <see cref="Unit"/> gives the source of the unit that defines a name (a function or a
+/// data object; one per file, named after it, as musl lays its sources out), or null when the
+/// library has none. <see cref="Header"/> gives a header private to the library (musl's
+/// <c>libm.h</c>), which a library unit's <c>#include</c> finds before any other.
+/// </summary>
+internal sealed record SourceLibrary(Func<string, string?> Unit, Func<string, string?> Header);
