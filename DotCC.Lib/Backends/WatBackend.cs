@@ -125,6 +125,15 @@ internal sealed partial class WatBackend
     /// <summary>True once the program calls <c>exit</c>, which imports WASI's <c>proc_exit</c>.</summary>
     private bool _usesProcExit;
 
+    /// <summary>The frame slots each call that passes or returns a struct by value uses: the
+    /// copy of each aggregate argument, and the result's slot, by call node (reference
+    /// identity), placed with the function's frame before its body is emitted.</summary>
+    private readonly Dictionary<CExpr, (int? Result, Dictionary<int, int> Args)> _callTemps = new(ReferenceEqualityComparer.Instance);
+
+    /// <summary>The frame slot of each compound literal in an expression (<c>(struct P){1, 2}</c>,
+    /// <c>(int[]){1, 2}</c>), by node; a declaration's initializer is stored into its own slot.</summary>
+    private readonly Dictionary<CExpr, int> _literalSlots = new(ReferenceEqualityComparer.Instance);
+
     /// <summary>The C stack the program gets when its data does not fit below the default
     /// stack top: the stack then starts past the data and grows down through this.</summary>
     private const int StackBytes = 1 << 20;
@@ -334,12 +343,8 @@ internal sealed partial class WatBackend
 
         var ret = fn.Sym.Type is CType.Func f ? f.Return : CType.Int;
         _currentRet = ret;
-        // A struct passed or returned by value needs a calling convention for aggregates
-        // (an address to a caller's copy, a caller-provided result slot), not built yet.
-        if (IsAggregate(ret) || fn.Params.Any(p => IsAggregate(p.Type)))
-        {
-            throw new IrUnsupportedException($"the wat target does not yet pass or return a struct by value ('{fn.Sym.Name}')");
-        }
+        _callTemps.Clear();
+        _literalSlots.Clear();
 
         // Classify storage: address-taken symbols (params or locals) and arrays live
         // in the frame; every other scalar local is a fast wasm value local.
@@ -360,7 +365,8 @@ internal sealed partial class WatBackend
         // wasm value local.
         foreach (var p in fn.Params)
         {
-            if (p.AddressTaken) { Place(p); spillParams.Add(p); }
+            // A struct parameter is the address of the caller's copy: it is memory already.
+            if (p.AddressTaken && !IsAggregate(p.Type)) { Place(p); spillParams.Add(p); }
         }
         var bodyLocals = new List<Symbol>();
         foreach (var s in fn.Body.Stmts) { CollectLocals(s, bodyLocals); }
@@ -369,10 +375,39 @@ internal sealed partial class WatBackend
             if (loc.AddressTaken || IsAddressValued(loc.Type)) { Place(loc); }
             else { valueLocals.Add(loc); }
         }
+        // Each call that passes or returns a struct by value gets slots of its own: a copy of
+        // each aggregate argument (the callee may change its parameter) and the result's.
+        foreach (var s in fn.Body.Stmts)
+        {
+            ForEachExpr(s, e =>
+            {
+                int PlaceTemp(CType t)
+                {
+                    cursor = AlignUp(cursor, SlotAlign(t));
+                    var at = cursor;
+                    cursor += Math.Max(1, WasmSizeOf(t));
+                    return at;
+                }
+                if (e is StructInit && IsAggregate(e.Type)) { _literalSlots[e] = PlaceTemp(e.Type); return; }
+                if (e is StackArray sa) { _literalSlots[e] = PlaceTemp(new CType.Array(sa.Element, sa.Elems.Count)); return; }
+                if (AggregateCallShape(e) is not { } shape) { return; }
+                int? result = IsAggregate(shape.Fn.Return) ? PlaceTemp(shape.Fn.Return) : null;
+                var args = new Dictionary<int, int>();
+                for (var i = 0; i < shape.Args.Count; i++)
+                {
+                    var pt = i < shape.Fn.Params.Count ? shape.Fn.Params[i] : shape.Args[i].Type;
+                    if (IsAggregate(pt)) { args[i] = PlaceTemp(pt); }
+                }
+                _callTemps[e] = (result, args);
+            });
+        }
         _frameSize = AlignUp(cursor, 8);
         _hasFrame = _frameSize > 0;
 
-        var ps = string.Concat(fn.Params.Select(p => $" (param ${p.TargetName} {_wat.RenderType(p.Type)})"));
+        // A struct result goes to the caller's slot, whose address is a hidden first parameter;
+        // the function returns that address, the struct's value as a caller sees it.
+        var ps = (IsAggregate(ret) ? " (param $__sret i32)" : "")
+            + string.Concat(fn.Params.Select(p => $" (param ${p.TargetName} {_wat.RenderType(p.Type)})"));
         var result = ret.Unqualified is CType.VoidType ? "" : $" (result {_wat.RenderType(ret)})";
         Line($"(func ${fn.Sym.TargetName}{ps}{result}");
         _indent++;
@@ -544,11 +579,7 @@ internal sealed partial class WatBackend
                 break;
 
             case Return r:
-                if (r.Value is { } v)
-                {
-                    EmitExpr(v);
-                    EmitConvert(v.Type, _currentRet);
-                }
+                EmitReturnValue(r.Value);
                 RestoreSp();   // stack-neutral: leaves any return value in place
                 Line("return");
                 break;
@@ -737,6 +768,136 @@ internal sealed partial class WatBackend
         if (e.Type.Unqualified is not CType.VoidType) { Line("drop"); }
     }
 
+    /// <summary>The function type and arguments of a call that passes or returns a struct by
+    /// value (and so needs frame slots, see <see cref="_callTemps"/>), or null.</summary>
+    private static (CType.Func Fn, IReadOnlyList<CExpr> Args)? AggregateCallShape(CExpr e)
+    {
+        var (fnType, args) = e switch
+        {
+            Call { CalleeSym.Type: var t } c => (t.Unqualified switch
+            {
+                CType.Func f => f,
+                CType.Pointer { Pointee: var pt } => pt.Unqualified as CType.Func,
+                _ => null,
+            }, (IReadOnlyList<CExpr>)c.Args),
+            IndirectCall ic => (ic.Callee.Type.Unqualified switch
+            {
+                CType.Func f => f,
+                CType.Pointer { Pointee: var pt } => pt.Unqualified as CType.Func,
+                _ => null,
+            }, ic.Args),
+            _ => ((CType.Func?)null, (IReadOnlyList<CExpr>)System.Array.Empty<CExpr>()),
+        };
+        if (fnType is null) { return null; }
+        var any = IsAggregate(fnType.Return)
+            || fnType.Params.Any(IsAggregate)
+            || args.Any(a => IsAggregate(a.Type));
+        return any ? (fnType, args) : null;
+    }
+
+    /// <summary>A call's arguments, each converted to its parameter's type: first the address of
+    /// the result's slot when the callee returns a struct, and a struct argument as the address
+    /// of a fresh copy in its slot (C passes a copy, which the callee may change).</summary>
+    private void EmitCallArgs(CExpr call, IReadOnlyList<CExpr> args, IReadOnlyList<CType>? paramTypes)
+    {
+        _callTemps.TryGetValue(call, out var temps);
+        if (temps.Result is { } resultSlot) { EmitFrameAddr(resultSlot); }
+        for (var i = 0; i < args.Count; i++)
+        {
+            if (temps.Args is { } argSlots && argSlots.TryGetValue(i, out var slot))
+            {
+                EmitFrameAddr(slot);
+                EmitExpr(args[i]);
+                Line($"i32.const {WasmSizeOf(args[i].Type)}");
+                Line("memory.copy");
+                EmitFrameAddr(slot);
+                continue;
+            }
+            if (IsAggregate(args[i].Type))
+            {
+                throw new IrUnsupportedException("the wat target has no frame slot for a struct argument here");
+            }
+            EmitExpr(args[i]);
+            if (paramTypes is { } pts && i < pts.Count) { EmitConvert(args[i].Type, pts[i]); }
+        }
+    }
+
+    /// <summary>Leave a function's return value: a scalar converted to the return type, or, for
+    /// a struct, the value copied into the caller's slot ($__sret) and that slot's address.</summary>
+    private void EmitReturnValue(CExpr? value)
+    {
+        if (value is null) { return; }
+        if (IsAggregate(_currentRet))
+        {
+            Line("local.get $__sret");
+            EmitExpr(value);
+            Line($"i32.const {WasmSizeOf(_currentRet)}");
+            Line("memory.copy");
+            Line("local.get $__sret");
+            return;
+        }
+        EmitExpr(value);
+        EmitConvert(value.Type, _currentRet);
+    }
+
+    /// <summary>Visit every expression in <paramref name="s"/>, nested ones included, for the
+    /// frame layout's look ahead at a function's calls (see <see cref="_callTemps"/>). A node it
+    /// does not look into is one the backend refuses anyway.</summary>
+    private static void ForEachExpr(CStmt s, Action<CExpr> visit)
+    {
+        void E(CExpr? e)
+        {
+            if (e is null) { return; }
+            visit(e);
+            switch (e)
+            {
+                case Paren p: E(p.Inner); break;
+                case Unary u: E(u.Operand); break;
+                case Binary b: E(b.Left); E(b.Right); break;
+                case Assign a: E(a.Target); E(a.Value); break;
+                case Cast c: E(c.Operand); break;
+                case CondExpr ce: E(ce.Cond); E(ce.Then); E(ce.Else); break;
+                case Index ix: E(ix.Base); E(ix.Idx); break;
+                case Member m: E(m.Base); break;
+                case Call c: foreach (var a in c.Args) { E(a); } break;
+                case IndirectCall ic: E(ic.Callee); foreach (var a in ic.Args) { E(a); } break;
+                case CommaOp co: foreach (var a in co.Items) { E(a); } break;
+                case CommaSeq cs: foreach (var a in cs.Items) { E(a); } break;
+                case StructInit si: foreach (var m in si.Members) { E(m.Value); } break;
+                case ArrayValue av: foreach (var x in av.Elems) { E(x); } break;
+            }
+        }
+        void Init(CExpr? init)
+        {
+            if (init is StructInit si) { foreach (var m in si.Members) { Init(m.Value); } }
+            else if (init is ArrayValue av) { foreach (var x in av.Elems) { Init(x); } }
+            else { E(init); }
+        }
+        void S(CStmt? st)
+        {
+            switch (st)
+            {
+                case null: break;
+                case Block b: foreach (var x in b.Stmts) { S(x); } break;
+                case Seq q: foreach (var x in q.Stmts) { S(x); } break;
+                // A declaration's own brace initializer is stored into the declared object's slot,
+                // so only what is inside it is looked at.
+                case DeclStmt d: foreach (var ld in d.Decls) { Init(ld.Init); } break;
+                case ArrayDecl ad: if (ad.Inits is { } inits) { foreach (var x in inits) { Init(x); } } break;
+                case ExprStmt es: E(es.Expr); break;
+                case If i: E(i.Cond); S(i.Then); S(i.Else); break;
+                case While w: E(w.Cond); S(w.Body); break;
+                case DoWhile dw: S(dw.Body); E(dw.Cond); break;
+                case For f: S(f.Init); E(f.Cond); E(f.Post); S(f.Body); break;
+                case Return r: E(r.Value); break;
+                case Switch sw: E(sw.Subject); foreach (var sec in sw.Sections) { foreach (var x in sec.Body) { S(x); } } break;
+                case Labeled lab: S(lab.Body); break;
+                case CaseLabelStmt cl: S(cl.Body); break;
+            }
+        }
+        S(s);
+    }
+
     /// <summary>The wasm instruction a one-argument <c>&lt;math.h&gt;</c> function is, exactly
     /// (IEEE-754 square root, absolute value and the directed roundings), or null. C's
     /// <c>round</c> is not <c>nearest</c>, which rounds halves to even.</summary>
@@ -884,11 +1045,7 @@ internal sealed partial class WatBackend
         {
             throw new IrUnsupportedException("the wat target does not yet call a variadic function through a pointer");
         }
-        if (IsAggregate(f.Return) || f.Params.Any(IsAggregate))
-        {
-            throw new IrUnsupportedException("the wat target does not yet pass or return a struct by value (through a pointer)");
-        }
-        var sig = string.Concat(f.Params.Where(p => p.Unqualified is not CType.VoidType).Select(p => $" (param {ValType(p)})"))
+        var sig = (IsAggregate(f.Return) ? " (param i32)" : "") + string.Concat(f.Params.Where(p => p.Unqualified is not CType.VoidType).Select(p => $" (param {ValType(p)})"))
             + (f.Return.Unqualified is CType.VoidType ? "" : $" (result {ValType(f.Return)})");
         if (!_sigTypes.TryGetValue(sig, out var name))
         {
@@ -901,7 +1058,7 @@ internal sealed partial class WatBackend
     /// <summary>A call through a function pointer: the arguments (each converted to its
     /// parameter's type when the pointer's type gives them), then the pointer (a table
     /// index), then <c>call_indirect</c>, which traps on a null or mistyped one.</summary>
-    private void EmitCallIndirect(CExpr callee, IReadOnlyList<CExpr> args, IReadOnlyList<CType>? paramTypes)
+    private void EmitCallIndirect(CExpr callee, IReadOnlyList<CExpr> args, IReadOnlyList<CType>? paramTypes, CExpr? callSite = null)
     {
         var sig = SigType(callee.Type);
         var fnParams = (callee.Type.Unqualified switch
@@ -911,11 +1068,7 @@ internal sealed partial class WatBackend
             _ => null,
         })?.Params;
         var types = paramTypes ?? fnParams;
-        for (var i = 0; i < args.Count; i++)
-        {
-            EmitExpr(args[i]);
-            if (types is { } pts && i < pts.Count) { EmitConvert(args[i].Type, pts[i]); }
-        }
+        EmitCallArgs(callSite ?? callee, args, types);
         EmitExpr(callee);
         Line($"call_indirect (type {sig})");
     }
@@ -1075,7 +1228,7 @@ internal sealed partial class WatBackend
                 if (!IsAddressValued(e.Type)) { Line(LoadInstr(e.Type)); }
                 break;
             case IndirectCall ic:
-                EmitCallIndirect(ic.Callee, ic.Args, ic.ParamTypes);
+                EmitCallIndirect(ic.Callee, ic.Args, ic.ParamTypes, ic);
                 break;
             case CommaOp co:
                 // Every operand left to right; all but the last are discarded.
@@ -1086,6 +1239,22 @@ internal sealed partial class WatBackend
                 for (var i = 0; i < cs.Items.Count - 1; i++) { EmitDiscarded(cs.Items[i]); }
                 EmitExpr(cs.Items[^1]);
                 break;
+            case StructInit si when _literalSlots.TryGetValue(si, out var siSlot):
+                // A compound literal: its slot zeroed, the members it gives stored, its address.
+                EmitAggregateInit(siSlot, si.Type, si);
+                EmitFrameAddr(siSlot);
+                break;
+            case StackArray sa when _literalSlots.TryGetValue(sa, out var saSlot):
+            {
+                var step = WasmSizeOf(sa.Element);
+                EmitFrameAddr(saSlot);
+                Line("i32.const 0");
+                Line($"i32.const {Math.Max(1, step * sa.Elems.Count)}");
+                Line("memory.fill");
+                for (var i = 0; i < sa.Elems.Count; i++) { StoreInitValue(saSlot + i * step, sa.Element, sa.Elems[i]); }
+                EmitFrameAddr(saSlot);
+                break;
+            }
             case DefaultLit when !IsAddressValued(e.Type):
                 // C23 `{}` of a scalar: its zero.
                 Line($"{ValType(e.Type)}.const 0");
@@ -1538,7 +1707,7 @@ internal sealed partial class WatBackend
         // A call through a function-pointer variable (`fp(x)`): its value is a table index.
         if (c.CalleeSym is { Kind: SymKind.Var or SymKind.Param } fpVar)
         {
-            EmitCallIndirect(new VarRef(fpVar) { Type = fpVar.Type }, c.Args, c.ParamTypes);
+            EmitCallIndirect(new VarRef(fpVar) { Type = fpVar.Type }, c.Args, c.ParamTypes, c);
             return;
         }
         // The printf family with a string-literal format is expanded inline (no
@@ -1603,14 +1772,7 @@ internal sealed partial class WatBackend
                 throw new IrUnsupportedException($"call to '{c.Callee}': library or undefined functions need host imports (putchar/puts/printf are wired so far)");
             }
         }
-        for (var i = 0; i < c.Args.Count; i++)
-        {
-            EmitExpr(c.Args[i]);
-            if (c.ParamTypes is { } pts && i < pts.Count)
-            {
-                EmitConvert(c.Args[i].Type, pts[i]);
-            }
-        }
+        EmitCallArgs(c, c.Args, c.ParamTypes);
         // A user function is called by the name its definition is emitted under: a static
         // renamed out of the way of a same-named external one (BuildFuncDef) differs from
         // the C name.
@@ -2000,6 +2162,12 @@ internal sealed partial class WatBackend
                 break;
             case VarRef { Sym.IsGlobal: true } g:
                 EmitGlobalAddr(g.Sym);
+                break;
+            case StructInit or StackArray when _literalSlots.ContainsKey(lv):
+                EmitExpr(lv);   // a compound literal is an lvalue: its slot, filled
+                break;
+            case VarRef { Sym.Kind: SymKind.Param } ap when IsAggregate(ap.Sym.Type) && !_frame.ContainsKey(ap.Sym):
+                Line($"local.get ${ap.Sym.TargetName}");   // the address of the caller's copy
                 break;
             case VarRef v when _frame.TryGetValue(v.Sym, out var off):
                 EmitFrameAddr(off);

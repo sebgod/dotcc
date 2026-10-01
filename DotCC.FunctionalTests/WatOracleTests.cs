@@ -124,6 +124,10 @@ public sealed class WatOracleTests
     [InlineData("struct V { int (*f)(int); };\nint twice(int x){ return 2 * x; }\nint neg(int x){ return -x; }\nstatic int (*ops[2])(int) = { twice, neg };\nint main(void){ struct V v = { twice }; return v.f(21) + ops[1](2) + ops[0](3); }", 46)]
     // assert by the condition's own type, a void conditional, the instruction math functions.
     [InlineData("#include <assert.h>\n#include <math.h>\nint n;\nvoid bump(int *p){ *p += 1; }\nint main(void){ double d = 0.5; assert(d); n == 0 ? bump(&n) : (void)0; return n * 100 + (int)sqrt(16.0) * 10 + (int)floor(2.7); }", 142)]
+    // structs by value (a copy's address in, a caller's slot out), compound literals, div.
+    [InlineData("struct P { int x, y; };\nstruct P make(int a){ struct P p = {a, a * 2}; return p; }\nint sum(struct P p){ p.x += 100; return p.x + p.y; }\nint main(void){ struct P q = make(3); int s = sum(q); return s * 10 + q.x; }", 1093)]
+    [InlineData("struct P { int x, y; };\nint sum(struct P p){ return p.x + p.y; }\nint main(void){ int *a = (int[]){4, 5, 6}; return sum((struct P){1, 2}) * 100 + a[2] + (&(struct P){7, 8})->y; }", 314)]
+    [InlineData("#include <stdlib.h>\nint main(void){ div_t d = div(17, 5); ldiv_t l = ldiv(-17L, 5L); return d.quot * 100 + d.rem * 10 + (int)l.rem; }", 318)]
     public void Wat_program_returns_expected_value(string source, int expected)
     {
         if (!Requested)

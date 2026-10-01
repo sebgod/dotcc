@@ -358,11 +358,7 @@ internal sealed partial class WatBackend
                 break;
 
             case CfgKind.Return:
-                if (b.RetVal is { } v)
-                {
-                    EmitExpr(v);
-                    EmitConvert(v.Type, _currentRet);
-                }
+                EmitReturnValue(b.RetVal);
                 RestoreSp();
                 Line("return");
                 break;
