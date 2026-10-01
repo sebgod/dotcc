@@ -312,7 +312,7 @@ Synthetic header at `DotCC.Lib/include/wchar.h`; implementations in `DotCC.Libc/
 | `wcstok` | ✅ | The C reentrant 3-arg form (explicit `wchar_t**` save slot) — no stateful 2-arg variant. |
 | `wmemcpy`, `wmemmove`, `wmemset`, `wmemcmp`, `wmemchr` | ✅ | Counts in `wchar_t` units; `wmemmove` overlap-safe. |
 | `wcstol`, `wcstoll`, `wcstoul`, `wcstoull` | ✅ | Transcode → byte `strtol`/`strtoul` cores; full base-0/2-36 + endptr + `errno` clamp. |
-| `wcstod`, `wcstof`, `wcstold` | ✅ | Transcode → byte `strtod`; `wcstof` narrows to `float`, `wcstold` == `double` (dotcc's `long double`). |
+| `wcstod`, `wcstof`, `wcstold` | ✅ | Transcode → byte `strtod`; `wcstof` → byte `strtof` (rounded once), `wcstold` == `double` (dotcc's `long double`). |
 | `fputwc`, `putwc`, `putwchar`, `fputws` | ✅ | Wide char/line output via the stream's UTF-8 `TextWriter` (the writer `fprintf` uses, so wide + narrow writes stay ordered). |
 | `fgetwc`, `getwc`, `getwchar`, `fgetws`, `ungetwc` | ✅ | Wide char/line input — assembles UTF-8 off the byte reader into UTF-16 (byte-stream-consistent with `fgetc`/`fgets`; shares the `ungetc` pushback). A code point > U+FFFF arrives as its surrogate pair across two `fgetwc` calls. |
 | `wprintf`, `fwprintf`, `swprintf` | ✅ | Wide formatted output. The emitter lowers them to the same fluent builder as `printf`/`sprintf`; the wide format is transcoded to UTF-8 (pooled) so the byte `PrintfBuilder` parses it, a wide `%ls`/`%lc` arg is a `char*`. `swprintf` bounds to `n` wide chars incl. the NUL (returns negative on overflow — C's contract, unlike `snprintf`). |

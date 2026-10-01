@@ -357,9 +357,17 @@ public static unsafe partial class Libc
     /// <c>e</c>/<c>E</c> exponent, C99 hex floats, <c>inf</c>/<c>nan</c>).</summary>
     public static double wcstod(char* nptr, char** endptr) => WcstodViaByte(nptr, endptr);
 
-    /// <summary><c>wcstof(nptr, endptr)</c> (C99) — parse a float (the double parse,
-    /// narrowed to <see cref="float"/>).</summary>
-    public static float wcstof(char* nptr, char** endptr) => (float)WcstodViaByte(nptr, endptr);
+    /// <summary><c>wcstof(nptr, endptr)</c> (C99) — parse a float, rounded once by the byte
+    /// <see cref="strtof"/> (narrowing the double parse would round twice).</summary>
+    public static float wcstof(char* nptr, char** endptr)
+    {
+        byte* buf = WideNumericScratch(nptr);
+        byte* bEnd;
+        float v = strtof(buf, &bEnd);
+        if (endptr != null) { *endptr = nptr + (bEnd - buf); }
+        NativeMemory.Free(buf);
+        return v;
+    }
 
     /// <summary><c>wcstold(nptr, endptr)</c> (C99) — parse a long double
     /// (== <c>double</c> on dotcc's model).</summary>
