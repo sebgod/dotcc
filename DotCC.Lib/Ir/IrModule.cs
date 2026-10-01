@@ -125,6 +125,8 @@ internal sealed partial class IrModule
             case CType.Enum e: return Layout(e.Underlying);
             // _Float128 wraps a UInt128, which .NET aligns to 16 on x64, as gcc does.
             case CType.Float128Type: return (16, 16);
+            // double _Complex: two doubles, the real part first (C11 6.2.5p13).
+            case CType.ComplexType: return (16, 8);
             default: return (0, 1);
         }
     }
