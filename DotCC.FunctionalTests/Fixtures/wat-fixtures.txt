@@ -37,6 +37,8 @@ c-idioms
 c11-alignof
 c11-char32
 c11-generic
+c11-thread-local
+c11-threads
 c23-attributes
 c23-char8
 c23-constants
@@ -206,6 +208,8 @@ switch-goto-fallthrough
 tag-declarations
 ternary-cmp-arm
 tgmath-overload
+thread-local-init
+threads-counter
 time-basic
 time-calendar
 truthy

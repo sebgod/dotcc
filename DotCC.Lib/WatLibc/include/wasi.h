@@ -17,4 +17,8 @@ int __wasi_clock_time_get(unsigned clock_id, unsigned long precision, unsigned l
 /* buf_len random bytes from the host's secure source into buf (a WASI size is 32 bits). */
 int __wasi_random_get(void *buf, unsigned buf_len);
 
+/* wasi-threads (imported from module "wasi" as "thread-spawn"): run wasi_thread_start(tid, arg)
+   in a new thread's instance of the module; the new thread's id, or a negative error. */
+int __wasi_thread_spawn(void *start_arg);
+
 #endif
