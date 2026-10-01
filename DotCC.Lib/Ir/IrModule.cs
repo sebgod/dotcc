@@ -334,6 +334,64 @@ internal sealed partial class IrModule
     /// os.windows and dwarf into the program; a C or root-unit aggregate is always emitted.</summary>
     internal HashSet<string> PrunableTypes { get; } = new(System.StringComparer.Ordinal);
 
+    /// <summary>What each definition names, as the C binder resolved it: the functions and file-scope
+    /// objects a function's body or an object's initializer (the owner) refers to. A reference made
+    /// outside any definition (a file-scope <c>sizeof</c> operand, an array dimension) is in
+    /// <see cref="_referencedOutside"/>. <see cref="UnreachedTuLocals"/> walks it.</summary>
+    private readonly Dictionary<Symbol, HashSet<Symbol>> _references = new();
+
+    /// <summary>The functions and objects named outside any definition, which count as reached.</summary>
+    private readonly HashSet<Symbol> _referencedOutside = new();
+
+    /// <summary>Record that <paramref name="owner"/>'s definition (null: no definition) names
+    /// <paramref name="target"/>.</summary>
+    internal void NoteReference(Symbol? owner, Symbol target)
+    {
+        if (owner is null)
+        {
+            _referencedOutside.Add(target);
+            return;
+        }
+        if (!_references.TryGetValue(owner, out var targets))
+        {
+            targets = new HashSet<Symbol>();
+            _references[owner] = targets;
+        }
+        targets.Add(target);
+    }
+
+    /// <summary>The internal-linkage functions and objects (<see cref="Symbol.IsTuLocal"/>) nothing
+    /// reaches from a definition with external linkage, so no program can call or read them: a
+    /// C compiler emits no code for them, and the backends leave them out. Every header
+    /// <c>static inline</c> a unit includes is one, and an object compiled from CPython carried
+    /// 600 of them per unit, most never called. Only the C binder marks a definition TU-local,
+    /// and it records every name it resolves (<see cref="NoteReference"/>), so the walk sees all
+    /// of a TU-local definition's uses; one it missed would be named but not defined, which the
+    /// C# build reports rather than miscompiling.</summary>
+    internal HashSet<Symbol> UnreachedTuLocals()
+    {
+        var reached = new HashSet<Symbol>();
+        var pending = new Stack<Symbol>();
+        void Reach(Symbol s)
+        {
+            if (reached.Add(s)) { pending.Push(s); }
+        }
+        foreach (var f in Functions) { if (!f.Sym.IsTuLocal) { Reach(f.Sym); } }
+        foreach (var g in Globals) { if (!g.Sym.IsTuLocal) { Reach(g.Sym); } }
+        foreach (var s in _referencedOutside) { Reach(s); }
+        while (pending.TryPop(out var s))
+        {
+            if (_references.TryGetValue(s, out var targets))
+            {
+                foreach (var t in targets) { Reach(t); }
+            }
+        }
+        var unreached = new HashSet<Symbol>();
+        foreach (var f in Functions) { if (f.Sym.IsTuLocal && !reached.Contains(f.Sym)) { unreached.Add(f.Sym); } }
+        foreach (var g in Globals) { if (g.Sym.IsTuLocal && !reached.Contains(g.Sym)) { unreached.Add(g.Sym); } }
+        return unreached;
+    }
+
     /// <summary>Withdraw a registered struct / union so it is not emitted: a lazy Zig module's container
     /// found, after registering, to hold a container that could not be lowered (road-to-zig-std G3,
     /// <c>ZigLowering.FailDependentContainers</c>). A no-op for a name that is not registered.</summary>

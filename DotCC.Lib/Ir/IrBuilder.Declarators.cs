@@ -378,7 +378,7 @@ internal sealed partial class IrBuilder
         // declarator), as parking_lot.c's `buckets[]` pointing into itself needs: declare it
         // first, then give it the size its initializer counts.
         var sym = DeclareGlobalArray(d.Name, arr, csName, tuLocal);
-        var a = ResolveArrayObject(d, arr);
+        var a = Owned(sym, () => ResolveArrayObject(d, arr));
         sym.Type = a.Type;
         var init = new PinnedArray(a.Elem, a.Elems, a.Elems is null ? CountLit(a.Count) : null) { Type = new CType.Pointer(a.Elem) };
         Globals.Add(new GlobalVar(sym, init));

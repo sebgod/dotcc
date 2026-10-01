@@ -636,7 +636,10 @@ internal sealed partial class WatBackend
     private string Module(IrModule unit)
     {
         _unit = unit;
-        foreach (var fn in unit.Functions) { _defined.Add(fn.Sym.Name); }
+        // A static function nothing reaches is left out (IrModule.UnreachedTuLocals).
+        var unreached = unit.UnreachedTuLocals();
+        var functions = unit.Functions.Where(fn => !unreached.Contains(fn.Sym)).ToList();
+        foreach (var fn in functions) { _defined.Add(fn.Sym.Name); }
         _threaded = UsesThreads(unit);
         PlaceGlobals(unit);
 
@@ -644,7 +647,7 @@ internal sealed partial class WatBackend
         var hasMain = false;
         var bodies = new List<(string Name, string Text, Needs Needs)>();
         var moduleNeeds = TakeNeeds();
-        foreach (var fn in unit.Functions)
+        foreach (var fn in functions)
         {
             var start = _sb.Length;
             EmitFunc(fn);

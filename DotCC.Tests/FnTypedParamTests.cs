@@ -33,7 +33,7 @@ public sealed class FnTypedParamTests
     {
         var emitted = Emit("""
             static int apply(int f(int), int v) { return f(v); }
-            static void *run(void *(func)(char *), char *s) { return func(s); }
+            void *run(void *(func)(char *), char *s) { return func(s); }
             static int id(int x) { return x; }
             int main(void) { return apply(id, 3); }
             """);

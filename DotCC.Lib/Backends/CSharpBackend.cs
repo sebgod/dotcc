@@ -81,9 +81,13 @@ internal sealed partial class CSharpBackend
         var mainReturnsErrUnion = false;
         var mainErrPayloadIsVoid = false;
         var records = new List<LinkRecord>();
+        // A TU-local definition nothing reaches is left out, as a C compiler emits no code for
+        // an unused static function (IrModule.UnreachedTuLocals).
+        var unreached = unit.UnreachedTuLocals();
 
         foreach (var fn in unit.Functions)
         {
+            if (unreached.Contains(fn.Sym)) { continue; }
             cg._currentFnName = fn.Sym.Name;
             var fnText = cg.Func(fn);
             fns.Add(fnText);
@@ -154,6 +158,7 @@ internal sealed partial class CSharpBackend
         var globals = new StringBuilder();
         foreach (var g in unit.Globals)
         {
+            if (unreached.Contains(g.Sym)) { continue; }
             var storageStart = storage.Length;
             var globalStart = globals.Length;
             AppendGlobal(g);

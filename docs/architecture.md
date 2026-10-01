@@ -82,6 +82,7 @@ The generated `DotCC.C` / `DotCC.Zig` partial classes (from the `.lalr.yaml` gra
 | `struct` / `union` | a plain `struct` (never `unsafe struct`): only the members that need an unsafe context are `unsafe` (a pointer field, a `fixed` buffer, the array-member init helper) |
 | File-scope variable | a field of `static class DotCcGlobals` (not an `unsafe` class), `unsafe` only when its type or initializer needs it (`static int LIMIT = 5;` is `public static int LIMIT = 5;`) |
 | Prototype / forward decl | empty emit (C# methods hoist) |
+| Unused `static` function or object | not emitted. The C binder records what each definition names (`IrModule.NoteReference`), and both backends leave out a TU-local definition that no external one reaches (`IrModule.UnreachedTuLocals`), as a C compiler emits no code for it. Every header `static inline` a unit includes is such a definition: libpython went from 69.5k methods to 15.4k |
 
 **Self-contained emit, no inlining duplication.** Every emitted file pulls in the `DotCC.Libc` runtime via the single block `BuildShell` splices from embedded resources (see `LoadRuntimeBlock` above) — `using static Libc;` then surfaces every method by bare name.
 
