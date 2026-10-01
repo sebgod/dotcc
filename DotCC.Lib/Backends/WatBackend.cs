@@ -130,6 +130,84 @@ internal sealed partial class WatBackend
         sym is { Storage: Storage.Extern, IsTuLocal: false } && sym.Type.Unqualified is CType.Pointer
         && _globalArrays.Contains(sym.TargetName);
 
+    /// <summary>The address <paramref name="scratch"/> in the running thread's scratch: the low
+    /// area the formatter and fd_write work in (<see cref="FpBig"/> to <see cref="IoScratch"/>).
+    /// A threaded module gives each thread its own, at the base of its TLS block in
+    /// <c>$__tls</c>; the main thread's is at 0, where an unthreaded module's is.</summary>
+    private string Lo(int scratch) =>
+        _threaded ? $"global.get $__tls i32.const {scratch} i32.add" : $"i32.const {scratch}";
+
+    /// <summary>True when a function of <paramref name="unit"/> calls one of
+    /// <see cref="ThreadPrimitives"/> that nothing defines.</summary>
+    private bool UsesThreads(IrModule unit)
+    {
+        var found = false;
+        foreach (var fn in unit.Functions)
+        {
+            foreach (var s in fn.Body.Stmts)
+            {
+                ForEachExpr(s, e => found |= e is Call c && ThreadPrimitives.Contains(c.Callee) && !_defined.Contains(c.Callee));
+            }
+        }
+        return found;
+    }
+
+    /// <summary>The offset of thread-local <paramref name="sym"/> among a TLS block's
+    /// thread-locals, or null when it is not one (or the module is not threaded).</summary>
+    private int? TlsOffset(Symbol sym)
+    {
+        if (!_threaded) { return null; }
+        if (sym.IsTuLocal) { return _tlsBySym.TryGetValue(sym, out var a) ? a : null; }
+        return _tlsByName.TryGetValue(sym.TargetName, out var b) ? b : null;
+    }
+
+    /// <summary>Lay out a threaded module's thread-locals: errno, then each one, aligned. The main
+    /// thread's TLS block is the low scratch with these right after it (from DataBase), so the
+    /// data area starts past them; their initial values go to a template in the data area.</summary>
+    private void PlaceThreadLocals(IrModule unit)
+    {
+        var cursor = 4;   // errno
+        var placed = new List<(GlobalVar G, int Off)>();
+        foreach (var g in unit.Globals)
+        {
+            if (!g.Sym.IsThreadLocal) { continue; }
+            cursor = AlignUp(cursor, SlotAlign(g.Sym.Type));
+            placed.Add((g, cursor));
+            cursor += Math.Max(1, WasmSizeOf(g.Sym.Type));
+        }
+        _tlsSize = AlignUp(cursor, 16);
+        _dataEnd = AlignUp(DataBase + _tlsSize, 16);
+        _tlsTemplate = _dataEnd;
+        _dataEnd += _tlsSize;
+        foreach (var (g, off) in placed)
+        {
+            if (g.Sym.IsTuLocal)
+            {
+                _tuGlobals[g.Sym] = _tlsTemplate + off;
+                _tlsBySym[g.Sym] = off;
+            }
+            else
+            {
+                _globals[g.Sym.TargetName] = _tlsTemplate + off;
+                _tlsByName[g.Sym.TargetName] = off;
+            }
+        }
+    }
+
+    /// <summary>Push errno's address: a fixed slot, or in a threaded module the running thread's,
+    /// the first of its thread-locals.</summary>
+    private void EmitErrnoAddr()
+    {
+        if (_threaded)
+        {
+            Line("global.get $__tls");
+            Line($"i32.const {DataBase}");
+            Line("i32.add");
+            return;
+        }
+        Line($"i32.const {ErrnoAddr()}");
+    }
+
     /// <summary>The address <see cref="PlaceGlobals"/> gave <paramref name="sym"/>.</summary>
     private bool TryGlobalAddr(Symbol sym, out int addr) =>
         sym.IsTuLocal ? _tuGlobals.TryGetValue(sym, out addr) : _globals.TryGetValue(sym.TargetName, out addr);
@@ -171,6 +249,40 @@ internal sealed partial class WatBackend
     /// <c>$__longjmp</c> exception tag and the <c>$__jmpseq</c> token counter (see
     /// <see cref="EmitSetjmpGuard"/>).</summary>
     private bool _usesLongjmp;
+
+    /// <summary>True when the program runs threads: it calls one of <see cref="ThreadPrimitives"/>.
+    /// Its memory is then a shared memory the host provides and every thread an instance of the
+    /// module over it (wasi-threads): the data segments are passive and copied in once, the heap's
+    /// next free byte lives in memory, each thread has a TLS block (its own formatter scratch, see
+    /// <see cref="Lo"/>, then its thread-locals), and the atomic operations are atomic instructions.
+    /// A module without threads keeps its plain shape.</summary>
+    private bool _threaded;
+
+    /// <summary>The calls that make a program threaded: spawning a thread, and waiting or waking
+    /// on memory, which needs a shared memory.</summary>
+    private static readonly HashSet<string> ThreadPrimitives = new(StringComparer.Ordinal)
+    {
+        "__wasi_thread_spawn", "__builtin_wasm_memory_atomic_wait32", "__builtin_wasm_memory_atomic_notify",
+    };
+
+    /// <summary>A threaded module's shared memory may grow to this many pages (1 GiB): a shared
+    /// memory needs a maximum.</summary>
+    private const int MaxSharedPages = 16384;
+
+    /// <summary>A threaded module's fixed cells, below the formatter's scratch (from 16): the flag
+    /// the first instance's start function sets as it lays memory out, so a thread's instance
+    /// leaves it alone, and the heap's next free byte, which every thread's malloc bumps.</summary>
+    private const int InitFlagAddr = 8;
+    private const int HeapCellAddr = 12;
+
+    /// <summary>A threaded module's thread-locals, which a TLS block holds past its scratch (from
+    /// <see cref="DataBase"/>): their bytes (errno first), the address of their initial values
+    /// (the template a new thread's block copies), and each one's offset among them, by name for
+    /// external linkage and by symbol for internal.</summary>
+    private int _tlsSize;
+    private int _tlsTemplate;
+    private readonly Dictionary<string, int> _tlsByName = new(StringComparer.Ordinal);
+    private readonly Dictionary<Symbol, int> _tlsBySym = new(ReferenceEqualityComparer.Instance);
 
     /// <summary>True once the program calls <c>exit</c>, which imports WASI's <c>proc_exit</c>.</summary>
     private bool _usesProcExit;
@@ -280,6 +392,58 @@ internal sealed partial class WatBackend
 
     public static string Run(IrModule unit) => new WatBackend().Module(unit);
 
+    /// <summary>The module and field a <c>__wasi_&lt;name&gt;</c> function is imported from:
+    /// <c>wasi_snapshot_preview1.&lt;name&gt;</c>, except wasi-threads' <c>wasi.thread-spawn</c>.</summary>
+    private static (string Module, string Field) WasiImport(string cName) =>
+        cName == "__wasi_thread_spawn" ? ("wasi", "thread-spawn") : ("wasi_snapshot_preview1", cName[WasiPrefix.Length..]);
+
+    /// <summary>A threaded module's start function. It runs in every thread's instance, and only
+    /// the first, which wins the flag, lays memory out: grows it to what the data and the main
+    /// stack need, copies the passive data segments in, stores the globals' initializers, gives
+    /// the main thread its thread-locals' initial values and starts the heap past the stack.</summary>
+    private string ThreadedStart(int pages, int stackTop, bool initGlobals)
+    {
+        var sb = new StringBuilder();
+        sb.Append("  (func $__start\n    (local $grow i32)\n");
+        sb.Append($"    i32.const {InitFlagAddr}\n    i32.const 0\n    i32.const 1\n    i32.atomic.rmw.cmpxchg\n    i32.eqz\n    if\n");
+        sb.Append($"      i32.const {pages}\n      memory.size\n      i32.sub\n      local.tee $grow\n      i32.const 0\n      i32.gt_s\n      if\n        local.get $grow\n        memory.grow\n        drop\n      end\n");
+        for (var i = 0; i < _strData.Count; i++)
+        {
+            var (off, hex) = _strData[i];
+            sb.Append($"      i32.const {off}\n      i32.const 0\n      i32.const {hex.Length / 3}\n      memory.init $__d{i}\n");
+        }
+        if (initGlobals) { sb.Append("      call $__init_globals\n"); }
+        sb.Append($"      i32.const {DataBase}\n      i32.const {_tlsTemplate}\n      i32.const {_tlsSize}\n      memory.copy\n");
+        sb.Append($"      i32.const {HeapCellAddr}\n      i32.const {stackTop}\n      i32.atomic.store\n");
+        sb.Append("    end\n  )\n");
+        return sb.ToString();
+    }
+
+    /// <summary>wasi-threads' entry point, which the host calls in a new thread's instance with the
+    /// thread's id and the argument <c>thrd_create</c> passed to <c>__wasi_thread_spawn</c>: the
+    /// thread's descriptor, whose first two fields (eight bytes each, as a pointer takes in memory)
+    /// are its stack top and its TLS block. It points the thread's stack pointer and TLS base at
+    /// them before anything uses either, then runs the libc's <c>__dotcc_thread_main</c>.</summary>
+    private static string ThreadStartExport() => """
+  (func $wasi_thread_start (param $tid i32) (param $arg i32)
+    local.get $arg
+    i64.load
+    i32.wrap_i64
+    global.set $__sp
+    local.get $arg
+    i32.const 8
+    i32.add
+    i64.load
+    i32.wrap_i64
+    global.set $__tls
+    local.get $tid
+    local.get $arg
+    call $__dotcc_thread_main
+  )
+  (export "wasi_thread_start" (func $wasi_thread_start))
+
+""";
+
     /// <summary>Assemble the module: emit the function bodies first (interning string
     /// literals into data segments), then wrap them with the linear memory, the stack
     /// pointer global, the data segments, and the <c>main</c> export.</summary>
@@ -287,6 +451,7 @@ internal sealed partial class WatBackend
     {
         _unit = unit;
         foreach (var fn in unit.Functions) { _defined.Add(fn.Sym.Name); }
+        _threaded = UsesThreads(unit);
         PlaceGlobals(unit);
 
         _indent = 1;
@@ -320,7 +485,13 @@ internal sealed partial class WatBackend
         }
         foreach (var (name, sig) in _wasiImports)
         {
-            m.Append($"  (import \"wasi_snapshot_preview1\" \"{name[WasiPrefix.Length..]}\" (func ${name}{sig}))\n");
+            var (module, field) = WasiImport(name);
+            m.Append($"  (import \"{module}\" \"{field}\" (func ${name}{sig}))\n");
+        }
+        if (_threaded)
+        {
+            // Every thread's instance runs over one memory, which the host makes and passes in.
+            m.Append($"  (import \"env\" \"memory\" (memory 1 {MaxSharedPages} shared))\n");
         }
         // Export the memory only when a WASI function reads or writes it (fd_write's
         // iovecs, clock_time_get's result); other modules keep the plain `(memory 1)`.
@@ -329,7 +500,8 @@ internal sealed partial class WatBackend
         // the heap starts where the stack tops.
         var stackTop = _dataEnd <= StackTop / 2 ? StackTop : AlignUp(_dataEnd, 16) + StackBytes;
         var pages = (stackTop + 65535) / 65536;
-        m.Append(usesIo || _wasiImports.Count > 0 ? $"  (memory (export \"memory\") {pages})\n" : $"  (memory {pages})\n");
+        if (_threaded) { m.Append("  (export \"memory\" (memory 0))\n"); }
+        else { m.Append(usesIo || _wasiImports.Count > 0 ? $"  (memory (export \"memory\") {pages})\n" : $"  (memory {pages})\n"); }
         foreach (var (sig, name) in _sigTypes) { m.Append($"  (type {name} (func{sig}))\n"); }
         if (_usesLongjmp)
         {
@@ -345,7 +517,13 @@ internal sealed partial class WatBackend
             m.Append($"  (elem (i32.const 1) func {string.Join(" ", _fnTable.Select(n => "$" + n))})\n");
         }
         m.Append($"  (global $__sp (mut i32) (i32.const {stackTop}))\n");
-        if (usesHeap)
+        if (_threaded)
+        {
+            // The running thread's TLS block: the main thread's is at 0 (wasi_thread_start sets a
+            // new thread's).
+            m.Append("  (global $__tls (mut i32) (i32.const 0))\n");
+        }
+        if (usesHeap && !_threaded)
         {
             // The bump-allocation pointer: next free heap byte, growing UP from the end
             // of the initial page (malloc grows linear memory past it on demand).
@@ -367,14 +545,24 @@ internal sealed partial class WatBackend
             // Active limb count of the float formatter's big-integer at FpBig.
             m.Append("  (global $__bnlen (mut i32) (i32.const 0))\n");
         }
-        foreach (var (off, hex) in _strData)
+        for (var i = 0; i < _strData.Count; i++)
         {
-            m.Append("  (data (i32.const ").Append(off).Append(") \"").Append(hex).Append("\")\n");
+            var (off, hex) = _strData[i];
+            // A threaded module's segments are passive: every thread instantiates the module, and
+            // only the first instance's start function may copy them in.
+            if (_threaded) { m.Append($"  (data $__d{i} \"").Append(hex).Append("\")\n"); }
+            else { m.Append("  (data (i32.const ").Append(off).Append(") \"").Append(hex).Append("\")\n"); }
         }
         m.Append(funcs);
-        if (initGlobals.Length > 0)
+        if (initGlobals.Length > 0) { m.Append(initGlobals); }
+        if (_threaded)
         {
-            m.Append(initGlobals);
+            m.Append(ThreadedStart(pages, stackTop, initGlobals.Length > 0));
+            m.Append("  (start $__start)\n");
+            if (_defined.Contains("__dotcc_thread_main")) { m.Append(ThreadStartExport()); }
+        }
+        else if (initGlobals.Length > 0)
+        {
             m.Append("  (start $__init_globals)\n");
         }
         m.Append(RuntimeFuncDefs());
@@ -1307,6 +1495,50 @@ internal sealed partial class WatBackend
         _ => null,
     };
 
+    /// <summary>The libc's threading intrinsics, or false when <paramref name="c"/> is none:
+    /// <c>__builtin_wasm_memory_atomic_wait32(int *addr, int expected, long long timeout_ns)</c>
+    /// and <c>__builtin_wasm_memory_atomic_notify(int *addr, unsigned count)</c> (clang's names
+    /// for the wasm instructions a futex is), and the TLS block a new thread needs:
+    /// <c>__builtin_dotcc_tls_size()</c> and <c>__builtin_dotcc_tls_init(void *block)</c>, which
+    /// copies the thread-locals' initial values in past the block's scratch.</summary>
+    private bool EmitThreadIntrinsic(Call c)
+    {
+        switch (c.Callee)
+        {
+            case "__builtin_wasm_memory_atomic_wait32" when c.Args.Count == 3:
+                EmitExpr(c.Args[0]);
+                EmitExpr(c.Args[1]);
+                EmitConvert(c.Args[1].Type, CType.Int);
+                EmitExpr(c.Args[2]);
+                EmitConvert(c.Args[2].Type, CType.Long);
+                Line("memory.atomic.wait32");
+                EmitConvert(CType.Int, c.Type);
+                return true;
+            case "__builtin_wasm_memory_atomic_notify" when c.Args.Count == 2:
+                EmitExpr(c.Args[0]);
+                EmitExpr(c.Args[1]);
+                EmitConvert(c.Args[1].Type, CType.UInt);
+                Line("memory.atomic.notify");
+                EmitConvert(CType.UInt, c.Type);
+                return true;
+            case "__builtin_dotcc_tls_size" when c.Args.Count == 0:
+                Line($"i32.const {DataBase + _tlsSize}");
+                EmitConvert(CType.UInt, c.Type);
+                return true;
+            case "__builtin_dotcc_tls_init" when c.Args.Count == 1:
+                EmitExpr(c.Args[0]);
+                Line($"i32.const {DataBase}");
+                Line("i32.add");
+                Line($"i32.const {_tlsTemplate}");
+                Line($"i32.const {_tlsSize}");
+                Line("memory.copy");
+                if (c.Type.Unqualified is not CType.VoidType) { Line($"{ValType(c.Type)}.const 0"); }
+                return true;
+            default:
+                return false;
+        }
+    }
+
     /// <summary>Arm the <c>jmp_buf</c> <paramref name="env"/> for a <c>setjmp</c>: a fresh token
     /// from the counter, which a <c>longjmp</c> through it throws and only this setjmp's handler
     /// matches, so a nested setjmp on another buffer passes it on.</summary>
@@ -1537,6 +1769,11 @@ internal sealed partial class WatBackend
         // The _explicit forms' memory orders, for their side effects only.
         for (var i = arity; i < c.Args.Count; i++) { EmitDiscarded(c.Args[i]); }
         CType result = CType.Void;
+        if (_threaded)
+        {
+            result = EmitAtomicInstruction(c, name, obj, addr, expected, value);
+            name = "";   // done: the plain lowering below is for an unthreaded module
+        }
         switch (name)
         {
             case "atomic_load":
@@ -1646,6 +1883,148 @@ internal sealed partial class WatBackend
         return true;
     }
 
+    /// <summary>An atomic generic function in a threaded module, as the atomic instruction it is,
+    /// over the object's bytes as an unsigned integer as wide as it is in memory (see
+    /// <see cref="AtomicBits"/>), the operands already in scratch locals; returns the result's
+    /// type. wasm's atomic instructions are sequentially consistent, which is every order C
+    /// asks for.</summary>
+    private CType EmitAtomicInstruction(Call c, string name, CType obj, string? addr, string? expected, string? value)
+    {
+        var bits = AtomicBits(obj);
+        var bvt = ValType(bits);
+        switch (name)
+        {
+            case "atomic_thread_fence" or "atomic_signal_fence":
+                Line("atomic.fence");
+                return CType.Void;
+            case "atomic_is_lock_free":
+                Line("i32.const 1");
+                return CType.Bool;
+            case "atomic_load":
+                Line($"local.get {addr}");
+                Line(AtomicInstr(bits, "load"));
+                FromAtomicBits(obj);
+                return obj;
+            case "atomic_store" or "atomic_init":
+                Line($"local.get {addr}");
+                Line($"local.get {value}");
+                ToAtomicBits(obj);
+                Line(AtomicInstr(bits, "store"));
+                return CType.Void;
+            case "atomic_flag_clear":
+                Line($"local.get {addr}");
+                Line($"{bvt}.const 0");
+                Line(AtomicInstr(bits, "store"));
+                return CType.Void;
+            case "atomic_flag_test_and_set":
+                Line($"local.get {addr}");
+                Line($"{bvt}.const 1");
+                Line(AtomicInstr(bits, "rmw.xchg"));
+                Line($"{bvt}.const 0");
+                Line($"{bvt}.ne");
+                return CType.Bool;
+            case "atomic_exchange":
+                Line($"local.get {addr}");
+                Line($"local.get {value}");
+                ToAtomicBits(obj);
+                Line(AtomicInstr(bits, "rmw.xchg"));
+                FromAtomicBits(obj);
+                return obj;
+            case "atomic_fetch_add" or "atomic_fetch_sub" or "atomic_fetch_or" or "atomic_fetch_and" or "atomic_fetch_xor":
+                if (obj is not (CType.Prim { Integer: true } or CType.Enum))
+                {
+                    throw new IrUnsupportedException($"the wat target does not support {c.Callee} on a {obj.Describe()}");
+                }
+                Line($"local.get {addr}");
+                Line($"local.get {value}");
+                Line(AtomicInstr(bits, "rmw." + name["atomic_fetch_".Length..]));
+                FromAtomicBits(obj);
+                return obj;
+            case "atomic_compare_exchange_strong" or "atomic_compare_exchange_weak":
+            {
+                // The old bytes come back; equal to *expected's, the exchange happened, else they
+                // go to *expected (7.17.7.4p2).
+                var old = AcquireScratch(bits);
+                Line($"local.get {addr}");
+                Line($"local.get {expected}");
+                Line(LoadInstr(bits));
+                Line($"local.get {value}");
+                ToAtomicBits(obj);
+                Line(AtomicInstr(bits, "rmw.cmpxchg"));
+                Line($"local.tee {old}");
+                Line($"local.get {expected}");
+                Line(LoadInstr(bits));
+                Line($"{bvt}.eq");
+                Line("if (result i32)");
+                Line("  i32.const 1");
+                Line("else");
+                Line($"  local.get {expected}");
+                Line($"  local.get {old}");
+                Line($"  {StoreInstr(bits)}");
+                Line("  i32.const 0");
+                Line("end");
+                ReleaseScratch(bits);
+                return CType.Bool;
+            }
+            default:
+                throw new IrUnsupportedException($"the wat target does not support {c.Callee} in a threaded program");
+        }
+    }
+
+    /// <summary>The unsigned integer type an atomic object's bytes are operated on as: as wide as
+    /// it is in memory (a pointer's eight bytes, a float's four, a double's eight).</summary>
+    private CType AtomicBits(CType obj) => obj.Unqualified switch
+    {
+        CType.Pointer or CType.Func => CType.ULong,
+        CType.Prim { Integer: false } p => p.Bytes <= 4 ? CType.UInt : CType.ULong,
+        var t => WasmSizeOf(t) switch
+        {
+            1 => CType.UChar,
+            2 => CType.UShort,
+            4 => CType.UInt,
+            _ => CType.ULong,
+        },
+    };
+
+    /// <summary>The atomic instruction for <paramref name="op"/> (<c>load</c>, <c>store</c>,
+    /// <c>rmw.add</c>, <c>rmw.xchg</c>, <c>rmw.cmpxchg</c>, …) on <paramref name="bits"/>-wide
+    /// memory; a narrow one zero-extends what it returns.</summary>
+    private string AtomicInstr(CType bits, string op)
+    {
+        var bytes = WasmSizeOf(bits);
+        if (bytes == 8) { return $"i64.atomic.{op}"; }
+        if (bytes == 4) { return $"i32.atomic.{op}"; }
+        var n = bytes * 8;
+        return op switch
+        {
+            "load" => $"i32.atomic.load{n}_u",
+            "store" => $"i32.atomic.store{n}",
+            _ => $"i32.atomic.rmw{n}.{op["rmw.".Length..]}_u",
+        };
+    }
+
+    /// <summary>Turn the <paramref name="obj"/> value on the stack into its bytes' integer.</summary>
+    private void ToAtomicBits(CType obj)
+    {
+        switch (obj.Unqualified)
+        {
+            case CType.Pointer or CType.Func: Line("i64.extend_i32_u"); break;
+            case CType.Prim { Integer: false } p: Line(p.Bytes <= 4 ? "i32.reinterpret_f32" : "i64.reinterpret_f64"); break;
+        }
+    }
+
+    /// <summary>Turn the bytes' integer on the stack back into the <paramref name="obj"/> value: a
+    /// narrow signed integer sign-extended, as the zero-extending instruction did not.</summary>
+    private void FromAtomicBits(CType obj)
+    {
+        switch (obj.Unqualified)
+        {
+            case CType.Pointer or CType.Func: Line("i32.wrap_i64"); break;
+            case CType.Prim { Integer: false } p: Line(p.Bytes <= 4 ? "f32.reinterpret_i32" : "f64.reinterpret_i64"); break;
+            case var t when IsSignedInt(t) && WasmSizeOf(t) < 4: Line(WasmSizeOf(t) == 1 ? "i32.extend8_s" : "i32.extend16_s"); break;
+        }
+    }
+
     /// <summary><c>memcpy</c>/<c>memmove</c> (<c>memory.copy</c>, which allows overlap) and
     /// <c>memset</c> (<c>memory.fill</c>, which stores the value's low byte): destination,
     /// source or value, then the count, and the destination is the call's value.</summary>
@@ -1741,8 +2120,10 @@ internal sealed partial class WatBackend
     /// program and starts zeroed (wasm memory does).</summary>
     private void PlaceGlobals(IrModule unit)
     {
+        if (_threaded) { PlaceThreadLocals(unit); }
         foreach (var g in unit.Globals)
         {
+            if (TlsOffset(g.Sym) is not null) { continue; }
             _dataEnd = AlignUp(_dataEnd, SlotAlign(g.Sym.Type));
             if (g.Sym.IsTuLocal) { _tuGlobals[g.Sym] = _dataEnd; } else { _globals[g.Sym.TargetName] = _dataEnd; }
             if (!g.Sym.IsTuLocal && g.Sym.Type.Unqualified is CType.Array) { _globalArrays.Add(g.Sym.TargetName); }
@@ -1761,6 +2142,13 @@ internal sealed partial class WatBackend
     /// <summary>Push a global's address (its value, for an array or an aggregate).</summary>
     private void EmitGlobalAddr(Symbol sym)
     {
+        if (TlsOffset(sym) is { } tls)
+        {
+            Line("global.get $__tls");
+            Line($"i32.const {DataBase + tls}");
+            Line("i32.add");
+            return;
+        }
         if (!TryGlobalAddr(sym, out var addr))
         {
             throw new IrUnsupportedException($"the wat target has no definition of the global '{sym.Name}'");
@@ -2120,7 +2508,7 @@ internal sealed partial class WatBackend
                 Line($"i32.const {InternUnits(DotCC.EmitHelpers.StringU32Values(u32.Segments), 4)}");
                 break;
             case NameRef { RawName: "errno" }:
-                Line($"i32.const {ErrnoAddr()}");
+                EmitErrnoAddr();
                 Line("i32.load");
                 break;
             case DefaultLit when !IsAddressValued(e.Type):
@@ -2614,6 +3002,7 @@ internal sealed partial class WatBackend
         if (c.Callee == "sprintf" && !_defined.Contains("sprintf")) { EmitSprintf(c, bounded: false); return; }
         if (c.Callee == "snprintf" && !_defined.Contains("snprintf")) { EmitSprintf(c, bounded: true); return; }
         if (!_defined.Contains(c.Callee) && EmitAtomic(c)) { return; }
+        if (!_defined.Contains(c.Callee) && EmitThreadIntrinsic(c)) { return; }
         if (c.Callee is "va_start" or "va_end" or "va_copy" && !_defined.Contains(c.Callee)) { EmitVaMacro(c); return; }
         if (c.Callee == "longjmp" && !_defined.Contains("longjmp") && c.Args.Count == 2) { EmitLongjmp(c); return; }
 
@@ -3071,7 +3460,7 @@ internal sealed partial class WatBackend
                 EmitGlobalAddr(g.Sym);
                 break;
             case NameRef { RawName: "errno" }:
-                Line($"i32.const {ErrnoAddr()}");
+                EmitErrnoAddr();
                 break;
             case StructInit or StackArray when _literalSlots.ContainsKey(lv):
                 EmitExpr(lv);   // a compound literal is an lvalue: its slot, filled
@@ -3177,16 +3566,16 @@ internal sealed partial class WatBackend
     i32.const -1
     i32.eq
     if                           ;; fd mode — one iovec, one fd_write to $__fd
-      i32.const {{IoScratch}}
+      {{Lo(IoScratch)}}
       local.get $ptr
       i32.store
-      i32.const {{IoScratch + 4}}
+      {{Lo(IoScratch + 4)}}
       local.get $len
       i32.store
       global.get $__fd           ;; target fd (1 = stdout, 2 = stderr)
-      i32.const {{IoScratch}}
+      {{Lo(IoScratch)}}
       i32.const 1
-      i32.const {{IoScratch + 8}}
+      {{Lo(IoScratch + 8)}}
       call $fd_write
       drop
     else                         ;; buffer — copy each byte through $__putb
@@ -3225,10 +3614,10 @@ internal sealed partial class WatBackend
     i32.const -1
     i32.eq
     if                           ;; fd mode
-      i32.const {{IoScratch + 12}}
+      {{Lo(IoScratch + 12)}}
       local.get $ch
       i32.store8
-      i32.const {{IoScratch + 12}}
+      {{Lo(IoScratch + 12)}}
       i32.const 1
       call $__write
     else                         ;; buffer mode
@@ -3343,7 +3732,7 @@ internal sealed partial class WatBackend
             sb.Append($$"""
   (func $__fmt_radix (param $v i64) (param $base i64) (param $alpha i32) (param $min i32) (result i32)
     (local $p i32) (local $d i32)
-    i32.const {{NumBufEnd}}
+    {{Lo(NumBufEnd)}}
     local.set $p
     local.get $v                 ;; skip digit gen only when v==0 && min==0
     i64.eqz
@@ -3390,7 +3779,7 @@ internal sealed partial class WatBackend
     end
     block $pdone                 ;; left-pad '0' until length ≥ min (precision)
       loop $pad
-        i32.const {{NumBufEnd}}
+        {{Lo(NumBufEnd)}}
         local.get $p
         i32.sub
         local.get $min
@@ -3507,7 +3896,7 @@ internal sealed partial class WatBackend
     call $__fmt_radix
     local.set $ptr
     local.get $ptr
-    i32.const {{NumBufEnd}}
+    {{Lo(NumBufEnd)}}
     local.get $ptr
     i32.sub
     local.get $sign
@@ -3543,7 +3932,7 @@ internal sealed partial class WatBackend
       end
     end
     local.get $ptr
-    i32.const {{NumBufEnd}}
+    {{Lo(NumBufEnd)}}
     local.get $ptr
     i32.sub
     local.get $mag i64.eqz       ;; #x/#X: the 0x prefix only on a nonzero value
@@ -3658,11 +4047,11 @@ internal sealed partial class WatBackend
         {
             sb.Append($$"""
   (func $__bn_set (param $v i64)         ;; bn = v  (v < 2^53 → 1-2 limbs)
-    i32.const {{FpBig}}
+    {{Lo(FpBig)}}
     local.get $v
     i32.wrap_i64
     i32.store
-    i32.const {{FpBig + 4}}
+    {{Lo(FpBig + 4)}}
     local.get $v
     i64.const 32
     i64.shr_u
@@ -3688,7 +4077,7 @@ internal sealed partial class WatBackend
     i64.const 0 local.set $carry
     block $done loop $lp
       local.get $i local.get $n i32.ge_s br_if $done
-      i32.const {{FpBig}} local.get $i i32.const 2 i32.shl i32.add local.set $addr
+      {{Lo(FpBig)}} local.get $i i32.const 2 i32.shl i32.add local.set $addr
       local.get $addr i32.load i64.extend_i32_u
       local.get $m i64.extend_i32_u
       i64.mul
@@ -3704,7 +4093,7 @@ internal sealed partial class WatBackend
     end end
     local.get $carry i64.eqz i32.eqz
     if                                   ;; one more limb for the final carry
-      i32.const {{FpBig}} local.get $n i32.const 2 i32.shl i32.add
+      {{Lo(FpBig)}} local.get $n i32.const 2 i32.shl i32.add
       local.get $carry i32.wrap_i64
       i32.store
       local.get $n i32.const 1 i32.add local.set $n
@@ -3721,14 +4110,14 @@ internal sealed partial class WatBackend
       local.get $carry i64.eqz br_if $done
       local.get $i local.get $n i32.ge_s
       if                                 ;; ran past the top → append the carry limb
-        i32.const {{FpBig}} local.get $n i32.const 2 i32.shl i32.add
+        {{Lo(FpBig)}} local.get $n i32.const 2 i32.shl i32.add
         local.get $carry i32.wrap_i64
         i32.store
         local.get $n i32.const 1 i32.add local.set $n
         i64.const 0 local.set $carry
         br $done
       end
-      i32.const {{FpBig}} local.get $i i32.const 2 i32.shl i32.add local.set $addr
+      {{Lo(FpBig)}} local.get $i i32.const 2 i32.shl i32.add local.set $addr
       local.get $addr i32.load i64.extend_i32_u
       local.get $carry
       i64.add
@@ -3749,13 +4138,13 @@ internal sealed partial class WatBackend
     i32.const 0 local.set $out
     local.get $n i32.const 0 i32.gt_s
     if
-      i32.const {{FpBig}} i32.load i32.const 1 i32.and local.set $out
+      {{Lo(FpBig)}} i32.load i32.const 1 i32.and local.set $out
     end
     i32.const 0 local.set $carry
     local.get $n i32.const 1 i32.sub local.set $i
     block $done loop $lp
       local.get $i i32.const 0 i32.lt_s br_if $done
-      i32.const {{FpBig}} local.get $i i32.const 2 i32.shl i32.add local.set $addr
+      {{Lo(FpBig)}} local.get $i i32.const 2 i32.shl i32.add local.set $addr
       local.get $addr i32.load local.set $cur
       local.get $addr
       local.get $cur i32.const 1 i32.shr_u
@@ -3768,7 +4157,7 @@ internal sealed partial class WatBackend
     end end
     local.get $n i32.const 0 i32.gt_s    ;; trim a top limb that became 0
     if
-      i32.const {{FpBig}} local.get $n i32.const 1 i32.sub i32.const 2 i32.shl i32.add
+      {{Lo(FpBig)}} local.get $n i32.const 1 i32.sub i32.const 2 i32.shl i32.add
       i32.load
       i32.eqz
       if local.get $n i32.const 1 i32.sub local.set $n end
@@ -3785,7 +4174,7 @@ internal sealed partial class WatBackend
     local.get $n i32.const 1 i32.sub local.set $i
     block $done loop $lp
       local.get $i i32.const 0 i32.lt_s br_if $done
-      i32.const {{FpBig}} local.get $i i32.const 2 i32.shl i32.add local.set $addr
+      {{Lo(FpBig)}} local.get $i i32.const 2 i32.shl i32.add local.set $addr
       local.get $rem i64.const 32 i64.shl
       local.get $addr i32.load i64.extend_i32_u
       i64.or
@@ -3799,7 +4188,7 @@ internal sealed partial class WatBackend
     end end
     block $tdone loop $tlp                ;; trim leading zero limbs
       local.get $n i32.const 0 i32.le_s br_if $tdone
-      i32.const {{FpBig}} local.get $n i32.const 1 i32.sub i32.const 2 i32.shl i32.add
+      {{Lo(FpBig)}} local.get $n i32.const 1 i32.sub i32.const 2 i32.shl i32.add
       i32.load
       i32.eqz i32.eqz
       br_if $tdone
@@ -3835,7 +4224,7 @@ internal sealed partial class WatBackend
     local.get $bits i64.const 4503599627370495 i64.and local.set $mant   ;; mant = bits & ((1<<52)-1)
     local.get $exp i32.const 2047 i32.eq         ;; inf / nan
     if
-      i32.const {{FpDigEnd - 3}} local.set $pos
+      {{Lo(FpDigEnd - 3)}} local.set $pos
       local.get $mant i64.eqz
       if                                         ;; "inf" / "INF"
         local.get $pos i32.const 105 local.get $uc i32.sub i32.store8
@@ -3899,13 +4288,13 @@ internal sealed partial class WatBackend
       local.get $half                             ;; round up iff half && (sticky || odd)
       if
         local.get $sticky
-        i32.const {{FpBig}} i32.load i32.const 1 i32.and
+        {{Lo(FpBig)}} i32.load i32.const 1 i32.and
         i32.or
         if i32.const 1 call $__bn_add end
       end
     end
-    i32.const {{FpDigEnd}} local.set $pos          ;; stage digits right-aligned, point at `prec`
-    i32.const {{FpDigEnd}} local.set $end
+    {{Lo(FpDigEnd)}} local.set $pos          ;; stage digits right-aligned, point at `prec`
+    {{Lo(FpDigEnd)}} local.set $end
     i32.const 0 local.set $i
     block $dd loop $dl
       local.get $i local.get $prec i32.eq
@@ -4079,14 +4468,14 @@ internal sealed partial class WatBackend
       local.get $mant i64.const 4503599627370496 i64.or local.set $M
       local.get $exp i32.const 1075 i32.sub local.set $E2
     end
-    i32.const {{FpR}} local.get $M call $__r_set      ;; R = M
-    i32.const {{FpS}} i64.const 1 call $__r_set       ;; S = 1
+    {{Lo(FpR)}} local.get $M call $__r_set      ;; R = M
+    {{Lo(FpS)}} i64.const 1 call $__r_set       ;; S = 1
     local.get $E2 i32.const 0 i32.ge_s
     if                                                ;; R <<= E2
       i32.const 0 local.set $i
       block $ad loop $al
         local.get $i local.get $E2 i32.ge_s br_if $ad
-        i32.const {{FpR}} i32.const 2 call $__r_mul
+        {{Lo(FpR)}} i32.const 2 call $__r_mul
         local.get $i i32.const 1 i32.add local.set $i
         br $al
       end end
@@ -4094,23 +4483,23 @@ internal sealed partial class WatBackend
       i32.const 0 local.set $i
       block $bd loop $bl
         local.get $i i32.const 0 local.get $E2 i32.sub i32.ge_s br_if $bd
-        i32.const {{FpS}} i32.const 2 call $__r_mul
+        {{Lo(FpS)}} i32.const 2 call $__r_mul
         local.get $i i32.const 1 i32.add local.set $i
         br $bl
       end end
     end
     i32.const 0 local.set $X
     block $sd loop $sl                                 ;; while R < S: R *= 10, X--
-      i32.const {{FpR}} i32.const {{FpS}} call $__r_cmp i32.const 0 i32.ge_s br_if $sd
-      i32.const {{FpR}} i32.const 10 call $__r_mul
+      {{Lo(FpR)}} {{Lo(FpS)}} call $__r_cmp i32.const 0 i32.ge_s br_if $sd
+      {{Lo(FpR)}} i32.const 10 call $__r_mul
       local.get $X i32.const 1 i32.sub local.set $X
       br $sl
     end end
     block $ud loop $ul                                 ;; while R >= 10*S: S *= 10, X++
-      i32.const {{FpMul}} i32.const {{FpS}} call $__r_copy
-      i32.const {{FpMul}} i32.const 10 call $__r_mul
-      i32.const {{FpR}} i32.const {{FpMul}} call $__r_cmp i32.const 0 i32.lt_s br_if $ud
-      i32.const {{FpS}} i32.const 10 call $__r_mul
+      {{Lo(FpMul)}} {{Lo(FpS)}} call $__r_copy
+      {{Lo(FpMul)}} i32.const 10 call $__r_mul
+      {{Lo(FpR)}} {{Lo(FpMul)}} call $__r_cmp i32.const 0 i32.lt_s br_if $ud
+      {{Lo(FpS)}} i32.const 10 call $__r_mul
       local.get $X i32.const 1 i32.add local.set $X
       br $ul
     end end
@@ -4119,22 +4508,22 @@ internal sealed partial class WatBackend
       local.get $i local.get $ndigits i32.ge_s br_if $gd
       i32.const 0 local.set $d
       block $qd loop $ql
-        i32.const {{FpR}} i32.const {{FpS}} call $__r_cmp i32.const 0 i32.lt_s br_if $qd
-        i32.const {{FpR}} i32.const {{FpS}} call $__r_sub
+        {{Lo(FpR)}} {{Lo(FpS)}} call $__r_cmp i32.const 0 i32.lt_s br_if $qd
+        {{Lo(FpR)}} {{Lo(FpS)}} call $__r_sub
         local.get $d i32.const 1 i32.add local.set $d
         br $ql
       end end
-      i32.const {{FpEDig}} local.get $i i32.add local.get $d i32.store8
+      {{Lo(FpEDig)}} local.get $i i32.add local.get $d i32.store8
       local.get $i i32.const 1 i32.add local.get $ndigits i32.lt_s
-      if i32.const {{FpR}} i32.const 10 call $__r_mul end   ;; ×10 for the next digit
+      if {{Lo(FpR)}} i32.const 10 call $__r_mul end   ;; ×10 for the next digit
       local.get $i i32.const 1 i32.add local.set $i
       br $gl
     end end
-    i32.const {{FpEDig}} local.get $ndigits i32.const 1 i32.sub i32.add i32.load8_u
+    {{Lo(FpEDig)}} local.get $ndigits i32.const 1 i32.sub i32.add i32.load8_u
     i32.const 1 i32.and local.set $lastOdd            ;; parity of the last emitted digit
-    i32.const {{FpMul}} i32.const {{FpR}} call $__r_copy      ;; compare 2*R vs S
-    i32.const {{FpMul}} i32.const 2 call $__r_mul
-    i32.const {{FpMul}} i32.const {{FpS}} call $__r_cmp local.set $c
+    {{Lo(FpMul)}} {{Lo(FpR)}} call $__r_copy      ;; compare 2*R vs S
+    {{Lo(FpMul)}} i32.const 2 call $__r_mul
+    {{Lo(FpMul)}} {{Lo(FpS)}} call $__r_cmp local.set $c
     local.get $c i32.const 0 i32.gt_s
     local.get $c i32.eqz local.get $lastOdd i32.and
     i32.or
@@ -4144,12 +4533,12 @@ internal sealed partial class WatBackend
       block $rd loop $rl
         local.get $carry i32.eqz br_if $rd
         local.get $j i32.const 0 i32.lt_s br_if $rd
-        i32.const {{FpEDig}} local.get $j i32.add i32.load8_u i32.const 1 i32.add local.set $d
+        {{Lo(FpEDig)}} local.get $j i32.add i32.load8_u i32.const 1 i32.add local.set $d
         local.get $d i32.const 10 i32.eq
         if
-          i32.const {{FpEDig}} local.get $j i32.add i32.const 0 i32.store8
+          {{Lo(FpEDig)}} local.get $j i32.add i32.const 0 i32.store8
         else
-          i32.const {{FpEDig}} local.get $j i32.add local.get $d i32.store8
+          {{Lo(FpEDig)}} local.get $j i32.add local.get $d i32.store8
           i32.const 0 local.set $carry
         end
         local.get $j i32.const 1 i32.sub local.set $j
@@ -4157,7 +4546,7 @@ internal sealed partial class WatBackend
       end end
       local.get $carry
       if                                              ;; carried out of the top: "1" + zeros, X++
-        i32.const {{FpEDig}} i32.const 1 i32.store8
+        {{Lo(FpEDig)}} i32.const 1 i32.store8
         local.get $X i32.const 1 i32.add local.set $X
       end
     end
@@ -4184,15 +4573,15 @@ internal sealed partial class WatBackend
     if
       local.get $bits i64.const 4503599627370495 i64.and i64.eqz
       if
-        i32.const {{FpEOut}} i32.const 105 local.get $uc i32.sub i32.store8
-        i32.const {{FpEOut}} i32.const 1 i32.add i32.const 110 local.get $uc i32.sub i32.store8
-        i32.const {{FpEOut}} i32.const 2 i32.add i32.const 102 local.get $uc i32.sub i32.store8
+        {{Lo(FpEOut)}} i32.const 105 local.get $uc i32.sub i32.store8
+        {{Lo(FpEOut)}} i32.const 1 i32.add i32.const 110 local.get $uc i32.sub i32.store8
+        {{Lo(FpEOut)}} i32.const 2 i32.add i32.const 102 local.get $uc i32.sub i32.store8
       else
-        i32.const {{FpEOut}} i32.const 110 local.get $uc i32.sub i32.store8
-        i32.const {{FpEOut}} i32.const 1 i32.add i32.const 97 local.get $uc i32.sub i32.store8
-        i32.const {{FpEOut}} i32.const 2 i32.add i32.const 110 local.get $uc i32.sub i32.store8
+        {{Lo(FpEOut)}} i32.const 110 local.get $uc i32.sub i32.store8
+        {{Lo(FpEOut)}} i32.const 1 i32.add i32.const 97 local.get $uc i32.sub i32.store8
+        {{Lo(FpEOut)}} i32.const 2 i32.add i32.const 110 local.get $uc i32.sub i32.store8
       end
-      i32.const {{FpEOut}} i32.const 3 local.get $sign local.get $width
+      {{Lo(FpEOut)}} i32.const 3 local.get $sign local.get $width
       local.get $mode i32.const 1 i32.eq if (result i32) i32.const 1 else i32.const 0 end
       call $__pf_emit
       return
@@ -4202,7 +4591,7 @@ internal sealed partial class WatBackend
       i32.const 0 local.set $i                          ;; digits all zero, X = 0
       block $zd loop $zl
         local.get $i local.get $prec i32.gt_s br_if $zd
-        i32.const {{FpEDig}} local.get $i i32.add i32.const 0 i32.store8
+        {{Lo(FpEDig)}} local.get $i i32.add i32.const 0 i32.store8
         local.get $i i32.const 1 i32.add local.set $i
         br $zl
       end end
@@ -4210,8 +4599,8 @@ internal sealed partial class WatBackend
     else
       local.get $v local.get $prec i32.const 1 i32.add call $__dragon local.set $X
     end
-    i32.const {{FpEOut}} local.set $p                    ;; assemble d.ddde±XX
-    local.get $p i32.const {{FpEDig}} i32.load8_u i32.const 48 i32.add i32.store8
+    {{Lo(FpEOut)}} local.set $p                    ;; assemble d.ddde±XX
+    local.get $p {{Lo(FpEDig)}} i32.load8_u i32.const 48 i32.add i32.store8
     local.get $p i32.const 1 i32.add local.set $p
     local.get $prec i32.const 0 i32.gt_s local.get $alt i32.or
     if
@@ -4221,7 +4610,7 @@ internal sealed partial class WatBackend
     i32.const 1 local.set $i
     block $fd loop $fl
       local.get $i local.get $prec i32.gt_s br_if $fd
-      local.get $p i32.const {{FpEDig}} local.get $i i32.add i32.load8_u i32.const 48 i32.add i32.store8
+      local.get $p {{Lo(FpEDig)}} local.get $i i32.add i32.load8_u i32.const 48 i32.add i32.store8
       local.get $p i32.const 1 i32.add local.set $p
       local.get $i i32.const 1 i32.add local.set $i
       br $fl
@@ -4245,8 +4634,8 @@ internal sealed partial class WatBackend
     local.get $p i32.const 1 i32.add local.set $p
     local.get $p local.get $ax i32.const 10 i32.rem_u i32.const 48 i32.add i32.store8
     local.get $p i32.const 1 i32.add local.set $p
-    i32.const {{FpEOut}}
-    local.get $p i32.const {{FpEOut}} i32.sub
+    {{Lo(FpEOut)}}
+    local.get $p {{Lo(FpEOut)}} i32.sub
     local.get $sign local.get $width local.get $mode
     call $__pf_emit
   )
@@ -4272,15 +4661,15 @@ internal sealed partial class WatBackend
     if
       local.get $bits i64.const 4503599627370495 i64.and i64.eqz
       if
-        i32.const {{FpEOut}} i32.const 105 local.get $uc i32.sub i32.store8
-        i32.const {{FpEOut}} i32.const 1 i32.add i32.const 110 local.get $uc i32.sub i32.store8
-        i32.const {{FpEOut}} i32.const 2 i32.add i32.const 102 local.get $uc i32.sub i32.store8
+        {{Lo(FpEOut)}} i32.const 105 local.get $uc i32.sub i32.store8
+        {{Lo(FpEOut)}} i32.const 1 i32.add i32.const 110 local.get $uc i32.sub i32.store8
+        {{Lo(FpEOut)}} i32.const 2 i32.add i32.const 102 local.get $uc i32.sub i32.store8
       else
-        i32.const {{FpEOut}} i32.const 110 local.get $uc i32.sub i32.store8
-        i32.const {{FpEOut}} i32.const 1 i32.add i32.const 97 local.get $uc i32.sub i32.store8
-        i32.const {{FpEOut}} i32.const 2 i32.add i32.const 110 local.get $uc i32.sub i32.store8
+        {{Lo(FpEOut)}} i32.const 110 local.get $uc i32.sub i32.store8
+        {{Lo(FpEOut)}} i32.const 1 i32.add i32.const 97 local.get $uc i32.sub i32.store8
+        {{Lo(FpEOut)}} i32.const 2 i32.add i32.const 110 local.get $uc i32.sub i32.store8
       end
-      i32.const {{FpEOut}} i32.const 3 local.get $sign local.get $width
+      {{Lo(FpEOut)}} i32.const 3 local.get $sign local.get $width
       local.get $mode i32.const 1 i32.eq if (result i32) i32.const 1 else i32.const 0 end
       call $__pf_emit
       return
@@ -4290,7 +4679,7 @@ internal sealed partial class WatBackend
       i32.const 0 local.set $i
       block $zd loop $zl
         local.get $i local.get $P i32.ge_s br_if $zd
-        i32.const {{FpEDig}} local.get $i i32.add i32.const 0 i32.store8
+        {{Lo(FpEDig)}} local.get $i i32.add i32.const 0 i32.store8
         local.get $i i32.const 1 i32.add local.set $i
         br $zl
       end end
@@ -4303,12 +4692,12 @@ internal sealed partial class WatBackend
     if
       block $kd loop $kl
         local.get $ndig i32.const 1 i32.le_s br_if $kd
-        i32.const {{FpEDig}} local.get $ndig i32.const 1 i32.sub i32.add i32.load8_u i32.eqz i32.eqz br_if $kd
+        {{Lo(FpEDig)}} local.get $ndig i32.const 1 i32.sub i32.add i32.load8_u i32.eqz i32.eqz br_if $kd
         local.get $ndig i32.const 1 i32.sub local.set $ndig
         br $kl
       end end
     end
-    i32.const {{FpEOut}} local.set $p
+    {{Lo(FpEOut)}} local.set $p
     local.get $X i32.const -4 i32.ge_s local.get $X local.get $P i32.lt_s i32.and
     if                                                  ;; ---- %f-style ----
       local.get $X i32.const 0 i32.ge_s
@@ -4318,7 +4707,7 @@ internal sealed partial class WatBackend
           local.get $i local.get $X i32.gt_s br_if $id
           local.get $p
           local.get $i local.get $ndig i32.lt_s
-          if (result i32) i32.const {{FpEDig}} local.get $i i32.add i32.load8_u i32.const 48 i32.add else i32.const 48 end
+          if (result i32) {{Lo(FpEDig)}} local.get $i i32.add i32.load8_u i32.const 48 i32.add else i32.const 48 end
           i32.store8
           local.get $p i32.const 1 i32.add local.set $p
           local.get $i i32.const 1 i32.add local.set $i
@@ -4331,7 +4720,7 @@ internal sealed partial class WatBackend
           local.get $X i32.const 1 i32.add local.set $i
           block $jd loop $jl
             local.get $i local.get $ndig i32.ge_s br_if $jd
-            local.get $p i32.const {{FpEDig}} local.get $i i32.add i32.load8_u i32.const 48 i32.add i32.store8
+            local.get $p {{Lo(FpEDig)}} local.get $i i32.add i32.load8_u i32.const 48 i32.add i32.store8
             local.get $p i32.const 1 i32.add local.set $p
             local.get $i i32.const 1 i32.add local.set $i
             br $jl
@@ -4352,14 +4741,14 @@ internal sealed partial class WatBackend
         i32.const 0 local.set $i
         block $md loop $ml
           local.get $i local.get $ndig i32.ge_s br_if $md
-          local.get $p i32.const {{FpEDig}} local.get $i i32.add i32.load8_u i32.const 48 i32.add i32.store8
+          local.get $p {{Lo(FpEDig)}} local.get $i i32.add i32.load8_u i32.const 48 i32.add i32.store8
           local.get $p i32.const 1 i32.add local.set $p
           local.get $i i32.const 1 i32.add local.set $i
           br $ml
         end end
       end
     else                                                ;; ---- %e-style ----
-      local.get $p i32.const {{FpEDig}} i32.load8_u i32.const 48 i32.add i32.store8
+      local.get $p {{Lo(FpEDig)}} i32.load8_u i32.const 48 i32.add i32.store8
       local.get $p i32.const 1 i32.add local.set $p
       local.get $ndig i32.const 1 i32.gt_s local.get $alt i32.or
       if
@@ -4368,7 +4757,7 @@ internal sealed partial class WatBackend
         i32.const 1 local.set $i
         block $ed loop $el
           local.get $i local.get $ndig i32.ge_s br_if $ed
-          local.get $p i32.const {{FpEDig}} local.get $i i32.add i32.load8_u i32.const 48 i32.add i32.store8
+          local.get $p {{Lo(FpEDig)}} local.get $i i32.add i32.load8_u i32.const 48 i32.add i32.store8
           local.get $p i32.const 1 i32.add local.set $p
           local.get $i i32.const 1 i32.add local.set $i
           br $el
@@ -4394,8 +4783,8 @@ internal sealed partial class WatBackend
       local.get $p local.get $ax i32.const 10 i32.rem_u i32.const 48 i32.add i32.store8
       local.get $p i32.const 1 i32.add local.set $p
     end
-    i32.const {{FpEOut}}
-    local.get $p i32.const {{FpEOut}} i32.sub
+    {{Lo(FpEOut)}}
+    local.get $p {{Lo(FpEOut)}} i32.sub
     local.get $sign local.get $width local.get $mode
     call $__pf_emit
   )
@@ -4429,15 +4818,15 @@ internal sealed partial class WatBackend
     if
       local.get $mant i64.eqz
       if
-        i32.const {{FpEOut}} i32.const 105 local.get $uc i32.sub i32.store8
-        i32.const {{FpEOut}} i32.const 1 i32.add i32.const 110 local.get $uc i32.sub i32.store8
-        i32.const {{FpEOut}} i32.const 2 i32.add i32.const 102 local.get $uc i32.sub i32.store8
+        {{Lo(FpEOut)}} i32.const 105 local.get $uc i32.sub i32.store8
+        {{Lo(FpEOut)}} i32.const 1 i32.add i32.const 110 local.get $uc i32.sub i32.store8
+        {{Lo(FpEOut)}} i32.const 2 i32.add i32.const 102 local.get $uc i32.sub i32.store8
       else
-        i32.const {{FpEOut}} i32.const 110 local.get $uc i32.sub i32.store8
-        i32.const {{FpEOut}} i32.const 1 i32.add i32.const 97 local.get $uc i32.sub i32.store8
-        i32.const {{FpEOut}} i32.const 2 i32.add i32.const 110 local.get $uc i32.sub i32.store8
+        {{Lo(FpEOut)}} i32.const 110 local.get $uc i32.sub i32.store8
+        {{Lo(FpEOut)}} i32.const 1 i32.add i32.const 97 local.get $uc i32.sub i32.store8
+        {{Lo(FpEOut)}} i32.const 2 i32.add i32.const 110 local.get $uc i32.sub i32.store8
       end
-      i32.const {{FpEOut}} i32.const 3 local.get $sign local.get $width
+      {{Lo(FpEOut)}} i32.const 3 local.get $sign local.get $width
       local.get $mode i32.const 1 i32.eq if (result i32) i32.const 1 else i32.const 0 end
       call $__pf_emit
       return
@@ -4455,7 +4844,7 @@ internal sealed partial class WatBackend
     i32.const 0 local.set $i                                    ;; 13 fraction nibbles: (mant >> (48-4i)) & 0xF
     block $nd loop $nl
       local.get $i i32.const 13 i32.ge_s br_if $nd
-      i32.const {{FpEDig}} local.get $i i32.add
+      {{Lo(FpEDig)}} local.get $i i32.add
       local.get $mant
       i64.const 48 local.get $i i64.extend_i32_s i64.const 4 i64.mul i64.sub
       i64.shr_u i64.const 15 i64.and i32.wrap_i64
@@ -4466,7 +4855,7 @@ internal sealed partial class WatBackend
     i32.const 13 local.set $full                                ;; trim trailing zero nibbles
     block $td loop $tl
       local.get $full i32.const 0 i32.le_s br_if $td
-      i32.const {{FpEDig}} local.get $full i32.const 1 i32.sub i32.add i32.load8_u i32.eqz i32.eqz br_if $td
+      {{Lo(FpEDig)}} local.get $full i32.const 1 i32.sub i32.add i32.load8_u i32.eqz i32.eqz br_if $td
       local.get $full i32.const 1 i32.sub local.set $full
       br $tl
     end end
@@ -4476,7 +4865,7 @@ internal sealed partial class WatBackend
     local.get $outLen i32.const 13 i32.lt_s                     ;; round at $outLen when nibbles are dropped
     if
       local.get $outLen local.set $rp
-      i32.const {{FpEDig}} local.get $rp i32.add i32.load8_u local.set $n   ;; first dropped nibble
+      {{Lo(FpEDig)}} local.get $rp i32.add i32.load8_u local.set $n   ;; first dropped nibble
       i32.const 0 local.set $carry
       local.get $n i32.const 8 i32.gt_u
       if
@@ -4488,7 +4877,7 @@ internal sealed partial class WatBackend
           local.get $rp i32.const 1 i32.add local.set $i
           block $sd loop $sl
             local.get $i i32.const 13 i32.ge_s br_if $sd
-            i32.const {{FpEDig}} local.get $i i32.add i32.load8_u i32.eqz i32.eqz
+            {{Lo(FpEDig)}} local.get $i i32.add i32.load8_u i32.eqz i32.eqz
             if i32.const 1 local.set $stick end
             local.get $i i32.const 1 i32.add local.set $i
             br $sl
@@ -4498,7 +4887,7 @@ internal sealed partial class WatBackend
             i32.const 1 local.set $carry                       ;; > half → up
           else                                                 ;; exact half → round to even
             local.get $rp i32.const 0 i32.gt_s
-            if (result i32) i32.const {{FpEDig}} local.get $rp i32.const 1 i32.sub i32.add i32.load8_u else local.get $first end
+            if (result i32) {{Lo(FpEDig)}} local.get $rp i32.const 1 i32.sub i32.add i32.load8_u else local.get $first end
             i32.const 1 i32.and local.set $carry
           end
         end
@@ -4509,8 +4898,8 @@ internal sealed partial class WatBackend
         block $cd loop $cl
           local.get $carry i32.eqz br_if $cd
           local.get $i i32.const 0 i32.lt_s br_if $cd
-          i32.const {{FpEDig}} local.get $i i32.add i32.load8_u i32.const 1 i32.add local.set $n
-          i32.const {{FpEDig}} local.get $i i32.add local.get $n i32.const 15 i32.and i32.store8
+          {{Lo(FpEDig)}} local.get $i i32.add i32.load8_u i32.const 1 i32.add local.set $n
+          {{Lo(FpEDig)}} local.get $i i32.add local.get $n i32.const 15 i32.and i32.store8
           local.get $n i32.const 4 i32.shr_u local.set $carry
           local.get $i i32.const 1 i32.sub local.set $i
           br $cl
@@ -4525,7 +4914,7 @@ internal sealed partial class WatBackend
         end
       end
     end
-    i32.const {{FpEOut}} local.set $p                           ;; assemble "0x" + digit + ".frac" + "p±d"
+    {{Lo(FpEOut)}} local.set $p                           ;; assemble "0x" + digit + ".frac" + "p±d"
     local.get $p i32.const 48 i32.store8
     local.get $p i32.const 1 i32.add i32.const 120 local.get $uc i32.sub i32.store8   ;; 'x' / 'X'
     local.get $p i32.const 2 i32.add local.set $p
@@ -4542,7 +4931,7 @@ internal sealed partial class WatBackend
       block $fd loop $fl
         local.get $i local.get $outLen i32.ge_s br_if $fd
         local.get $i i32.const 13 i32.lt_s
-        if (result i32) i32.const {{FpEDig}} local.get $i i32.add i32.load8_u else i32.const 0 end
+        if (result i32) {{Lo(FpEDig)}} local.get $i i32.add i32.load8_u else i32.const 0 end
         local.set $n
         local.get $p
         local.get $n i32.const 10 i32.lt_u
@@ -4580,8 +4969,8 @@ internal sealed partial class WatBackend
     end
     local.get $p local.get $ax i32.const 10 i32.rem_u i32.const 48 i32.add i32.store8
     local.get $p i32.const 1 i32.add local.set $p
-    i32.const {{FpEOut}}
-    local.get $p i32.const {{FpEOut}} i32.sub
+    {{Lo(FpEOut)}}
+    local.get $p {{Lo(FpEOut)}} i32.sub
     local.get $sign local.get $width local.get $mode
     call $__pf_emit
   )
@@ -4599,12 +4988,12 @@ internal sealed partial class WatBackend
   (func $__pf_p (param $ptr i32) (param $width i32) (param $mode i32)
     local.get $ptr i32.eqz
     if                           ;; null → "(nil)"
-      i32.const {{NumBuf}} i32.const 40 i32.store8                  ;; '('
-      i32.const {{NumBuf}} i32.const 1 i32.add i32.const 110 i32.store8   ;; 'n'
-      i32.const {{NumBuf}} i32.const 2 i32.add i32.const 105 i32.store8   ;; 'i'
-      i32.const {{NumBuf}} i32.const 3 i32.add i32.const 108 i32.store8   ;; 'l'
-      i32.const {{NumBuf}} i32.const 4 i32.add i32.const 41 i32.store8    ;; ')'
-      i32.const {{NumBuf}} i32.const 5 i32.const 0 local.get $width local.get $mode
+      {{Lo(NumBuf)}} i32.const 40 i32.store8                  ;; '('
+      {{Lo(NumBuf)}} i32.const 1 i32.add i32.const 110 i32.store8   ;; 'n'
+      {{Lo(NumBuf)}} i32.const 2 i32.add i32.const 105 i32.store8   ;; 'i'
+      {{Lo(NumBuf)}} i32.const 3 i32.add i32.const 108 i32.store8   ;; 'l'
+      {{Lo(NumBuf)}} i32.const 4 i32.add i32.const 41 i32.store8    ;; ')'
+      {{Lo(NumBuf)}} i32.const 5 i32.const 0 local.get $width local.get $mode
       call $__pf_emit
     else                         ;; "0x" + lowercase hex via the unsigned-radix path
       local.get $ptr i64.extend_i32_u
@@ -4624,7 +5013,74 @@ internal sealed partial class WatBackend
         // never meet. Each block carries an i32 size header (payload at
         // block+8, kept 8-aligned) so realloc can copy the old bytes; free never
         // reclaims. malloc grows linear memory on demand and returns NULL if it can't.
-        if (_runtimeUsed.Contains("malloc"))
+        if (_runtimeUsed.Contains("malloc") && _threaded)
+        {
+            // Threads share the heap: claim [block, end) by moving the cell in memory with a
+            // compare-exchange (another thread may have moved it first: try again), then grow
+            // the memory until it covers the claim (another thread may grow it meanwhile).
+            sb.Append($$"""
+  (func $malloc (param $n i32) (result i32)
+    (local $block i32) (local $end i32)
+    loop $claim
+      i32.const {{HeapCellAddr}}
+      i32.atomic.load
+      local.set $block
+      local.get $block
+      i32.const 8
+      i32.add
+      local.get $n
+      i32.const 7
+      i32.add
+      i32.const -8
+      i32.and
+      i32.add
+      local.set $end
+      i32.const {{HeapCellAddr}}
+      local.get $block
+      local.get $end
+      i32.atomic.rmw.cmpxchg
+      local.get $block
+      i32.ne
+      br_if $claim
+    end
+    block $enough
+      loop $grow
+        local.get $end
+        memory.size
+        i32.const 16
+        i32.shl
+        i32.le_u
+        br_if $enough
+        local.get $end
+        memory.size
+        i32.const 16
+        i32.shl
+        i32.sub
+        i32.const 65535
+        i32.add
+        i32.const 16
+        i32.shr_u
+        memory.grow
+        i32.const -1
+        i32.eq
+        if
+          i32.const 0
+          return
+        end
+        br $grow
+      end
+    end
+    local.get $block
+    local.get $n
+    i32.store
+    local.get $block
+    i32.const 8
+    i32.add
+  )
+
+""");
+        }
+        else if (_runtimeUsed.Contains("malloc"))
         {
             sb.Append("""
   (func $malloc (param $n i32) (result i32)
@@ -4949,7 +5405,7 @@ internal sealed partial class WatBackend
     private int WasmSizeOf(CType t) => t.Unqualified switch
     {
         CType.Pointer or CType.Func => 8,
-        CType.Named { Name: VaListName or JmpBufName } => 8,
+        CType.Named { Name: var opaque } when RuntimeObjectBytes.TryGetValue(opaque, out var bytes) => bytes,
         CType.ComplexType => 16,
         CType.Array a => (a.Count ?? 0) * WasmSizeOf(a.Element),
         CType.Named => checked((int)(Unit.SizeOfConst(t) ?? 0)),
@@ -4963,7 +5419,9 @@ internal sealed partial class WatBackend
     private int SlotAlign(CType t)
     {
         var u = t.Unqualified is CType.Array a ? a.FlatElement.Unqualified : t.Unqualified;
-        var align = u is CType.Named { Name: VaListName or JmpBufName } or CType.ComplexType ? 8 : u is CType.Named ? Unit.AlignOfConst(u) : WasmSizeOf(u);
+        var align = u is CType.Named { Name: var opaque } && RuntimeObjectBytes.ContainsKey(opaque) || u is CType.ComplexType
+            ? 8
+            : u is CType.Named ? Unit.AlignOfConst(u) : WasmSizeOf(u);
         return Math.Min(8, Math.Max(1, align));
     }
 
@@ -4984,6 +5442,21 @@ internal sealed partial class WatBackend
     /// <summary>The runtime type <c>&lt;setjmp.h&gt;</c> names <c>jmp_buf</c>: here an 8-byte
     /// object holding the token its latest <c>setjmp</c> armed it with.</summary>
     private const string JmpBufName = "LongJmpToken";
+
+    /// <summary>The bytes of each type a header names but the C# runtime defines (opaque to C, so
+    /// the layout model has no size for it), as the wat libc lays it out, aligned to 8:
+    /// <c>va_list</c> and <c>jmp_buf</c> above, and <c>&lt;threads.h&gt;</c>'s, whose insides
+    /// the libc's <c>threads_impl.h</c> defines (a thread or a key is a pointer's or an int's
+    /// eight bytes, a mutex or a condition four ints).</summary>
+    private static readonly Dictionary<string, int> RuntimeObjectBytes = new(StringComparer.Ordinal)
+    {
+        [VaListName] = 8,
+        [JmpBufName] = 8,
+        ["thrd_t"] = 8,
+        ["tss_t"] = 8,
+        ["mtx_t"] = 16,
+        ["cnd_t"] = 16,
+    };
 
     /// <summary>True when an expression of type <paramref name="t"/> evaluates to an
     /// address rather than a loaded value: an array (it decays) or an aggregate.</summary>

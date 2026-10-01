@@ -135,7 +135,7 @@ public sealed class WasmSurfaceProbeTests
         try
         {
             File.WriteAllText(wat, Compiler.EmitWat(new[] { c }));
-            Exec("wat2wasm", "--enable-exceptions", wat, "-o", wasm);
+            Exec("wat2wasm", "--enable-threads", "--enable-exceptions", wat, "-o", wasm);
             return WasmModuleProbe.Probe(File.ReadAllBytes(wasm));
         }
         finally

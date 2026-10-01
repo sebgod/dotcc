@@ -1103,6 +1103,44 @@ public sealed class WatBackendTests
     }
 
     [Fact]
+    public void A_threaded_module_shares_its_memory_and_exports_the_thread_entry()
+    {
+        // wasi-threads: the memory comes from the host, shared; the data segments are passive and
+        // only the first instance's start function copies them in; a new thread enters at
+        // wasi_thread_start, which points its stack and TLS block at the descriptor.
+        var wat = Wat("#include <threads.h>\n#include <stdio.h>\nstatic int work(void *a) { return 7; }\n"
+            + "int main(void) { thrd_t t; int r; thrd_create(&t, work, 0); thrd_join(t, &r); printf(\"%d\\n\", r); return 0; }");
+        wat.ShouldContain("(import \"wasi\" \"thread-spawn\" (func $__wasi_thread_spawn (param i32) (result i32)))");
+        wat.ShouldContain("(import \"env\" \"memory\" (memory 1 16384 shared))");
+        wat.ShouldContain("(export \"memory\" (memory 0))");
+        wat.ShouldContain("(data $__d0 ");
+        wat.ShouldContain("i32.atomic.rmw.cmpxchg\n    i32.eqz\n    if");
+        wat.ShouldContain("memory.init $__d0");
+        wat.ShouldContain("(export \"wasi_thread_start\" (func $wasi_thread_start))");
+        wat.ShouldContain("global.set $__tls");
+        wat.ShouldContain("memory.atomic.wait32");
+    }
+
+    [Fact]
+    public void A_thread_local_lives_in_the_running_threads_block()
+    {
+        var wat = Wat("#include <threads.h>\nstatic _Thread_local int mine = 5;\nstatic int work(void *a) { return mine; }\n"
+            + "int main(void) { thrd_t t; int r; thrd_create(&t, work, 0); thrd_join(t, &r); return r + mine; }");
+        wat.ShouldContain("(func $work (param $a i32) (result i32)\n    global.get $__tls\n    i32.const ");
+        wat.ShouldContain("i32.atomic.load");   // thrd_join's atomic_load is an atomic instruction now
+    }
+
+    [Fact]
+    public void A_program_without_threads_keeps_its_plain_shape()
+    {
+        var wat = Wat("#include <stdio.h>\n#include <stdatomic.h>\nint main(void) { atomic_int n = 1; atomic_fetch_add(&n, 1); printf(\"%d\\n\", n); return 0; }");
+        wat.ShouldNotContain("$__tls");
+        wat.ShouldNotContain("shared");
+        wat.ShouldNotContain(".atomic.");
+        wat.ShouldContain("(data (i32.const ");
+    }
+
+    [Fact]
     public void A_binary_literal_is_written_in_decimal()
     {
         // wat reads decimal and 0x hex, not C23's 0b: wat2wasm rejected `i32.const 0b1011`.

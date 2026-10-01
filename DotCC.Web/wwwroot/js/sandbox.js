@@ -4,8 +4,9 @@
 // that .wat into a running program entirely in the browser:
 //   wat text --> libwabt.js parseWat().toBinary() --> WebAssembly.instantiate
 //   --> call main(), capturing what it writes to fd 1/2 through a WASI fd_write shim.
-// The shim is the exact one the always-on WatOracleTests use, ported verbatim;
-// fd_write is the only import dotcc's wat backend emits.
+// The shim mirrors Scripts/wat-run.js, the node runner the wat oracle and probe use, less
+// its threads: fd_write, proc_exit, clock_time_get and random_get are the WASI functions
+// dotcc's wat libc imports.
 //
 // `WabtModule` is the global exposed by the vendored lib/wabt/libwabt.js (a UMD
 // build; with no CommonJS/AMD present it lands on window). It is a function that
@@ -35,8 +36,8 @@ window.dotccSandbox = (function () {
    *   { ok:true, exitCode, stdout, stderr }  on success
    *   { ok:false, stage:"assemble"|"run", error }  otherwise
    * The feature flags match what dotcc's wat backend emits (WF0's histogram):
-   * sign-extension + non-trapping float→int + bulk-memory + mutable globals, and
-   * exception handling (setjmp/longjmp).
+   * sign-extension + non-trapping float→int + bulk-memory + mutable globals,
+   * exception handling (setjmp/longjmp), and threads (atomics, shared memory).
    */
   async function assembleAndRun(wat) {
     let mod = null;
@@ -49,6 +50,7 @@ window.dotccSandbox = (function () {
         bulk_memory: true,
         mutable_globals: true,
         exceptions: true,
+        threads: true,
       });
       const { buffer } = mod.toBinary({ log: false });
       // Keep a copy: toBinary()'s buffer is a view over wabt-owned memory freed by
@@ -108,7 +110,18 @@ window.dotccSandbox = (function () {
     const decode = (arr) => new TextDecoder("utf-8", { fatal: false }).decode(new Uint8Array(arr));
 
     try {
-      const { instance } = await WebAssembly.instantiate(buffer, {
+      const mod = await WebAssembly.compile(buffer);
+      // A threaded program (C11 <threads.h>) imports a shared memory and wasi-threads'
+      // thread-spawn; it needs SharedArrayBuffer, which only a cross-origin isolated page has,
+      // and a worker per thread. Say so instead of failing to link.
+      if (WebAssembly.Module.imports(mod).some((i) => i.module === "env" && i.name === "memory")) {
+        return {
+          ok: false, stage: "run",
+          error: "This program uses threads, which run as wasm threads over a shared memory; "
+            + "the sandbox cannot run them yet (a shared memory needs a cross-origin isolated page).",
+        };
+      }
+      const instance = await WebAssembly.instantiate(mod, {
         wasi_snapshot_preview1: { fd_write, proc_exit, clock_time_get, random_get },
       });
       inst = instance;

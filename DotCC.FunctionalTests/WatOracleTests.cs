@@ -382,6 +382,19 @@ public sealed class WatOracleTests
         "-0.200000 0.400000|0.423077 -0.884615|2.000000 -4.000000|0.500000 1.000000\n"
         + "-1.0 -2.0|7.0 0.0|2.0 4.0|3.0|0 1|1 1\n"
         + "4.5 2.5 0.0 16")]
+    // Real threads (wasi-threads over node's worker_threads): an atomic counter four threads bump,
+    // a thread-local each thread starts at its initial value, malloc from every thread at once,
+    // and sprintf's float formatting in each thread's own scratch at the same time.
+    [InlineData("#include <stdio.h>\n#include <stdlib.h>\n#include <stdatomic.h>\n#include <threads.h>\n"
+        + "static atomic_int hits; static _Thread_local int mine = 100; static char out[4][64]; static long sums[4];\n"
+        + "static int work(void *arg){ int id = (int)(long)arg; for (int i = 0; i < 20000; i++) atomic_fetch_add(&hits, 1);"
+        + " for (int i = 0; i < 100; i++) mine += id; long s = 0;"
+        + " for (int i = 0; i < 200; i++) { int *p = malloc(sizeof(int) * 4); p[0] = i; s += p[0]; } sums[id] = s;"
+        + " for (int i = 0; i < 200; i++) sprintf(out[id], \"%d:%.3f:%d\", id, id * 1.5 + 0.125, mine); return id * 10; }\n"
+        + "int main(void){ thrd_t t[4]; int r[4]; for (long i = 0; i < 4; i++) thrd_create(&t[i], work, (void *)i);"
+        + " for (int i = 0; i < 4; i++) thrd_join(t[i], &r[i]); printf(\"%d %d|\", atomic_load(&hits), mine);"
+        + " for (int i = 0; i < 4; i++) printf(\"%s %ld %d|\", out[i], sums[i], r[i]); return 0; }",
+        "80000 100|0:0.125:100 19900 0|1:1.625:200 19900 10|2:3.125:300 19900 20|3:4.625:400 19900 30|")]
     // strerror's glibc wording, strtoimax past 32 bits, the one "C" locale, and time() from
     // WASI's clock.
     [InlineData("#include <stdio.h>\n#include <string.h>\n#include <errno.h>\n#include <inttypes.h>\n#include <locale.h>\n#include <time.h>\n"
@@ -399,34 +412,18 @@ public sealed class WatOracleTests
         RunWatStdout(source).ShouldBe(expected);
     }
 
-    /// <summary>The WASI preview1 functions a dotcc module imports, as JavaScript for node:
-    /// <c>fd_write</c> keeps what is written to fd 1 in <c>out</c>, <c>proc_exit</c> unwinds
-    /// with the status, <c>clock_time_get</c> reads node's clocks (0 realtime, 1 monotonic,
-    /// 2 and 3 CPU time, in nanoseconds), and <c>random_get</c> fills from node's secure source.
-    /// <c>inst</c> must be set before <c>main</c> runs.</summary>
-    private const string WasiShimJs =
-        "let inst; const out=[];" +
-        "const wasi={" +
-        "fd_write:(fd,iovs,iovsLen,nwrittenPtr)=>{" +
-        "const dv=new DataView(inst.exports.memory.buffer);" +
-        "const bytes=new Uint8Array(inst.exports.memory.buffer);" +
-        "let written=0;" +
-        "for(let i=0;i<iovsLen;i++){" +
-        "const ptr=dv.getUint32(iovs+i*8,true);" +
-        "const len=dv.getUint32(iovs+i*8+4,true);" +
-        "for(let j=0;j<len;j++){ if(fd===1) out.push(bytes[ptr+j]); }" +
-        "written+=len;}" +
-        "dv.setUint32(nwrittenPtr,written,true);return 0;}," +
-        "proc_exit:(c)=>{throw {exitCode:c};}," +
-        "clock_time_get:(id,precision,timePtr)=>{let ns;" +
-        "if(id===0){ns=BigInt(Date.now())*1000000n;}" +
-        "else if(id===1){ns=process.hrtime.bigint();}" +
-        "else if(id===2||id===3){const u=process.cpuUsage();ns=BigInt(u.user+u.system)*1000n;}" +
-        "else{return 28;}" +
-        "new DataView(inst.exports.memory.buffer).setBigUint64(timePtr,ns,true);return 0;}," +
-        "random_get:(buf,len)=>{require('crypto').randomFillSync(new Uint8Array(inst.exports.memory.buffer,buf,len));return 0;}};";
+    /// <summary>The node runner the wat oracle and <c>Scripts/wat-probe.sh</c> share
+    /// (<c>Scripts/wat-run.js</c>, copied next to the tests): a WASI preview1 shim, wasi-threads
+    /// over worker_threads for a threaded module, and the program's fd 1 and 2 straight to node's,
+    /// from every thread in order.</summary>
+    private static string Runner => Path.Combine(AppContext.BaseDirectory, "wat-run.js");
 
-    /// <summary>EmitWat → wat2wasm → node, returning <c>main()</c>'s value.</summary>
+    /// <summary>The flags every assembly takes: a module may use wasm's exception handling
+    /// (setjmp/longjmp) and, threaded, its atomics and shared memory.</summary>
+    private static readonly string[] Wat2WasmFeatures = { "--enable-threads", "--enable-exceptions" };
+
+    /// <summary>EmitWat → wat2wasm → node, returning <c>main()</c>'s value (exit's status when it
+    /// exits).</summary>
     private static int RunWat(string source)
     {
         var stem = Path.Combine(Path.GetTempPath(), $"dotcc-wat-{Guid.NewGuid():N}");
@@ -435,15 +432,8 @@ public sealed class WatOracleTests
         try
         {
             File.WriteAllText(wat, Compiler.EmitWat(new[] { c }));
-            Exec("wat2wasm", "--enable-exceptions", wat, "-o", wasm);   // validates (parse + typecheck) and assembles
-            // exit(n) (WASI proc_exit) ends the run with n as its value.
-            const string js =
-                "const fs=require('fs');" + WasiShimJs +
-                "WebAssembly.instantiate(fs.readFileSync(process.argv[1]),{wasi_snapshot_preview1:wasi})" +
-                ".then(r=>{inst=r.instance;let v;try{v=inst.exports.main();}catch(e){if(e&&e.exitCode!==undefined){v=e.exitCode;}else{throw e;}}" +
-                "process.stdout.write((typeof v==='bigint'?Number(v):v|0).toString());})" +
-                ".catch(e=>{console.error(e);process.exit(1);});";
-            var output = Exec("node", "-e", js, wasm);
+            Exec("wat2wasm", [.. Wat2WasmFeatures, wat, "-o", wasm]);   // validates (parse + typecheck) and assembles
+            var output = Exec("node", [Runner, "--result", wasm]);
             return int.Parse(output.Trim(), CultureInfo.InvariantCulture);
         }
         finally
@@ -452,11 +442,8 @@ public sealed class WatOracleTests
         }
     }
 
-    /// <summary>EmitWat → wat2wasm → node with a WASI <c>fd_write</c> shim, returning
-    /// the bytes the program wrote to fd 1 (stdout). The shim reads each iovec out of
-    /// the module's exported memory, accumulates fd-1 writes, and reports the byte
-    /// count back through <c>nwritten</c> — the minimal slice of WASI putchar/puts
-    /// need. The captured bytes are what the test asserts (not main's return value).</summary>
+    /// <summary>EmitWat → wat2wasm → node, returning what the program wrote to fd 1 (stdout),
+    /// one char per byte: what the test asserts (not main's return value).</summary>
     private static string RunWatStdout(string source)
     {
         var c = Path.Combine(Path.GetTempPath(), $"dotcc-wat-{Guid.NewGuid():N}.c");
@@ -465,10 +452,10 @@ public sealed class WatOracleTests
         finally { try { File.Delete(c); } catch { /* best effort */ } }
     }
 
-    /// <summary>wat2wasm → node with the WASI <c>fd_write</c> shim over an emitted module,
-    /// returning what it wrote to fd 1: its bytes decoded as UTF-8 (as a fixture's
-    /// <c>expected-stdout.txt</c> is read), or, for the inline programs above, one char per
-    /// byte (<paramref name="latin1"/>).</summary>
+    /// <summary>wat2wasm → node over an emitted module, returning what it wrote to fd 1: its bytes
+    /// decoded as UTF-8 (as a fixture's <c>expected-stdout.txt</c> is read), or, for the inline
+    /// programs above, one char per byte (<paramref name="latin1"/>). Its exit status is its own
+    /// (main's value, or exit's); a trap fails the test.</summary>
     internal static string RunWatModuleStdout(string watText, bool latin1 = false)
     {
         var stem = Path.Combine(Path.GetTempPath(), $"dotcc-wat-{Guid.NewGuid():N}");
@@ -476,14 +463,8 @@ public sealed class WatOracleTests
         try
         {
             File.WriteAllText(wat, watText);
-            Exec("wat2wasm", "--enable-exceptions", wat, "-o", wasm);
-            var js =
-                "const fs=require('fs');" + WasiShimJs +
-                "WebAssembly.instantiate(fs.readFileSync(process.argv[1]),{wasi_snapshot_preview1:wasi})" +
-                ".then(r=>{inst=r.instance;try{inst.exports.main();}catch(e){if(!(e&&e.exitCode!==undefined)){throw e;}}" +
-                (latin1 ? "process.stdout.write(Buffer.from(out).toString('latin1'));})" : "process.stdout.write(Buffer.from(out));})") +
-                ".catch(e=>{console.error(e);process.exit(1);});";
-            return Exec("node", "-e", js, wasm);
+            Exec("wat2wasm", [.. Wat2WasmFeatures, wat, "-o", wasm]);
+            return Exec("node", [Runner, wasm], latin1 ? System.Text.Encoding.Latin1 : System.Text.Encoding.UTF8, anyStatus: true);
         }
         finally
         {
@@ -491,10 +472,13 @@ public sealed class WatOracleTests
         }
     }
 
-    /// <summary>Run a tool and return its stdout. A missing tool
-    /// (<see cref="System.ComponentModel.Win32Exception"/>) skips the test, like the
-    /// other oracles when their compiler is absent; a non-zero exit fails it.</summary>
-    private static string Exec(string file, params string[] args)
+    /// <summary>Run a tool and return its stdout, decoded as <paramref name="encoding"/> (UTF-8 by
+    /// default). A missing tool (<see cref="System.ComponentModel.Win32Exception"/>) skips the test,
+    /// like the other oracles when their compiler is absent. A non-zero exit fails it, unless
+    /// <paramref name="anyStatus"/> (a program's own status), when only the runner's own failures
+    /// do: a trap (134) or an import it cannot resolve (127). A run past two minutes is killed and
+    /// fails it, so a thread that never finishes cannot hang the suite.</summary>
+    private static string Exec(string file, string[] args, System.Text.Encoding? encoding = null, bool anyStatus = false)
     {
         var psi = new ProcessStartInfo
         {
@@ -502,27 +486,37 @@ public sealed class WatOracleTests
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
+            StandardOutputEncoding = encoding ?? System.Text.Encoding.UTF8,
         };
         foreach (var a in args) { psi.ArgumentList.Add(a); }
 
-        Process proc;
+        Process? started;
         try
         {
-            proc = Process.Start(psi)!;
+            started = Process.Start(psi);
         }
         catch (System.ComponentModel.Win32Exception)
         {
             Assert.Skip($"'{file}' not found on PATH — install wabt (wat2wasm) and node to run the wat oracle.");
             throw; // unreachable: Assert.Skip throws
         }
+        if (started is not { } proc) { throw new InvalidOperationException($"{file} did not start"); }
 
-        var stdout = proc.StandardOutput.ReadToEnd();
-        var stderr = proc.StandardError.ReadToEnd();
-        proc.WaitForExit();
-        if (proc.ExitCode != 0)
+        using (proc)
         {
-            throw new InvalidOperationException($"{file} exited {proc.ExitCode}: {stderr}");
+            var stdout = proc.StandardOutput.ReadToEndAsync();
+            var stderr = proc.StandardError.ReadToEndAsync();
+            if (!proc.WaitForExit(TimeSpan.FromMinutes(2)))
+            {
+                proc.Kill(entireProcessTree: true);
+                throw new TimeoutException($"{file} ran past two minutes");
+            }
+            var failed = anyStatus ? proc.ExitCode is 134 or 127 : proc.ExitCode != 0;
+            if (failed)
+            {
+                throw new InvalidOperationException($"{file} exited {proc.ExitCode}: {stderr.Result}");
+            }
+            return stdout.Result;
         }
-        return stdout;
     }
 }
