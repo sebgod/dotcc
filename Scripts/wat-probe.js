@@ -1,5 +1,5 @@
 // Run one dotcc --target=wat module under node, for Scripts/wat-probe.sh: instantiate it with
-// a WASI preview1 shim (fd_write to stdout/stderr, proc_exit, clock_time_get), call main, and write what it
+// a WASI preview1 shim (fd_write to stdout/stderr, proc_exit, clock_time_get, random_get), call main, and write what it
 // printed to fd 1 to our stdout, byte for byte.
 //   node wat-probe.js module.wasm             run it (exit: main's value & 0xff, 134 on a trap)
 //   node wat-probe.js --same expected actual  exit 0 when the two outputs match as the
@@ -38,6 +38,10 @@ const wasi = {
     else if (id === 2 || id === 3) { const u = process.cpuUsage(); ns = BigInt(u.user + u.system) * 1000n; }
     else { return 28; }   // EINVAL
     new DataView(inst.exports.memory.buffer).setBigUint64(timePtr, ns, true);
+    return 0;
+  },
+  random_get(buf, len) {
+    require('crypto').randomFillSync(new Uint8Array(inst.exports.memory.buffer, buf, len));
     return 0;
   },
 };

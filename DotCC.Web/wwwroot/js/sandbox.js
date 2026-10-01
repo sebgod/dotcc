@@ -97,12 +97,19 @@ window.dotccSandbox = (function () {
       new DataView(inst.exports.memory.buffer).setBigUint64(timePtr, ns, true);
       return 0;
     };
+    // random_get (getrandom, getentropy): the browser's secure source, 64 KiB at a time.
+    const random_get = (buf, len) => {
+      for (let at = 0; at < len; at += 65536) {
+        crypto.getRandomValues(new Uint8Array(inst.exports.memory.buffer, buf + at, Math.min(65536, len - at)));
+      }
+      return 0;
+    };
 
     const decode = (arr) => new TextDecoder("utf-8", { fatal: false }).decode(new Uint8Array(arr));
 
     try {
       const { instance } = await WebAssembly.instantiate(buffer, {
-        wasi_snapshot_preview1: { fd_write, proc_exit, clock_time_get },
+        wasi_snapshot_preview1: { fd_write, proc_exit, clock_time_get, random_get },
       });
       inst = instance;
 
