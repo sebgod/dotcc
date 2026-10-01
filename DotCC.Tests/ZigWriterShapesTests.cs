@@ -112,7 +112,7 @@ public sealed class ZigWriterShapesTests
     {
         var cs = EmitZig(Program);
         cs.ShouldContain("Sink* self = (Sink*)((ulong)s - ");
-        cs.ShouldContain("(byte*)&__t.inner - (byte*)&__t");
+        cs.ShouldContain("(byte*)&((Sink*)Libc.OffsetOfBase)->inner - (byte*)Libc.OffsetOfBase");
     }
 
     [Fact]

@@ -2297,12 +2297,14 @@ internal sealed class CSharpBackend
             {
                 // .NET has no offsetof operator, and the address-through-a-null
                 // idiom (`&((T*)null)->m`) FAULTS — C#'s `->` null-checks the base.
-                // Compute it from a stack `default` instance instead: the member's
-                // address minus the base address, honoring the real .NET blittable
-                // layout (alignment included). `__t` lives inside the lambda (not
-                // captured), so `&__t` needs no `fixed`. A primitive `fixed`-buffer
-                // member's access already yields its address (no `&`); a scalar
-                // member uses `&`.
+                // Take the member's address through a pointer that is not null but is
+                // never read (`Libc.OffsetOfBase`) and subtract the base: the real .NET
+                // blittable layout (alignment included), with no instance. An instance
+                // (a `default` local) used to stand in, which zeroed a whole struct per
+                // offsetof, and one the size of CPython's runtime state (285 KB) is an
+                // initobj the browser's Mono interpreter cannot express. A primitive
+                // `fixed`-buffer member's access already yields its address (no `&`); a
+                // scalar member uses `&`.
                 // A flexible or zero-length array member has no C# field to measure (GH #246): its
                 // offset is the layout model's, the same one its accesses use.
                 if (o.MemberType?.Unqualified is CType.Array { } za && FlatCount(za) == 0
@@ -2315,8 +2317,9 @@ internal sealed class CSharpBackend
                 // A member that lowers to a C# `fixed` buffer (primitive-element
                 // array) already yields its own address — no `&` (would be CS0211).
                 var decays = o.MemberType?.Unqualified is CType.Array fa && IsFixedBufferType(Cs(fa.Element));
-                var memberAddr = decays ? $"(byte*)__t.{m}" : $"(byte*)&__t.{m}";
-                return ($"((System.Func<ulong>)(() => {{ {Cs(o.StructType)} __t = default; return (ulong)({memberAddr} - (byte*)&__t); }}))()", PPrimary);
+                var st = Cs(o.StructType);
+                var memberAddr = decays ? $"(byte*)(({st}*)Libc.OffsetOfBase)->{m}" : $"(byte*)&(({st}*)Libc.OffsetOfBase)->{m}";
+                return ($"((ulong)({memberAddr} - (byte*)Libc.OffsetOfBase))", PPrimary);
             }
             // A zero-size element read through a pointer loads nothing in zig (see the store above).
             case Index or Unary { Op: UnOp.Deref } when IsZeroSizeAccess(e):

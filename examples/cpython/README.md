@@ -12,6 +12,7 @@ holds the probe that measures how much of the tree compiles, with the CI job
 | `build.sh` | Compiles the interpreter's `core` and `boot` units to objects (`dotcc --emit=obj`, into `build/obj/`), links them into one C# program and builds it with `dotnet`. |
 | `run.sh` | Runs the built interpreter with the pinned tree's `Lib/` as its standard library. |
 | `smoke.py` | A script over core language features and the importable pure-Python library; its stdout must equal `smoke.expected`, which host CPython 3.13 prints too. |
+| `pack-stdlib.py` | Zips `Lib/` without the test suite, GUI and packaging tools (529 modules, 2.3 MB) for the web sandbox's Python page, which unpacks it into the tab's file system (fable-web.md WEB9, GH #260). |
 | `programs/`, `programs.sh` | Larger pure-Python programs (n-body, fannkuch, spectral-norm, a Richards-style scheduler, a Scheme interpreter, a language tour, the object model and GC, Unicode text and file I/O, tracebacks), each with the `.expected` output host CPython 3.13 prints. `programs.sh` runs them and diffs. |
 | `files.txt` | The 202 translation units: `group\|path\|flags`. `core` is the interpreter (Parser, Objects, Python), `boot` the `Setup.bootstrap` modules, `extra` modules beyond those. `@TREE@` in a flag is the source tree. |
 | `include/pyconfig.h` | dotcc's platform config: CPython's `./configure` output from Ubuntu x86_64, adjusted for dotcc (each change marked `dotcc:`). See its header. |

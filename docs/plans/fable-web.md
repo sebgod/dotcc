@@ -429,9 +429,21 @@ against their own tests (CPython, Lua 5.5, chibi-scheme). The site text was rewo
 without em-dashes in the same change. Verified in headless Edge: all ten programs
 render in order with their outputs, and the pages fit at 500 px and 1280 px (headless
 Edge will not lay out narrower than about 500 px, so phone widths are covered by the
-CSS rules rather than a screenshot). **Next (WEB9, a spike):** run Python in the tab
-by loading the interpreter assembly into the Blazor app, lazily, with the stdlib it
-needs in MEMFS; payload and startup under AOT are the unknowns.
+CSS rules rather than a screenshot). **Next:** WEB9, below.
+
+### WEB9: Python in the tab (M), IN PROGRESS (GH #260)
+
+Load libpython (the shared build's `python3.13` assembly) into the app lazily, unpack the
+stdlib (`examples/cpython/pack-stdlib.py`, 2.3 MB) into the tab's file system and call
+`Py_BytesMain`. The wiring is in (`DotCC.Web/Python/PythonRuntime.cs`, opt-in through
+`WithPython` when the CPython build and the zip are there, so CI's pages build is unchanged),
+and so are three dotcc fixes the browser runtime needed: managed-library export wrappers
+name no `EntryPoint` and pass function pointers as `void*`, function-pointer tables are
+copied rather than pinned, and `offsetof` measures from `Libc.OffsetOfBase` instead of a
+zeroed instance. **The blocker:** Mono's interpreter keeps value-type sizes and field
+offsets in 16 bits and CPython's runtime state is 285 KB, so libpython must be AOT-compiled.
+At the default settings clang ran out of memory (13.4 GB) on its 100 MB of bitcode. The
+numbers and next steps are in #260.
 
 ## Validation story
 

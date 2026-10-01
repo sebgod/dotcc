@@ -35,3 +35,4 @@ ir-emit-probe.txt
 
 # captured test-run output
 *.log
+DotCC.Web/wwwroot/cpython/

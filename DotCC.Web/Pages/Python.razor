@@ -1,6 +1,9 @@
 @page "/python"
 
 <PageTitle>dotcc: CPython 3.13 on .NET</PageTitle>
+#if DOTCC_PYTHON
+@inject DotCC.Web.Python.PythonRuntime Py
+#endif
 
 <section class="cov-head">
     <h1><span class="hl-py">CPython 3.13</span>, compiled by dotcc, on <span class="hl-net">.NET</span></h1>
@@ -39,6 +42,33 @@
     </section>
 </div>
 
+#if DOTCC_PYTHON
+<section class="cov-note py-run">
+    <h2>Run it in this tab</h2>
+    <p>
+        The interpreter below is the same dotcc-built CPython, as a .NET assembly running on
+        the WebAssembly .NET runtime in this browser. The first run downloads it
+        (libpython, then the standard library, unpacked into the tab's memory) and the runs
+        after that start at once. Nothing leaves the tab.
+    </p>
+    <textarea class="py-source" spellcheck="false" @bind="_source" @bind:event="oninput" rows="12"></textarea>
+    <div class="controls">
+        <button class="run" @onclick="RunAsync" disabled="@_busy">@(_busy ? "Running…" : "▶ Run")</button>
+        <span class="hint">@_hint</span>
+    </div>
+    @if (_result is { } r)
+    {
+        <pre class="stdout">@r.Stdout</pre>
+        @if (r.Stderr.Length > 0)
+        {
+            <div class="stream-label">stderr</div>
+            <pre class="stderr">@r.Stderr</pre>
+        }
+        <div class="exit @(r.ExitCode == 0 ? "ok" : "nonzero")">exit code: @r.ExitCode, @r.Elapsed.TotalSeconds.ToString("0.00") s</div>
+    }
+</section>
+#endif
+
 <section class="cov-note">
     <h2>The programs CI runs</h2>
     <p>
@@ -61,6 +91,9 @@
                     <summary>Source (@p.SourceLines lines)</summary>
                     <pre class="code">@p.Source</pre>
                 </details>
+#if DOTCC_PYTHON
+                <button class="run small" @onclick="() => RunProgramAsync(p)" disabled="@_busy">▶ Run here</button>
+#endif
                 <details>
                     <summary>Output</summary>
                     <pre class="stdout">@p.Output</pre>
@@ -80,10 +113,12 @@
         so <code>random</code>, <code>datetime</code> and <code>dataclasses</code> do not import.
         Compute-heavy programs run several times slower than on host CPython.
     </p>
+#if !DOTCC_PYTHON
     <p class="cov-outscope">
-        Python does not run in this browser tab yet: the <a href="sandbox">sandbox</a> compiles
-        C and Zig to WebAssembly. Loading the interpreter into it is the next step.
+        This build of the site does not carry the interpreter, so Python does not run in this
+        tab: the <a href="sandbox">sandbox</a> compiles C and Zig to WebAssembly.
     </p>
+#endif
 </section>
 
 @code {
@@ -107,6 +142,52 @@
     };
 
     private IReadOnlyList<PyProgram> _programs = Array.Empty<PyProgram>();
+
+#if DOTCC_PYTHON
+    private string _source = "import sys\nprint('Hello from', sys.implementation.name, sys.version.split()[0])\nprint(sum(i * i for i in range(10)))\n";
+    private bool _busy;
+    private string _hint = "";
+    private DotCC.Web.Python.PythonRuntime.Result? _result;
+
+    /// <summary>Run a program from the list: it goes into the box, so it can be edited and run again.</summary>
+    private async Task RunProgramAsync(PyProgram p)
+    {
+        _source = p.Source;
+        await RunAsync();
+    }
+
+    private async Task RunAsync()
+    {
+        if (_busy) { return; }
+        _busy = true;
+        _result = null;
+        _hint = Py.IsLoaded ? "" : "Loading the interpreter and the standard library…";
+        StateHasChanged();
+        // Let the browser paint the busy state: the run itself holds the tab's only thread.
+        await Task.Delay(30);
+        try
+        {
+            if (!Py.IsLoaded)
+            {
+                var load = System.Diagnostics.Stopwatch.StartNew();
+                await Py.EnsureLoadedAsync();
+                _hint = $"Loaded in {load.Elapsed.TotalSeconds:0.0} s. Running…";
+                StateHasChanged();
+                await Task.Delay(30);
+            }
+            _result = await Py.RunAsync(_source);
+            _hint = "";
+        }
+        catch (Exception ex)
+        {
+            _hint = $"Could not run: {ex.GetType().Name}: {ex.Message}";
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+#endif
 
     /// <summary>Read the programs from the resources the build embeds from
     /// <c>examples/cpython/programs</c> (see the project file).</summary>

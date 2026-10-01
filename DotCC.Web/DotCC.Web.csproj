@@ -35,6 +35,24 @@
                       LogicalName="python/%(Filename)%(Extension)" />
   </ItemGroup>
 
+  <!-- Python in the tab (fable-web.md, WEB9): when the shared CPython build is there
+       (examples/cpython/build.sh with BUILD_SHARED=1) and the packed standard library
+       (examples/cpython/pack-stdlib.py, into wwwroot/cpython/stdlib.zip, git-ignored) are both
+       there, the app carries libpython, loaded lazily on the Python page's first run, and the
+       zip, which that run unpacks into the tab's file system. Without it the
+       site builds as before and the page says Python does not run here. -->
+  <PropertyGroup>
+    <CPythonBuild Condition="'$(CPythonBuild)' == ''">$(MSBuildThisFileDirectory)..\examples\cpython\build\</CPythonBuild>
+    <WithPython Condition="'$(WithPython)' == '' And Exists('$(CPythonBuild)shared\python3.13\python3.13.csproj') And Exists('$(MSBuildThisFileDirectory)wwwroot\cpython\stdlib.zip')">true</WithPython>
+    <DefineConstants Condition="'$(WithPython)' == 'true'">$(DefineConstants);DOTCC_PYTHON</DefineConstants>
+    <AllowUnsafeBlocks Condition="'$(WithPython)' == 'true'">true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(WithPython)' == 'true'">
+    <ProjectReference Include="$(CPythonBuild)shared\python3.13\python3.13.csproj" />
+    <BlazorWebAssemblyLazyLoad Include="python3.13.wasm" />
+  </ItemGroup>
+
   <!-- Keep DotCC.Lib whole: the parse tables + embedded system headers are reached
        structurally / via manifest resources, which the trimmer can't see. -->
   <ItemGroup>

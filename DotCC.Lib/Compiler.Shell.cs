@@ -452,6 +452,11 @@ public static partial class Compiler
         }
         """;
 
+    /// <summary>A managed library's export wrapper's form of a C# type: a function pointer
+    /// becomes <c>void*</c> (see <see cref="BuildAssemblyShell"/>), anything else is itself.</summary>
+    private static string NativeForm(string type) =>
+        type.StartsWith("delegate*", System.StringComparison.Ordinal) ? "void*" : type;
+
     /// <summary>
     /// The shell of a managed library (<see cref="EmitMode.Assembly"/>): the functions, already
     /// given their access by linkage, spread over public classes named
@@ -478,11 +483,22 @@ public static partial class Compiler
         foreach (var e in exports)
         {
             // The wrapper has a name of its own, so its body's bare call reaches the function
-            // (through `using static`), not the wrapper itself.
+            // (through `using static`), not the wrapper itself. It names no EntryPoint: dlsym
+            // finds it through the table below, and a host that does export entry points (the
+            // browser's Mono build relinks every one into its native module) would put CPython's
+            // pthread_* and the like beside the C library's same-named functions.
             var csName = EmitHelpers.Id(e.Name);
-            exportsBlock.Append($"    [UnmanagedCallersOnly(EntryPoint = \"{e.Name}\", CallConvs = new[] {{ typeof(CallConvCdecl) }})]\n");
-            exportsBlock.Append($"    public static unsafe {e.ReturnType} __export_{e.Name}({e.ParamList}) => {csName}({e.ArgList});\n");
-            table.Append($"        (\"{e.Name}\", (nint)({e.PointerType(native: true)})&__export_{e.Name}, (nint)({e.PointerType(native: false)})&{csName}),\n");
+            // A function pointer crosses the C boundary as the address it is (`void*`): Mono
+            // (the browser's runtime) cannot build the native-to-managed wrapper for a
+            // function-pointer parameter or return, and an address is all C sees anyway.
+            var native = new EmitHelpers.Export(e.Name, NativeForm(e.ReturnType),
+                e.Params.Select(p => new EmitHelpers.ExportParam(NativeForm(p.Type), p.Name)).ToList());
+            var args = string.Join(", ", e.Params.Select(p => NativeForm(p.Type) == p.Type ? p.Name : $"({p.Type}){p.Name}"));
+            var call = $"{csName}({args})";
+            if (native.ReturnType != e.ReturnType) { call = $"({native.ReturnType}){call}"; }
+            exportsBlock.Append("    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]\n");
+            exportsBlock.Append($"    public static unsafe {native.ReturnType} __export_{e.Name}({native.ParamList}) => {call};\n");
+            table.Append($"        (\"{e.Name}\", (nint)({native.PointerType(native: true)})&__export_{e.Name}, (nint)({e.PointerType(native: false)})&{csName}),\n");
         }
         // dlsym's table, which Libc.dlopen reads when a program loads this assembly: each
         // export's C name, its native entry point and the managed function behind it.
@@ -529,7 +545,7 @@ public static partial class Compiler
             {{globals}}}
 
             // Native entry points of the functions with external linkage, which
-            // dlsym finds by EntryPoint when a program dlopens this assembly.
+            // dlsym finds through __dotcc_exports when a program dlopens this assembly.
             public static class {{prefix}}_Exports
             {
             {{exportsBlock}}}
