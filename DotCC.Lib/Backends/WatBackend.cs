@@ -1142,7 +1142,10 @@ internal sealed partial class WatBackend
                 EmitConvert(c.Args[i].Type, pts[i]);
             }
         }
-        Line($"call ${c.Callee}");
+        // A user function is called by the name its definition is emitted under: a static
+        // renamed out of the way of a same-named external one (BuildFuncDef) differs from
+        // the C name.
+        Line($"call ${(c.CalleeSym is { Kind: SymKind.Func } fs ? fs.TargetName : c.Callee)}");
     }
 
     /// <summary>Lower a heap allocator call (<c>malloc</c>/<c>calloc</c>/<c>realloc</c>)

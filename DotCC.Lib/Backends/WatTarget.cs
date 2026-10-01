@@ -49,8 +49,13 @@ internal sealed class WatTarget : ITarget
     }
 
     /// <summary><c>i32.const</c>/<c>i64.const</c> take a bare integer — no C suffix,
-    /// the literal's width is carried by the instruction's own type prefix.</summary>
-    public string RenderIntLit(LitInt lit) => lit.Digits;
+    /// the literal's width is carried by the instruction's own type prefix. wat reads
+    /// decimal and <c>0x</c> hex; a C23 binary literal (<c>0b1011</c>, which the neutral
+    /// digits keep since C# reads it too) is written in decimal.</summary>
+    public string RenderIntLit(LitInt lit) =>
+        lit.Digits.StartsWith("0b", System.StringComparison.OrdinalIgnoreCase)
+            ? System.Convert.ToUInt64(lit.Digits[2..], 2).ToString(System.Globalization.CultureInfo.InvariantCulture)
+            : lit.Digits;
 
     /// <summary>Render a float constant for <c>f32.const</c>/<c>f64.const</c>. The
     /// neutral <see cref="LitFloat.Text"/> is a C/C# decimal spelling, which differs
