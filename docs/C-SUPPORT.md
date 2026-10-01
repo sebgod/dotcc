@@ -261,6 +261,7 @@ Implementations: `malloc`/`free`/`strtod`/`atof` in `Libc.cs`, the rest in `Stdl
 | `atof` | ✅ | `strtod(s, NULL)` — leading-double parse. Fixture `strtod-parse/`. |
 | `atoi`, `atol`, `atoll` (C99) | ✅ | `strtoll(s, NULL, 10)` cores; `atoi` narrows to int. |
 | `strtod` | ✅ | Parses a leading double (sign / decimal / `e`-exponent / C99 `inf`/`nan`), skips leading whitespace, sets `endptr` to the first unconsumed byte (so a buffer of numbers can be walked); `double.Parse(NumberStyles.Float, invariant)` core. Fixture `strtod-parse/`; `LibcTests`. |
+| `strtof`, `strtold` | ✅ | `strtod`'s grammar and `endptr`; `strtof` rounds a decimal significand to `float` once (`float.Parse`), not by narrowing the double (which can round twice); `strtold` is `strtod` (`long double` is `double`). Under `--target=wat` all three are musl's `__floatscan`, compiled with the program. `LibcTests`. |
 | `strtol`, `strtoll` (C99), `strtoul`, `strtoull` (C99) | ✅ | Base 0/2..36 with `0x`/`0` prefix auto-detect, sign, `endptr` out-param, and ERANGE-clamp on overflow (`errno` set). Signed/unsigned 64-bit cores (dotcc's `long`==`long long`). |
 | `abs`, `labs`, `llabs` (C99) | ✅ | `n < 0 ? -n : n` (unchecked — INT_MIN wraps like C UB, doesn't throw like `Math.Abs`). |
 | `div`, `ldiv`, `lldiv` | ✅ | `div_t`/`ldiv_t`/`lldiv_t` result structs: runtime-owned (the header declares the body for the IR, the runtime supplies the type; see the time section). Truncate toward zero per C99. |

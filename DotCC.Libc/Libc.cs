@@ -408,6 +408,33 @@ public static unsafe partial class Libc
     /// </summary>
     public static double atof(byte* nptr) => strtod(nptr, null);
 
+    /// <summary>
+    /// <c>strtof(nptr, endptr)</c> (C99 7.22.1.3): <see cref="strtod"/>'s grammar and end,
+    /// rounded to <c>float</c> once. A decimal significand is parsed by
+    /// <c>float.Parse</c>, which rounds correctly: narrowing strtod's double would round
+    /// twice, and land one float off when the double falls on a float halfway point. A hex
+    /// float, an infinity or a NaN narrows the double, which holds it exactly or as C has it.
+    /// </summary>
+    public static float strtof(byte* nptr, byte** endptr)
+    {
+        byte* end;
+        double d = strtod(nptr, &end);
+        if (endptr != null) { *endptr = end; }
+        byte* p = nptr;
+        while (*p == (byte)' ' || (*p >= 9 && *p <= 13)) { p++; }
+        byte* q = *p == (byte)'+' || *p == (byte)'-' ? p + 1 : p;
+        bool hex = q[0] == (byte)'0' && (q[1] == (byte)'x' || q[1] == (byte)'X');
+        if (end > p && !hex && double.IsFinite(d))
+        {
+            return float.Parse(Encoding.ASCII.GetString(p, (int)(end - p)), NumberStyles.Float, CultureInfo.InvariantCulture);
+        }
+        return (float)d;
+    }
+
+    /// <summary><c>strtold(nptr, endptr)</c> (C99 7.22.1.3): <see cref="strtod"/>, as dotcc's
+    /// <c>long double</c> is <c>double</c>.</summary>
+    public static double strtold(byte* nptr, byte** endptr) => strtod(nptr, endptr);
+
     /// <summary>Hex digit value (0-15).</summary>
     private static int HexVal(byte b) => b switch
     {

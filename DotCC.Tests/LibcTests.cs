@@ -487,6 +487,32 @@ public sealed unsafe class LibcTests
     public void atof_is_strtod_without_endptr() =>
         atof(L("42\0"u8)).ShouldBe(42.0);
 
+    [Fact]
+    public void strtof_rounds_once_not_through_a_double()
+    {
+        // Just below the halfway point between 1 + 2^-23 and 1 + 2^-22: its nearest double IS
+        // that halfway point, which ties to the even 1 + 2^-22, while the value itself rounds
+        // down to 1 + 2^-23.
+        byte* s = L("1.0000001788139343261718749999 rest\0"u8);
+        byte* end;
+        float f = strtof(s, &end);
+        BitConverter.SingleToUInt32Bits(f).ShouldBe(0x3F800001u);
+        ((nint)end).ShouldBe((nint)(s + 30));
+        ((float)strtod(s, null)).ShouldNotBe(f);
+    }
+
+    [Fact]
+    public void strtof_reads_hex_infinities_and_an_overflow()
+    {
+        strtof(L("0x1.8p3\0"u8), null).ShouldBe(12f);
+        strtof(L("-inf\0"u8), null).ShouldBe(float.NegativeInfinity);
+        strtof(L("1e39\0"u8), null).ShouldBe(float.PositiveInfinity);
+    }
+
+    [Fact]
+    public void strtold_is_strtod() =>
+        strtold(L("2.5e-3\0"u8), null).ShouldBe(0.0025, 1e-15);
+
     // -----------------------------------------------------------------
     // helpers
     // -----------------------------------------------------------------
