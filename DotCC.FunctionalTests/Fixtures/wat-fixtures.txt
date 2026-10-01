@@ -9,6 +9,8 @@ anon-struct-decl
 anon-struct-member
 anon-union-decl
 anon-union-member
+array-compound-literal
+array-compound-literal-expr
 array-designators
 array-init
 array-member-cast-dim
@@ -47,6 +49,7 @@ comma-void-call
 comma-void-control
 comma-void-value
 comparison-as-int
+compound-literals
 comptime-const-fold
 cond-int-types
 const-cast-unchecked
@@ -112,6 +115,7 @@ macro-ops
 malloc-no-cast
 multi-decl
 multi-declarator
+multi-tu-struct
 multidim-array
 multidim-member
 named-nested-member
@@ -133,6 +137,7 @@ ptr-arith-arrow
 ptr-to-array
 qsort-bsearch
 restrict-qualifier
+runtime-owned-structs
 runtime-type-name-clash
 sig-atomic
 sizeof-charbit
@@ -151,6 +156,7 @@ stdbool-c23
 stddef-types
 stdint-fixed-widths
 stdio-limits
+stdlib-core
 string-char-escapes
 string-escape-quotes
 string-h-basic
@@ -158,8 +164,11 @@ string-h-extended
 string-high-byte-escapes
 string-init-parenthesized
 string-literal-L-collision
+struct-array-member-init
 struct-hack-array
 struct-init
+struct-linked-list
+struct-point
 switch-day
 switch-fallthrough
 switch-goto-fallthrough

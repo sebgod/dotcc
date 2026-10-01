@@ -730,12 +730,18 @@ public sealed class WatBackendTests
     }
 
     [Fact]
-    public void A_struct_passed_by_value_is_refused_loudly()
+    public void A_struct_crosses_a_call_by_value_as_the_address_of_a_copy()
     {
-        // No calling convention for aggregates yet: refused, never miscompiled.
-        Should.Throw<CompileException>(() =>
-            Wat("struct P { int x; };\nint get(struct P p){ return p.x; }\nint main(void){ struct P p = {1}; return get(p); }"))
-            .Message.ShouldContain("does not yet pass or return a struct by value");
+        // clang's wasm32 convention: a struct argument is the address of a copy the caller
+        // makes in its frame (the callee may change its parameter), and a struct result goes to
+        // a slot of the caller's whose address is a hidden first parameter ($__sret), which the
+        // function also returns.
+        var wat = Wat("struct P { int x, y; };\nstruct P make(int a){ struct P p = {a, a * 2}; return p; }\n"
+            + "int sum(struct P p){ p.x += 100; return p.x + p.y; }\n"
+            + "int main(void){ struct P q = make(3); int s = sum(q); return s * 10 + q.x; }");
+        wat.ShouldContain("(func $make (param $__sret i32) (param $a i32) (result i32)");
+        wat.ShouldContain("(func $sum (param $p i32) (result i32)");
+        wat.ShouldContain("local.get $__sret\n    global.get $__sp\n    i32.const 8\n    memory.copy\n    local.get $__sret");
     }
 
     [Fact]
