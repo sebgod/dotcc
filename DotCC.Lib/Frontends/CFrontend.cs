@@ -40,7 +40,7 @@ internal sealed class CFrontend : IFrontend
         var pedantic = (warnings & WarningFlags.Pedantic) != 0;
         var pedanticErrors = (warnings & WarningFlags.PedanticErrors) == WarningFlags.PedanticErrors;
 
-        var includeResolver = Compiler.BuildIncludeResolver(includeDirs);
+        var includeResolver = Compiler.BuildIncludeResolver(includeDirs, req.Library?.Header);
         var lexerTable = C.BuildLexer();
         var activeDialect = dialect ?? CDialect.Default;
         var seededDefines = Compiler.SeedDialectDefines(activeDialect, defines);
@@ -159,18 +159,21 @@ internal sealed class CFrontend : IFrontend
             irBuilder.AddUnit(root, Path.GetFileName(unitPath));
             fingerprints.Clear();
         }
-        // A library (the wat target's libc): each function the program calls but no unit
-        // defines is looked up by name, and its source, if the library has one, is bound as a
-        // library unit; what that unit calls is looked up in turn, until nothing new is.
-        if (req.LibrarySource is { } library)
+        // A library (the wat target's libc): each function the program calls, and each extern
+        // object it uses, that no unit defines is looked up by name, and its source, if the
+        // library has one, is bound as a library unit; what that unit uses is looked up in
+        // turn, until nothing new is.
+        if (req.Library is { } library)
         {
             var tried = new HashSet<string>(StringComparer.Ordinal);
-            while (irBuilder.UndefinedCalledFunctions().Where(tried.Add).ToList() is { Count: > 0 } wanted)
+            while (irBuilder.UndefinedCalledFunctions().Concat(irBuilder.ExternDataReferenced)
+                       .Where(tried.Add).ToList() is { Count: > 0 } wanted)
             {
                 foreach (var name in wanted)
                 {
-                    if (library(name) is not { } text) { continue; }
-                    var root = ParseUnitText($"<libc>/{name}.c", text, irParser, quiet: true);
+                    if (library.Unit(name) is not { } text) { continue; }
+                    var root = ParseUnitText(
+                        $"{Compiler.IncludeResolver.LibraryDir}/{name}.c", text, irParser, quiet: true);
                     irBuilder.AddUnit(root, $"{name}.c", library: true);
                     fingerprints.Clear();
                 }

@@ -67,7 +67,7 @@ public static partial class Compiler
         WarningFlags warnings = WarningFlags.Default,
         bool testMode = false,
         string? objectKey = null,
-        Func<string, string?>? librarySource = null)
+        Frontends.SourceLibrary? library = null)
     {
         // clang's shape (`clang: error: no such file or directory: 'x.c'`), checked before any frontend
         // opens the file, so a missing input is a diagnostic rather than an unhandled IO exception.
@@ -79,7 +79,7 @@ public static partial class Compiler
             }
         }
         var request = new Frontends.FrontendRequest(
-            inputPaths, includeDirs, defines, dialect, names, warnings, testMode, objectKey, librarySource);
+            inputPaths, includeDirs, defines, dialect, names, warnings, testMode, objectKey, library);
         var anyZig = inputPaths.Any(IsZigSource);
         var anyC = inputPaths.Any(p => !IsZigSource(p));
         if (anyZig && anyC) { return BuildMixedIr(request); }
@@ -237,7 +237,7 @@ public static partial class Compiler
         WarningFlags warnings = WarningFlags.Default)
     {
         var irBuilder = BuildIr(inputPaths, includeDirs, defines, dialect, new Backends.WatNameLegalizer(), warnings,
-            librarySource: WatLibcSource);
+            library: WatLibc);
         return Backends.WatBackend.Run(irBuilder);
     }
 

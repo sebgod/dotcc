@@ -203,6 +203,15 @@ internal sealed class CPreprocessor : C.IPreprocessor
     /// </summary>
     public void SetActiveFile(string path)
     {
+        // A library unit (`<libc>/sin.c`) is no disk file: its directory is the marker that
+        // sends its includes to the library's headers.
+        if (path.StartsWith(Compiler.IncludeResolver.LibraryDir + "/", StringComparison.Ordinal))
+        {
+            _currentlyIncluding = path[(Compiler.IncludeResolver.LibraryDir.Length + 1)..];
+            _currentKey = path;
+            _currentDir = Compiler.IncludeResolver.LibraryDir;
+            return;
+        }
         var full = System.IO.Path.GetFullPath(path);
         _currentlyIncluding = System.IO.Path.GetFileName(path);
         _currentKey = full;
