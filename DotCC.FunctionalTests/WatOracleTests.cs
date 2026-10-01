@@ -113,6 +113,10 @@ public sealed class WatOracleTests
     // module's start function; 40 KB of data moves the stack past it.
     [InlineData("struct P { int x; const char *name; };\nint counter = 5;\nstatic struct P origin = { 7, \"origin\" };\nconst char *greeting = \"hey\";\nint table[4] = { 1, 2, 3, 4 };\nstatic char big[40000];\nint next(void){ static int n = 100; return n++; }\nint main(void){ counter++; next(); big[39999] = 2; return counter + next() + origin.x + origin.name[1] + greeting[2] + table[3] + big[39999]; }", 355)]
     [InlineData("int next(void){ static int n = 10; return n++; } int main(void){ next(); next(); return next(); }", 12)]
+    // function pointers: a table index, called through call_indirect (a local, a global,
+    // a struct member, a table of them).
+    [InlineData("int add(int a, int b){ return a + b; }\nint (*op)(int, int) = add;\nint main(void){ int (*f)(int, int) = &add; return f(2, 3) + op(4, 5); }", 14)]
+    [InlineData("struct V { int (*f)(int); };\nint twice(int x){ return 2 * x; }\nint neg(int x){ return -x; }\nstatic int (*ops[2])(int) = { twice, neg };\nint main(void){ struct V v = { twice }; return v.f(21) + ops[1](2) + ops[0](3); }", 46)]
     public void Wat_program_returns_expected_value(string source, int expected)
     {
         if (!Requested)

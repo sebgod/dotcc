@@ -716,6 +716,20 @@ public sealed class WatBackendTests
     }
 
     [Fact]
+    public void A_function_pointer_is_a_table_index_called_through_call_indirect()
+    {
+        // A function used as a value gets a slot in the module's funcref table (from 1; 0 is
+        // the null pointer, which traps when called) and a call through a pointer checks the
+        // signature, declared once as a module type.
+        var wat = Wat("int add(int a, int b){ return a + b; }\nint (*op)(int, int) = add;\n"
+            + "int main(void){ int (*f)(int, int) = &add; return f(2, 3) + op(4, 5); }");
+        wat.ShouldContain("(type $__sig0 (func (param i32) (param i32) (result i32)))");
+        wat.ShouldContain("(table 2 funcref)");
+        wat.ShouldContain("(elem (i32.const 1) func $add)");
+        wat.ShouldContain("call_indirect (type $__sig0)");
+    }
+
+    [Fact]
     public void A_pointer_takes_eight_bytes_in_memory()
     {
         // C's LP64 view (sizeof(void*) == 8, the layout model's) holds on wasm32 too: a
