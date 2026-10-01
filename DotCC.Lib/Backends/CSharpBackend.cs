@@ -2962,6 +2962,14 @@ internal sealed class CSharpBackend
             return ($"({Cs(c.Target)})({Cs(fv.Type)})&{fv.Sym.TargetName}", PUnary);
         }
         if (RenderFloat128Conversion(c) is { } quad) { return quad; }
+        // A complex converted to a real type is its real part (C11 6.3.1.7p2), and to _Bool
+        // whether either part is not zero (6.3.1.2): System.Numerics.Complex converts to neither.
+        if (c.Operand.Type.Unqualified is CType.ComplexType && c.Target.Unqualified is not CType.ComplexType)
+        {
+            return c.Target.Unqualified is CType.Prim { Name: "_Bool" }
+                ? ($"(CBool)({Sub(c.Operand, PPostfix)} != System.Numerics.Complex.Zero)", PUnary)
+                : ($"({Cs(c.Target)}){Sub(c.Operand, PPostfix)}.Real", PUnary);
+        }
         if (IsNativeToManagedFnPtr(c.Target, c.Operand)) { return (FnPtrConversion(c.Target.Unqualified, c.Operand), PUnary); }
         var operandText = Sub(c.Operand, PUnary);
         var targetText = Cs(c.Target);

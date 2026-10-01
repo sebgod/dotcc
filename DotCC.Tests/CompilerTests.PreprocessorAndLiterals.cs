@@ -256,6 +256,31 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
+    public void A_complex_cast_to_a_real_type_is_its_real_part()
+    {
+        // C11 6.3.1.7p2 (the real part) and 6.3.1.2 (to _Bool: either part not zero);
+        // System.Numerics.Complex converts to neither, which CS0030 rejected.
+        var src = WriteTemp("""
+            #include <complex.h>
+            int main(void) {
+                double _Complex z = 3.0 + 4.0 * I;
+                double d = (double)z;
+                int i = (int)z;
+                _Bool b = (_Bool)z;
+                return (int)d + i + b;
+            }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("double d = (double)z.Real;");
+            emitted.ShouldContain("int i = (int)z.Real;");
+            emitted.ShouldContain("(CBool)(z != System.Numerics.Complex.Zero)");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void Complex_requires_a_floating_base()
     {
         var src = WriteTemp("int main() { int _Complex x; return 0; }");
