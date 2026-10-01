@@ -921,6 +921,28 @@ public sealed class WatBackendTests
     }
 
     [Fact]
+    public void An_atomic_read_modify_write_is_a_plain_load_and_store()
+    {
+        // One thread, unshared memory: atomic_fetch_add loads the old value, stores the sum
+        // and yields the old, with no call and no wasm threads instruction.
+        var wat = Wat("#include <stdatomic.h>\nint main(void) { atomic_int n = 40; int old = atomic_fetch_add(&n, 2); return old + atomic_load(&n); }");
+        wat.ShouldContain("i32.add\n    i32.store");
+        wat.ShouldNotContain("call $atomic_");
+        wat.ShouldNotContain("atomic.rmw");
+    }
+
+    [Fact]
+    public void An_atomic_load_yields_the_objects_type_not_an_implicit_int()
+    {
+        // No header declares the atomic generics; the IR gives atomic_load the object's own
+        // type, so a long is read whole rather than narrowed to an int.
+        var wat = Wat("#include <stdatomic.h>\nlong f(atomic_long *p) { return atomic_load(p); }\nint main(void) { atomic_long v = 5000000000; return f(&v) == 5000000000; }");
+        wat.ShouldContain("(func $f (param $p i32) (result i64)");
+        wat.ShouldContain("i64.load\n");
+        wat.ShouldNotContain("i32.wrap_i64\n    i64.extend_i32_s");
+    }
+
+    [Fact]
     public void A_binary_literal_is_written_in_decimal()
     {
         // wat reads decimal and 0x hex, not C23's 0b: wat2wasm rejected `i32.const 0b1011`.

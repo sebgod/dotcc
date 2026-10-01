@@ -950,6 +950,160 @@ internal sealed partial class WatBackend
         _ => null,
     };
 
+    /// <summary>A C11 <c>&lt;stdatomic.h&gt;</c> generic function, or false when
+    /// <paramref name="c"/> is not one. The module runs on one thread over memory nothing else
+    /// shares, so each atomic operation is the plain memory operation it orders and every memory
+    /// order is moot: a read-modify-write loads the old value, stores the new one and yields the
+    /// old, a compare-exchange compares the object's bytes (7.17.7.4), and a fence is nothing.
+    /// The operands are evaluated once, in order, before the operation.</summary>
+    private bool EmitAtomic(Call c)
+    {
+        var name = c.Callee.EndsWith("_explicit", StringComparison.Ordinal) ? c.Callee[..^"_explicit".Length] : c.Callee;
+        var arity = name switch
+        {
+            "atomic_thread_fence" or "atomic_signal_fence" => 0,
+            "atomic_load" or "atomic_flag_test_and_set" or "atomic_flag_clear" or "atomic_is_lock_free" => 1,
+            "atomic_store" or "atomic_init" or "atomic_exchange" or "atomic_fetch_add" or "atomic_fetch_sub"
+                or "atomic_fetch_or" or "atomic_fetch_and" or "atomic_fetch_xor" => 2,
+            "atomic_compare_exchange_strong" or "atomic_compare_exchange_weak" => 3,
+            _ => -1,
+        };
+        if (arity < 0 || c.Args.Count < arity) { return false; }
+        var obj = arity > 0 && c.Args[0].Type.Unqualified is CType.Pointer p ? p.Pointee.Unqualified : CType.Int;
+        var vt = ValType(obj);
+        string? addr = null, expected = null, value = null;
+        if (arity > 0)
+        {
+            addr = AcquireScratch("addr");
+            EmitExpr(c.Args[0]);
+            Line($"local.set {addr}");
+        }
+        if (arity == 3)
+        {
+            expected = AcquireScratch("addr");
+            EmitExpr(c.Args[1]);
+            Line($"local.set {expected}");
+        }
+        if (arity >= 2)
+        {
+            var v = c.Args[arity - 1];
+            value = AcquireScratch(obj);
+            EmitExpr(v);
+            EmitConvert(v.Type, obj);
+            Line($"local.set {value}");
+        }
+        // The _explicit forms' memory orders, for their side effects only.
+        for (var i = arity; i < c.Args.Count; i++) { EmitDiscarded(c.Args[i]); }
+        CType result = CType.Void;
+        switch (name)
+        {
+            case "atomic_load":
+                Line($"local.get {addr}");
+                Line(LoadInstr(obj));
+                result = obj;
+                break;
+            case "atomic_store" or "atomic_init":
+                Line($"local.get {addr}");
+                Line($"local.get {value}");
+                Line(StoreInstr(obj));
+                break;
+            case "atomic_flag_clear":
+                Line($"local.get {addr}");
+                Line($"{vt}.const 0");
+                Line(StoreInstr(obj));
+                break;
+            case "atomic_flag_test_and_set":
+                Line($"local.get {addr}");
+                Line(LoadInstr(obj));
+                Line($"local.get {addr}");
+                Line($"{vt}.const 1");
+                Line(StoreInstr(obj));
+                Line($"{vt}.const 0");
+                Line($"{vt}.ne");
+                result = CType.Bool;
+                break;
+            case "atomic_is_lock_free":
+                Line("i32.const 1");
+                result = CType.Bool;
+                break;
+            case "atomic_exchange":
+                Line($"local.get {addr}");
+                Line(LoadInstr(obj));
+                Line($"local.get {addr}");
+                Line($"local.get {value}");
+                Line(StoreInstr(obj));
+                result = obj;
+                break;
+            case "atomic_fetch_add" or "atomic_fetch_sub" or "atomic_fetch_or" or "atomic_fetch_and" or "atomic_fetch_xor":
+            {
+                if (obj is not (CType.Prim { Integer: true } or CType.Enum))
+                {
+                    throw new IrUnsupportedException($"the wat target does not support {c.Callee} on a {obj.Describe()}");
+                }
+                var op = name switch
+                {
+                    "atomic_fetch_add" => BinOp.Add,
+                    "atomic_fetch_sub" => BinOp.Sub,
+                    "atomic_fetch_or" => BinOp.BitOr,
+                    "atomic_fetch_and" => BinOp.BitAnd,
+                    _ => BinOp.BitXor,
+                };
+                Line($"local.get {addr}");
+                Line(LoadInstr(obj));
+                Line($"local.get {addr}");
+                Line($"local.get {addr}");
+                Line(LoadInstr(obj));
+                Line($"local.get {value}");
+                Line(IntBinOp(op, obj));
+                Line(StoreInstr(obj));
+                result = obj;
+                break;
+            }
+            case "atomic_compare_exchange_strong" or "atomic_compare_exchange_weak":
+            {
+                // The object's bytes, as an unsigned integer as wide as it is in memory.
+                CType bits = WasmSizeOf(obj) switch
+                {
+                    1 => CType.UChar,
+                    2 => CType.UShort,
+                    4 => CType.UInt,
+                    8 => CType.ULong,
+                    _ => throw new IrUnsupportedException($"the wat target does not support {c.Callee} on a {obj.Describe()}"),
+                };
+                var current = AcquireScratch(bits);
+                Line($"local.get {addr}");
+                Line(LoadInstr(bits));
+                Line($"local.tee {current}");
+                Line($"local.get {expected}");
+                Line(LoadInstr(bits));
+                Line($"{ValType(bits)}.eq");
+                Line("if (result i32)");
+                _indent++;
+                Line($"local.get {addr}");
+                Line($"local.get {value}");
+                Line(StoreInstr(obj));
+                Line("i32.const 1");
+                _indent--;
+                Line("else");
+                _indent++;
+                Line($"local.get {expected}");
+                Line($"local.get {current}");
+                Line(StoreInstr(bits));
+                Line("i32.const 0");
+                _indent--;
+                Line("end");
+                ReleaseScratch(bits);
+                result = CType.Bool;
+                break;
+            }
+        }
+        if (value is not null) { ReleaseScratch(obj); }
+        if (expected is not null) { ReleaseScratch("addr"); }
+        if (addr is not null) { ReleaseScratch("addr"); }
+        if (result is not CType.VoidType) { EmitConvert(result, c.Type); }
+        return true;
+    }
+
     /// <summary><c>memcpy</c>/<c>memmove</c> (<c>memory.copy</c>, which allows overlap) and
     /// <c>memset</c> (<c>memory.fill</c>, which stores the value's low byte): destination,
     /// source or value, then the count, and the destination is the call's value.</summary>
@@ -1835,6 +1989,7 @@ internal sealed partial class WatBackend
         if (c.Callee == "fprintf" && !_defined.Contains("fprintf")) { EmitFprintf(c); return; }
         if (c.Callee == "sprintf" && !_defined.Contains("sprintf")) { EmitSprintf(c, bounded: false); return; }
         if (c.Callee == "snprintf" && !_defined.Contains("snprintf")) { EmitSprintf(c, bounded: true); return; }
+        if (!_defined.Contains(c.Callee) && EmitAtomic(c)) { return; }
 
         // The heap allocators lower to calls into the hand-written bump allocator;
         // free is a no-op drop. A user-defined one wins and routes through below.

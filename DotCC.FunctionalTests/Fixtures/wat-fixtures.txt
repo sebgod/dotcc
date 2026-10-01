@@ -20,6 +20,8 @@ array-sum
 array-typedef
 assert-basic
 atomic-counter
+atomic-narrow
+atomic-stdlib
 auto-infer
 bitwise
 block-comment-close

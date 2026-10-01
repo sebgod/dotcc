@@ -297,6 +297,13 @@ public sealed class WatOracleTests
         + "1 1 1 0\n"
         + "0.841470957 0.540302277 2.71828175 2.30258512 1.41421354\n"
         + "1.25992107 0.463647604 -1")]
+    // <stdatomic.h> on one thread.
+    [InlineData("#include <stdio.h>\n#include <stdatomic.h>\n"
+        + "int main(void){ atomic_long n = 5000000000; long old = atomic_fetch_add(&n, 7); long e = 1; int ok = atomic_compare_exchange_strong(&n, &e, 0);"
+        + " atomic_flag f = ATOMIC_FLAG_INIT; int first = atomic_flag_test_and_set(&f), second = atomic_flag_test_and_set(&f);"
+        + " long now = atomic_load(&n); long swapped = atomic_exchange(&n, 3);"
+        + " printf(\"%ld %ld %d %ld %d %d %ld %ld\", old, now, ok, e, first, second, swapped, atomic_load(&n)); return 0; }",
+        "5000000000 5000000007 0 5000000007 0 1 5000000007 3")]
     public void Wat_program_writes_expected_stdout(string source, string expected)
     {
         if (!Requested)
