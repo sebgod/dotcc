@@ -444,6 +444,43 @@ internal sealed partial class WatBackend
 
 """;
 
+    /// <summary>The emitted functions a program can run, in their order: those reached from
+    /// <c>main</c>, from a threaded module's thread entry, from the function table (whatever
+    /// had its address taken) and from the globals' initializers, through the <c>call</c>s their
+    /// emitted bodies make. The edges are what the backend emitted, so a call it lowered to an
+    /// instruction or expanded inline (a printf with a literal format) reaches nothing; a library
+    /// unit nothing reaches costs the module nothing.</summary>
+    private string ReachableFunctions(List<(string Name, string Text)> bodies, string initGlobals)
+    {
+        var byName = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var (name, text) in bodies) { byName[name] = text; }
+        var reached = new HashSet<string>(StringComparer.Ordinal);
+        var work = new Stack<string>();
+        void Reach(string name)
+        {
+            if (byName.ContainsKey(name) && reached.Add(name)) { work.Push(name); }
+        }
+        void ReachCalls(string text)
+        {
+            foreach (System.Text.RegularExpressions.Match m in CallTarget().Matches(text)) { Reach(m.Groups[1].Value); }
+        }
+        Reach("main");
+        if (_threaded) { Reach("__dotcc_thread_main"); }
+        foreach (var name in _fnTable) { Reach(name); }
+        ReachCalls(initGlobals);
+        while (work.Count > 0) { ReachCalls(byName[work.Pop()]); }
+        var sb = new StringBuilder();
+        foreach (var (name, text) in bodies)
+        {
+            if (reached.Contains(name)) { sb.Append(text); }
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>A direct call in emitted wat, capturing its target's name.</summary>
+    [System.Text.RegularExpressions.GeneratedRegex(@"\bcall \$([^\s()]+)")]
+    private static partial System.Text.RegularExpressions.Regex CallTarget();
+
     /// <summary>Assemble the module: emit the function bodies first (interning string
     /// literals into data segments), then wrap them with the linear memory, the stack
     /// pointer global, the data segments, and the <c>main</c> export.</summary>
@@ -456,13 +493,16 @@ internal sealed partial class WatBackend
 
         _indent = 1;
         var hasMain = false;
+        var bodies = new List<(string Name, string Text)>();
         foreach (var fn in unit.Functions)
         {
+            var start = _sb.Length;
             EmitFunc(fn);
+            bodies.Add((fn.Sym.TargetName, _sb.ToString(start, _sb.Length - start)));
             if (fn.Sym.Name == "main") { hasMain = true; }
         }
         var initGlobals = GlobalsInitFunc(unit);
-        var funcs = _sb.ToString();
+        var funcs = hasMain ? ReachableFunctions(bodies, initGlobals) : _sb.ToString();
         // I/O pulls the WASI import + exported memory + sink globals; the heap only
         // needs its bump-pointer global. A program can use either, both, or neither.
         var usesHeap = _runtimeUsed.Contains("malloc");

@@ -472,7 +472,7 @@ public sealed class WatBackendTests
     public void pointer_index_scales_by_the_element_size()
     {
         // An int* subscript multiplies the index by sizeof(int)=4 before the load.
-        var wat = Wat("int at(int *a){ return a[3]; } int main(void){ return 0; }");
+        var wat = Wat("int at(int *a){ return a[3]; } int main(void){ int a[4] = {0}; return at(a); }");
         wat.ShouldContain("i32.const 4");
         wat.ShouldContain("i32.mul");
         wat.ShouldContain("i32.load");
@@ -847,7 +847,7 @@ public sealed class WatBackendTests
         var a = Path.Combine(Path.GetTempPath(), $"dotcc-wat-{System.Guid.NewGuid():N}.c");
         var b = Path.Combine(Path.GetTempPath(), $"dotcc-wat-{System.Guid.NewGuid():N}.c");
         File.WriteAllText(a, "static const double K = 1.5;\ndouble fa(void) { return K; }\n");
-        File.WriteAllText(b, "static const double K = 2.5;\ndouble fb(void) { return K; }\nint main(void) { return fb() > 0; }\n");
+        File.WriteAllText(b, "static const double K = 2.5;\ndouble fb(void) { return K; }\ndouble fa(void);\nint main(void) { return fa() + fb() > 0; }\n");
         try
         {
             var wat = Compiler.EmitWat(new[] { a, b });
@@ -912,7 +912,7 @@ public sealed class WatBackendTests
     [Fact]
     public void Copysign_and_fabsl_are_single_instructions()
     {
-        var wat = Wat("#include <math.h>\ndouble f(double x, double y) { return copysign(x, y) + fabsl(x); }\nfloat g(float x, float y) { return copysignf(x, y); }\nint main(void) { return f(1.0, -2.0) < 0; }");
+        var wat = Wat("#include <math.h>\ndouble f(double x, double y) { return copysign(x, y) + fabsl(x); }\nfloat g(float x, float y) { return copysignf(x, y); }\nint main(void) { return f(1.0, -2.0) + g(1.0f, -2.0f) < 0; }");
         wat.ShouldContain("f64.copysign");
         wat.ShouldContain("f32.copysign");
         wat.ShouldContain("f64.abs");
