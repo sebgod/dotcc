@@ -842,8 +842,7 @@ internal sealed class CSharpBackend
                 // statement per operand, BRACED so a braceless nested body (`if (c)
                 // (a, b); else …`, `while (…) (a, b);`) stays a single statement. Peel
                 // parens / a void cast (`(void)(a, b)`, `api_check`) to find the comma.
-                var inner = es.Expr;
-                while (inner is Paren pp) { inner = pp.Inner; }
+                var inner = PeelDiscard(es.Expr);
                 // `unreachable()` (C23) → a real C# `throw`, NOT a plain call to
                 // the [DoesNotReturn] helper: C#'s CS0161 "not all code paths
                 // return" analysis only treats a literal `throw` as a control-flow
@@ -2940,6 +2939,9 @@ internal sealed class CSharpBackend
     /// <see cref="IsConstExpr"/> flag alone.</summary>
     private (string, int) RenderCast(Cast c)
     {
+        // A void cast outside statement position (where RenderStmtExpr peels it) renders its
+        // operand: C# has no void cast, and nothing reads the value.
+        if (c.Target.Unqualified is CType.VoidType) { return Render(c.Operand); }
         // A null pointer converted to an integer is 0 (C11 6.3.2.3p6 leaves the value to the
         // implementation, 0 on every target dotcc models; obmalloc.c's `(uintptr_t)NULL`).
         if (c.Target.Unqualified is CType.Prim { Integer: true } && IsNullPtr(c.Operand))
@@ -3339,8 +3341,9 @@ internal sealed class CSharpBackend
     private string RenderStmtExpr(CExpr e)
     {
         // Outer parens never matter for a statement-expression (a macro body like
-        // `((c) ? a() : b())` arrives parenthesized) — strip them to see the shape.
-        while (e is Paren p) { e = p.Inner; }
+        // `((c) ? a() : b())` arrives parenthesized), nor does a void cast, whose value is
+        // discarded here anyway — strip them to see the shape.
+        e = PeelDiscard(e);
         // A comma in statement position discards every operand's value (the whole
         // comma's value is unused here), so emit each operand as its own statement
         // rather than a value tuple/delegate. This is also the ONLY correct lowering
@@ -3355,6 +3358,19 @@ internal sealed class CSharpBackend
             return $"if ({Truth(ct.Cond).Text}) {{ {RenderStmtExpr(ct.Then)}; }} else {{ {RenderStmtExpr(ct.Else)}; }}";
         }
         return IsStmtExpr(e) ? Expr(e) : $"_ = {Sub(e, PAssign)}";
+    }
+
+    /// <summary>An expression whose value is discarded, without the parentheses and
+    /// <c>(void)</c> casts around it: C# has no void cast, so in statement position the
+    /// operand itself is the statement.</summary>
+    private static CExpr PeelDiscard(CExpr e)
+    {
+        while (true)
+        {
+            if (e is Paren p) { e = p.Inner; }
+            else if (e is Cast { Target.Unqualified: CType.VoidType } vc) { e = vc.Operand; }
+            else { return e; }
+        }
     }
 
     private static bool IsStmtExpr(CExpr e) => e switch
