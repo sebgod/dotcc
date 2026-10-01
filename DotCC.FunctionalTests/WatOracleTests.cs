@@ -113,6 +113,11 @@ public sealed class WatOracleTests
     // module's start function; 40 KB of data moves the stack past it.
     [InlineData("struct P { int x; const char *name; };\nint counter = 5;\nstatic struct P origin = { 7, \"origin\" };\nconst char *greeting = \"hey\";\nint table[4] = { 1, 2, 3, 4 };\nstatic char big[40000];\nint next(void){ static int n = 100; return n++; }\nint main(void){ counter++; next(); big[39999] = 2; return counter + next() + origin.x + origin.name[1] + greeting[2] + table[3] + big[39999]; }", 355)]
     [InlineData("int next(void){ static int n = 10; return n++; } int main(void){ next(); next(); return next(); }", 12)]
+    // a value waiting in a scratch survives a nested use (log_[li++] = v), comma operators,
+    // a switch inside a goto function (CFG dispatch, with fall-through).
+    [InlineData("int log_[4]; int li;\nvoid record(int v){ log_[li++] = v; }\nint main(void){ record(7); record(9); return log_[0] * 10 + log_[1] + li * 100; }", 279)]
+    [InlineData("int f(int x){ int r = 0; if (x < 0) goto neg; switch (x) { case 1: r = 10; case 2: r += 2; break; default: r = 99; } return r; neg: return -1; }\nint main(void){ return f(1) * 1000 + f(2) * 100 + f(3) + f(-5); }", 12298)]
+    [InlineData("int g(int *p){ return ++*p; }\nint main(void){ int a = 1, b; (void)g(&a); b = (g(&a), g(&a), a * 10); for (int i = 0, j = 3; i < j; i++, j--) b += i; return b; }", 41)]
     // function pointers: a table index, called through call_indirect (a local, a global,
     // a struct member, a table of them).
     [InlineData("int add(int a, int b){ return a + b; }\nint (*op)(int, int) = add;\nint main(void){ int (*f)(int, int) = &add; return f(2, 3) + op(4, 5); }", 14)]
