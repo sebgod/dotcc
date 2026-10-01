@@ -1,7 +1,8 @@
 // Run one dotcc --target=wat module under node: instantiate it with a WASI preview1 shim
-// (fd_write, proc_exit, clock_time_get, random_get) and, for a threaded module, wasi-threads
-// (the shared memory it imports as env.memory, and thread-spawn, a worker_threads Worker that
-// instantiates the module over that memory and calls its wasi_thread_start), then call main.
+// (fd_write, fd_read, fd_seek, fd_close, proc_exit, clock_time_get, random_get) and, for a
+// threaded module, wasi-threads (the shared memory it imports as env.memory, and thread-spawn,
+// a worker_threads Worker that instantiates the module over that memory and calls its
+// wasi_thread_start), then call main.
 // What the program writes to fd 1 and 2 goes straight to our stdout and stderr, from every
 // thread, in the order it is written. Scripts/wat-probe.sh and the wat oracle tests both run
 // modules through this file.
@@ -41,6 +42,30 @@ function imports(mod, run, getInstance) {
       dv.setUint32(nwrittenPtr, written, true);
       return 0;
     },
+    // stdin is ours; fd 0 reads it, filling each iovec in turn until a read comes up short.
+    fd_read(fd, iovs, iovsLen, nreadPtr) {
+      if (fd !== 0) { return 8; }   // EBADF
+      const dv = new DataView(memory());
+      let total = 0;
+      for (let i = 0; i < iovsLen; i++) {
+        const ptr = dv.getUint32(iovs + i * 8, true);
+        const len = dv.getUint32(iovs + i * 8 + 4, true);
+        if (len === 0) { continue; }
+        const bytes = Buffer.alloc(len);
+        let got;
+        try { got = fs.readSync(0, bytes, 0, len, null); }
+        catch (e) { if (e.code === 'EOF') { got = 0; } else { return 29; } }   // EIO
+        new Uint8Array(memory(), ptr, got).set(bytes.subarray(0, got));
+        total += got;
+        if (got < len) { break; }
+      }
+      dv.setUint32(nreadPtr, total, true);
+      return 0;
+    },
+    // The standard streams are a terminal or a pipe: none of them seeks, and closing one is a
+    // no-op; there are no other descriptors.
+    fd_seek(fd, offset, whence, newOffsetPtr) { return fd <= 2 ? 70 : 8; },   // ESPIPE, EBADF
+    fd_close(fd) { return fd <= 2 ? 0 : 8; },
     proc_exit(code) { throw new Exit(code); },
     // clock ids: 0 realtime, 1 monotonic, 2 process CPU time, 3 thread CPU time (nanoseconds).
     clock_time_get(id, precision, timePtr) {

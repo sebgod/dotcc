@@ -5,8 +5,8 @@
 //   wat text --> libwabt.js parseWat().toBinary() --> WebAssembly.instantiate
 //   --> call main(), capturing what it writes to fd 1/2 through a WASI fd_write shim.
 // The shim mirrors Scripts/wat-run.js, the node runner the wat oracle and probe use, less
-// its threads: fd_write, proc_exit, clock_time_get and random_get are the WASI functions
-// dotcc's wat libc imports.
+// its threads: fd_write, fd_read, fd_seek, fd_close, proc_exit, clock_time_get and random_get
+// are the WASI functions dotcc's wat libc imports.
 //
 // `WabtModule` is the global exposed by the vendored lib/wabt/libwabt.js (a UMD
 // build; with no CommonJS/AMD present it lands on window). It is a function that
@@ -88,6 +88,15 @@ window.dotccSandbox = (function () {
       dv.setUint32(nwrittenPtr, written, true);
       return 0;
     };
+    // The page has no stdin to give: fd 0 is at its end. The standard streams are neither
+    // seekable nor closable, and there are no other descriptors.
+    const fd_read = (fd, iovs, iovsLen, nreadPtr) => {
+      if (fd !== 0) { return 8; }   // EBADF
+      new DataView(inst.exports.memory.buffer).setUint32(nreadPtr, 0, true);
+      return 0;
+    };
+    const fd_seek = (fd) => (fd <= 2 ? 70 : 8);   // ESPIPE, EBADF
+    const fd_close = (fd) => (fd <= 2 ? 0 : 8);
     const proc_exit = (code) => { const e = new Error("proc_exit"); e.__exit = code | 0; throw e; };
     // clock_time_get (time(), clock()): nanoseconds of clock 0 (realtime) or, for the
     // monotonic and CPU-time clocks, the page's high-resolution time since it loaded.
@@ -122,7 +131,7 @@ window.dotccSandbox = (function () {
         };
       }
       const instance = await WebAssembly.instantiate(mod, {
-        wasi_snapshot_preview1: { fd_write, proc_exit, clock_time_get, random_get },
+        wasi_snapshot_preview1: { fd_write, fd_read, fd_seek, fd_close, proc_exit, clock_time_get, random_get },
       });
       inst = instance;
 

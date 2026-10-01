@@ -219,7 +219,12 @@ internal sealed partial class IrBuilder
             _gate?.Report("ISO C forbids an empty translation unit", 0);
             return;
         }
+        var globalsBefore = Module.Globals.Count;
         FlattenFns(root, BuildTopLevel);
+        if (library)
+        {
+            for (var i = globalsBefore; i < Module.Globals.Count; i++) { Module.LibraryGlobals.Add(Module.Globals[i].Sym); }
+        }
         if (ObjectKey is { } key) { QualifyTuLocals(key); }
     }
 
@@ -845,6 +850,7 @@ internal sealed partial class IrBuilder
         }
 
         ApplyFnMarkers(funcSym);
+        if (_libraryUnit && !sig.IsStatic) { Module.LibraryFunctions.Add(sig.Name); }
         _symbols.BeginFunction();
         _setjmpCalls.Clear(); // per-function stray-setjmp tracking (see the field)
         _currentFnName = sig.Name; // drives the `__func__` predefined identifier
@@ -3127,6 +3133,10 @@ internal sealed partial class IrBuilder
             // native data import (resolved against another TU's definition, or — if
             // none — warned as unsupported by the emit pass).
             if (sym is { Kind: SymKind.Var, Storage: Storage.Extern }) { _referencedExternData.Add(sym.Name); }
+            // A function named other than to call it (its address taken, or decayed into a
+            // function pointer) is used as surely as a call uses it: a library unit or an
+            // import must supply it all the same.
+            if (sym is { Kind: SymKind.Func }) { _referencedFuncs.Add(sym.Name); }
             return new VarRef(sym) { Type = sym.Type, IsLValue = sym.Kind is SymKind.Var or SymKind.Param };
         }
         // `__func__` (C99 §6.4.2.2) — a predefined identifier implicitly declared

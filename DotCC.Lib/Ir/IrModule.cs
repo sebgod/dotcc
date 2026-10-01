@@ -54,6 +54,16 @@ internal sealed partial class IrModule
     /// like are body-less there because the runtime supplies them as C# types.</summary>
     public HashSet<string> RuntimeTags { get; } = new(StringComparer.Ordinal);
 
+    /// <summary>The functions a library unit defined (see <see cref="IrBuilder.AddUnit(Item, string, bool)"/>):
+    /// the program defines none of them itself, so a backend may still lower a call to one
+    /// its own way (the wat target expands a <c>printf</c> with a literal format inline) and
+    /// keep the library's for the calls it cannot.</summary>
+    public HashSet<string> LibraryFunctions { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>The file-scope objects (and function-scope statics) a library unit defined: a
+    /// backend may leave out one nothing it emits reaches, as it does a library function.</summary>
+    public HashSet<Symbol> LibraryGlobals { get; } = new(ReferenceEqualityComparer.Instance);
+
     public List<FuncDef> Functions { get; } = new();
     public List<GlobalVar> Globals { get; } = new();
     public List<StructTypeDef> Types { get; } = new();

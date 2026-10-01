@@ -395,6 +395,35 @@ public sealed class WatOracleTests
         + " for (int i = 0; i < 4; i++) thrd_join(t[i], &r[i]); printf(\"%d %d|\", atomic_load(&hits), mine);"
         + " for (int i = 0; i < 4; i++) printf(\"%s %ld %d|\", out[i], sums[i], r[i]); return 0; }",
         "80000 100|0:0.125:100 19900 0|1:1.625:200 19900 10|2:3.125:300 19900 20|3:4.625:400 19900 30|")]
+    // A format read at run time (the libc's printf over vsnprintf) prints what the same format
+    // as a literal (expanded inline) does, flag for flag, and glibc's text: widths, precisions,
+    // '#', length modifiers, %a, %p, a '*' width and precision, %n, and snprintf's truncation.
+    [InlineData("#include <stdio.h>\n"
+        + "int main(void){ const char *f[] = { \"%5d|%-5d|%05d|%+d|% d|\", \"%x %X %#x %#o %.3d|\", \"%.3f %e %g %a %G|\", \"%10.4s|%-3c|%%|%p|\", \"%hhd %hd %ld %lld %zu|\" };\n"
+        + " printf(f[0], 42, 42, 42, 42, 42); printf(\"%5d|%-5d|%05d|%+d|% d|\", 42, 42, 42, 42, 42);\n"
+        + " printf(f[1], 255u, 255u, 255u, 8u, 7); printf(\"%x %X %#x %#o %.3d|\", 255u, 255u, 255u, 8u, 7);\n"
+        + " printf(f[2], 3.14159, 31415.9, 0.0001234, 1.5, 1e-10); printf(\"%.3f %e %g %a %G|\", 3.14159, 31415.9, 0.0001234, 1.5, 1e-10);\n"
+        + " printf(f[3], \"abcdefg\", 'z', (void *)0); printf(\"%10.4s|%-3c|%%|%p|\", \"abcdefg\", 'z', (void *)0);\n"
+        + " printf(f[4], (signed char)-3, (short)-300, -5L, -6LL, (size_t)7); printf(\"%hhd %hd %ld %lld %zu|\", (signed char)-3, (short)-300, -5L, -6LL, (size_t)7);\n"
+        + " char b[8]; int n = snprintf(b, sizeof b, f[0], 1, 2, 3, 4, 5); printf(\"[%s] %d|\", b, n);\n"
+        + " printf(\"[%*.*f]%n\", 8, 2, 2.71828, &n); printf(\"%d\", n); return 0; }",
+        "   42|42   |00042|+42| 42|   42|42   |00042|+42| 42|ff FF 0xff 010 007|ff FF 0xff 010 007|3.142 3.141590e+04 0.0001234 0x1.8p+0 1E-10|3.142 3.141590e+04 0.0001234 0x1.8p+0 1E-10|      abcd|z  |%|(nil)|      abcd|z  |%|(nil)|-3 -300 -5 -6 7|-3 -300 -5 -6 7|[    1|2] 24|[    2.72]10")]
+    // The stdio FILE layer (musl's, over WASI): a tmpfile in memory written with fwrite and
+    // fprintf, read back with fgetc, ungetc, fgets and fread, positioned with fseek, ftell and
+    // rewind (a write past the end leaves zeros), EOF and clearerr; printf's count, its
+    // argument's own output first; fputs, fputc and putc to stdout.
+    [InlineData("#include <stdio.h>\n"
+        + "#include <string.h>\n"
+        + "static int g(void){ return printf(\"<g>\"); }\n"
+        + "int main(void){ FILE *t = tmpfile(); char s[32]; int c;\n"
+        + " fwrite(\"hello\\nworld\\n\", 1, 12, t); fprintf(t, \"%d-%s\\n\", 7, \"x\"); long end = ftell(t);\n"
+        + " fseek(t, 6, SEEK_SET); c = fgetc(t); ungetc('W', t); fgets(s, sizeof s, t); printf(\"%ld %c [%s] \", end, c, strtok(s, \"\\n\"));\n"
+        + " rewind(t); size_t got = fread(s, 1, 5, t); s[got] = 0; printf(\"%zu [%s] %ld \", got, s, ftell(t));\n"
+        + " fseek(t, 3, SEEK_END); fputc('!', t); printf(\"%ld \", ftell(t)); fseek(t, -4, SEEK_END);\n"
+        + " int a = fgetc(t), b = fgetc(t), d = fgetc(t), e = fgetc(t), z = fgetc(t), eof = feof(t); clearerr(t);\n"
+        + " printf(\"%d %d %d %d %d %d %d \", a, b, d, e, z, eof, feof(t));\n"
+        + " fclose(t); int n = printf(\"[%d]\", g()); printf(\" %d \", n); fputs(\"put\", stdout); fputc('c', stdout); putc('\\n', stdout); return 0; }",
+        "16 w [World] 5 [hello] 5 20 0 0 0 33 -1 1 0 <g>[3] 3 putc\n")]
     // strerror's glibc wording, strtoimax past 32 bits, the one "C" locale, and time() from
     // WASI's clock.
     [InlineData("#include <stdio.h>\n#include <string.h>\n#include <errno.h>\n#include <inttypes.h>\n#include <locale.h>\n#include <time.h>\n"

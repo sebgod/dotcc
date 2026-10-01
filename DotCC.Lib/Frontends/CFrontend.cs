@@ -163,6 +163,8 @@ internal sealed class CFrontend : IFrontend
         // object it uses, that no unit defines is looked up by name, and its source, if the
         // library has one, is bound as a library unit; what that unit uses is looked up in
         // turn, until nothing new is.
+        // The library's own files, whose warnings are the library's business, not the program's.
+        var libraryFiles = new HashSet<string>(StringComparer.Ordinal);
         if (req.Library is { } library)
         {
             var tried = new HashSet<string>(StringComparer.Ordinal);
@@ -175,6 +177,7 @@ internal sealed class CFrontend : IFrontend
                     var root = ParseUnitText(
                         $"{Compiler.IncludeResolver.LibraryDir}/{name}.c", text, irParser, quiet: true);
                     irBuilder.AddUnit(root, $"{name}.c", library: true);
+                    libraryFiles.Add($"{name}.c");
                     fingerprints.Clear();
                 }
             }
@@ -184,7 +187,7 @@ internal sealed class CFrontend : IFrontend
         {
             throw new CompileException(string.Join("\n", irErrors.Select(d => "error: " + d)));
         }
-        foreach (var w in irBuilder.Diagnostics.Where(d => d.Severity == Ir.Severity.Warning))
+        foreach (var w in irBuilder.Diagnostics.Where(d => d.Severity == Ir.Severity.Warning && !libraryFiles.Contains(d.File ?? "")))
         {
             Console.Error.WriteLine("dotcc: warning: " + w);
         }
