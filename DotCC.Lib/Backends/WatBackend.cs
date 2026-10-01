@@ -2188,13 +2188,9 @@ internal sealed partial class WatBackend
             CType produced;
             if (a.CompoundOp is { } cop)
             {
-                var common = CType.UsualArithmetic(vr.Type, a.Value.Type);
                 Line($"local.get ${vr.Sym.TargetName}");
-                EmitConvert(vr.Type, common);
-                EmitExpr(a.Value);
-                EmitConvert(a.Value.Type, common);
-                Line(ArithBinOp(cop, common));
-                produced = common;
+                EmitCompoundStep(cop, vr.Type, a.Value);
+                produced = vr.Type;
             }
             else
             {
@@ -2237,17 +2233,12 @@ internal sealed partial class WatBackend
         if (a.CompoundOp is { } mop)
         {
             // *lv OP= v  — compute the address once, read-modify-write through it.
-            var common = CType.UsualArithmetic(tt, a.Value.Type);
             EmitAddress(a.Target);
             var addr = AcquireScratch("addr");
             Line($"local.set {addr}");
             Line($"local.get {addr}");
             Line(LoadInstr(tt));
-            EmitConvert(tt, common);
-            EmitExpr(a.Value);
-            EmitConvert(a.Value.Type, common);
-            Line(ArithBinOp(mop, common));
-            EmitConvert(common, tt);
+            EmitCompoundStep(mop, tt, a.Value);
             var scratch = AcquireScratch(tt);
             Line($"local.set {scratch}");
             Line($"local.get {addr}");
@@ -2269,6 +2260,26 @@ internal sealed partial class WatBackend
             Line($"local.get {scratch}");   // leave the stored value
             ReleaseScratch(tt);
         }
+    }
+
+    /// <summary>With a compound assignment's target value (of type <paramref name="target"/>) on
+    /// the stack, leave <c>target OP value</c> as the target's type: a pointer stepped by
+    /// <paramref name="value"/> elements for <c>+=</c>/<c>-=</c> (6.5.16.2, so <c>p += n</c> is
+    /// <c>p + n</c>), any other operand pair under the usual arithmetic conversions.</summary>
+    private void EmitCompoundStep(BinOp op, CType target, CExpr value)
+    {
+        if (target.Unqualified is CType.Pointer && op is BinOp.Add or BinOp.Sub)
+        {
+            EmitScaledIndex(value, ElementType(target));
+            Line(op == BinOp.Add ? "i32.add" : "i32.sub");
+            return;
+        }
+        var common = CType.UsualArithmetic(target, value.Type);
+        EmitConvert(target, common);
+        EmitExpr(value);
+        EmitConvert(value.Type, common);
+        Line(ArithBinOp(op, common));
+        EmitConvert(common, target);
     }
 
     private void EmitCast(Cast c)

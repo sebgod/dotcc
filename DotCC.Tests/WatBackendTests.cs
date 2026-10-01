@@ -1077,6 +1077,14 @@ public sealed class WatBackendTests
     }
 
     [Fact]
+    public void A_pointer_compound_assignment_steps_by_elements()
+    {
+        // `p += n` is `p + n`: n elements, not n bytes (a `char *` hid it, sizeof is 1).
+        var wat = Wat("int f(int *p, int n) { p += n; return *p; }\nint main(void) { int a[3] = { 1, 2, 3 }; return f(a, 2); }");
+        wat.ShouldContain("local.get $p\n    local.get $n\n    i32.const 4\n    i32.mul\n    i32.add");
+    }
+
+    [Fact]
     public void A_binary_literal_is_written_in_decimal()
     {
         // wat reads decimal and 0x hex, not C23's 0b: wat2wasm rejected `i32.const 0b1011`.
