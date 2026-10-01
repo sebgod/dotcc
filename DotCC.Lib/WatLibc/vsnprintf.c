@@ -1,11 +1,22 @@
 /* vsnprintf: format into s, at most n bytes with the terminating NUL, and return the length of the
    whole output. The format is read here, at run time; each conversion is laid out by the wat
    backend's formatter, the runtime the inline expansion of a literal format calls, so the two
-   print alike (printf_impl.h). long double is double on this target. The wat target's libc (WatLibc), compiled with the program. */
+   print alike (printf_impl.h). long double is double on this target; %lc and %ls are a wide
+   character and string, written as UTF-8. The wat target's libc (WatLibc), compiled with the program. */
 #include <stdio.h>
 #include <stddef.h>
 #include <stdarg.h>
 #include <printf_impl.h>
+#include <stdlib.h>
+#include <wide_impl.h>
+
+/* Lay out the k bytes at bytes in a field width wide, spaces before them or (left) after. */
+static void pad_wide(const char *bytes, int k, int width, int left)
+{
+	for (int i = k; !left && i < width; i++) __builtin_dotcc_pf_write(" ", 1);
+	__builtin_dotcc_pf_write(bytes, k);
+	for (int i = k; left && i < width; i++) __builtin_dotcc_pf_write(" ", 1);
+}
 
 int vsnprintf(char *restrict s, size_t n, const char *restrict fmt, va_list ap)
 {
@@ -108,10 +119,34 @@ int vsnprintf(char *restrict s, size_t n, const char *restrict fmt, va_list ap)
 			break;
 		}
 		case 'c':
-			__builtin_dotcc_pf_char(va_arg(ap, int), width, left);
+			if (len == 'l') {
+				/* A wide character, as its UTF-8 bytes. */
+				wchar_t one[2] = { (wchar_t)va_arg(ap, int), 0 };
+				char bytes[4];
+				size_t k = one[0] ? __wcs_to_utf8(bytes, one, sizeof bytes) : 1;
+				if (!one[0]) bytes[0] = 0;
+				pad_wide(bytes, (int)k, width, left);
+			} else {
+				__builtin_dotcc_pf_char(va_arg(ap, int), width, left);
+			}
 			break;
 		case 's':
-			__builtin_dotcc_pf_str(va_arg(ap, const char *), prec, width, left);
+			if (len == 'l') {
+				/* A wide string, as UTF-8: the precision bounds its bytes, whole characters
+				   only. */
+				const wchar_t *ws = va_arg(ap, const wchar_t *);
+				size_t max = prec >= 0 ? (size_t)prec : (size_t)-1;
+				size_t k = __wcs_to_utf8(NULL, ws, max);
+				char small[256];
+				char *bytes = k <= sizeof small ? small : malloc(k);
+				if (bytes) {
+					__wcs_to_utf8(bytes, ws, k);
+					pad_wide(bytes, (int)k, width, left);
+					if (bytes != small) free(bytes);
+				}
+			} else {
+				__builtin_dotcc_pf_str(va_arg(ap, const char *), prec, width, left);
+			}
 			break;
 		case 'p':
 			__builtin_dotcc_pf_p(va_arg(ap, void *), width, left);

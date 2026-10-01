@@ -452,6 +452,30 @@ public sealed class WatOracleTests
         + "    return 0;\n"
         + "}",
         "5|42 -17 [hello] 325 31\n3|[abc] 123 [rest of it] 18\n0|-1|1 34|4 7.5 Z -5 300\n3 493 16 8|3 -0.125\n1 1 0|1 1 x|1 0|0 63 35|-9223372036854775808 18446744073709551615\n")]
+    // Wide stdio over UTF-8, as ISO C has it: %ls/%lc in a narrow printf (a precision bounds
+    // the bytes, whole characters only), swprintf's count and its -1 when the text does not
+    // fit, swscanf into a wide and a narrow string, wprintf's count in wide characters,
+    // fputws and putwchar. (The expected text is the UTF-8 bytes, one char each.)
+    [InlineData("#include <stdio.h>\n"
+        + "#include <wchar.h>\n"
+        + "int main(void) {\n"
+        + "    const wchar_t *ws = L\"h\u00e9llo\";\n"
+        + "    printf(\"[%ls] [%5ls] [%-7ls|] [%.2ls] [%lc]\\n\", ws, L\"ab\", L\"cd\", ws, (wint_t)L'\u00e9');\n"
+        + "    wchar_t buf[8];\n"
+        + "    int n = swprintf(buf, 8, L\"%d-%ls\", 12345, L\"xyz\");\n"
+        + "    printf(\"%d %d\\n\", n, (int)wcslen(buf));\n"
+        + "    n = swprintf(buf, 8, L\"%d\", 42);\n"
+        + "    printf(\"%d %d %d\\n\", n, buf[0], buf[2]);\n"
+        + "    wchar_t w1[16]; int a; char narrow[16];\n"
+        + "    n = swscanf(L\"  77 \u00e9t\u00e9 abc\", L\"%d %ls %s\", &a, w1, narrow);\n"
+        + "    printf(\"%d %d %d %d %d [%s]\\n\", n, a, (int)wcslen(w1), w1[0], w1[1], narrow);\n"
+        + "    n = wprintf(L\"w:%ls %d\\n\", L\"\u00e9\", 5);\n"
+        + "    printf(\"%d\\n\", n);\n"
+        + "    fputws(L\"\u00e9\u20ac!\\n\", stdout);\n"
+        + "    putwchar(L'Z'); putwchar(L'\\n');\n"
+        + "    return 0;\n"
+        + "}",
+        "[h\u00c3\u00a9llo] [   ab] [cd     |] [h] [\u00c3\u00a9]\n-1 7\n2 52 0\n3 77 3 233 116 [abc]\nw:\u00c3\u00a9 5\n6\n\u00c3\u00a9\u00e2\u0082\u00ac!\nZ\n")]
     // strerror's glibc wording, strtoimax past 32 bits, the one "C" locale, and time() from
     // WASI's clock.
     [InlineData("#include <stdio.h>\n#include <string.h>\n#include <errno.h>\n#include <inttypes.h>\n#include <locale.h>\n#include <time.h>\n"

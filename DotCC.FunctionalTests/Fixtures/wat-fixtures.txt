@@ -233,4 +233,5 @@ varargs
 void-ternary-stmt
 volatile-access
 volatile-pointer
+wchar-io
 wchar-literals
