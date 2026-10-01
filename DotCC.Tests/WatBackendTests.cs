@@ -822,6 +822,24 @@ public sealed class WatBackendTests
     }
 
     [Fact]
+    public void An_extern_declaration_reaches_the_global_another_unit_defines()
+    {
+        // `extern int g;` in one unit and `int g = 5;` in another are two symbols with one
+        // name: both are the one address in the data area.
+        var a = Path.Combine(Path.GetTempPath(), $"dotcc-wat-{System.Guid.NewGuid():N}.c");
+        var b = Path.Combine(Path.GetTempPath(), $"dotcc-wat-{System.Guid.NewGuid():N}.c");
+        File.WriteAllText(a, "int g = 5;\nvoid bump(void) { g++; }\n");
+        File.WriteAllText(b, "extern int g;\nvoid bump(void);\nint main(void) { bump(); return g; }\n");
+        try
+        {
+            var wat = Compiler.EmitWat(new[] { a, b });
+            wat.ShouldContain("i32.const 1024\n    i32.const 5\n    i32.store");
+            wat.ShouldContain("(func $main (result i32)\n    call $bump\n    i32.const 1024\n    i32.load");
+        }
+        finally { File.Delete(a); File.Delete(b); }
+    }
+
+    [Fact]
     public void A_binary_literal_is_written_in_decimal()
     {
         // wat reads decimal and 0x hex, not C23's 0b: wat2wasm rejected `i32.const 0b1011`.

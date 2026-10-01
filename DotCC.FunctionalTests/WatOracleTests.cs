@@ -128,6 +128,13 @@ public sealed class WatOracleTests
     [InlineData("struct P { int x, y; };\nstruct P make(int a){ struct P p = {a, a * 2}; return p; }\nint sum(struct P p){ p.x += 100; return p.x + p.y; }\nint main(void){ struct P q = make(3); int s = sum(q); return s * 10 + q.x; }", 1093)]
     [InlineData("struct P { int x, y; };\nint sum(struct P p){ return p.x + p.y; }\nint main(void){ int *a = (int[]){4, 5, 6}; return sum((struct P){1, 2}) * 100 + a[2] + (&(struct P){7, 8})->y; }", 314)]
     [InlineData("#include <stdlib.h>\nint main(void){ div_t d = div(17, 5); ldiv_t l = ldiv(-17L, 5L); return d.quot * 100 + d.rem * 10 + (int)l.rem; }", 318)]
+    // a promoted malloc (a stack struct, a stack buffer), wide literals, a parenthesized
+    // assignment target, errno.
+    [InlineData("#include <stdlib.h>\nstruct P { int x, y; };\nint main(void){ struct P *p = malloc(sizeof(struct P)); p->x = 3; p->y = 4; int r = p->x * 10 + p->y; free(p); return r; }", 34)]
+    [InlineData("#include <stdlib.h>\n#include <string.h>\nint main(void){ char *b = malloc(16); strcpy(b, \"hello\"); int n = (int)strlen(b); free(b); return n; }", 5)]
+    // (the non-ASCII forms run in the char16-literals and c11-char32 fixtures)
+    [InlineData("#include <uchar.h>\nint main(void){ const char16_t *s = u\"hi\"; const char32_t *t = U\"ok\"; return (s[1] == 'i') * 100 + (t[1] == 'k') * 10 + (t[2] == 0); }", 111)]
+    [InlineData("#include <errno.h>\nint x;\nint main(void){ (x) = 5; errno = 0; errno = 34; return (x) * 100 + errno; }", 534)]
     public void Wat_program_returns_expected_value(string source, int expected)
     {
         if (!Requested)

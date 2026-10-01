@@ -106,7 +106,15 @@ internal sealed partial class WatBackend
 
     /// <summary>Each file-scope object (and block-scope static) → its fixed address in the
     /// data area, where it lives for the program (see <see cref="PlaceGlobals"/>).</summary>
-    private readonly Dictionary<Symbol, int> _globals = new();
+    private readonly Dictionary<string, int> _globals = new(StringComparer.Ordinal);
+
+    /// <summary>The address of <c>errno</c>, a slot of its own in the data area (dotcc's
+    /// headers leave the name to the runtime, so it reaches the backend unresolved).</summary>
+    private int? _errnoAddr;
+
+    /// <summary>The frame buffer of each pointer a promoted <c>malloc</c> points at (an
+    /// <see cref="ArrayDecl"/> whose symbol stays a pointer, C#'s <c>stackalloc</c>).</summary>
+    private readonly Dictionary<Symbol, int> _arrayBuffers = new();
 
     /// <summary>True while the initializer stores address absolute memory (the globals'
     /// start function) rather than the current frame.</summary>
@@ -345,6 +353,7 @@ internal sealed partial class WatBackend
         _currentRet = ret;
         _callTemps.Clear();
         _literalSlots.Clear();
+        _arrayBuffers.Clear();
 
         // Classify storage: address-taken symbols (params or locals) and arrays live
         // in the frame; every other scalar local is a fast wasm value local.
@@ -375,6 +384,8 @@ internal sealed partial class WatBackend
             if (loc.AddressTaken || IsAddressValued(loc.Type)) { Place(loc); }
             else { valueLocals.Add(loc); }
         }
+        // A promoted malloc's buffer (an ArrayDecl over a pointer symbol) is frame memory.
+        foreach (var s in fn.Body.Stmts) { ReserveArrayBuffers(s, ref cursor); }
         // Each call that passes or returns a struct by value gets slots of its own: a copy of
         // each aggregate argument (the callee may change its parameter) and the result's.
         foreach (var s in fn.Body.Stmts)
@@ -388,7 +399,7 @@ internal sealed partial class WatBackend
                     cursor += Math.Max(1, WasmSizeOf(t));
                     return at;
                 }
-                if (e is StructInit && IsAggregate(e.Type)) { _literalSlots[e] = PlaceTemp(e.Type); return; }
+                if (e is StructInit or DefaultLit && IsAggregate(e.Type)) { _literalSlots[e] = PlaceTemp(e.Type); return; }
                 if (e is StackArray sa) { _literalSlots[e] = PlaceTemp(new CType.Array(sa.Element, sa.Elems.Count)); return; }
                 if (AggregateCallShape(e) is not { } shape) { return; }
                 int? result = IsAggregate(shape.Fn.Return) ? PlaceTemp(shape.Fn.Return) : null;
@@ -655,6 +666,22 @@ internal sealed partial class WatBackend
     /// (reading it before assignment is UB in C, and the frame is reused memory).</summary>
     private void EmitArrayDecl(ArrayDecl ad)
     {
+        if (_arrayBuffers.TryGetValue(ad.Sym, out var buffer))
+        {
+            // The pointer a promoted malloc returned: the address of its frame buffer.
+            if (_frame.TryGetValue(ad.Sym, out var ptrSlot))
+            {
+                EmitFrameAddr(ptrSlot);
+                EmitFrameAddr(buffer);
+                Line(StoreInstr(ad.Sym.Type));
+            }
+            else
+            {
+                EmitFrameAddr(buffer);
+                Line($"local.set ${ad.Sym.TargetName}");
+            }
+            return;
+        }
         if (!_frame.TryGetValue(ad.Sym, out var baseOff))
         {
             throw new IrUnsupportedException("the wat target could not place array local in the frame");
@@ -869,6 +896,7 @@ internal sealed partial class WatBackend
         }
         void Init(CExpr? init)
         {
+            if (init is DefaultLit) { return; }
             if (init is StructInit si) { foreach (var m in si.Members) { Init(m.Value); } }
             else if (init is ArrayValue av) { foreach (var x in av.Elems) { Init(x); } }
             else { E(init); }
@@ -929,6 +957,65 @@ internal sealed partial class WatBackend
         ReleaseScratch("addr");
     }
 
+    /// <summary>Reserve the frame buffer of each promoted <c>malloc</c> in <paramref name="s"/>
+    /// (see <see cref="_arrayBuffers"/>): its element size times its constant count.</summary>
+    private void ReserveArrayBuffers(CStmt s, ref int cursor)
+    {
+        var decls = new List<ArrayDecl>();
+        void Walk(CStmt? st)
+        {
+            switch (st)
+            {
+                case ArrayDecl ad when ad.Sym.Type.Unqualified is CType.Pointer: decls.Add(ad); break;
+                case Block b: foreach (var x in b.Stmts) { Walk(x); } break;
+                case Seq q: foreach (var x in q.Stmts) { Walk(x); } break;
+                case If i: Walk(i.Then); Walk(i.Else); break;
+                case While w: Walk(w.Body); break;
+                case DoWhile dw: Walk(dw.Body); break;
+                case For f: Walk(f.Init); Walk(f.Body); break;
+                case Switch sw: foreach (var sec in sw.Sections) { foreach (var x in sec.Body) { Walk(x); } } break;
+                case Labeled lab: Walk(lab.Body); break;
+                case CaseLabelStmt cl: Walk(cl.Body); break;
+            }
+        }
+        Walk(s);
+        foreach (var ad in decls)
+        {
+            if (ad.CountExpr is not LitInt { Value: { } count })
+            {
+                throw new IrUnsupportedException($"the wat target needs a constant size for the buffer of '{ad.Sym.Name}'");
+            }
+            cursor = AlignUp(cursor, SlotAlign(ad.Element));
+            _arrayBuffers[ad.Sym] = cursor;
+            cursor += Math.Max(1, checked((int)count * WasmSizeOf(ad.Element)));
+        }
+    }
+
+    /// <summary>The address of <c>errno</c>'s slot, placed in the data area on first use.</summary>
+    private int ErrnoAddr()
+    {
+        if (_errnoAddr is { } at) { return at; }
+        _dataEnd = AlignUp(_dataEnd, 4);
+        _errnoAddr = _dataEnd;
+        _dataEnd += 4;
+        return _dataEnd - 4;
+    }
+
+    /// <summary>Intern a wide string literal's code units (<paramref name="width"/> bytes each,
+    /// little-endian) and its terminator, as <see cref="InternBytes"/> interns a narrow one.</summary>
+    private int InternUnits(IReadOnlyList<int> units, int width)
+    {
+        var bytes = new List<int>(units.Count * width + width - 1);
+        foreach (var u in units)
+        {
+            for (var b = 0; b < width; b++) { bytes.Add((u >> (8 * b)) & 0xFF); }
+        }
+        // InternBytes adds one NUL byte; the rest of the terminator's width comes from here.
+        for (var b = 1; b < width; b++) { bytes.Add(0); }
+        _dataEnd = AlignUp(_dataEnd, width);
+        return InternBytes(bytes);
+    }
+
     /// <summary>Push the address an initializer store goes to: an offset in the current
     /// frame, or an absolute address while the globals' start function is emitted.</summary>
     private void EmitInitAddr(int at)
@@ -949,7 +1036,7 @@ internal sealed partial class WatBackend
                 throw new IrUnsupportedException($"the wat target does not yet support an initialized flexible array member ('{g.Sym.Name}')");
             }
             _dataEnd = AlignUp(_dataEnd, SlotAlign(g.Sym.Type));
-            _globals[g.Sym] = _dataEnd;
+            _globals[g.Sym.TargetName] = _dataEnd;
             _dataEnd += Math.Max(1, WasmSizeOf(g.Sym.Type));
         }
     }
@@ -957,7 +1044,7 @@ internal sealed partial class WatBackend
     /// <summary>Push a global's address (its value, for an array or an aggregate).</summary>
     private void EmitGlobalAddr(Symbol sym)
     {
-        if (!_globals.TryGetValue(sym, out var addr))
+        if (!_globals.TryGetValue(sym.TargetName, out var addr))
         {
             throw new IrUnsupportedException($"the wat target has no definition of the global '{sym.Name}'");
         }
@@ -982,7 +1069,7 @@ internal sealed partial class WatBackend
             foreach (var g in unit.Globals)
             {
                 if (g.Init is not { } init) { continue; }
-                var at = _globals[g.Sym];
+                var at = _globals[g.Sym.TargetName];
                 switch (init)
                 {
                     case PinnedArray pa:
@@ -1255,6 +1342,21 @@ internal sealed partial class WatBackend
                 EmitFrameAddr(saSlot);
                 break;
             }
+            case DefaultLit dl when _literalSlots.TryGetValue(dl, out var dlSlot):
+                // C23 `{}` of a struct: a zeroed slot's address.
+                EmitAggregateInit(dlSlot, dl.Type, dl);
+                EmitFrameAddr(dlSlot);
+                break;
+            case LitU16Str u16:
+                Line($"i32.const {InternUnits(DotCC.EmitHelpers.StringU16Values(u16.Segments), 2)}");
+                break;
+            case LitU32Str u32:
+                Line($"i32.const {InternUnits(DotCC.EmitHelpers.StringU32Values(u32.Segments), 4)}");
+                break;
+            case NameRef { RawName: "errno" }:
+                Line($"i32.const {ErrnoAddr()}");
+                Line("i32.load");
+                break;
             case DefaultLit when !IsAddressValued(e.Type):
                 // C23 `{}` of a scalar: its zero.
                 Line($"{ValType(e.Type)}.const 0");
@@ -1552,6 +1654,8 @@ internal sealed partial class WatBackend
 
     private void EmitAssign(Assign a)
     {
+        // Parentheses around the target change nothing: `(x) = v`, a macro's `(p->f) = v`.
+        while (a.Target is Paren tp) { a = a with { Target = tp.Inner }; }
         // Fast path: a plain wasm value local — store-and-keep via local.tee.
         if (a.Target is VarRef vr && !vr.Sym.IsGlobal && !_frame.ContainsKey(vr.Sym))
         {
@@ -1577,7 +1681,7 @@ internal sealed partial class WatBackend
         }
 
         // Memory lvalue: a frame-resident variable, *p, a[i], or s.f / p->f.
-        if (a.Target is not (VarRef or Index or Member or Unary { Op: UnOp.Deref }))
+        if (a.Target is not (VarRef or Index or Member or Unary { Op: UnOp.Deref } or NameRef { RawName: "errno" }))
         {
             throw new IrUnsupportedException($"the wat target cannot assign to {a.Target.GetType().Name}");
         }
@@ -2162,6 +2266,9 @@ internal sealed partial class WatBackend
                 break;
             case VarRef { Sym.IsGlobal: true } g:
                 EmitGlobalAddr(g.Sym);
+                break;
+            case NameRef { RawName: "errno" }:
+                Line($"i32.const {ErrnoAddr()}");
                 break;
             case StructInit or StackArray when _literalSlots.ContainsKey(lv):
                 EmitExpr(lv);   // a compound literal is an lvalue: its slot, filled
@@ -4076,7 +4183,7 @@ internal sealed partial class WatBackend
                 CType.Array a => a.Element,
                 var other => other,
             }
-            : m.Base.Type;
+            : m.Base is VarRef { Sym.Type: var symType } && symType.Unqualified is CType.Named ? symType : m.Base.Type;
         if (owner.Unqualified is not CType.Named n)
         {
             throw new IrUnsupportedException($"the wat target cannot take member '{m.Field}' of a {owner.Describe()}");
