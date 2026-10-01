@@ -619,7 +619,8 @@ public static unsafe partial class Libc
     /// truncated, matching C99.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static SprintfBuilder snprintf(byte* dst, int n, byte* fmt) => new(dst, fmt, capacity: Math.Max(0, n - 1));
+    public static SprintfBuilder snprintf(byte* dst, ulong n, byte* fmt) =>
+        new(dst, fmt, capacity: n == 0 ? 0 : (int)Math.Min(n - 1, int.MaxValue));
 
     /// <summary>
     /// <c>fscanf(stream, fmt)</c> — start a fluent scan chain reading from

@@ -54,15 +54,15 @@ public sealed class SprintfLoweringTests
     }
 
     [Fact]
-    public void snprintf_unsigned_bound_is_coerced_to_int()
+    public void snprintf_bound_is_size_t()
     {
-        // C's `size_t n` reaches the factory's `int n` — an unsigned operand
-        // (C# won't narrow it implicitly) takes the store-conversion cast.
+        // snprintf's bound is C's `size_t n` (unsigned long) in the header and the factory
+        // alike, so an `unsigned` operand widens to it with no cast.
         var emitted = Emit("""
             #include <stdio.h>
             int main(void) { char buf[32]; unsigned u = 10; int x = 5; snprintf(buf, u, "%d", x); return 0; }
             """);
-        emitted.ShouldContain("snprintf(buf, (int)(u), Libc.L(\"%d\\0\"u8)).Arg(x).Done()");
+        emitted.ShouldContain("snprintf(buf, u, Libc.L(\"%d\\0\"u8)).Arg(x).Done()");
     }
 
     [Fact]

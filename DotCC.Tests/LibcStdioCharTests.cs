@@ -53,7 +53,7 @@ public sealed unsafe class LibcStdioCharTests
             fixed (byte* p = snake)
             {
                 fwrite(p, 1, 1, stdout);                 // the first byte of é alone,
-                fwrite(p + 1, 1, snake.Length - 1, stdout); // then the rest
+                fwrite(p + 1, 1, (ulong)(snake.Length - 1), stdout); // then the rest
                 write(1, p, 3);                          // é and the first byte of 🐍,
                 write(1, p + 3, 3);                      // then its last three
             }
