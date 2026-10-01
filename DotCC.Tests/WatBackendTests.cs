@@ -663,6 +663,18 @@ public sealed class WatBackendTests
     }
 
     [Fact]
+    public void A_pointer_takes_eight_bytes_in_memory()
+    {
+        // C's LP64 view (sizeof(void*) == 8, the layout model's) holds on wasm32 too: a
+        // pointer in memory is the i32 address zero-extended to eight bytes, so an array of
+        // pointers steps by 8 and sizeof agrees with the storage.
+        var wat = Wat("int main(void){ char *n[3] = {\"a\", \"bb\", \"ccc\"}; return (int)((char *)&n[1] - (char *)&n[0]) + n[2][1]; }");
+        wat.ShouldContain("i64.extend_i32_u i64.store");
+        wat.ShouldContain("i64.load i32.wrap_i64");
+        wat.ShouldContain("i32.const 8\n");   // the element step
+    }
+
+    [Fact]
     public void A_binary_literal_is_written_in_decimal()
     {
         // wat reads decimal and 0x hex, not C23's 0b: wat2wasm rejected `i32.const 0b1011`.

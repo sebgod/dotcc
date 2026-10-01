@@ -3301,10 +3301,14 @@ internal sealed partial class WatBackend
         _ => throw new IrUnsupportedException($"the wat target does not support pointer comparison {op}"),
     };
 
+    /// <summary>The instruction(s) that load a <paramref name="pointee"/> from the address on
+    /// the stack. A pointer takes eight bytes in memory (C's LP64 view, which the layout model
+    /// and <c>sizeof</c> folding share) and is an i32 address on the stack (wasm32), so it is
+    /// read as an i64 and wrapped.</summary>
     private static string LoadInstr(CType pointee)
     {
         var p = pointee.Unqualified;
-        if (p is CType.Pointer or CType.Func) { return "i32.load"; }
+        if (p is CType.Pointer or CType.Func) { return "i64.load i32.wrap_i64"; }
         if (p is CType.Enum en) { return LoadInstr(en.Underlying); }
         if (p is CType.Prim prim)
         {
@@ -3321,10 +3325,12 @@ internal sealed partial class WatBackend
         throw new IrUnsupportedException($"the wat target cannot load through {pointee.Describe()} yet (milestone 2 is integers)");
     }
 
+    /// <summary>The instruction(s) that store the value on the stack at the address below it. A
+    /// pointer is widened to the eight bytes it takes in memory (see <see cref="LoadInstr"/>).</summary>
     private static string StoreInstr(CType pointee)
     {
         var p = pointee.Unqualified;
-        if (p is CType.Pointer or CType.Func) { return "i32.store"; }
+        if (p is CType.Pointer or CType.Func) { return "i64.extend_i32_u i64.store"; }
         if (p is CType.Enum en) { return StoreInstr(en.Underlying); }
         if (p is CType.Prim prim)
         {
@@ -3348,9 +3354,12 @@ internal sealed partial class WatBackend
         _ => throw new IrUnsupportedException($"the wat target cannot subscript a {t.Describe()}"),
     };
 
+    /// <summary>The bytes a <paramref name="t"/> takes in linear memory: C's LP64 sizes, so a
+    /// pointer is eight bytes (an i32 address zero-extended), as <c>sizeof</c> and the layout
+    /// model say.</summary>
     private static int WasmSizeOf(CType t) => t.Unqualified switch
     {
-        CType.Pointer or CType.Func => 4,
+        CType.Pointer or CType.Func => 8,
         CType.Array a => (a.Count ?? 0) * WasmSizeOf(a.Element),
         _ => t.SizeOf,
     };
