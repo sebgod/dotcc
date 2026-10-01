@@ -790,6 +790,20 @@ public sealed class WatBackendTests
     }
 
     [Fact]
+    public void Assert_tests_its_condition_by_type_and_a_void_conditional_runs_for_effect()
+    {
+        // assert(d) on a double tests d != 0.0 (an int conversion would fail on 0.5) and traps;
+        // a void `?:` is an if/else with no value; sqrt and floor are wasm instructions.
+        var wat = Wat("#include <assert.h>\n#include <math.h>\nint n;\nvoid bump(int *p){ *p += 1; }\n"
+            + "int main(void){ double d = 0.5; assert(d); n == 0 ? bump(&n) : (void)0; return n * 100 + (int)sqrt(16.0) * 10 + (int)floor(2.7); }");
+        wat.ShouldContain("f64.ne\n    i32.eqz\n    if\n      unreachable\n    end");
+        wat.ShouldContain("    if\n      i32.const 1024\n      call $bump");
+        wat.ShouldContain("f64.sqrt");
+        wat.ShouldContain("f64.floor");
+        wat.ShouldNotContain("(func $sqrt");
+    }
+
+    [Fact]
     public void A_pointer_takes_eight_bytes_in_memory()
     {
         // C's LP64 view (sizeof(void*) == 8, the layout model's) holds on wasm32 too: a

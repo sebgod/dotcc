@@ -122,6 +122,8 @@ public sealed class WatOracleTests
     // a struct member, a table of them).
     [InlineData("int add(int a, int b){ return a + b; }\nint (*op)(int, int) = add;\nint main(void){ int (*f)(int, int) = &add; return f(2, 3) + op(4, 5); }", 14)]
     [InlineData("struct V { int (*f)(int); };\nint twice(int x){ return 2 * x; }\nint neg(int x){ return -x; }\nstatic int (*ops[2])(int) = { twice, neg };\nint main(void){ struct V v = { twice }; return v.f(21) + ops[1](2) + ops[0](3); }", 46)]
+    // assert by the condition's own type, a void conditional, the instruction math functions.
+    [InlineData("#include <assert.h>\n#include <math.h>\nint n;\nvoid bump(int *p){ *p += 1; }\nint main(void){ double d = 0.5; assert(d); n == 0 ? bump(&n) : (void)0; return n * 100 + (int)sqrt(16.0) * 10 + (int)floor(2.7); }", 142)]
     public void Wat_program_returns_expected_value(string source, int expected)
     {
         if (!Requested)
@@ -254,6 +256,10 @@ public sealed class WatOracleTests
         + " for (int i = 0; i < 6; i++) printf(\"%d \", a[i]);"
         + " printf(\"%c%c %s|\", toupper('q'), isdigit('7') ? 'Y' : 'N', strstr(buf, \"was\")); memset(buf, 'z', 3); printf(\"%.5s\", buf); exit(3); }",
         "Hello, wasm 11 1 -42 31|1 3 3 5 7 9 QY wasm|zzzlo")]
+    [InlineData("#include <stdio.h>\n#include <string.h>\n#include <inttypes.h>\n"
+        + "int main(void){ char s[] = \"  a,bb,,ccc \"; for (char *t = strtok(s, \" ,\"); t; t = strtok(NULL, \" ,\")) printf(\"[%s]\", t);"
+        + " printf(\" %d\", (int)imaxabs(-7)); return 0; }",
+        "[a][bb][ccc] 7")]
     public void Wat_program_writes_expected_stdout(string source, string expected)
     {
         if (!Requested)
