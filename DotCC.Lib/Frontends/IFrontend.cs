@@ -43,4 +43,5 @@ internal sealed record FrontendRequest(
     INameLegalizer? Names = null,
     WarningFlags Warnings = WarningFlags.Default,
     bool TestMode = false,
-    string? ObjectKey = null);
+    string? ObjectKey = null,
+    Func<string, string?>? LibrarySource = null);

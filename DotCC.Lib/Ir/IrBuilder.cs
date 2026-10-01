@@ -202,8 +202,15 @@ internal sealed partial class IrBuilder
     /// <summary>Walk one translation unit's parse tree, appending its functions
     /// / globals to the accumulated lists (file-scope symbols persist across
     /// units so a whole-program call resolves).</summary>
-    public void AddUnit(Item root, string file)
+    public void AddUnit(Item root, string file) => AddUnit(root, file, library: false);
+
+    /// <summary>Bind one translation unit. A <paramref name="library"/> unit (the wat target's
+    /// libc, compiled from C with the program) defines its functions weakly: one the program
+    /// already defines keeps the program's, and what it does define is marked
+    /// <see cref="Symbol.IsLibrary"/>, so it is left out unless something reaches it.</summary>
+    public void AddUnit(Item root, string file, bool library)
     {
+        _libraryUnit = library;
         _file = file;
         _unitObjects.Clear();
         Module.IsObject = ObjectKey is not null;
@@ -728,6 +735,14 @@ internal sealed partial class IrBuilder
     // proto-only AND referenced AND not from a synthetic header AND non-variadic is
     // what an `-l` library must resolve. See ProtoOnlyReferenced.
     private readonly Dictionary<string, Symbol> _protoOnlyFuncs = new(StringComparer.Ordinal);
+
+    /// <summary>True while a library unit is bound (see <see cref="AddUnit(Item, string, bool)"/>).</summary>
+    private bool _libraryUnit;
+
+    /// <summary>The functions called by name that no unit bound so far defines: what a library
+    /// unit is looked up for.</summary>
+    internal IEnumerable<string> UndefinedCalledFunctions() =>
+        _referencedFuncs.Where(name => !_fnDefSites.ContainsKey(name)).Order(StringComparer.Ordinal).ToList();
     private readonly HashSet<string> _referencedFuncs = new(StringComparer.Ordinal);
     // Extern DATA (`extern int x;`) read/written through its extern symbol, and the
     // names some TU actually DEFINES. An extern referenced but defined nowhere would
@@ -748,6 +763,8 @@ internal sealed partial class IrBuilder
                 $"function definition declared '{Spelling(storage)}'", SrcPos.From(fnSig), _file));
         }
         var sig = ExtractFnSig(fnSig);
+        // A library unit's definition is weak: the program's own definition of the name wins.
+        if (_libraryUnit && _fnDefSites.ContainsKey(sig.Name)) { return; }
         // A definition means this name is no longer a pure prototype → not an import.
         _protoOnlyFuncs.Remove(sig.Name);
         Symbol funcSym;

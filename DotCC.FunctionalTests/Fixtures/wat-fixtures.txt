@@ -15,6 +15,7 @@ array-member-cast-dim
 array-member-constexpr
 array-param-decay
 array-sum
+array-typedef
 atomic-counter
 auto-infer
 bitwise
@@ -25,6 +26,7 @@ bool-result-to-byte
 bool-stdbool
 c-idioms
 c11-alignof
+c23-attributes
 c23-char8
 c23-constants
 c23-constexpr
@@ -46,7 +48,9 @@ cond-int-types
 const-cast-unchecked
 const-qualifiers
 cs-keyword-idents
+ctype-predicates
 declaration-specifiers
+declarator-lists
 deref-incr-decr
 digit-separators
 embed-basic
@@ -123,6 +127,7 @@ printf-format
 printf-octal
 ptr-arith-arrow
 ptr-to-array
+qsort-bsearch
 restrict-qualifier
 runtime-type-name-clash
 sig-atomic
@@ -144,6 +149,7 @@ stdint-fixed-widths
 stdio-limits
 string-char-escapes
 string-escape-quotes
+string-h-basic
 string-high-byte-escapes
 string-init-parenthesized
 string-literal-L-collision

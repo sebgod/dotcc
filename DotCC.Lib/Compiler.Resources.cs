@@ -35,6 +35,34 @@ public static partial class Compiler
     private static readonly Lazy<IReadOnlyDictionary<string, string>> _systemHeaders =
         new(LoadEmbeddedSystemHeaders);
 
+    /// <summary>
+    /// The wat target's libc: the C source (<c>DotCC.Lib/WatLibc/</c>, embedded as
+    /// <c>DotCC.WatLibc.&lt;name&gt;.c</c>) that defines <paramref name="function"/>, or null when the
+    /// library has none. One function per file, named after it, as musl lays its sources out:
+    /// <see cref="EmitWat"/> binds the file of each function a program calls and defines nowhere,
+    /// so a program carries only the library it uses, and its own definition of a name wins.
+    /// </summary>
+    internal static string? WatLibcSource(string function) =>
+        _watLibc.Value.TryGetValue(function, out var text) ? text : null;
+
+    private static readonly Lazy<Dictionary<string, string>> _watLibc = new(LoadWatLibc);
+
+    private static Dictionary<string, string> LoadWatLibc()
+    {
+        const string prefix = "DotCC.WatLibc.";
+        var asm = typeof(Compiler).Assembly;
+        var map = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var name in asm.GetManifestResourceNames())
+        {
+            if (!name.StartsWith(prefix, StringComparison.Ordinal) || !name.EndsWith(".c", StringComparison.Ordinal)) { continue; }
+            using var stream = asm.GetManifestResourceStream(name)
+                ?? throw new InvalidOperationException($"missing embedded libc resource: {name}");
+            using var reader = new StreamReader(stream);
+            map[name[prefix.Length..^2]] = reader.ReadToEnd();
+        }
+        return map;
+    }
+
     private static Dictionary<string, string> LoadEmbeddedSystemHeaders()
     {
         const string prefix = "DotCC.SystemHeaders.";

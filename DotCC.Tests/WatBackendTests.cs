@@ -753,6 +753,43 @@ public sealed class WatBackendTests
     }
 
     [Fact]
+    public void A_libc_function_is_compiled_from_c_only_when_the_program_calls_it()
+    {
+        // The wat target's libc is C (DotCC.Lib/WatLibc, one function per file) compiled with
+        // the program: a called function brings its file, and what that calls, in turn
+        // (atoi -> strtol -> __strtox), and nothing else comes along.
+        var wat = Wat("#include <stdlib.h>\n#include <string.h>\nint main(void){ return atoi(\"42\") + (int)strlen(\"ab\"); }");
+        wat.ShouldContain("(func $atoi ");
+        wat.ShouldContain("(func $strtol ");
+        wat.ShouldContain("(func $__strtox ");
+        wat.ShouldContain("(func $strlen ");
+        wat.ShouldNotContain("$strcmp");
+        Wat("int main(void){ return 0; }").ShouldNotContain("$strlen");
+    }
+
+    [Fact]
+    public void A_programs_own_definition_of_a_libc_name_wins()
+    {
+        // The library's definitions are weak: the program's strlen is the only one.
+        var wat = Wat("#include <string.h>\nint strlen(char *s){ return 7; }\nint main(void){ return strlen(\"ab\"); }");
+        wat.ShouldContain("(func $strlen (param $s i32) (result i32)\n    i32.const 7");
+        wat.Split("(func $strlen ").Length.ShouldBe(2);
+    }
+
+    [Fact]
+    public void Bulk_memory_and_exit_are_instructions_not_library_calls()
+    {
+        // memcpy/memmove are memory.copy, memset memory.fill (each leaving its destination),
+        // exit is WASI's proc_exit, abort traps.
+        var wat = Wat("#include <string.h>\n#include <stdlib.h>\nint main(void){ char a[8], b[8]; memset(a, 'x', 8); memcpy(b, a, 8); if (b[7] != 'x') abort(); exit(b[0]); }");
+        wat.ShouldContain("memory.fill");
+        wat.ShouldContain("memory.copy");
+        wat.ShouldContain("(import \"wasi_snapshot_preview1\" \"proc_exit\" (func $proc_exit (param i32)))");
+        wat.ShouldContain("call $proc_exit\n    unreachable");
+        wat.ShouldNotContain("(func $memcpy");
+    }
+
+    [Fact]
     public void A_pointer_takes_eight_bytes_in_memory()
     {
         // C's LP64 view (sizeof(void*) == 8, the layout model's) holds on wasm32 too: a
