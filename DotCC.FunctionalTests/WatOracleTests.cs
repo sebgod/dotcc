@@ -109,6 +109,10 @@ public sealed class WatOracleTests
     [InlineData("struct N { int v; struct N *next; };\nint main(void){ struct N c = {3, 0}, b = {2, &c}, a = {1, &b}; int s = 0; for (struct N *p = &a; p; p = p->next) s += p->v * 10; return s; }", 60)]
     [InlineData("union U { int i; unsigned char b[4]; };\nint main(void){ union U u; u.i = 0x01020304; return u.b[0] + u.b[3]; }", 5)]
     [InlineData("struct In { int a, b; }; struct Out { struct In in[2]; int t; };\nint main(void){ struct Out o = { { {1, 2}, {3, 4} }, 5 }; struct Out *p = &o; return p->in[1].b * 10 + o.in[0].a + p->t; }", 46)]
+    // file-scope objects and block-scope statics at fixed addresses, initialized by the
+    // module's start function; 40 KB of data moves the stack past it.
+    [InlineData("struct P { int x; const char *name; };\nint counter = 5;\nstatic struct P origin = { 7, \"origin\" };\nconst char *greeting = \"hey\";\nint table[4] = { 1, 2, 3, 4 };\nstatic char big[40000];\nint next(void){ static int n = 100; return n++; }\nint main(void){ counter++; next(); big[39999] = 2; return counter + next() + origin.x + origin.name[1] + greeting[2] + table[3] + big[39999]; }", 355)]
+    [InlineData("int next(void){ static int n = 10; return n++; } int main(void){ next(); next(); return next(); }", 12)]
     public void Wat_program_returns_expected_value(string source, int expected)
     {
         if (!Requested)
