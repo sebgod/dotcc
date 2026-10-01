@@ -55,9 +55,12 @@ internal sealed class CFrontend : IFrontend
         // twice: once with an analysis visitor, once with the emit visitor.
         // `quiet` suppresses the preprocessor's diagnostics on the analysis
         // pass so #warning / #include messages don't print twice.
-        Item ParseUnit(string unitPath, global::LALR.CC.Parser parser, bool quiet, DialectGate? gate = null)
+        Item ParseUnit(string unitPath, global::LALR.CC.Parser parser, bool quiet, DialectGate? gate = null) =>
+            ParseUnitText(unitPath, File.ReadAllText(unitPath), parser, quiet, gate);
+
+        Item ParseUnitText(string unitPath, string text, global::LALR.CC.Parser parser, bool quiet, DialectGate? gate = null)
         {
-            var source = Compiler.SpliceLineContinuations(File.ReadAllText(unitPath));
+            var source = Compiler.SpliceLineContinuations(text);
             // #embed search path: the TU's own directory first, then the -I dirs
             // (first-wins, mirroring #include). Resolved on the filesystem since
             // OnEmbed reads RAW bytes (distinct from the include text map).
@@ -155,6 +158,23 @@ internal sealed class CFrontend : IFrontend
             var root = ParseUnit(unitPath, irParser, quiet: false, gate);
             irBuilder.AddUnit(root, Path.GetFileName(unitPath));
             fingerprints.Clear();
+        }
+        // A library (the wat target's libc): each function the program calls but no unit
+        // defines is looked up by name, and its source, if the library has one, is bound as a
+        // library unit; what that unit calls is looked up in turn, until nothing new is.
+        if (req.LibrarySource is { } library)
+        {
+            var tried = new HashSet<string>(StringComparer.Ordinal);
+            while (irBuilder.UndefinedCalledFunctions().Where(tried.Add).ToList() is { Count: > 0 } wanted)
+            {
+                foreach (var name in wanted)
+                {
+                    if (library(name) is not { } text) { continue; }
+                    var root = ParseUnitText($"<libc>/{name}.c", text, irParser, quiet: true);
+                    irBuilder.AddUnit(root, $"{name}.c", library: true);
+                    fingerprints.Clear();
+                }
+            }
         }
         var irErrors = irBuilder.Diagnostics.Where(d => d.Severity == Ir.Severity.Error).ToList();
         if (irErrors.Count > 0)

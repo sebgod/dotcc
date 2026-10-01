@@ -245,6 +245,15 @@ public sealed class WatOracleTests
     // hex for a nonzero address, "(nil)" for null; width / left-justify apply.
     [InlineData("int main(void){ printf(\"%p %p %p\", (void*)255, (void*)0, (void*)0x1234); return 0; }", "0xff (nil) 0x1234")]
     [InlineData("int main(void){ printf(\"[%10p][%-10p]\", (void*)255, (void*)255); return 0; }", "[      0xff][0xff      ]")]
+    // the wat libc, compiled from C with the program (string, ctype, stdlib), the bulk-memory
+    // intrinsics, and exit ending the run with what was printed so far.
+    [InlineData("#include <stdio.h>\n#include <string.h>\n#include <stdlib.h>\n#include <ctype.h>\n"
+        + "static int cmp(const void *a, const void *b){ return *(const int *)a - *(const int *)b; }\n"
+        + "int main(void){ char buf[32]; strcpy(buf, \"Hello\"); strcat(buf, \", wasm\"); int a[6] = {5, 3, 9, 1, 7, 3}; qsort(a, 6, sizeof(int), cmp);"
+        + " printf(\"%s %d %d %d %d|\", buf, (int)strlen(buf), strcmp(\"abc\", \"abd\") < 0, atoi(\"  -42x\"), (int)strtol(\"0x1F\", NULL, 0));"
+        + " for (int i = 0; i < 6; i++) printf(\"%d \", a[i]);"
+        + " printf(\"%c%c %s|\", toupper('q'), isdigit('7') ? 'Y' : 'N', strstr(buf, \"was\")); memset(buf, 'z', 3); printf(\"%.5s\", buf); exit(3); }",
+        "Hello, wasm 11 1 -42 31|1 3 3 5 7 9 QY wasm|zzzlo")]
     public void Wat_program_writes_expected_stdout(string source, string expected)
     {
         if (!Requested)
@@ -264,10 +273,12 @@ public sealed class WatOracleTests
         {
             File.WriteAllText(wat, Compiler.EmitWat(new[] { c }));
             Exec("wat2wasm", wat, "-o", wasm);   // validates (parse + typecheck) and assembles
+            // exit(n) (WASI proc_exit) ends the run with n as its value.
             const string js =
                 "const fs=require('fs');" +
-                "WebAssembly.instantiate(fs.readFileSync(process.argv[1]))" +
-                ".then(r=>{const v=r.instance.exports.main();" +
+                "const proc_exit=(c)=>{throw {exitCode:c};};" +
+                "WebAssembly.instantiate(fs.readFileSync(process.argv[1]),{wasi_snapshot_preview1:{proc_exit}})" +
+                ".then(r=>{let v;try{v=r.instance.exports.main();}catch(e){if(e&&e.exitCode!==undefined){v=e.exitCode;}else{throw e;}}" +
                 "process.stdout.write((typeof v==='bigint'?Number(v):v|0).toString());})" +
                 ".catch(e=>{console.error(e);process.exit(1);});";
             var output = Exec("node", "-e", js, wasm);
@@ -317,8 +328,9 @@ public sealed class WatOracleTests
                 "for(let j=0;j<len;j++){ if(fd===1) out.push(bytes[ptr+j]); }" +
                 "written+=len;}" +
                 "dv.setUint32(nwrittenPtr,written,true);return 0;};" +
-                "WebAssembly.instantiate(fs.readFileSync(process.argv[1]),{wasi_snapshot_preview1:{fd_write}})" +
-                ".then(r=>{inst=r.instance;inst.exports.main();" +
+                "const proc_exit=(c)=>{throw {exitCode:c};};" +
+                "WebAssembly.instantiate(fs.readFileSync(process.argv[1]),{wasi_snapshot_preview1:{fd_write,proc_exit}})" +
+                ".then(r=>{inst=r.instance;try{inst.exports.main();}catch(e){if(!(e&&e.exitCode!==undefined)){throw e;}}" +
                 (latin1 ? "process.stdout.write(Buffer.from(out).toString('latin1'));})" : "process.stdout.write(Buffer.from(out));})") +
                 ".catch(e=>{console.error(e);process.exit(1);});";
             return Exec("node", "-e", js, wasm);

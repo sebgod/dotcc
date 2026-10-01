@@ -122,6 +122,9 @@ internal sealed partial class WatBackend
     /// once as a module <c>(type …)</c>: signature text → type name.</summary>
     private readonly Dictionary<string, string> _sigTypes = new(StringComparer.Ordinal);
 
+    /// <summary>True once the program calls <c>exit</c>, which imports WASI's <c>proc_exit</c>.</summary>
+    private bool _usesProcExit;
+
     /// <summary>The C stack the program gets when its data does not fit below the default
     /// stack top: the stack then starts past the data and grows down through this.</summary>
     private const int StackBytes = 1 << 20;
@@ -250,6 +253,11 @@ internal sealed partial class WatBackend
             // WASI fd_write — imports must precede every defined function (it takes
             // the lowest function index). Brings in I/O without a bespoke host ABI.
             m.Append("  (import \"wasi_snapshot_preview1\" \"fd_write\" (func $fd_write (param i32 i32 i32 i32) (result i32)))\n");
+        }
+        if (_usesProcExit)
+        {
+            // exit(): WASI proc_exit ends the program with its status.
+            m.Append("  (import \"wasi_snapshot_preview1\" \"proc_exit\" (func $proc_exit (param i32)))\n");
         }
         // Export the memory only when the WASI shim needs to read iovecs out of it;
         // non-I/O modules keep the byte-identical plain `(memory 1)`.
@@ -727,6 +735,27 @@ internal sealed partial class WatBackend
     {
         EmitExpr(e);
         if (e.Type.Unqualified is not CType.VoidType) { Line("drop"); }
+    }
+
+    /// <summary><c>memcpy</c>/<c>memmove</c> (<c>memory.copy</c>, which allows overlap) and
+    /// <c>memset</c> (<c>memory.fill</c>, which stores the value's low byte): destination,
+    /// source or value, then the count, and the destination is the call's value.</summary>
+    private void EmitBulkMemory(Call c, string instr)
+    {
+        if (c.Args.Count != 3)
+        {
+            throw new IrUnsupportedException($"the wat target expects {c.Callee} with 3 argument(s)");
+        }
+        EmitExpr(c.Args[0]);
+        var dst = AcquireScratch("addr");
+        Line($"local.tee {dst}");
+        EmitExpr(c.Args[1]);
+        EmitConvert(c.Args[1].Type, instr == "memory.fill" ? CType.Int : c.Args[1].Type);
+        EmitExpr(c.Args[2]);
+        EmitConvert(c.Args[2].Type, CType.Int);
+        Line(instr);
+        Line($"local.get {dst}");
+        ReleaseScratch("addr");
     }
 
     /// <summary>Push the address an initializer store goes to: an offset in the current
@@ -1503,6 +1532,21 @@ internal sealed partial class WatBackend
         if (c.Callee == "calloc" && !_defined.Contains("calloc")) { EmitHeapAlloc(c, "calloc", 2); return; }
         if (c.Callee == "realloc" && !_defined.Contains("realloc")) { EmitHeapAlloc(c, "realloc", 2); return; }
         if (c.Callee == "free" && !_defined.Contains("free")) { EmitFree(c); return; }
+
+        // What a wasm instruction does is not a library call: the bulk-memory copies and
+        // fill, and the program's end (WASI proc_exit; abort traps).
+        if (c.Callee is "memcpy" or "memmove" && !_defined.Contains(c.Callee)) { EmitBulkMemory(c, "memory.copy"); return; }
+        if (c.Callee == "memset" && !_defined.Contains("memset")) { EmitBulkMemory(c, "memory.fill"); return; }
+        if (c.Callee is "exit" or "_Exit" && !_defined.Contains(c.Callee))
+        {
+            _usesProcExit = true;
+            EmitExpr(c.Args[0]);
+            EmitConvert(c.Args[0].Type, CType.Int);
+            Line("call $proc_exit");
+            Line("unreachable");
+            return;
+        }
+        if (c.Callee == "abort" && !_defined.Contains("abort")) { Line("unreachable"); return; }
 
         if (!_defined.Contains(c.Callee))
         {
