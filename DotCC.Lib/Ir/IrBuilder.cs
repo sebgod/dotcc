@@ -2805,9 +2805,10 @@ internal sealed partial class IrBuilder
     {
         var target = TypeNameType(c.Arg1, TypeNameSite.Cast);
         var operand = BuildExpr(c.Arg3);
-        // `(void)X` — C# has no void cast and the value is discarded; carry the
-        // operand through typed void so a statement position emits `X;`.
-        if (target is CType.VoidType) { return operand with { Type = CType.Void }; }
+        // `(void)X`: X is evaluated and its value discarded. A void cast node keeps X's own
+        // type on X, so each backend sees what X produces (the wat backend drops it; C#,
+        // which has no void cast, renders X in statement position).
+        if (target is CType.VoidType) { return new Cast(CType.Void, operand) { Type = CType.Void, Pos = operand.Pos }; }
         // `(void *)0`, the headers' NULL: the null pointer constant, typed void* (C11
         // 6.3.2.3p3), the same node C23 `nullptr` builds.
         if (target.Unqualified is CType.Pointer { Pointee: CType.VoidType } && IsNullPointerConstant(operand))
