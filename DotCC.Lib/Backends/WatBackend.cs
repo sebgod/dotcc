@@ -737,6 +737,16 @@ internal sealed partial class WatBackend
         if (e.Type.Unqualified is not CType.VoidType) { Line("drop"); }
     }
 
+    /// <summary>The wasm instruction a one-argument <c>&lt;math.h&gt;</c> function is, exactly
+    /// (IEEE-754 square root, absolute value and the directed roundings), or null. C's
+    /// <c>round</c> is not <c>nearest</c>, which rounds halves to even.</summary>
+    private static string? MathInstr(string callee) => callee switch
+    {
+        "sqrt" => "f64.sqrt", "fabs" => "f64.abs", "floor" => "f64.floor", "ceil" => "f64.ceil", "trunc" => "f64.trunc",
+        "sqrtf" => "f32.sqrt", "fabsf" => "f32.abs", "floorf" => "f32.floor", "ceilf" => "f32.ceil", "truncf" => "f32.trunc",
+        _ => null,
+    };
+
     /// <summary><c>memcpy</c>/<c>memmove</c> (<c>memory.copy</c>, which allows overlap) and
     /// <c>memset</c> (<c>memory.fill</c>, which stores the value's low byte): destination,
     /// source or value, then the count, and the destination is the call's value.</summary>
@@ -1106,6 +1116,19 @@ internal sealed partial class WatBackend
                 break;
             case Call call:
                 EmitCall(call);
+                break;
+            case CondExpr ce when ce.Type.Unqualified is CType.VoidType:
+                // A void `?:` (a macro's `c ? f() : (void)0`) is an if/else run for effect.
+                EmitCond(ce.Cond);
+                Line("if");
+                _indent++;
+                EmitDiscarded(ce.Then);
+                _indent--;
+                Line("else");
+                _indent++;
+                EmitDiscarded(ce.Else);
+                _indent--;
+                Line("end");
                 break;
             case CondExpr ce:
                 EmitCond(ce.Cond);
@@ -1547,6 +1570,28 @@ internal sealed partial class WatBackend
             return;
         }
         if (c.Callee == "abort" && !_defined.Contains("abort")) { Line("unreachable"); return; }
+        // <assert.h>'s assert(e) is __dotcc_assert(e): e is tested by its own type (a pointer
+        // or a double as well as an int) and a false one traps; unreachable() traps.
+        if (c.Callee == "__dotcc_assert" && !_defined.Contains(c.Callee) && c.Args.Count == 1)
+        {
+            EmitBool(c.Args[0]);
+            Line("i32.eqz");
+            Line("if");
+            Line("  unreachable");
+            Line("end");
+            return;
+        }
+        if (c.Callee is "__dotcc_unreachable" or "__builtin_unreachable" && !_defined.Contains(c.Callee)) { Line("unreachable"); return; }
+        // <math.h> functions that are one wasm instruction.
+        if (MathInstr(c.Callee) is { } math && !_defined.Contains(c.Callee) && c.Args.Count == 1)
+        {
+            var operand = math.StartsWith("f32", StringComparison.Ordinal) ? CType.Float : CType.Double;
+            EmitExpr(c.Args[0]);
+            EmitConvert(c.Args[0].Type, operand);
+            Line(math);
+            EmitConvert(operand, c.Type);
+            return;
+        }
 
         if (!_defined.Contains(c.Callee))
         {

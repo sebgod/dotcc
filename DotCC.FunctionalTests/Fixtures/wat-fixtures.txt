@@ -16,6 +16,7 @@ array-member-constexpr
 array-param-decay
 array-sum
 array-typedef
+assert-basic
 atomic-counter
 auto-infer
 bitwise
@@ -26,12 +27,14 @@ bool-result-to-byte
 bool-stdbool
 c-idioms
 c11-alignof
+c11-generic
 c23-attributes
 c23-char8
 c23-constants
 c23-constexpr
 c23-elifdef
 c23-static-assert
+c23-unreachable
 c23-va-opt
 c99-stdint-fast
 call-arg-conv
@@ -42,6 +45,7 @@ comma-pointer-value
 comma-ptr-typedef
 comma-void-call
 comma-void-control
+comma-void-value
 comparison-as-int
 comptime-const-fold
 cond-int-types
@@ -150,6 +154,7 @@ stdio-limits
 string-char-escapes
 string-escape-quotes
 string-h-basic
+string-h-extended
 string-high-byte-escapes
 string-init-parenthesized
 string-literal-L-collision
@@ -172,5 +177,6 @@ typeof-c23
 unary-plus
 union-bits
 usual-arith-conv
+void-ternary-stmt
 volatile-access
 volatile-pointer
