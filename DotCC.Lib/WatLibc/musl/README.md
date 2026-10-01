@@ -1,4 +1,4 @@
-# Vendored musl libm
+# Vendored musl: libm and the core of stdio
 
 The `<math.h>` functions of the wat target's libc are musl's, compiled by dotcc together
 with the program, as emscripten compiles musl into every module. They compute
@@ -22,13 +22,34 @@ bit-identical results to the same sources built natively (checked against gcc in
   one per file (`shgetc.c` into `__shlim.c` and `__shgetc.c`, `strtod.c` into `strtod.c`,
   `strtof.c` and `strtold.c`, each with its own copy of the static `strtox`), because the
   library binds a unit by the name a program uses and leaves undefined.
+- **stdio** (`src/stdio/`): the `FILE` machinery (`__towrite`, `__toread`, `__uflow`,
+  `__overflow`, `__fwritex`) and `fwrite`, `fread`, `fputs`, `fgets`, `ungetc`, `fseek`,
+  `ftell`, `rewind`, `setvbuf`, `setbuf`, `fflush`, `fclose`, `fileno`, `feof`, `ferror`,
+  `clearerr`, the standard streams, and the printf family's wrappers (`printf`, `fprintf`,
+  `sprintf`, `snprintf`, `vprintf`, `vsprintf`) over dotcc's own `vfprintf`/`vsnprintf`.
+  Edits, all to fit a library with no locks and no weak symbols:
+  - `FLOCK`/`FUNLOCK` are empty (`../include/stdio_impl.h`) and `fputc`/`putc`/`fgetc`/
+    `getc`/`getchar` are `putc_unlocked`/`getc_unlocked` without `putc.h`/`getc.h`'s locking.
+  - What musl reaches through a weak alias it reaches directly (`fflush(NULL)` flushes
+    `stdout` and `stderr`), and the `__stdio_exit_needed` hooks are gone; `fclose` does not
+    unlist a locked file.
+  - `__stdio_write`/`__stdio_read`/`__stdio_seek`/`__stdio_close` call WASI's `fd_write`/
+    `fd_read`/`fd_seek`/`fd_close` as emscripten's do, with WASI's own 8-byte iovecs (dotcc's
+    pointers are 8 bytes in memory) and WASI's errno mapped to C's (`__wasi_errno`).
+  - `stdout` is unbuffered, like `stderr`: the backend expands a printf with a literal format
+    inline, writing straight to fd 1, and a buffer would hold back what went through `stdout`.
+  - Split one function per file as above (`fseek.c` into `__fseeko_unlocked.c`, `__fseeko.c`
+    and `fseek.c`; `ftell.c` likewise; `fwrite.c` into `__fwritex.c` and `fwrite.c`), and the
+    `__stdin_FILE`-style objects are `static`.
+  `tmpfile` (in memory, after `fmemopen`), `vsnprintf`, `vfprintf` and the open-file list are
+  dotcc's own, in `..`.
 
 What musl's build gets from its own headers, these get from `../include/`: `libm.h` and
 `features.h` adapted from musl's `src/internal/` and `src/include/`, a `math.h` with
 musl's `double_t`, `INFINITY` and classification macros, and a `stdio_impl.h` whose
-`FILE` is musl's `struct _IO_FILE` cut to the fields the library reads so far (a
-program's `FILE` stays opaque, so the library is free to define it). Those headers are the library's
-own; a program includes dotcc's `DotCC.Lib/include/math.h`.
+`FILE` is musl's `struct _IO_FILE` (a program's `FILE` stays opaque, so the library is free
+to define it). Those headers are the library's own; a program includes dotcc's
+`DotCC.Lib/include/math.h` and `stdio.h`.
 
 Adding a function: copy its file (and whatever it calls, transitively) from the same musl
 tree, and declare it in `../include/math.h` if the public header does not.

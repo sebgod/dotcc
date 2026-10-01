@@ -228,6 +228,8 @@ public static partial class Compiler
     /// <see cref="Backends.CSharpBackend"/> + <see cref="BuildShell"/>). Milestone 1 emits the
     /// freestanding integer slice; constructs outside it raise
     /// <see cref="CompileException"/> (an <see cref="Ir.IrUnsupportedException"/>).
+    /// The target predefines <c>__wasm__</c>, as clang does for WebAssembly, which is how
+    /// <c>&lt;stdio.h&gt;</c> declares the wat libc's <c>stdin</c>/<c>stdout</c>/<c>stderr</c> objects.
     /// </summary>
     public static string EmitWat(
         IReadOnlyList<string> inputPaths,
@@ -236,8 +238,8 @@ public static partial class Compiler
         CDialect? dialect = null,
         WarningFlags warnings = WarningFlags.Default)
     {
-        var irBuilder = BuildIr(inputPaths, includeDirs, defines, dialect, new Backends.WatNameLegalizer(), warnings,
-            library: WatLibc);
+        var irBuilder = BuildIr(inputPaths, includeDirs, ["__wasm__=1", .. defines ?? []], dialect,
+            new Backends.WatNameLegalizer(), warnings, library: WatLibc);
         return Backends.WatBackend.Run(irBuilder);
     }
 

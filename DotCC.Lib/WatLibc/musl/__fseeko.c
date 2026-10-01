@@ -1,0 +1,11 @@
+#include "stdio_impl.h"
+#include <errno.h>
+
+int __fseeko(FILE *f, off_t off, int whence)
+{
+	int result;
+	FLOCK(f);
+	result = __fseeko_unlocked(f, off, whence);
+	FUNLOCK(f);
+	return result;
+}

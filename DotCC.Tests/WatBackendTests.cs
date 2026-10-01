@@ -303,20 +303,49 @@ public sealed class WatBackendTests
     }
 
     [Fact]
-    public void printf_with_a_runtime_format_is_rejected()
+    public void printf_with_a_runtime_format_calls_the_libc()
     {
-        // Only a string-literal format can be expanded at compile time.
-        Should.Throw<CompileException>(() => Wat("int main(void){ char *f = \"%d\"; printf(f, 1); return 0; }"));
+        // Only a string-literal format is expanded at compile time; any other is the libc's
+        // printf, which reads it at run time and lays each conversion out through the same
+        // formatter (the intrinsics its vsnprintf calls).
+        var wat = Wat("#include <stdio.h>\nint main(void){ const char *f = \"%d\\n\"; printf(f, 1); printf(\"%d\\n\", 2); return 0; }");
+        wat.ShouldContain("call $printf");
+        wat.ShouldContain("(func $vsnprintf");
+        wat.ShouldContain("call $__pf_int_s");
     }
 
     [Fact]
-    public void printf_unsupported_conversions_are_rejected()
+    public void a_literal_printf_does_not_bring_the_libc_printf_in()
     {
-        // '#' on a d/i/u/c/s conversion (where C leaves it undefined) and the
-        // unsupported %n still fail loud rather than miscompile. (%E/%F/%G, %#x/%#X/%#o,
-        // %a/%A and %p are all supported now.)
-        Should.Throw<CompileException>(() => Wat("int main(void){ printf(\"%#d\", 255); return 0; }"));
-        Should.Throw<CompileException>(() => Wat("int main(void){ int n; printf(\"%n\", &n); return 0; }"));
+        // The libc's printf is bound whenever a program calls printf, but a literal format
+        // expands inline, so nothing reaches it, nor the stdout object it names, nor the
+        // stream functions that object points at.
+        var wat = Wat("#include <stdio.h>\nint main(void){ printf(\"%d\\n\", 2); return 0; }");
+        wat.ShouldNotContain("(func $printf");
+        wat.ShouldNotContain("__stdio_write");
+        wat.ShouldNotContain("(table");
+        wat.ShouldNotContain("fd_seek");
+    }
+
+    [Fact]
+    public void printf_evaluates_its_arguments_before_it_writes_and_returns_its_count()
+    {
+        // C evaluates every argument before the call, so what f prints comes first; the
+        // expansion holds f's result in a local and returns the bytes it wrote.
+        var wat = Wat("#include <stdio.h>\nint f(void){ return printf(\"x\"); }\nint main(void){ return printf(\"a%d\", f()); }");
+        var main = wat[wat.IndexOf("(func $main", StringComparison.Ordinal)..];
+        main.IndexOf("call $f", StringComparison.Ordinal).ShouldBeLessThan(main.IndexOf("call $__write", StringComparison.Ordinal));
+        main.ShouldContain("global.get $__ocount");
+    }
+
+    [Fact]
+    public void printf_conversions_the_expansion_cannot_lay_out_call_the_libc()
+    {
+        // A width or precision from an argument (*), %n, and '#' on a d/i/u/c/s conversion
+        // (where C gives it no meaning) are the libc printf's to format.
+        Wat("#include <stdio.h>\nint main(void){ printf(\"%*d\", 5, 255); return 0; }").ShouldContain("call $printf");
+        Wat("#include <stdio.h>\nint main(void){ int n; printf(\"%n\", &n); return 0; }").ShouldContain("call $printf");
+        Wat("#include <stdio.h>\nint main(void){ printf(\"%#d\", 255); return 0; }").ShouldContain("call $printf");
     }
 
     [Fact]
@@ -436,7 +465,7 @@ public sealed class WatBackendTests
         var wat = Wat("int main(void){ puts(\"hi\"); return 0; }");
         wat.ShouldContain("(func $puts (param $s i32) (result i32)");
         wat.ShouldContain("loop $scan");      // the inline strlen
-        wat.ShouldContain("call $fd_write");
+        wat.ShouldContain("call $__wasi_fd_write");
     }
 
     [Fact]

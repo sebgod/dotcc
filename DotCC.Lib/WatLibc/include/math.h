@@ -97,4 +97,9 @@ double modf(double x, double* iptr);        float modff(float x, float* iptr);
 double hypot(double x, double y);           float hypotf(float x, float y);
 double copysign(double x, double y);        float copysignf(float x, float y);
 
+/* clang's builtins for wasm's min and max instructions, which emscripten's musl (fmin, fmax and
+   their f forms) calls on __wasm__. Each is NaN when either operand is, and orders -0 below +0. */
+double __builtin_wasm_min_f64(double x, double y);  float __builtin_wasm_min_f32(float x, float y);
+double __builtin_wasm_max_f64(double x, double y);  float __builtin_wasm_max_f32(float x, float y);
+
 #endif

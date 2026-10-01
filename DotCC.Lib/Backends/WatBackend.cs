@@ -237,7 +237,7 @@ internal sealed partial class WatBackend
     /// <summary>The WASI functions the program calls, by their C name (<c>__wasi_&lt;name&gt;</c>,
     /// imported from <c>wasi_snapshot_preview1</c> as <c>&lt;name&gt;</c>) → the import's
     /// <c>(param …) (result …)</c>, from the C prototype (see <see cref="WasiPrefix"/>).</summary>
-    private readonly SortedDictionary<string, string> _wasiImports = new(StringComparer.Ordinal);
+    private SortedDictionary<string, string> _wasiImports = new(StringComparer.Ordinal);
 
     /// <summary>A function declared but never defined under this prefix is a WASI preview1
     /// import, which is how the libc reaches the host (as emscripten's libc calls
@@ -344,7 +344,7 @@ internal sealed partial class WatBackend
         new(StringComparer.Ordinal) { "malloc", "calloc", "realloc" };
     // The runtime helpers/functions the module needs, including those reached only
     // through printf expansion. Closed over dependencies by NeedRuntime.
-    private readonly HashSet<string> _runtimeUsed = new(StringComparer.Ordinal);
+    private HashSet<string> _runtimeUsed = new(StringComparer.Ordinal);
 
     /// <summary>Mark a runtime helper as needed, pulling in its dependencies. Every
     /// helper ultimately writes through <c>$__write</c> (the WASI sink), so any
@@ -444,38 +444,103 @@ internal sealed partial class WatBackend
 
 """;
 
-    /// <summary>The emitted functions a program can run, in their order: those reached from
-    /// <c>main</c>, from a threaded module's thread entry, from the function table (whatever
-    /// had its address taken) and from the globals' initializers, through the <c>call</c>s their
-    /// emitted bodies make. The edges are what the backend emitted, so a call it lowered to an
-    /// instruction or expanded inline (a printf with a literal format) reaches nothing; a library
-    /// unit nothing reaches costs the module nothing.</summary>
-    private string ReachableFunctions(List<(string Name, string Text)> bodies, string initGlobals)
+    /// <summary>What a program can reach: the functions it can run, and the library's data
+    /// objects it can use. From <c>main</c> (and a threaded module's thread entry) and from the
+    /// program's own objects' initializers, each emitted function reaches the functions it
+    /// calls and those whose address it takes, and the objects it addresses; an object's
+    /// initializer reaches what it addresses in turn. The edges are what the backend emitted,
+    /// so a call it lowered to an instruction or expanded inline (a printf with a literal
+    /// format) reaches nothing, and a library unit nothing reaches, function or object, costs
+    /// the module nothing. The program's own objects are all kept.</summary>
+    private (HashSet<string> Functions, HashSet<object> Globals) Reachable(
+        List<(string Name, string Text, Needs Needs)> bodies, List<(GlobalVar Global, string Text, Needs Needs)> inits, Needs roots)
     {
-        var byName = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (var (name, text) in bodies) { byName[name] = text; }
-        var reached = new HashSet<string>(StringComparer.Ordinal);
+        var byName = new Dictionary<string, (string Text, Needs Needs)>(StringComparer.Ordinal);
+        foreach (var (name, text, needs) in bodies) { byName[name] = (text, needs); }
+        var initsByKey = new Dictionary<object, Needs>();
+        foreach (var (g, _, needs) in inits) { initsByKey[GlobalKey(g.Sym)] = needs; }
+        var functions = new HashSet<string>(StringComparer.Ordinal);
+        var globals = new HashSet<object>();
         var work = new Stack<string>();
-        void Reach(string name)
+        var globalWork = new Stack<object>();
+        void ReachFunction(string name)
         {
-            if (byName.ContainsKey(name) && reached.Add(name)) { work.Push(name); }
+            if (byName.ContainsKey(name) && functions.Add(name)) { work.Push(name); }
         }
-        void ReachCalls(string text)
+        void ReachGlobal(object key)
         {
-            foreach (System.Text.RegularExpressions.Match m in CallTarget().Matches(text)) { Reach(m.Groups[1].Value); }
+            if (globals.Add(key)) { globalWork.Push(key); }
         }
-        Reach("main");
-        if (_threaded) { Reach("__dotcc_thread_main"); }
-        foreach (var name in _fnTable) { Reach(name); }
-        ReachCalls(initGlobals);
-        while (work.Count > 0) { ReachCalls(byName[work.Pop()]); }
-        var sb = new StringBuilder();
-        foreach (var (name, text) in bodies)
+        void ReachNeeds(Needs needs)
         {
-            if (reached.Contains(name)) { sb.Append(text); }
+            foreach (var name in needs.Table) { ReachFunction(name); }
+            foreach (var key in needs.Globals) { ReachGlobal(key); }
         }
-        return sb.ToString();
+        ReachFunction("main");
+        if (_threaded) { ReachFunction("__dotcc_thread_main"); }
+        ReachNeeds(roots);
+        foreach (var (g, _, _) in inits)
+        {
+            if (!Unit.LibraryGlobals.Contains(g.Sym)) { ReachGlobal(GlobalKey(g.Sym)); }
+        }
+        while (work.Count > 0 || globalWork.Count > 0)
+        {
+            if (work.TryPop(out var name))
+            {
+                var (text, needs) = byName[name];
+                foreach (System.Text.RegularExpressions.Match m in CallTarget().Matches(text)) { ReachFunction(m.Groups[1].Value); }
+                ReachNeeds(needs);
+            }
+            else if (globalWork.TryPop(out var key) && initsByKey.TryGetValue(key, out var needs))
+            {
+                ReachNeeds(needs);
+            }
+        }
+        return (functions, globals);
     }
+
+    /// <summary>A global's identity: its symbol for one with internal linkage, its name for one
+    /// with external linkage, which every unit's declaration of it shares.</summary>
+    private static object GlobalKey(Symbol sym) => sym.IsTuLocal ? sym : sym.TargetName;
+
+    /// <summary>What an emitted function or initializer needs of the module beyond its own text:
+    /// the hand-written runtime helpers (see <see cref="NeedRuntime"/>), the WASI imports, WASI's
+    /// <c>proc_exit</c> and the longjmp tag, and what it reaches other than by a call: the
+    /// functions whose address it takes (their table slots) and the globals it addresses (by
+    /// <see cref="GlobalKey"/>). Each one's are collected apart, so one the module leaves out
+    /// (see <see cref="Reachable"/>) brings none of them in.</summary>
+    private sealed record Needs(
+        HashSet<string> Runtime, SortedDictionary<string, string> Wasi, bool ProcExit, bool Longjmp,
+        HashSet<string> Table, HashSet<object> Globals);
+
+    /// <summary>Hand over what has been needed since the last call, and start afresh.</summary>
+    private Needs TakeNeeds()
+    {
+        var needs = new Needs(_runtimeUsed, _wasiImports, _usesProcExit, _usesLongjmp, _tableUsed, _globalsUsed);
+        _runtimeUsed = new HashSet<string>(StringComparer.Ordinal);
+        _wasiImports = new SortedDictionary<string, string>(StringComparer.Ordinal);
+        _usesProcExit = false;
+        _usesLongjmp = false;
+        _tableUsed = new HashSet<string>(StringComparer.Ordinal);
+        _globalsUsed = new HashSet<object>();
+        return needs;
+    }
+
+    /// <summary>Make the module provide what <paramref name="needs"/> lists.</summary>
+    private void AddNeeds(Needs needs)
+    {
+        _runtimeUsed.UnionWith(needs.Runtime);
+        foreach (var (name, sig) in needs.Wasi) { _wasiImports[name] = sig; }
+        _usesProcExit |= needs.ProcExit;
+        _usesLongjmp |= needs.Longjmp;
+        _tableUsed.UnionWith(needs.Table);
+        _globalsUsed.UnionWith(needs.Globals);
+    }
+
+    /// <summary>The functions whose table slot the code emitted since the last
+    /// <see cref="TakeNeeds"/> uses, and the globals it addresses.</summary>
+    private HashSet<string> _tableUsed = new(StringComparer.Ordinal);
+    private HashSet<object> _globalsUsed = new();
 
     /// <summary>A direct call in emitted wat, capturing its target's name.</summary>
     [System.Text.RegularExpressions.GeneratedRegex(@"\bcall \$([^\s()]+)")]
@@ -493,16 +558,34 @@ internal sealed partial class WatBackend
 
         _indent = 1;
         var hasMain = false;
-        var bodies = new List<(string Name, string Text)>();
+        var bodies = new List<(string Name, string Text, Needs Needs)>();
+        var moduleNeeds = TakeNeeds();
         foreach (var fn in unit.Functions)
         {
             var start = _sb.Length;
             EmitFunc(fn);
-            bodies.Add((fn.Sym.TargetName, _sb.ToString(start, _sb.Length - start)));
+            bodies.Add((fn.Sym.TargetName, _sb.ToString(start, _sb.Length - start), TakeNeeds()));
             if (fn.Sym.Name == "main") { hasMain = true; }
         }
-        var initGlobals = GlobalsInitFunc(unit);
-        var funcs = hasMain ? ReachableFunctions(bodies, initGlobals) : _sb.ToString();
+        var inits = GlobalInits(unit);
+        AddNeeds(moduleNeeds);
+        var reached = hasMain ? Reachable(bodies, inits, moduleNeeds) : default;
+        var kept = new StringBuilder();
+        foreach (var (name, text, needs) in bodies)
+        {
+            if (reached.Functions is { } fns && !fns.Contains(name)) { continue; }
+            kept.Append(text);
+            AddNeeds(needs);
+        }
+        var funcs = kept.ToString();
+        var initBody = new StringBuilder();
+        foreach (var (g, text, needs) in inits)
+        {
+            if (reached.Globals is { } gs && Unit.LibraryGlobals.Contains(g.Sym) && !gs.Contains(GlobalKey(g.Sym))) { continue; }
+            initBody.Append(text);
+            AddNeeds(needs);
+        }
+        var initGlobals = GlobalsInitFunc(initBody.ToString());
         // I/O pulls the WASI import + exported memory + sink globals; the heap only
         // needs its bump-pointer global. A program can use either, both, or neither.
         var usesHeap = _runtimeUsed.Contains("malloc");
@@ -514,9 +597,9 @@ internal sealed partial class WatBackend
         m.Append("(module\n");
         if (usesIo)
         {
-            // WASI fd_write — imports must precede every defined function (it takes
-            // the lowest function index). Brings in I/O without a bespoke host ABI.
-            m.Append("  (import \"wasi_snapshot_preview1\" \"fd_write\" (func $fd_write (param i32 i32 i32 i32) (result i32)))\n");
+            // WASI fd_write, which the runtime writes through: the same import as the libc's
+            // __wasi_fd_write (see WasiPrefix), so a program that uses both has it once.
+            _wasiImports["__wasi_fd_write"] = " (param i32) (param i32) (param i32) (param i32) (result i32)";
         }
         if (_usesProcExit)
         {
@@ -550,11 +633,19 @@ internal sealed partial class WatBackend
             m.Append("  (tag $__longjmp (param i32 i32))\n");
             m.Append("  (global $__jmpseq (mut i32) (i32.const 0))\n");
         }
-        if (_fnTable.Count > 0)
+        if (_tableUsed.Count > 0 || funcs.Contains("call_indirect", StringComparison.Ordinal))
         {
-            // Slot 0 stays empty: the null function pointer, which call_indirect traps on.
+            // Slot 0 stays empty: the null function pointer, which call_indirect traps on. So does
+            // the slot of a function only code the module left out took the address of.
             m.Append($"  (table {_fnTable.Count + 1} funcref)\n");
-            m.Append($"  (elem (i32.const 1) func {string.Join(" ", _fnTable.Select(n => "$" + n))})\n");
+            for (var i = 0; i < _fnTable.Count; i++)
+            {
+                if (!_tableUsed.Contains(_fnTable[i])) { continue; }
+                var run = i;
+                while (run + 1 < _fnTable.Count && _tableUsed.Contains(_fnTable[run + 1])) { run++; }
+                m.Append($"  (elem (i32.const {i + 1}) func {string.Join(" ", _fnTable.Skip(i).Take(run - i + 1).Select(n => "$" + n))})\n");
+                i = run;
+            }
         }
         m.Append($"  (global $__sp (mut i32) (i32.const {stackTop}))\n");
         if (_threaded)
@@ -1525,13 +1616,17 @@ internal sealed partial class WatBackend
     /// operand count, or null: IEEE-754 square root, absolute value, the directed roundings
     /// and <c>copysign</c> (<c>long double</c> is <c>double</c> here). C's <c>round</c> is not
     /// <c>nearest</c>, which rounds halves to even, and <c>fmin</c>/<c>fmax</c> are not
-    /// <c>min</c>/<c>max</c>, which return NaN for a NaN operand; those come from the libc.</summary>
+    /// <c>min</c>/<c>max</c>, which return NaN for a NaN operand; those come from the libc, whose
+    /// <c>fmin</c>/<c>fmax</c> settle the NaN cases and then use clang's builtins for them.</summary>
     private static (string Instr, int Arity)? MathInstr(string callee) => callee switch
     {
         "sqrt" => ("f64.sqrt", 1), "fabs" or "fabsl" => ("f64.abs", 1), "floor" => ("f64.floor", 1),
         "ceil" => ("f64.ceil", 1), "trunc" => ("f64.trunc", 1), "copysign" => ("f64.copysign", 2),
         "sqrtf" => ("f32.sqrt", 1), "fabsf" => ("f32.abs", 1), "floorf" => ("f32.floor", 1),
         "ceilf" => ("f32.ceil", 1), "truncf" => ("f32.trunc", 1), "copysignf" => ("f32.copysign", 2),
+        // clang's wasm builtins, which emscripten's musl calls on __wasm__.
+        "__builtin_wasm_min_f64" => ("f64.min", 2), "__builtin_wasm_max_f64" => ("f64.max", 2),
+        "__builtin_wasm_min_f32" => ("f32.min", 2), "__builtin_wasm_max_f32" => ("f32.max", 2),
         _ => null,
     };
 
@@ -2182,6 +2277,7 @@ internal sealed partial class WatBackend
     /// <summary>Push a global's address (its value, for an array or an aggregate).</summary>
     private void EmitGlobalAddr(Symbol sym)
     {
+        _globalsUsed.Add(GlobalKey(sym));
         if (TlsOffset(sym) is { } tls)
         {
             Line("global.get $__tls");
@@ -2196,15 +2292,15 @@ internal sealed partial class WatBackend
         Line($"i32.const {addr}");
     }
 
-    /// <summary>The start function (<c>$__init_globals</c>, run when the module is
-    /// instantiated) that stores each global's initializer at its address, or empty when
-    /// none needs a store (zero storage is already zero). An array's elements and a
-    /// struct's members are stored one by one, as a local's are.</summary>
-    private string GlobalsInitFunc(IrModule unit)
+    /// <summary>The stores of each global's initializer at its address, one global at a time with
+    /// what it needs (see <see cref="Needs"/>), for the start function
+    /// (<see cref="GlobalsInitFunc"/>). A global with no initializer needs no store (zero storage
+    /// is already zero). An array's elements and a struct's members are stored one by one, as a
+    /// local's are.</summary>
+    private List<(GlobalVar Global, string Text, Needs Needs)> GlobalInits(IrModule unit)
     {
+        var inits = new List<(GlobalVar Global, string Text, Needs Needs)>();
         var prev = _out;
-        var body = new StringBuilder();
-        _out = body;
         _indent = 2;
         _hasFrame = false;
         _absoluteInit = true;
@@ -2214,6 +2310,8 @@ internal sealed partial class WatBackend
             foreach (var g in unit.Globals)
             {
                 if (g.Init is not { } init) { continue; }
+                var body = new StringBuilder();
+                _out = body;
                 if (!TryGlobalAddr(g.Sym, out var at)) { throw new InvalidOperationException($"global '{g.Sym.Name}' was never placed"); }
                 switch (init)
                 {
@@ -2237,6 +2335,7 @@ internal sealed partial class WatBackend
                     var step = WasmSizeOf(tail.Element);
                     for (var i = 0; i < tail.Elems.Count; i++) { StoreInitValue(first + i * step, tail.Element, tail.Elems[i]); }
                 }
+                inits.Add((g, body.ToString(), TakeNeeds()));
             }
         }
         finally
@@ -2244,6 +2343,14 @@ internal sealed partial class WatBackend
             _absoluteInit = false;
             _out = prev;
         }
+        return inits;
+    }
+
+    /// <summary>The start function (<c>$__init_globals</c>, run when the module is instantiated)
+    /// that runs the initializers' stores (see <see cref="GlobalInits"/>), or empty when there
+    /// are none.</summary>
+    private string GlobalsInitFunc(string body)
+    {
         if (body.Length == 0) { return ""; }
         var func = new StringBuilder("  (func $__init_globals\n");
         foreach (var local in ScratchLocals()) { func.Append("    ").Append(local).Append('\n'); }
@@ -2267,6 +2374,7 @@ internal sealed partial class WatBackend
         {
             throw new IrUnsupportedException($"the wat target cannot take the address of '{fn.Name}', which the program does not define");
         }
+        _tableUsed.Add(name);
         if (!_fnTableIndex.TryGetValue(name, out var index))
         {
             _fnTable.Add(name);
@@ -2437,6 +2545,11 @@ internal sealed partial class WatBackend
 
     private void EmitExpr(CExpr e)
     {
+        if (_evaluated.Count > 0 && _evaluated.TryGetValue(e, out var local))
+        {
+            Line($"local.get {local}");
+            return;
+        }
         switch (e)
         {
             case Paren p:
@@ -3034,30 +3147,39 @@ internal sealed partial class WatBackend
             EmitCallIndirect(new VarRef(fpVar) { Type = fpVar.Type }, c.Args, c.ParamTypes, c);
             return;
         }
-        // The printf family with a string-literal format is expanded inline (no
-        // runtime function); a user-defined one, if any, wins and routes through the
-        // generic path below.
-        if (c.Callee == "printf" && !_defined.Contains("printf")) { EmitPrintf(c); return; }
-        if (c.Callee == "fprintf" && !_defined.Contains("fprintf")) { EmitFprintf(c); return; }
-        if (c.Callee == "sprintf" && !_defined.Contains("sprintf")) { EmitSprintf(c, bounded: false); return; }
-        if (c.Callee == "snprintf" && !_defined.Contains("snprintf")) { EmitSprintf(c, bounded: true); return; }
-        if (!_defined.Contains(c.Callee) && EmitAtomic(c)) { return; }
-        if (!_defined.Contains(c.Callee) && EmitThreadIntrinsic(c)) { return; }
-        if (c.Callee is "va_start" or "va_end" or "va_copy" && !_defined.Contains(c.Callee)) { EmitVaMacro(c); return; }
-        if (c.Callee == "longjmp" && !_defined.Contains("longjmp") && c.Args.Count == 2) { EmitLongjmp(c); return; }
+        // The printf family with a string-literal format the expansion lays out is expanded
+        // inline; the libc's (compiled from C, formatting at run time) serves the rest, a format
+        // that is not a literal or a stream that is not a standard one. A program's own printf
+        // wins and routes through the generic path below.
+        if (c.Callee is "printf" or "fprintf" or "sprintf" or "snprintf" && !UserDefines(c.Callee)
+            && (ExpandsInline(c) || !_defined.Contains(c.Callee)))
+        {
+            switch (c.Callee)
+            {
+                case "printf": EmitPrintf(c); break;
+                case "fprintf": EmitFprintf(c); break;
+                default: EmitSprintf(c, bounded: c.Callee == "snprintf"); break;
+            }
+            return;
+        }
+        if (!UserDefines(c.Callee) && EmitAtomic(c)) { return; }
+        if (!UserDefines(c.Callee) && EmitThreadIntrinsic(c)) { return; }
+        if (!UserDefines(c.Callee) && EmitFormatIntrinsic(c)) { return; }
+        if (c.Callee is "va_start" or "va_end" or "va_copy" && !UserDefines(c.Callee)) { EmitVaMacro(c); return; }
+        if (c.Callee == "longjmp" && !UserDefines("longjmp") && c.Args.Count == 2) { EmitLongjmp(c); return; }
 
         // The heap allocators lower to calls into the hand-written bump allocator;
         // free is a no-op drop. A user-defined one wins and routes through below.
-        if (c.Callee == "malloc" && !_defined.Contains("malloc")) { EmitHeapAlloc(c, "malloc", 1); return; }
-        if (c.Callee == "calloc" && !_defined.Contains("calloc")) { EmitHeapAlloc(c, "calloc", 2); return; }
-        if (c.Callee == "realloc" && !_defined.Contains("realloc")) { EmitHeapAlloc(c, "realloc", 2); return; }
-        if (c.Callee == "free" && !_defined.Contains("free")) { EmitFree(c); return; }
+        if (c.Callee == "malloc" && !UserDefines("malloc")) { EmitHeapAlloc(c, "malloc", 1); return; }
+        if (c.Callee == "calloc" && !UserDefines("calloc")) { EmitHeapAlloc(c, "calloc", 2); return; }
+        if (c.Callee == "realloc" && !UserDefines("realloc")) { EmitHeapAlloc(c, "realloc", 2); return; }
+        if (c.Callee == "free" && !UserDefines("free")) { EmitFree(c); return; }
 
         // What a wasm instruction does is not a library call: the bulk-memory copies and
         // fill, and the program's end (WASI proc_exit; abort traps).
-        if (c.Callee is "memcpy" or "memmove" && !_defined.Contains(c.Callee)) { EmitBulkMemory(c, "memory.copy"); return; }
-        if (c.Callee == "memset" && !_defined.Contains("memset")) { EmitBulkMemory(c, "memory.fill"); return; }
-        if (c.Callee is "exit" or "_Exit" && !_defined.Contains(c.Callee))
+        if (c.Callee is "memcpy" or "memmove" && !UserDefines(c.Callee)) { EmitBulkMemory(c, "memory.copy"); return; }
+        if (c.Callee == "memset" && !UserDefines("memset")) { EmitBulkMemory(c, "memory.fill"); return; }
+        if (c.Callee is "exit" or "_Exit" && !UserDefines(c.Callee))
         {
             _usesProcExit = true;
             EmitExpr(c.Args[0]);
@@ -3066,10 +3188,10 @@ internal sealed partial class WatBackend
             Line("unreachable");
             return;
         }
-        if (c.Callee == "abort" && !_defined.Contains("abort")) { Line("unreachable"); return; }
+        if (c.Callee == "abort" && !UserDefines("abort")) { Line("unreachable"); return; }
         // <assert.h>'s assert(e) is __dotcc_assert(e): e is tested by its own type (a pointer
         // or a double as well as an int) and a false one traps; unreachable() traps.
-        if (c.Callee == "__dotcc_assert" && !_defined.Contains(c.Callee) && c.Args.Count == 1)
+        if (c.Callee == "__dotcc_assert" && !UserDefines(c.Callee) && c.Args.Count == 1)
         {
             EmitBool(c.Args[0]);
             Line("i32.eqz");
@@ -3078,9 +3200,9 @@ internal sealed partial class WatBackend
             Line("end");
             return;
         }
-        if (c.Callee is "__dotcc_unreachable" or "__builtin_unreachable" && !_defined.Contains(c.Callee)) { Line("unreachable"); return; }
+        if (c.Callee is "__dotcc_unreachable" or "__builtin_unreachable" && !UserDefines(c.Callee)) { Line("unreachable"); return; }
         // <math.h> functions that are one wasm instruction.
-        if (MathInstr(c.Callee) is { } math && !_defined.Contains(c.Callee) && c.Args.Count == math.Arity)
+        if (MathInstr(c.Callee) is { } math && !UserDefines(c.Callee) && c.Args.Count == math.Arity)
         {
             var operand = math.Instr.StartsWith("f32", StringComparison.Ordinal) ? CType.Float : CType.Double;
             foreach (var arg in c.Args)
@@ -3150,15 +3272,14 @@ internal sealed partial class WatBackend
         if (c.Type.Unqualified is not CType.VoidType) { Line($"{ValType(c.Type)}.const 0"); }
     }
 
-    /// <summary>Expand a <c>printf</c> with a string-literal format at compile time —
-    /// the common case. Output goes to fd 1 (the sink's default mode); the result is
-    /// C's char count, which we don't track (rarely consulted; the C# backend's
-    /// <c>Done()</c> also returns 0), so the expression leaves 0.</summary>
+    /// <summary>Expand a <c>printf</c> with a string-literal format at compile time — the
+    /// common case. Output goes to fd 1 (the sink's default mode), and the expression is C's
+    /// result, the count of bytes written, which the sink counts.</summary>
     private void EmitPrintf(Call c)
     {
         var fmt = FormatLiteral(c, 0, "printf");
-        EmitFormatExpansion(fmt, c, firstArg: 1);
-        Line("i32.const 0");
+        EmitFormatExpansion(fmt, c, firstArg: 1, counted: true);
+        Line("global.get $__ocount");
     }
 
     /// <summary>Expand <c>fprintf(stream, fmt, …)</c> with a string-literal format. The
@@ -3177,6 +3298,7 @@ internal sealed partial class WatBackend
                 "fprintf to a non-standard stream is unsupported in --target=wat (only stdout/stderr map to WASI fds)");
         }
         var fmt = FormatLiteral(c, 1, "fprintf");
+        EvaluateArgumentsFirst(c, firstArg: 2);
         if (fd != 1)
         {
             Line($"i32.const {fd}");
@@ -3184,16 +3306,16 @@ internal sealed partial class WatBackend
         }
         // The stream operand (a bare stdout/stderr VarRef, no side effects) is not
         // evaluated — its identity was consumed above to pick the fd.
-        EmitFormatExpansion(fmt, c, firstArg: 2);
+        EmitFormatExpansion(fmt, c, firstArg: 2, counted: true);
         if (fd != 1)
         {
             Line("i32.const 1");
             Line("global.set $__fd");   // restore stdout as the default sink
         }
-        // Leave the (ignored) char-count result ONLY when the call is used for its
-        // value — Zig's std.debug.print lowers to a VOID-typed fprintf, so leaving a
-        // value there would unbalance the stack (the void statement won't drop it).
-        if (c.Type.Unqualified is not CType.VoidType) { Line("i32.const 0"); }
+        // Leave the count ONLY when the call is used for its value — Zig's
+        // std.debug.print lowers to a VOID-typed fprintf, so leaving a value there would
+        // unbalance the stack (the void statement won't drop it).
+        if (c.Type.Unqualified is not CType.VoidType) { Line("global.get $__ocount"); }
     }
 
     /// <summary>Map a standard-stream operand to its WASI fd (<c>stdout</c>→1,
@@ -3225,6 +3347,9 @@ internal sealed partial class WatBackend
         var fmtIdx = bounded ? 2 : 1;
         var fmt = FormatLiteral(c, fmtIdx, name);
         NeedRuntime("__sink_end");
+        // The formatted arguments first: one may itself format into a buffer, which aims the
+        // sink elsewhere.
+        EvaluateArgumentsFirst(c, firstArg: fmtIdx + 1);
 
         // Aim the sink at the buffer: $__ob = dst, $__oend = dst + n (or "infinite"),
         // $__ocount = 0. Re-reading $__ob avoids a temp for dst in the bound.
@@ -3258,8 +3383,15 @@ internal sealed partial class WatBackend
     /// sidesteps a wat varargs ABI entirely (arguments are consumed positionally).
     /// C evaluates every argument even past the last conversion, so the unconsumed
     /// tail is still evaluated (for side effects) and dropped.</summary>
-    private void EmitFormatExpansion(LitStr fmt, Call c, int firstArg)
+    private void EmitFormatExpansion(LitStr fmt, Call c, int firstArg, bool counted = false)
     {
+        EvaluateArgumentsFirst(c, firstArg);
+        if (counted)
+        {
+            NeedRuntime("__write");
+            Line("i32.const 0");
+            Line("global.set $__ocount");
+        }
         var bytes = DotCC.EmitHelpers.StringByteValues(fmt.Segments);
         var argIdx = firstArg;
         foreach (var seg in PrintfFormat.Parse(bytes))
@@ -3281,9 +3413,145 @@ internal sealed partial class WatBackend
         }
         for (; argIdx < c.Args.Count; argIdx++)
         {
+            if (_evaluated.ContainsKey(c.Args[argIdx])) { continue; }
             EmitExpr(c.Args[argIdx]);
             if (c.Args[argIdx].Type.Unqualified is not CType.VoidType) { Line("drop"); }
         }
+        ReleaseEvaluated(c, firstArg);
+    }
+
+    /// <summary>The arguments of a printf-family call an expansion has evaluated ahead of its
+    /// output, each to the scratch local that holds its value, which <see cref="EmitExpr"/> reads
+    /// in its place.</summary>
+    private readonly Dictionary<CExpr, string> _evaluated = new(ReferenceEqualityComparer.Instance);
+
+    /// <summary>Evaluate the arguments from <paramref name="firstArg"/> on that could print, trap
+    /// or write memory (a call, an assignment, a load through a pointer), in order, before the
+    /// expansion of <paramref name="c"/> writes anything: C evaluates every argument before the
+    /// call, so a function an argument calls prints first. A literal or a variable's value is
+    /// read where its conversion is. Idempotent for one call.</summary>
+    private void EvaluateArgumentsFirst(Call c, int firstArg)
+    {
+        for (var i = firstArg; i < c.Args.Count; i++)
+        {
+            var arg = c.Args[i];
+            if (_evaluated.ContainsKey(arg) || IsPlainOperand(arg)) { continue; }
+            if (arg.Type.Unqualified is CType.VoidType)
+            {
+                EmitExpr(arg);
+                _evaluated[arg] = "";
+                continue;
+            }
+            var local = AcquireScratch(arg.Type);
+            EmitExpr(arg);
+            Line($"local.set {local}");
+            _evaluated[arg] = local;
+        }
+    }
+
+    /// <summary>Give back the scratch locals <see cref="EvaluateArgumentsFirst"/> took for
+    /// <paramref name="c"/>'s arguments.</summary>
+    private void ReleaseEvaluated(Call c, int firstArg)
+    {
+        for (var i = firstArg; i < c.Args.Count; i++)
+        {
+            if (!_evaluated.Remove(c.Args[i], out var local) || local.Length == 0) { continue; }
+            ReleaseScratch(c.Args[i].Type);
+        }
+    }
+
+    /// <summary>True for an operand whose evaluation has no effect to order: a literal, or the
+    /// value of a variable (possibly converted).</summary>
+    private static bool IsPlainOperand(CExpr e) => e switch
+    {
+        LitInt or LitFloat or LitStr => true,
+        VarRef or NameRef => true,
+        Paren p => IsPlainOperand(p.Inner),
+        Cast cast => IsPlainOperand(cast.Operand),
+        _ => false,
+    };
+
+    /// <summary>True when the program itself defines <paramref name="name"/>, which then wins
+    /// over every lowering of its own the backend has for a libc name. A library unit's
+    /// definition (<see cref="IrModule.LibraryFunctions"/>) does not: a call the backend
+    /// lowers its own way never reaches it, and one nothing else reaches is left out.</summary>
+    private bool UserDefines(string name) => _defined.Contains(name) && !Unit.LibraryFunctions.Contains(name);
+
+    /// <summary>True when the backend expands the printf-family call <paramref name="c"/> at
+    /// compile time: its format is a string literal whose every conversion the expansion lays
+    /// out (see <see cref="ExpandsInline(PrintfFormat.Spec)"/>) and, for <c>fprintf</c>, its
+    /// stream is <c>stdout</c> or <c>stderr</c>.</summary>
+    private static bool ExpandsInline(Call c)
+    {
+        var fmtIdx = c.Callee switch { "printf" => 0, "snprintf" => 2, _ => 1 };
+        return c.Args.Count > fmtIdx && c.Args[fmtIdx] is LitStr fmt
+            && (c.Callee != "fprintf" || StdStreamFd(c.Args[0]) >= 0)
+            && PrintfFormat.Parse(DotCC.EmitHelpers.StringByteValues(fmt.Segments))
+                .All(seg => seg.Conversion is not { } spec || ExpandsInline(spec));
+    }
+
+    /// <summary>True for a conversion the inline expansion lays out (<see cref="EmitConversion"/>):
+    /// not a width or precision taken from an argument (<c>*</c>), nor a <c>%n</c>, nor a
+    /// precision wider than the formatter stages, nor <c>#</c> where C gives it no meaning.</summary>
+    private static bool ExpandsInline(PrintfFormat.Spec spec) => spec.Conv switch
+    {
+        'c' or 's' or 'p' => !spec.Alt,
+        'd' or 'i' or 'u' => !spec.Alt && spec.Precision <= MaxNumDigits,
+        'x' or 'X' or 'o' => spec.Precision <= MaxNumDigits,
+        'f' or 'F' or 'e' or 'E' or 'g' or 'G' or 'a' or 'A' => spec.Precision <= MaxFloatPrec,
+        _ => false,
+    };
+
+    /// <summary>The runtime functions the libc's <c>vsnprintf</c> (compiled from C) formats
+    /// through, under the names its <c>&lt;printf_impl.h&gt;</c> declares them by, each with
+    /// the runtime function's parameters: so a format read at run time prints exactly what
+    /// the inline expansion of the same literal format does.</summary>
+    private static readonly Dictionary<string, string> FormatIntrinsics = new(StringComparer.Ordinal)
+    {
+        ["__builtin_dotcc_pf_write"] = "__write",
+        ["__builtin_dotcc_pf_int"] = "__pf_int_s",
+        ["__builtin_dotcc_pf_uint"] = "__pf_int_u",
+        ["__builtin_dotcc_pf_str"] = "__emit_str",
+        ["__builtin_dotcc_pf_char"] = "__emit_char",
+        ["__builtin_dotcc_pf_f"] = "__pf_f",
+        ["__builtin_dotcc_pf_e"] = "__pf_e",
+        ["__builtin_dotcc_pf_g"] = "__pf_g",
+        ["__builtin_dotcc_pf_a"] = "__pf_a",
+        ["__builtin_dotcc_pf_p"] = "__pf_p",
+        ["__builtin_dotcc_sink_end"] = "__sink_end",
+    };
+
+    /// <summary>One of the formatter's intrinsics, or false when <paramref name="c"/> is not
+    /// one: a call into the runtime (<see cref="FormatIntrinsics"/>), or the sink's control,
+    /// <c>__builtin_dotcc_sink(dst, end)</c> aiming it at a buffer as <c>sprintf</c>'s
+    /// expansion does and <c>__builtin_dotcc_sink_count()</c> the bytes it has taken.</summary>
+    private bool EmitFormatIntrinsic(Call c)
+    {
+        if (c.Callee == "__builtin_dotcc_sink" && c.Args.Count == 2)
+        {
+            NeedRuntime("__sink_end");
+            EmitCallArgs(c, c.Args, c.ParamTypes);
+            Line("global.set $__oend");
+            Line("global.set $__ob");
+            Line("i32.const 0");
+            Line("global.set $__ocount");
+            if (c.Type.Unqualified is not CType.VoidType) { Line($"{ValType(c.Type)}.const 0"); }
+            return true;
+        }
+        if (c.Callee == "__builtin_dotcc_sink_count" && c.Args.Count == 0)
+        {
+            NeedRuntime("__sink_end");
+            Line("global.get $__ocount");
+            EmitConvert(CType.Int, c.Type);
+            return true;
+        }
+        if (!FormatIntrinsics.TryGetValue(c.Callee, out var runtime)) { return false; }
+        NeedRuntime(runtime);
+        EmitCallArgs(c, c.Args, c.ParamTypes);
+        Line($"call ${runtime}");
+        if (runtime == "__sink_end") { EmitConvert(CType.Int, c.Type); }
+        else if (c.Type.Unqualified is not CType.VoidType) { Line($"{ValType(c.Type)}.const 0"); }
+        return true;
     }
 
     /// <summary>The format argument of a printf-family call, required to be a string
@@ -3616,8 +3884,12 @@ internal sealed partial class WatBackend
       {{Lo(IoScratch)}}
       i32.const 1
       {{Lo(IoScratch + 8)}}
-      call $fd_write
+      call $__wasi_fd_write
       drop
+      global.get $__ocount       ;; count it (printf's result)
+      local.get $len
+      i32.add
+      global.set $__ocount
     else                         ;; buffer — copy each byte through $__putb
       block $done
         loop $lp
