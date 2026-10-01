@@ -234,6 +234,11 @@ public sealed unsafe class LibcWcharTests
     public void wcstof_narrows_to_float() => wcstof(L16("1.5\0"), null).ShouldBe(1.5f);
 
     [Fact]
+    public void wcstof_rounds_once_as_strtof_does() =>
+        // Just below a float halfway point whose nearest double is the halfway point itself.
+        BitConverter.SingleToUInt32Bits(wcstof(L16("1.0000001788139343261718749999\0"), null)).ShouldBe(0x3F800001u);
+
+    [Fact]
     public void wcstold_parses_as_double() => wcstold(L16("2.25\0"), null).ShouldBe(2.25);
 
     [Fact]
