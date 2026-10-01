@@ -424,6 +424,34 @@ public sealed class WatOracleTests
         + " printf(\"%d %d %d %d %d %d %d \", a, b, d, e, z, eof, feof(t));\n"
         + " fclose(t); int n = printf(\"[%d]\", g()); printf(\" %d \", n); fputs(\"put\", stdout); fputc('c', stdout); putc('\\n', stdout); return 0; }",
         "16 w [World] 5 [hello] 5 20 0 0 0 33 -1 1 0 <g>[3] 3 putc\n")]
+    // The scanf family (musl's vfscanf): %d %i %s %lf %x, scansets, %n, assignment suppression,
+    // a failed match and an empty input, %f/%c/%hhd/%hd, octal and prefixed %i, inf/nan/hex
+    // floats; and the strtol family clamping out-of-range values with ERANGE. glibc's text.
+    [InlineData("#include <stdio.h>\n"
+        + "#include <stdlib.h>\n"
+        + "#include <errno.h>\n"
+        + "#include <limits.h>\n"
+        + "int main(void) {\n"
+        + "    int a, b, n; char w[16], rest[32]; double d; float f; unsigned u; long l; char c; short h; signed char hh;\n"
+        + "    int r = sscanf(\"  42 -17 hello 3.25e2 0x1f\", \"%d %i %15s %lf %x\", &a, &b, w, &d, &u);\n"
+        + "    printf(\"%d|%d %d [%s] %g %u\\n\", r, a, b, w, d, u);\n"
+        + "    r = sscanf(\"abc:123;rest of it\", \"%[a-z]:%ld;%[^\\n]%n\", w, &l, rest, &n);\n"
+        + "    printf(\"%d|[%s] %ld [%s] %d\\n\", r, w, l, rest, n);\n"
+        + "    r = sscanf(\"x\", \"%d\", &a); printf(\"%d|\", r);\n"
+        + "    r = sscanf(\"\", \"%d\", &a); printf(\"%d|\", r);\n"
+        + "    r = sscanf(\"12 34\", \"%*d %d\", &a); printf(\"%d %d|\", r, a);\n"
+        + "    r = sscanf(\"7.5 Z -5 300\", \"%f %c %hhd %hd\", &f, &c, &hh, &h); printf(\"%d %g %c %d %d\\n\", r, f, c, hh, h);\n"
+        + "    r = sscanf(\"0755 0x10 010\", \"%o %i %i\", &u, &a, &b); printf(\"%d %u %d %d|\", r, u, a, b);\n"
+        + "    r = sscanf(\"  inf nan -0x1p-3\", \"%lf %lf %lf\", &d, &d, &d); printf(\"%d %g\\n\", r, d);\n"
+        + "    char *e; errno = 0;\n"
+        + "    long big = strtol(\"99999999999999999999\", &e, 10); printf(\"%ld %d %d|\", big == LONG_MAX, errno == ERANGE, *e);\n"
+        + "    errno = 0; long neg = strtol(\"-99999999999999999999x\", &e, 10); printf(\"%d %d %c|\", neg == LONG_MIN, errno == ERANGE, *e);\n"
+        + "    errno = 0; unsigned long ub = strtoul(\"-1\", &e, 10); printf(\"%d %d|\", ub == ULONG_MAX, errno);\n"
+        + "    printf(\"%ld %ld %ld|\", strtol(\"0x\", &e, 16), strtol(\"  +077\", NULL, 0), strtol(\"z\", &e, 36));\n"
+        + "    printf(\"%lld %llu\\n\", strtoll(\"-9223372036854775808\", NULL, 10), strtoull(\"18446744073709551615\", NULL, 10));\n"
+        + "    return 0;\n"
+        + "}",
+        "5|42 -17 [hello] 325 31\n3|[abc] 123 [rest of it] 18\n0|-1|1 34|4 7.5 Z -5 300\n3 493 16 8|3 -0.125\n1 1 0|1 1 x|1 0|0 63 35|-9223372036854775808 18446744073709551615\n")]
     // strerror's glibc wording, strtoimax past 32 bits, the one "C" locale, and time() from
     // WASI's clock.
     [InlineData("#include <stdio.h>\n#include <string.h>\n#include <errno.h>\n#include <inttypes.h>\n#include <locale.h>\n#include <time.h>\n"

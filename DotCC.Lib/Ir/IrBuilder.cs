@@ -768,8 +768,9 @@ internal sealed partial class IrBuilder
                 $"function definition declared '{Spelling(storage)}'", SrcPos.From(fnSig), _file));
         }
         var sig = ExtractFnSig(fnSig);
-        // A library unit's definition is weak: the program's own definition of the name wins.
-        if (_libraryUnit && _fnDefSites.ContainsKey(sig.Name)) { return; }
+        // A library unit's external definition is weak: the program's own definition of the
+        // name wins. A static one is the unit's own, whatever other units define.
+        if (_libraryUnit && !sig.IsStatic && _fnDefSites.ContainsKey(sig.Name)) { return; }
         // A definition means this name is no longer a pure prototype → not an import.
         _protoOnlyFuncs.Remove(sig.Name);
         Symbol funcSym;
