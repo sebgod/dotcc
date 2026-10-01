@@ -27,8 +27,10 @@ bool-as-int
 bool-from-pointer
 bool-result-to-byte
 bool-stdbool
+braceless-comma-body
 c-idioms
 c11-alignof
+c11-char32
 c11-generic
 c23-attributes
 c23-char8
@@ -41,6 +43,7 @@ c23-va-opt
 c99-stdint-fast
 call-arg-conv
 char-array-init
+char16-literals
 comma-for-loop
 comma-operator
 comma-pointer-value
@@ -69,6 +72,7 @@ enum-shadow
 enum-switch-int
 enum-tag-global-var
 enum-underlying-c23
+extern-linkage
 factorial-for
 factorial-longdouble
 fibonacci
@@ -91,6 +95,7 @@ fnptr-struct-member
 fnptr-table
 for-shadow
 fprintf-streams
+function-declarators
 goto-cleanup
 goto-into-block-decl
 goto-into-loop
@@ -113,6 +118,9 @@ macro-arg-prescan
 macro-funclike
 macro-ops
 malloc-no-cast
+malloc-promote-keyword-var
+malloc-stack-promote
+malloc-stackalloc
 multi-decl
 multi-declarator
 multi-tu-struct
@@ -157,6 +165,7 @@ stddef-types
 stdint-fixed-widths
 stdio-limits
 stdlib-core
+storage-class-order
 string-char-escapes
 string-escape-quotes
 string-h-basic
