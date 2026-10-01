@@ -663,6 +663,30 @@ public sealed class WatBackendTests
     }
 
     [Fact]
+    public void A_struct_lives_in_the_frame_and_its_members_are_offsets()
+    {
+        // The layout model places the members (int x @0, long y @8, char *n @16; size 24),
+        // the one sizeof and offsetof fold from. A struct's value is its address: a brace
+        // initializer zeroes the slot then stores each member, an assignment copies bytes.
+        var wat = Wat("#include <stddef.h>\nstruct P { int x; long y; char *n; };\n"
+            + "int main(void){ struct P p; p.x = 3; p.y = 4; struct P q = { 1, 2, \"hi\" }; p = q; "
+            + "return (int)(sizeof(struct P) + offsetof(struct P, n) + p.x + p.y + p.n[1]); }");
+        wat.ShouldContain("i64.const 24\n    i64.const 16\n    i64.add");      // sizeof, offsetof
+        wat.ShouldContain("global.get $__sp\n    i32.const 8\n    i32.add\n    local.get $__t64\n    i64.store");  // p.y = 4
+        wat.ShouldContain("i32.const 0\n    i32.const 24\n    memory.fill");   // q's initializer
+        wat.ShouldContain("i32.const 24\n    memory.copy");                      // p = q
+    }
+
+    [Fact]
+    public void A_struct_passed_by_value_is_refused_loudly()
+    {
+        // No calling convention for aggregates yet: refused, never miscompiled.
+        Should.Throw<CompileException>(() =>
+            Wat("struct P { int x; };\nint get(struct P p){ return p.x; }\nint main(void){ struct P p = {1}; return get(p); }"))
+            .Message.ShouldContain("does not yet pass or return a struct by value");
+    }
+
+    [Fact]
     public void A_pointer_takes_eight_bytes_in_memory()
     {
         // C's LP64 view (sizeof(void*) == 8, the layout model's) holds on wasm32 too: a
