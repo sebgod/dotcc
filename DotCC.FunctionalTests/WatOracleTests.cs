@@ -304,6 +304,14 @@ public sealed class WatOracleTests
         + " long now = atomic_load(&n); long swapped = atomic_exchange(&n, 3);"
         + " printf(\"%ld %ld %d %ld %d %d %ld %ld\", old, now, ok, e, first, second, swapped, atomic_load(&n)); return 0; }",
         "5000000000 5000000007 0 5000000007 0 1 5000000007 3")]
+    // strerror's glibc wording, strtoimax past 32 bits, the one "C" locale, and time() from
+    // WASI's clock.
+    [InlineData("#include <stdio.h>\n#include <string.h>\n#include <errno.h>\n#include <inttypes.h>\n#include <locale.h>\n#include <time.h>\n"
+        + "int main(void){ printf(\"%s|%s|%s|\", strerror(ERANGE), strerror(0), strerror(9999));"
+        + " printf(\"%\" PRIdMAX \" %\" PRIuMAX \"|\", strtoimax(\"-9000000000\", NULL, 10), strtoumax(\"0xFFFFFFFFFF\", NULL, 16));"
+        + " printf(\"%s %s %d|\", setlocale(LC_ALL, NULL), localeconv()->decimal_point, setlocale(LC_ALL, \"fr_FR\") == NULL);"
+        + " printf(\"%.1f %d\", difftime(1000, 400), time(NULL) > 1000000000); return 0; }",
+        "Numerical result out of range|Success|Unknown error|-9000000000 1099511627775|C . 1|600.0 1")]
     public void Wat_program_writes_expected_stdout(string source, string expected)
     {
         if (!Requested)
@@ -312,6 +320,31 @@ public sealed class WatOracleTests
         }
         RunWatStdout(source).ShouldBe(expected);
     }
+
+    /// <summary>The WASI preview1 functions a dotcc module imports, as JavaScript for node:
+    /// <c>fd_write</c> keeps what is written to fd 1 in <c>out</c>, <c>proc_exit</c> unwinds
+    /// with the status, and <c>clock_time_get</c> reads node's clocks (0 realtime, 1 monotonic,
+    /// 2 and 3 CPU time, in nanoseconds). <c>inst</c> must be set before <c>main</c> runs.</summary>
+    private const string WasiShimJs =
+        "let inst; const out=[];" +
+        "const wasi={" +
+        "fd_write:(fd,iovs,iovsLen,nwrittenPtr)=>{" +
+        "const dv=new DataView(inst.exports.memory.buffer);" +
+        "const bytes=new Uint8Array(inst.exports.memory.buffer);" +
+        "let written=0;" +
+        "for(let i=0;i<iovsLen;i++){" +
+        "const ptr=dv.getUint32(iovs+i*8,true);" +
+        "const len=dv.getUint32(iovs+i*8+4,true);" +
+        "for(let j=0;j<len;j++){ if(fd===1) out.push(bytes[ptr+j]); }" +
+        "written+=len;}" +
+        "dv.setUint32(nwrittenPtr,written,true);return 0;}," +
+        "proc_exit:(c)=>{throw {exitCode:c};}," +
+        "clock_time_get:(id,precision,timePtr)=>{let ns;" +
+        "if(id===0){ns=BigInt(Date.now())*1000000n;}" +
+        "else if(id===1){ns=process.hrtime.bigint();}" +
+        "else if(id===2||id===3){const u=process.cpuUsage();ns=BigInt(u.user+u.system)*1000n;}" +
+        "else{return 28;}" +
+        "new DataView(inst.exports.memory.buffer).setBigUint64(timePtr,ns,true);return 0;}};";
 
     /// <summary>EmitWat → wat2wasm → node, returning <c>main()</c>'s value.</summary>
     private static int RunWat(string source)
@@ -325,10 +358,9 @@ public sealed class WatOracleTests
             Exec("wat2wasm", wat, "-o", wasm);   // validates (parse + typecheck) and assembles
             // exit(n) (WASI proc_exit) ends the run with n as its value.
             const string js =
-                "const fs=require('fs');" +
-                "const proc_exit=(c)=>{throw {exitCode:c};};" +
-                "WebAssembly.instantiate(fs.readFileSync(process.argv[1]),{wasi_snapshot_preview1:{proc_exit}})" +
-                ".then(r=>{let v;try{v=r.instance.exports.main();}catch(e){if(e&&e.exitCode!==undefined){v=e.exitCode;}else{throw e;}}" +
+                "const fs=require('fs');" + WasiShimJs +
+                "WebAssembly.instantiate(fs.readFileSync(process.argv[1]),{wasi_snapshot_preview1:wasi})" +
+                ".then(r=>{inst=r.instance;let v;try{v=inst.exports.main();}catch(e){if(e&&e.exitCode!==undefined){v=e.exitCode;}else{throw e;}}" +
                 "process.stdout.write((typeof v==='bigint'?Number(v):v|0).toString());})" +
                 ".catch(e=>{console.error(e);process.exit(1);});";
             var output = Exec("node", "-e", js, wasm);
@@ -366,20 +398,8 @@ public sealed class WatOracleTests
             File.WriteAllText(wat, watText);
             Exec("wat2wasm", wat, "-o", wasm);
             var js =
-                "const fs=require('fs');" +
-                "let inst; const out=[];" +
-                "const fd_write=(fd,iovs,iovsLen,nwrittenPtr)=>{" +
-                "const dv=new DataView(inst.exports.memory.buffer);" +
-                "const bytes=new Uint8Array(inst.exports.memory.buffer);" +
-                "let written=0;" +
-                "for(let i=0;i<iovsLen;i++){" +
-                "const ptr=dv.getUint32(iovs+i*8,true);" +
-                "const len=dv.getUint32(iovs+i*8+4,true);" +
-                "for(let j=0;j<len;j++){ if(fd===1) out.push(bytes[ptr+j]); }" +
-                "written+=len;}" +
-                "dv.setUint32(nwrittenPtr,written,true);return 0;};" +
-                "const proc_exit=(c)=>{throw {exitCode:c};};" +
-                "WebAssembly.instantiate(fs.readFileSync(process.argv[1]),{wasi_snapshot_preview1:{fd_write,proc_exit}})" +
+                "const fs=require('fs');" + WasiShimJs +
+                "WebAssembly.instantiate(fs.readFileSync(process.argv[1]),{wasi_snapshot_preview1:wasi})" +
                 ".then(r=>{inst=r.instance;try{inst.exports.main();}catch(e){if(!(e&&e.exitCode!==undefined)){throw e;}}" +
                 (latin1 ? "process.stdout.write(Buffer.from(out).toString('latin1'));})" : "process.stdout.write(Buffer.from(out));})") +
                 ".catch(e=>{console.error(e);process.exit(1);});";

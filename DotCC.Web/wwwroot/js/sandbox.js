@@ -85,12 +85,22 @@ window.dotccSandbox = (function () {
       return 0;
     };
     const proc_exit = (code) => { const e = new Error("proc_exit"); e.__exit = code | 0; throw e; };
+    // clock_time_get (time(), clock()): nanoseconds of clock 0 (realtime) or, for the
+    // monotonic and CPU-time clocks, the page's high-resolution time since it loaded.
+    const clock_time_get = (id, precision, timePtr) => {
+      if (id < 0 || id > 3) { return 28; }   // EINVAL
+      const ns = id === 0
+        ? BigInt(Date.now()) * 1000000n
+        : BigInt(Math.round(performance.now() * 1e6));
+      new DataView(inst.exports.memory.buffer).setBigUint64(timePtr, ns, true);
+      return 0;
+    };
 
     const decode = (arr) => new TextDecoder("utf-8", { fatal: false }).decode(new Uint8Array(arr));
 
     try {
       const { instance } = await WebAssembly.instantiate(buffer, {
-        wasi_snapshot_preview1: { fd_write, proc_exit },
+        wasi_snapshot_preview1: { fd_write, proc_exit, clock_time_get },
       });
       inst = instance;
 

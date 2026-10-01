@@ -1,5 +1,5 @@
 // Run one dotcc --target=wat module under node, for Scripts/wat-probe.sh: instantiate it with
-// a WASI preview1 shim (fd_write to stdout/stderr, proc_exit), call main, and write what it
+// a WASI preview1 shim (fd_write to stdout/stderr, proc_exit, clock_time_get), call main, and write what it
 // printed to fd 1 to our stdout, byte for byte.
 //   node wat-probe.js module.wasm             run it (exit: main's value & 0xff, 134 on a trap)
 //   node wat-probe.js --same expected actual  exit 0 when the two outputs match as the
@@ -30,6 +30,16 @@ const wasi = {
     return 0;
   },
   proc_exit(code) { throw new Exit(code); },
+  // clock ids: 0 realtime, 1 monotonic, 2 process CPU time, 3 thread CPU time (nanoseconds).
+  clock_time_get(id, precision, timePtr) {
+    let ns;
+    if (id === 0) { ns = BigInt(Date.now()) * 1000000n; }
+    else if (id === 1) { ns = process.hrtime.bigint(); }
+    else if (id === 2 || id === 3) { const u = process.cpuUsage(); ns = BigInt(u.user + u.system) * 1000n; }
+    else { return 28; }   // EINVAL
+    new DataView(inst.exports.memory.buffer).setBigUint64(timePtr, ns, true);
+    return 0;
+  },
 };
 let code = 0;
 try {

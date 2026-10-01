@@ -140,6 +140,17 @@ internal sealed partial class WatBackend
     /// once as a module <c>(type …)</c>: signature text → type name.</summary>
     private readonly Dictionary<string, string> _sigTypes = new(StringComparer.Ordinal);
 
+    /// <summary>The WASI functions the program calls, by their C name (<c>__wasi_&lt;name&gt;</c>,
+    /// imported from <c>wasi_snapshot_preview1</c> as <c>&lt;name&gt;</c>) → the import's
+    /// <c>(param …) (result …)</c>, from the C prototype (see <see cref="WasiPrefix"/>).</summary>
+    private readonly SortedDictionary<string, string> _wasiImports = new(StringComparer.Ordinal);
+
+    /// <summary>A function declared but never defined under this prefix is a WASI preview1
+    /// import, which is how the libc reaches the host (as emscripten's libc calls
+    /// <c>__wasi_clock_time_get</c>): its prototype types the import, a pointer as the i32
+    /// address it is on the stack and a 64-bit integer as an i64, as WASI's ABI has them.</summary>
+    private const string WasiPrefix = "__wasi_";
+
     /// <summary>True once the program calls <c>exit</c>, which imports WASI's <c>proc_exit</c>.</summary>
     private bool _usesProcExit;
 
@@ -286,14 +297,18 @@ internal sealed partial class WatBackend
             // exit(): WASI proc_exit ends the program with its status.
             m.Append("  (import \"wasi_snapshot_preview1\" \"proc_exit\" (func $proc_exit (param i32)))\n");
         }
-        // Export the memory only when the WASI shim needs to read iovecs out of it;
-        // non-I/O modules keep the byte-identical plain `(memory 1)`.
+        foreach (var (name, sig) in _wasiImports)
+        {
+            m.Append($"  (import \"wasi_snapshot_preview1\" \"{name[WasiPrefix.Length..]}\" (func ${name}{sig}))\n");
+        }
+        // Export the memory only when a WASI function reads or writes it (fd_write's
+        // iovecs, clock_time_get's result); other modules keep the plain `(memory 1)`.
         // The data (strings, globals) sits from DataBase up; the stack tops at StackTop
         // while the data leaves it room (every small program), else past the data, and
         // the heap starts where the stack tops.
         var stackTop = _dataEnd <= StackTop / 2 ? StackTop : AlignUp(_dataEnd, 16) + StackBytes;
         var pages = (stackTop + 65535) / 65536;
-        m.Append(usesIo ? $"  (memory (export \"memory\") {pages})\n" : $"  (memory {pages})\n");
+        m.Append(usesIo || _wasiImports.Count > 0 ? $"  (memory (export \"memory\") {pages})\n" : $"  (memory {pages})\n");
         foreach (var (sig, name) in _sigTypes) { m.Append($"  (type {name} (func{sig}))\n"); }
         if (_fnTable.Count > 0)
         {
@@ -2043,9 +2058,14 @@ internal sealed partial class WatBackend
             // A handful of libc names are backed by the hand-written wat I/O runtime
             // (emitted on demand from RuntimeFuncDefs); the rest still fail loud.
             if (RuntimeFns.Contains(c.Callee)) { NeedRuntime(c.Callee); }
+            else if (c.Callee.StartsWith(WasiPrefix, StringComparison.Ordinal) && c.ParamTypes is { } wasiParams)
+            {
+                var result = c.Type.Unqualified is CType.VoidType ? "" : $" (result {ValType(c.Type)})";
+                _wasiImports[c.Callee] = string.Concat(wasiParams.Select(p => $" (param {ValType(p)})")) + result;
+            }
             else
             {
-                throw new IrUnsupportedException($"call to '{c.Callee}': library or undefined functions need host imports (putchar/puts/printf are wired so far)");
+                throw new IrUnsupportedException($"call to '{c.Callee}': no unit defines it, and the wat libc has no source for it");
             }
         }
         EmitCallArgs(c, c.Args, c.ParamTypes);
