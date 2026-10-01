@@ -104,9 +104,19 @@ internal sealed partial class WatBackend
 
     private IrModule Unit => _unit ?? throw new InvalidOperationException("the wat backend has no module");
 
-    /// <summary>Each file-scope object (and block-scope static) → its fixed address in the
-    /// data area, where it lives for the program (see <see cref="PlaceGlobals"/>).</summary>
+    /// <summary>Each file-scope object with external linkage → its fixed address in the data
+    /// area, where it lives for the program (see <see cref="PlaceGlobals"/>). Keyed by name, so
+    /// an <c>extern</c> declaration in one unit reaches the object another unit defines.</summary>
     private readonly Dictionary<string, int> _globals = new(StringComparer.Ordinal);
+
+    /// <summary>Each object with internal linkage (a <c>static</c> at file or block scope) → its
+    /// address. Keyed by the symbol: two units' <c>static const double S1</c> are two objects
+    /// under one name (musl's <c>__sin.c</c> and <c>__sindf.c</c>).</summary>
+    private readonly Dictionary<Symbol, int> _tuGlobals = new(ReferenceEqualityComparer.Instance);
+
+    /// <summary>The address <see cref="PlaceGlobals"/> gave <paramref name="sym"/>.</summary>
+    private bool TryGlobalAddr(Symbol sym, out int addr) =>
+        sym.IsTuLocal ? _tuGlobals.TryGetValue(sym, out addr) : _globals.TryGetValue(sym.TargetName, out addr);
 
     /// <summary>The address of <c>errno</c>, a slot of its own in the data area (dotcc's
     /// headers leave the name to the runtime, so it reaches the backend unresolved).</summary>
@@ -1036,7 +1046,7 @@ internal sealed partial class WatBackend
                 throw new IrUnsupportedException($"the wat target does not yet support an initialized flexible array member ('{g.Sym.Name}')");
             }
             _dataEnd = AlignUp(_dataEnd, SlotAlign(g.Sym.Type));
-            _globals[g.Sym.TargetName] = _dataEnd;
+            if (g.Sym.IsTuLocal) { _tuGlobals[g.Sym] = _dataEnd; } else { _globals[g.Sym.TargetName] = _dataEnd; }
             _dataEnd += Math.Max(1, WasmSizeOf(g.Sym.Type));
         }
     }
@@ -1044,7 +1054,7 @@ internal sealed partial class WatBackend
     /// <summary>Push a global's address (its value, for an array or an aggregate).</summary>
     private void EmitGlobalAddr(Symbol sym)
     {
-        if (!_globals.TryGetValue(sym.TargetName, out var addr))
+        if (!TryGlobalAddr(sym, out var addr))
         {
             throw new IrUnsupportedException($"the wat target has no definition of the global '{sym.Name}'");
         }
@@ -1069,7 +1079,7 @@ internal sealed partial class WatBackend
             foreach (var g in unit.Globals)
             {
                 if (g.Init is not { } init) { continue; }
-                var at = _globals[g.Sym.TargetName];
+                if (!TryGlobalAddr(g.Sym, out var at)) { throw new InvalidOperationException($"global '{g.Sym.Name}' was never placed"); }
                 switch (init)
                 {
                     case PinnedArray pa:
