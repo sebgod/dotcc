@@ -63,18 +63,33 @@ public static unsafe partial class Libc
         return true;
     }
 
-    // Pinned delegate* arrays + their GCHandles (delegate* can't be a generic arg).
-    private static readonly List<(GCHandle Handle, Array Arr)> _fnPtrArrays = new();
-
     /// <summary>
-    /// Pin a delegate*-element array and return a stable void* to element 0.
-    /// The caller casts the result to the appropriate pointer type. The array
-    /// and its GCHandle are rooted for program lifetime.
+    /// The storage of a file-scope array of function pointers, initialised from
+    /// <paramref name="arr"/>: a <c>delegate*</c> can't be a generic argument, so the emitter
+    /// builds the initializer as an array and this copies it into native memory of the same
+    /// size, one function pointer per element, which lives for the program. The caller casts
+    /// the result to the element pointer type. Copied rather than pinned: Mono (the browser's
+    /// .NET runtime) refuses to pin an array whose element type is a function pointer.
     /// </summary>
     public static unsafe void* PinFnPtrArray(Array arr)
     {
-        var handle = GCHandle.Alloc(arr, GCHandleType.Pinned);
-        lock (_fnPtrArrays) { _fnPtrArrays.Add((handle, arr)); }
-        return (void*)handle.AddrOfPinnedObject();
+        var bytes = (nuint)arr.Length * (nuint)sizeof(nint);
+        var storage = NativeMemory.AllocZeroed(bytes == 0 ? 1 : bytes);
+        if (bytes != 0)
+        {
+            fixed (byte* src = &MemoryMarshal.GetArrayDataReference(arr))
+            {
+                Buffer.MemoryCopy(src, storage, bytes, bytes);
+            }
+        }
+        return storage;
     }
+
+    /// <summary>
+    /// The base an <c>offsetof</c> measures from: <c>&amp;((T*)OffsetOfBase)-&gt;m</c> minus this
+    /// address is the member's offset, and no member is ever read. It is real memory, not a
+    /// made-up address: C#'s <c>-&gt;</c> null-checks its base, and CoreCLR checks by reading a
+    /// byte there (a null base faults, and so does an unmapped one).
+    /// </summary>
+    public static readonly void* OffsetOfBase = NativeMemory.AllocZeroed(64);
 }

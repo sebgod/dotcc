@@ -44,7 +44,7 @@ public sealed class OffsetofTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("(byte*)&__t.c - (byte*)&__t");
+            emitted.ShouldContain("(byte*)&((S*)Libc.OffsetOfBase)->c - (byte*)Libc.OffsetOfBase");
             emitted.ShouldNotContain("__Offsets");
         }
         finally { File.Delete(src); }
@@ -55,7 +55,7 @@ public sealed class OffsetofTests
     {
         // c:char@0, d:double aligned to 8 → offsetof(d) == 8 at runtime.
         // The typed IR no longer constant-folds offsetof to a literal; instead it
-        // emits an inline lambda that subtracts &__t.d from &__t at runtime.
+        // emits the member's address through Libc.OffsetOfBase minus that base, at runtime.
         // The correct field name `d` appears in the lambda body.
         var src = WriteTemp("""
             struct S { char c; double d; };
@@ -63,7 +63,7 @@ public sealed class OffsetofTests
             """);
         try
         {
-            Compiler.EmitCSharp(new[] { src }).ShouldContain("(byte*)&__t.d - (byte*)&__t");
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("(byte*)&((S*)Libc.OffsetOfBase)->d - (byte*)Libc.OffsetOfBase");
         }
         finally { File.Delete(src); }
     }
@@ -87,10 +87,9 @@ public sealed class OffsetofTests
     [Fact]
     public void union_member_offset_is_zero()
     {
-        // Every union member is at offset 0. The typed IR emits a lambda that
-        // subtracts &__t.b from &__t; for a union both are at address 0, so the
-        // subtraction evaluates to zero at runtime. No __Offsets helper class is
-        // emitted — the IR uses inline lambdas for all offsetof lowerings.
+        // Every union member is at offset 0. The typed IR subtracts the base from
+        // &p->b; for a union both are the same address, so the subtraction evaluates
+        // to zero at runtime. No __Offsets helper class is emitted.
         var src = WriteTemp("""
             union U { int a; double b; };
             int main(void) { return (int)offsetof(union U, b); }
@@ -98,7 +97,7 @@ public sealed class OffsetofTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("(byte*)&__t.b - (byte*)&__t");
+            emitted.ShouldContain("(byte*)&((U*)Libc.OffsetOfBase)->b - (byte*)Libc.OffsetOfBase");
             emitted.ShouldNotContain("__Offsets");
         }
         finally { File.Delete(src); }
@@ -108,9 +107,8 @@ public sealed class OffsetofTests
     public void non_modellable_falls_back_to_helper()
     {
         // A bit-field makes the layout non-modellable, so offsetof uses the runtime
-        // address-subtraction path. The typed IR emits this as an inline lambda (no
-        // separate __Offsets helper class). The lambda body uses `&__t.c` for the
-        // regular (non-bit-field) field c.
+        // address-subtraction path, inline (no separate __Offsets helper class), with
+        // `&p->c` for the regular (non-bit-field) field c.
         var src = WriteTemp("""
             struct S { int a; int b : 3; int c; };
             int main(void) { return (int)offsetof(struct S, c); }
@@ -119,7 +117,10 @@ public sealed class OffsetofTests
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
             emitted.ShouldNotContain("__Offsets");
-            emitted.ShouldContain("S __t = default; return (ulong)((byte*)&__t.c - (byte*)&__t)");
+            emitted.ShouldContain("((ulong)((byte*)&((S*)Libc.OffsetOfBase)->c - (byte*)Libc.OffsetOfBase))");
+            // No instance stands in for the struct: zeroing one per offsetof cost a whole
+            // struct of stack, and one over 64 KB is an initobj Mono's interpreter cannot run.
+            emitted.ShouldNotContain("__t = default");
         }
         finally { File.Delete(src); }
     }
@@ -127,8 +128,8 @@ public sealed class OffsetofTests
     [Fact]
     public void fixed_buffer_member_decays_in_helper_fallback()
     {
-        // A `fixed` buffer decays to a pointer, so the fallback helper uses
-        // `(byte*)__t.grid`, NOT `&__t.grid`. Reached here via a bit-field that
+        // A `fixed` buffer decays to a pointer, so the fallback uses
+        // `(byte*)p->grid`, NOT `&p->grid`. Reached here via a bit-field that
         // forces the fallback (a fixed-buffer-only struct would otherwise fold).
         var src = WriteTemp("""
             struct S { int a : 3; int grid[2]; };
@@ -137,8 +138,8 @@ public sealed class OffsetofTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("return (ulong)((byte*)__t.grid - (byte*)&__t)");
-            emitted.ShouldNotContain("(byte*)&__t.grid");
+            emitted.ShouldContain("((ulong)((byte*)((S*)Libc.OffsetOfBase)->grid - (byte*)Libc.OffsetOfBase))");
+            emitted.ShouldNotContain("(byte*)&((S*)Libc.OffsetOfBase)->grid");
         }
         finally { File.Delete(src); }
     }
@@ -146,10 +147,9 @@ public sealed class OffsetofTests
     [Fact]
     public void duplicate_offsetof_emits_one_helper()
     {
-        // The typed IR emits each offsetof as an inline lambda — no __Offsets helper
-        // class, no dedup across call sites. Two identical lambdas appear in the
-        // output. Verify the lambda body is present (at least once) and that no
-        // __Offsets class is generated.
+        // The typed IR emits each offsetof inline: no __Offsets helper class, no
+        // dedup across call sites. Verify the expression is present (at least once)
+        // and that no __Offsets class is generated.
         var src = WriteTemp("""
             struct S { int x : 3; int b; };
             int main(void) { return (int)offsetof(struct S, b) + (int)offsetof(struct S, b); }
@@ -157,7 +157,7 @@ public sealed class OffsetofTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("S __t = default; return (ulong)((byte*)&__t.b - (byte*)&__t)");
+            emitted.ShouldContain("((ulong)((byte*)&((S*)Libc.OffsetOfBase)->b - (byte*)Libc.OffsetOfBase))");
             emitted.ShouldNotContain("__Offsets");
         }
         finally { File.Delete(src); }
