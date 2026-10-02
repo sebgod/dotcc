@@ -42,6 +42,31 @@ public static unsafe partial class Libc
     }
     public static int strncmp(byte* a, byte* b, ulong n) => strncmp(a, b, (nuint)n);
 
+    /// <summary><c>strnlen(s, n)</c> (POSIX): the length of <paramref name="s"/>, but at most
+    /// <paramref name="n"/>, reading no byte past the n-th.</summary>
+    public static ulong strnlen(byte* s, ulong n)
+    {
+        ulong i = 0;
+        while (i < n && s[i] != 0) { i++; }
+        return i;
+    }
+
+    /// <summary><c>strdup(s)</c> (C23 7.26.2.6): a copy of <paramref name="s"/> from
+    /// <see cref="Libc.malloc(ulong)"/>, or null when there is no memory.</summary>
+    public static byte* strdup(byte* s) => strndup(s, ulong.MaxValue);
+
+    /// <summary><c>strndup(s, n)</c> (C23 7.26.2.7): a copy of at most <paramref name="n"/> bytes
+    /// of <paramref name="s"/>, then a NUL, from <see cref="Libc.malloc(ulong)"/>, or null.</summary>
+    public static byte* strndup(byte* s, ulong n)
+    {
+        var len = strnlen(s, n);
+        var d = (byte*)malloc(len + 1);
+        if (d == null) { return null; }
+        Buffer.MemoryCopy(s, d, len, len);
+        d[len] = 0;
+        return d;
+    }
+
     /// <summary>
     /// <c>strncpy(dst, src, n)</c> — copy up to <paramref name="n"/> bytes from
     /// <paramref name="src"/>. If <paramref name="src"/> is shorter, the

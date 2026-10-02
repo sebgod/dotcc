@@ -284,6 +284,7 @@ Synthetic header at `DotCC.Lib/include/string.h` declares the surface; implement
 | `strcoll` | ✅ | Locale-aware compare; dotcc runs the "C" locale (byte order), so it's exactly `strcmp`. Used by Lua's `lvm.c` string ordering. |
 | `strcasecmp`, `strncasecmp` (POSIX) | ✅ | Case-insensitive compare — ASCII tolower on each byte before the difference (the "C"-locale semantics). Declared in `<string.h>` (glibc puts them in `<strings.h>`, but real code includes string.h). chibi sexp.c. |
 | `strcpy` | ✅ | Pointer loop; declared in `<string.h>`. |
+| `strdup`, `strndup` (C23), `strnlen` (POSIX) | ✅ | A copy from `malloc` (at most `n` bytes of the source, then a NUL, for `strndup`), or null without memory; `strnlen` reads no byte past the `n`-th. C#: `StringLib`; wat: musl's. |
 | `strncpy` | ✅ | Bounded copy with NUL-padding when src is short, and the classic "no terminator when src fills n" behaviour faithfully reproduced. |
 | `strcat`, `strncat` | ✅ | Append to NUL-terminated dst; `strncat` always re-terminates after at most `n` bytes. |
 | `strchr`, `strrchr` | ✅ | First / last occurrence of a byte; the terminating NUL is part of the string (`strchr(s,0)` finds it). |
