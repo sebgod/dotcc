@@ -27,7 +27,8 @@ internal sealed record CSharpBackendResult(
     bool MainReturnsErrUnion = false,
     bool MainErrPayloadIsVoid = false,
     IReadOnlyList<(string Name, string FnName)>? Tests = null,
-    IReadOnlyList<LinkRecord>? Records = null);
+    IReadOnlyList<LinkRecord>? Records = null,
+    IReadOnlyList<(int Priority, string Name)>? Constructors = null);
 
 /// <summary>What a <see cref="LinkRecord"/> defines. An <see cref="OpaqueType"/> is the
 /// placeholder of a struct this unit never completes: the linker keeps it only when no
@@ -300,7 +301,9 @@ internal sealed class CSharpBackend
             ? unit.Tests.Select(t => (t.Name, t.Sym.TargetName)).ToList()
             : null;
 
-        return new CSharpBackendResult(fns, structs.ToString(), Aliases: "", storage.ToString() + globals.ToString(), mainArity, exports, mainReturnsVoid, mainReturnsErrUnion, mainErrPayloadIsVoid, tests, records);
+        // The [[gnu::constructor]] functions, which the program's entry calls before main.
+        var ctors = unit.Constructors.Select(s => (s.ConstructorPriority ?? Ir.IrModule.DefaultConstructorPriority, s.TargetName)).ToList();
+        return new CSharpBackendResult(fns, structs.ToString(), Aliases: "", storage.ToString() + globals.ToString(), mainArity, exports, mainReturnsVoid, mainReturnsErrUnion, mainErrPayloadIsVoid, tests, records, ctors);
     }
 
     // ---- type declarations -----------------------------------------------

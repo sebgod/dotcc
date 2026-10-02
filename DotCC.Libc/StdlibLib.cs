@@ -361,10 +361,44 @@ public static unsafe partial class Libc
         return arr;
     }
 
-    /// <summary><c>exit(code)</c> — terminate the program with
-    /// <paramref name="code"/>. Routes to <see cref="Environment.Exit(int)"/>.
-    /// (dotcc does not yet run <c>atexit</c> handlers.)</summary>
-    public static void exit(int code) => Environment.Exit(code);
+    /// <summary>The functions <see cref="atexit"/> registered, the last registered last.</summary>
+    private static readonly List<nint> s_atExit = new();
+
+    /// <summary><c>atexit(func)</c> (C11 7.22.4.2): register <paramref name="func"/> to be called
+    /// when the program exits, by <see cref="exit"/> or by returning from <c>main</c>, the last
+    /// registered first. Returns 0.</summary>
+    public static int atexit(delegate*<void> func)
+    {
+        lock (s_atExit) { s_atExit.Add((nint)func); }
+        return 0;
+    }
+
+    /// <summary>Call the functions <see cref="atexit"/> registered, the last registered first,
+    /// each once (one that registers another while they run gets it called too): what
+    /// <see cref="exit"/> does first, and what the program's entry does when <c>main</c>
+    /// returns (C11 5.1.2.2.3).</summary>
+    public static void RunAtExit()
+    {
+        while (true)
+        {
+            nint func;
+            lock (s_atExit)
+            {
+                if (s_atExit.Count == 0) { return; }
+                func = s_atExit[^1];
+                s_atExit.RemoveAt(s_atExit.Count - 1);
+            }
+            ((delegate*<void>)func)();
+        }
+    }
+
+    /// <summary><c>exit(code)</c>: call the <see cref="atexit"/> functions, then terminate the
+    /// program with <paramref name="code"/> (<see cref="Environment.Exit(int)"/>).</summary>
+    public static void exit(int code)
+    {
+        RunAtExit();
+        Environment.Exit(code);
+    }
 
     /// <summary><c>_Exit(code)</c> (C99) — terminate immediately without flushing
     /// or running handlers. Same backing as <see cref="exit"/> here.</summary>

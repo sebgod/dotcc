@@ -1,0 +1,6 @@
+constructor: priority 101
+constructor: priority 200
+constructor: no priority
+main
+atexit: registered last, runs first
+atexit: bye

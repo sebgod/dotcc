@@ -1,0 +1,1 @@
+MSVC has no constructor attribute: cl ignores [[gnu::constructor]], so the constructors would not run.

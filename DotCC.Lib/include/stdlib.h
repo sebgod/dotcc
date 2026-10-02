@@ -63,6 +63,9 @@ char *realpath(const char *path, char *resolved_path);
 int system(const char *command);
 void exit(int code);
 void _Exit(int code);
+/* Register func to be called at exit, or on return from main, the last registered first
+   (C11 7.22.4.2); 0 on success. */
+int atexit(void (*func)(void));
 void abort(void);
 
 /* Generic sort / search — comparator is a function pointer. */
