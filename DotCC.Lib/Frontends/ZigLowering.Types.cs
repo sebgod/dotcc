@@ -422,6 +422,9 @@ internal sealed partial class ZigLowering
             case Zig.TypeArmEnum e:
                 type = ReifyInlineEnum(arm, e.Arg2);
                 return true;
+            case Zig.TypeArmEnumTyped et:
+                type = ReifyInlineEnum(arm, et.Arg5, et.Arg2);
+                return true;
             default:
                 return TryTypeAliasRhs(arm, out type);
         }
@@ -873,22 +876,29 @@ internal sealed partial class ZigLowering
     /// <summary>The enum twin of <see cref="ReifyInlineStruct"/>: an anonymous <c>enum { pos, neg }</c> in a
     /// type slot (std's <c>parseIntWithSign(…, comptime sign: enum { pos, neg })</c>) reifies ONE enum per
     /// source site (<c>__AnonEnum&lt;n&gt;</c>, module-qualified in an imported module), memoized by the
-    /// occurrence, so every instance of a generic whose parameter spells it shares the type. Fields-only,
-    /// like the inline struct: a method or <c>const</c> member needs a named <c>const E = enum {…};</c>.</summary>
-    private CType ReifyInlineEnum(Item occurrence, Item enumFields)
+    /// occurrence, so every instance of a generic whose parameter spells it shares the type. Its tag type is
+    /// <paramref name="tagType"/> when the source spells one (<c>enum(u8) { … }</c>, a type arm, GH #282). Its
+    /// consts register with it, and its methods are declared now and their bodies deferred, as a reified
+    /// generic's are (<see cref="DeferReifiedMethod"/>): the reification may run from any type position. The
+    /// methods see no comptime seeds, so one that names a generic's parameter is a loud cut.</summary>
+    private CType ReifyInlineEnum(Item occurrence, Item enumFields, Item? tagType = null)
     {
         if (_inlineStructNames.TryGetValue(occurrence, out var existing)) { return _containerTypes[existing]; }
-        var (_, methods, consts) = SplitEnumMembers(enumFields);
-        if (methods.Count > 0 || consts.Count > 0)
-        {
-            throw new IrUnsupportedException(
-                "zig: an inline `enum {…}` type is fields-only — a method or `const` member needs a named "
-                + "enum decl (`const E = enum { … };`)");
-        }
         var name = QualifyTypeName($"__AnonEnum{_inlineStructNames.Count}");   // shares the per-module counter
         _inlineStructNames[occurrence] = name;
         if (_currentContainer is { } enumParent) { _containerParents[name] = enumParent; }   // as an inline union's (task #193)
-        using (EnterContainer(name)) { RegisterEnumZig(name, null, enumFields); }
+        using (EnterContainer(name))
+        {
+            foreach (var methodDef in RegisterEnumZig(name, tagType, enumFields))
+            {
+                var me = DeclareMethod(name, methodDef);
+                _currentContainer = name;   // DeclareMethod clears it
+                if (IsFnTemplate(me.sym)) { continue; }
+                DeferReifiedMethod(new PendingReifiedMethod(me.sym, name, me.ps, me.body,
+                    System.Array.Empty<TypeSeed>(), System.Array.Empty<ValueSeed>(),
+                    System.Array.Empty<(string, bool, long, CType)>()));
+            }
+        }
         return _containerTypes[name];
     }
 
