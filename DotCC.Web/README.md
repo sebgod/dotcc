@@ -1,7 +1,8 @@
 # DotCC.Web: the in-browser sandbox
 
 A **fully static, single-page** web app that runs the dotcc compiler **entirely in
-the browser** and executes the C (or Zig) you type. There is no server, no backend and
+the browser** and executes the C (or Zig) you type, or runs the Python you type on CPython
+3.13, which dotcc compiled to wasm ahead of time. There is no server, no backend and
 no telemetry. Live at **<https://sebgod.github.io/dotcc/>**.
 
 It's a Blazor WebAssembly app that loads `DotCC.Lib` (the actual compiler) as managed
@@ -10,11 +11,21 @@ It's a Blazor WebAssembly app that loads `DotCC.Lib` (the actual compiler) as ma
 ```
 source  ─Compiler.EmitWat→  .wat text
         ─libwabt.js parseWat().toBinary()→  wasm bytes
-        ─WebAssembly.instantiate + fd_write/proc_exit shim→  run main(), capture stdout/stderr
+        ─WebAssembly.instantiate + WASI (js/wasi-fs.js)→  run _start, capture stdout/stderr
 ```
 
-That run path is the always-on `WatOracleTests` round-trip moved into the browser:
-`fd_write` is the only import dotcc's wat backend emits. The **wat / C# / -E** tabs
+That run path is the `WatOracleTests` round-trip moved into the browser: a program is a
+WASI command, and its WASI calls (arguments, descriptors, paths) are `js/wasi-fs.js`'s, the
+same file `Scripts/wat-run.js` runs under node, here over a file system in memory.
+
+The **Python** mode compiles nothing in the tab. CI compiles CPython 3.13 with dotcc's wat
+back end (`examples/cpython/build-wat.sh`) into `python/python.wasm` and packs its standard
+library into `python/stdlib.bin` (`examples/cpython/pack-stdlib.py`). The page's worker
+(`js/python-worker.js`, over `js/python-run.js`) fetches both on the first Python run,
+unpacks the library into an in-memory file system and runs the editor's code as
+`/main.py`, off the page's thread, so Stop can end a program that never does. To try it
+locally, build both (see `examples/cpython/README.md`) and copy them to
+`wwwroot/python/` (git-ignored). The **wat / C# / -E** tabs
 are pure `Compiler.EmitWat` / `EmitCSharp` / `Preprocess` string projections; the
 editor is CodeMirror 6; share-links pack the source into a `#src=…` fragment with the
 native `CompressionStream` API. Everything is client-side, and the only "server" is
@@ -71,8 +82,10 @@ site already exists, and then PUT is the call.)
 ### 2. The deploy workflow: `.github/workflows/pages.yml`
 
 Triggers on push to `main` that touches `DotCC.Web/**`, `DotCC.Lib/**`, `DotCC.Libc/**`,
-`examples/cpython/programs/**` or the workflow itself (so the live site tracks the latest
-compiler and the Python page the latest programs), plus manual `workflow_dispatch`. The
+`examples/cpython/**` or the workflow itself (so the live site tracks the latest compiler,
+the Python page the latest programs and the Python mode the latest python.wasm), plus manual
+`workflow_dispatch`. Besides publishing the app, it compiles CPython to `python.wasm` and
+packs its standard library into `publish/wwwroot/python/`. The
 **build** job:
 
 1. **`dotnet workload install wasm-tools`**: a Release Blazor-WASM publish relinks the

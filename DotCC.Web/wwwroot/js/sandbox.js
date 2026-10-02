@@ -3,10 +3,10 @@
 // Blazor lowers C/Zig to WebAssembly-text via Compiler.EmitWat; this module turns
 // that .wat into a running program entirely in the browser:
 //   wat text --> libwabt.js parseWat().toBinary() --> WebAssembly.instantiate
-//   --> call main(), capturing what it writes to fd 1/2 through a WASI fd_write shim.
-// The shim mirrors Scripts/wat-run.js, the node runner the wat oracle and probe use, less
-// its threads: fd_write, fd_read, fd_seek, fd_close, proc_exit, clock_time_get and random_get
-// are the WASI functions dotcc's wat libc imports.
+//   --> call _start, capturing what it writes to fd 1/2.
+// Its WASI is wasi-fs.js's, which Scripts/wat-run.js (the node runner the wat oracle and probe
+// use) runs too, over a file system in memory instead of node's. The Python mode runs CPython,
+// compiled to wasm by dotcc in CI, in a worker (python-worker.js).
 //
 // `WabtModule` is the global exposed by the vendored lib/wabt/libwabt.js (a UMD
 // build; with no CommonJS/AMD present it lands on window). It is a function that
@@ -68,35 +68,20 @@ window.dotccSandbox = (function () {
     let inst = null;
     const fd1 = [];
     const fd2 = [];
+    const decode = (arr) => new TextDecoder("utf-8", { fatal: false }).decode(new Uint8Array(arr));
 
-    // Minimal WASI: fd_write reads each iovec out of the module's exported memory
-    // and accumulates fd-1 (stdout) / fd-2 (stderr) bytes; proc_exit unwinds with
-    // the status so `main` can early-exit. Any other import the module declares but
-    // we don't provide would surface as a link error in the run stage.
-    const fd_write = (fd, iovs, iovsLen, nwrittenPtr) => {
-      const mem = inst.exports.memory.buffer;
-      const dv = new DataView(mem);
-      const bytes = new Uint8Array(mem);
-      let written = 0;
-      for (let i = 0; i < iovsLen; i++) {
-        const ptr = dv.getUint32(iovs + i * 8, true);
-        const len = dv.getUint32(iovs + i * 8 + 4, true);
-        const sink = fd === 2 ? fd2 : fd1;
-        for (let j = 0; j < len; j++) { sink.push(bytes[ptr + j]); }
-        written += len;
-      }
-      dv.setUint32(nwrittenPtr, written, true);
-      return 0;
-    };
-    // The page has no stdin to give: fd 0 is at its end. The standard streams are neither
-    // seekable nor closable, and there are no other descriptors.
-    const fd_read = (fd, iovs, iovsLen, nreadPtr) => {
-      if (fd !== 0) { return 8; }   // EBADF
-      new DataView(inst.exports.memory.buffer).setUint32(nreadPtr, 0, true);
-      return 0;
-    };
-    const fd_seek = (fd) => (fd <= 2 ? 70 : 8);   // ESPIPE, EBADF
-    const fd_close = (fd) => (fd <= 2 ? 0 : 8);
+    // The program's WASI: its arguments, descriptors and paths are wasi-fs.js's (shared with
+    // the node runner the tests use), over a file system in memory preopened as "/", fresh for
+    // each run; what it writes to fd 1 and 2 is kept for the output pane, and fd 0 is at its
+    // end (the page has no stdin to give). proc_exit unwinds with the status.
+    const wasi = WasiFs.createWasi({
+      memory: () => inst.exports.memory.buffer,
+      args: ["program"],
+      preopens: [{ name: "/", fs: new WasiFs.MemFs() }],
+      stdout: (bytes) => { for (const b of bytes) { fd1.push(b); } },
+      stderr: (bytes) => { for (const b of bytes) { fd2.push(b); } },
+      stdin: () => null,
+    });
     const proc_exit = (code) => { const e = new Error("proc_exit"); e.__exit = code | 0; throw e; };
     // clock_time_get (time(), clock()): nanoseconds of clock 0 (realtime) or, for the
     // monotonic and CPU-time clocks, the page's high-resolution time since it loaded.
@@ -108,6 +93,11 @@ window.dotccSandbox = (function () {
       new DataView(inst.exports.memory.buffer).setBigUint64(timePtr, ns, true);
       return 0;
     };
+    const clock_res_get = (id, resPtr) => {
+      if (id < 0 || id > 3) { return 28; }
+      new DataView(inst.exports.memory.buffer).setBigUint64(resPtr, id === 0 ? 1000000n : 1000n, true);
+      return 0;
+    };
     // random_get (getrandom, getentropy): the browser's secure source, 64 KiB at a time.
     const random_get = (buf, len) => {
       for (let at = 0; at < len; at += 65536) {
@@ -115,8 +105,6 @@ window.dotccSandbox = (function () {
       }
       return 0;
     };
-
-    const decode = (arr) => new TextDecoder("utf-8", { fatal: false }).decode(new Uint8Array(arr));
 
     try {
       const mod = await WebAssembly.compile(buffer);
@@ -131,14 +119,16 @@ window.dotccSandbox = (function () {
         };
       }
       const instance = await WebAssembly.instantiate(mod, {
-        wasi_snapshot_preview1: { fd_write, fd_read, fd_seek, fd_close, proc_exit, clock_time_get, random_get },
+        wasi_snapshot_preview1: { ...wasi, proc_exit, clock_time_get, clock_res_get, random_get },
       });
       inst = instance;
 
+      // A program is a WASI command: _start runs it and ends in proc_exit with its status.
       let exitCode = 0;
       try {
-        const main = inst.exports.main;
-        exitCode = typeof main === "function" ? (main() | 0) : 0;
+        const start = inst.exports._start;
+        if (typeof start === "function") { start(); }
+        else if (typeof inst.exports.main === "function") { exitCode = inst.exports.main() | 0; }
       } catch (e) {
         if (e && typeof e.__exit === "number") { exitCode = e.__exit; }
         else { throw e; }
@@ -146,6 +136,73 @@ window.dotccSandbox = (function () {
       return { ok: true, exitCode, stdout: decode(fd1), stderr: decode(fd2) };
     } catch (e) {
       return { ok: false, stage: "run", error: String((e && e.message) || e) };
+    }
+  }
+
+  // --- Python (GH #269) ---------------------------------------------------
+  // CPython 3.13, compiled to wasm by dotcc's wat back end in CI, runs in a worker
+  // (python-worker.js): a program that never ends ties up the worker, not the tab, and Stop
+  // terminates it. The worker fetches python.wasm and the standard library on its first run and
+  // keeps them; a terminated worker is replaced on the next run.
+  let pyWorker = null;
+  let pyPending = null;
+
+  function pythonWorker() {
+    if (!pyWorker) { pyWorker = new Worker(new URL("js/python-worker.js", document.baseURI)); }
+    return pyWorker;
+  }
+
+  /**
+   * Run Python code as /main.py. Resolves like assembleAndRun: { ok:true, exitCode, stdout,
+   * stderr } or { ok:false, stage, error }. What the program writes reaches `progress`, a .NET
+   * object reference, through its OnPythonOutput(stdout, stderr) at most every 100 ms, so the
+   * output pane fills while it runs; OnPythonLoading() says the interpreter is being fetched.
+   */
+  function runPython(code, progress) {
+    return new Promise((resolve) => {
+      const out = { 1: "", 2: "" };
+      let timer = null;
+      const report = () => {
+        timer = null;
+        if (progress) { progress.invokeMethodAsync("OnPythonOutput", out[1], out[2]); }
+      };
+      const finish = (result) => {
+        if (timer) { clearTimeout(timer); timer = null; }
+        pyPending = null;
+        resolve(result);
+      };
+      pyPending = { finish, out };
+      const w = pythonWorker();
+      w.onmessage = ({ data }) => {
+        if (data.type === "loading") {
+          if (progress) { progress.invokeMethodAsync("OnPythonLoading"); }
+        } else if (data.type === "out") {
+          out[data.fd] += data.text;
+          if (!timer) { timer = setTimeout(report, 100); }
+        } else if (data.type === "exit") {
+          finish({ ok: true, exitCode: data.code, stdout: out[1], stderr: out[2] });
+        } else if (data.type === "error") {
+          finish({ ok: false, stage: "run", error: data.error, stdout: out[1], stderr: out[2] });
+        }
+      };
+      w.onerror = (e) => finish({ ok: false, stage: "run", error: String((e && e.message) || e) });
+      w.postMessage({
+        code,
+        urls: {
+          wasm: new URL("python/python.wasm", document.baseURI).href,
+          stdlib: new URL("python/stdlib.bin", document.baseURI).href,
+        },
+      });
+    });
+  }
+
+  /** Stop the running Python program: terminate its worker (the next run starts another,
+   *  which fetches the interpreter from the browser's cache). */
+  function stopPython() {
+    if (pyWorker) { pyWorker.terminate(); pyWorker = null; }
+    if (pyPending) {
+      const { finish, out } = pyPending;
+      finish({ ok: true, exitCode: 130, stdout: out[1], stderr: out[2] + "\n[stopped]\n" });
     }
   }
 
@@ -249,5 +306,5 @@ window.dotccSandbox = (function () {
     return true;
   }
 
-  return { assembleAndRun, makeShareLink, readShareSource, getLastWasmBase64, downloadLastWasm, downloadText };
+  return { assembleAndRun, runPython, stopPython, makeShareLink, readShareSource, getLastWasmBase64, downloadLastWasm, downloadText };
 })();
