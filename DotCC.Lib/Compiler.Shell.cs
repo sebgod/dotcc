@@ -197,8 +197,18 @@ public static partial class Compiler
         IReadOnlyList<(string Name, string FnName)>? tests = null,
         bool pythonShim = false,
         bool posixPaths = false,
-        IReadOnlyList<string>? libraryClasses = null)
+        IReadOnlyList<string>? libraryClasses = null,
+        IReadOnlyList<(int Priority, string Name)>? constructors = null)
     {
+        // The [[gnu::constructor]] functions run before main, the lower priority first and in
+        // definition order among equals. A library has no entry to run them from yet.
+        var ctors = (constructors ?? []).OrderBy(c => c.Priority).Select(c => c.Name).ToList();
+        if (ctors.Count > 0 && emit == EmitMode.SharedLib)
+        {
+            throw new CompileException(
+                $"dotcc does not yet support: a [[gnu::constructor]] function ('{ctors[0]}') in a shared library");
+        }
+        var ctorCalls = string.Concat(ctors.Select(n => $"{n}();\n"));
         if (emit == EmitMode.SharedLib)
         {
             return BuildLibraryShell(string.Join("\n\n", emittedFns), structDecls, usingAliases, globals, exports, importsClass, importsAreStatic, pythonShim);
@@ -377,14 +387,14 @@ public static partial class Compiler
             // such programs reach their own recursion guards and fault gracefully.
             {{debugHeapInit}}{{posixPathsInit}}int __dotccExit = 0;
             var __dotccThread = new System.Threading.Thread(
-                () => { __dotccExit = __DotCcEntry(); }, 64 * 1024 * 1024);
+                () => { __dotccExit = __DotCcEntry(); Libc.RunAtExit(); }, 64 * 1024 * 1024);
             __dotccThread.Start();
             __dotccThread.Join();
             return __dotccExit;
 
             int __DotCcEntry()
             {
-            {{importsBind}}{{entry}}
+            {{importsBind}}{{ctorCalls}}{{entry}}
             }
 
 

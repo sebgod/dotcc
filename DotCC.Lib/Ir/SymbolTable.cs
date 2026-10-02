@@ -104,6 +104,13 @@ public sealed class Symbol
     /// <c>[System.Diagnostics.CodeAnalysis.DoesNotReturn]</c> on the emitted method.</summary>
     public bool IsNoReturn { get; set; }
 
+    /// <summary>The priority of a function declared <c>[[gnu::constructor]]</c> (or
+    /// <c>[[gnu::constructor(N)]]</c>), which the program runs before <c>main</c>: N, or 65536
+    /// for none, which GCC runs after every one with a priority. Null for any other function.
+    /// Any declaration marks the shared symbol; the definition puts it on
+    /// <see cref="IrModule.Constructors"/>.</summary>
+    public int? ConstructorPriority { get; set; }
+
     /// <summary>True when the function is declared <c>inline</c> (C99; any
     /// declaration marks the shared symbol). The C# backend surfaces it as
     /// <c>[MethodImpl(MethodImplOptions.AggressiveInlining)]</c> — a real JIT

@@ -327,6 +327,7 @@ internal sealed partial class IrBuilder
                 _pendingAttrNoreturn = false;
                 _pendingAttrDeprecated = null;
                 _pendingAttrNodiscard = null;
+                _pendingAttrConstructor = null;
                 break;
             case C.FuncDef d: BuildFuncDef(d.Arg0, d.Arg1, Fingerprints.Of(fn)); break;
             // A header-defined file-scope variable (chibi sexp.h's `static const
@@ -544,6 +545,9 @@ internal sealed partial class IrBuilder
     // `[[…]]` specifier (null = absent, "" = message-less), consumed by the wrapped
     // function declaration (ApplyFnMarkers → Symbol.Nodiscard) and cleared on unwind.
     private string? _pendingAttrNodiscard;
+    // The priority of an enclosing `[[gnu::constructor]]` (GCC's attribute in C23's namespaced
+    // spelling): null = absent, IrModule.DefaultConstructorPriority = no priority given.
+    private int? _pendingAttrConstructor;
 
     /// <summary>Record one function/storage specifier prefix of the declaration
     /// being built — `_Noreturn` (gated C11) and `inline` for the enclosing function
@@ -662,9 +666,21 @@ internal sealed partial class IrBuilder
             case C.AttrCall a when Tok(a.Arg0) == "nodiscard":
                 _pendingAttrNodiscard ??= TryStringLiteral(a.Arg2) ?? "";
                 break;
+            // GCC's constructor attribute, `[[gnu::constructor]]` or with a priority,
+            // `[[gnu::constructor(101)]]`: the function runs before main.
+            case C.AttrNamespaced a when IsGnu(a.Arg0) && Tok(a.Arg3) is "constructor" or "__constructor__":
+                _pendingAttrConstructor ??= IrModule.DefaultConstructorPriority;
+                break;
+            case C.AttrNsCall a when IsGnu(a.Arg0) && Tok(a.Arg3) is "constructor" or "__constructor__":
+                _pendingAttrConstructor ??= (int)(ConstEval(BuildExpr(a.Arg5))
+                    ?? throw new IrUnsupportedException("a constructor priority that is not an integer constant expression"));
+                break;
             default: break; // all other attribute shapes: accepted + ignored
         }
     }
+
+    /// <summary>True when an attribute's namespace is GCC's, <c>gnu</c> or <c>__gnu__</c>.</summary>
+    private static bool IsGnu(Item ns) => Tok(ns) is "gnu" or "__gnu__";
 
     /// <summary>True when an <c>AttrList</c> contains the C23 <c>[[fallthrough]]</c>
     /// attribute (a bare identifier). Recognized structurally — like the attributes in
@@ -714,6 +730,7 @@ internal sealed partial class IrBuilder
         if (_sawInlineSpec) { sym.IsInline = true; }
         if (_pendingAttrDeprecated is { } dep && sym.Deprecated is null) { sym.Deprecated = dep; }
         if (_pendingAttrNodiscard is { } nd && sym.Nodiscard is null) { sym.Nodiscard = nd; }
+        if (_pendingAttrConstructor is { } prio) { sym.ConstructorPriority ??= prio; }
     }
 
     /// <summary>Warn (gcc <c>-Wunused-result</c>, on by default — the attribute's
@@ -881,6 +898,16 @@ internal sealed partial class IrBuilder
         ApplyFnMarkers(funcSym);
         _unitFunctions.Add(funcSym);
         if (_libraryUnit && !sig.IsStatic) { Module.LibraryFunctions.Add(sig.Name); }
+        if (funcSym.ConstructorPriority is not null && !Module.Constructors.Contains(funcSym))
+        {
+            // The program calls a constructor with no arguments, before main.
+            if (sig.Params.Count > 0)
+            {
+                Diagnostics.Add(new Diagnostic(Severity.Error,
+                    $"constructor '{sig.Name}' must take no parameters", SrcPos.From(fnSig), _file));
+            }
+            else { Module.Constructors.Add(funcSym); }
+        }
         _symbols.BeginFunction();
         _setjmpCalls.Clear(); // per-function stray-setjmp tracking (see the field)
         _currentFnName = sig.Name; // drives the `__func__` predefined identifier

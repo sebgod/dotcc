@@ -50,6 +50,9 @@ public static partial class Compiler
     // `runtime:python`: the unit included the synthetic <Python.h>, so the program links the
     // runtime's abi3 shim.
     private const string FragRuntimePython = "//!!dotcc-obj runtime:python";
+    // `ctor:<priority> <name>`: a [[gnu::constructor]] function, which the program's entry
+    // calls before main, by priority and then in link order.
+    private const string FragCtor = "//!!dotcc-obj ctor:";
 
     // The uniform "magic" first line every dotcc-generated `.cs` carries, so any
     // file can be classified at a glance:
@@ -99,7 +102,8 @@ public static partial class Compiler
         IReadOnlyList<Backends.LinkRecord> records, int mainArity,
         IReadOnlyList<(string Name, string FieldType)> importSpecs, IEnumerable<string> defNames,
         IReadOnlyList<EmitHelpers.Export> exports, bool mainReturnsVoid = false,
-        bool mainReturnsErrUnion = false, bool mainErrPayloadIsVoid = false, bool pythonShim = false)
+        bool mainReturnsErrUnion = false, bool mainErrPayloadIsVoid = false, bool pythonShim = false,
+        IReadOnlyList<(int Priority, string Name)>? constructors = null)
     {
         var sb = new StringBuilder();
         sb.Append(MagicObject).Append(' ').Append(ObjectFormat).Append(" — link with `dotcc <objs> -o <out>`.\n");
@@ -107,6 +111,10 @@ public static partial class Compiler
         if (mainReturnsVoid) { sb.Append(FragMainVoid).Append("1").Append('\n'); }
         if (mainReturnsErrUnion) { sb.Append(FragMainErr).Append(mainErrPayloadIsVoid ? "v" : "i").Append('\n'); }
         if (pythonShim) { sb.Append(FragRuntimePython).Append('\n'); }
+        foreach (var (priority, name) in constructors ?? [])
+        {
+            sb.Append(FragCtor).Append(priority).Append(' ').Append(name).Append('\n');
+        }
         // Import candidates + defined names, for the link step's resolution. Names
         // have no spaces (C identifiers), so the type — which does (`delegate*
         // unmanaged[Cdecl]<int, int>`) — is everything after the first space.
@@ -196,6 +204,9 @@ public static partial class Compiler
         /// <summary>The functions a library exports, with their C# signatures.</summary>
         public List<EmitHelpers.Export> Exports { get; } = new();
 
+        /// <summary>The <c>[[gnu::constructor]]</c> functions, in link order.</summary>
+        public List<(int Priority, string Name)> Constructors { get; } = new();
+
         /// <summary>The parameter count of <c>main</c>, or -1 when no object defines it.</summary>
         public int MainArity { get; set; } = -1;
 
@@ -284,7 +295,8 @@ public static partial class Compiler
                           importsAreStatic: false, mainReturnsVoid: set.MainReturnsVoid,
                           mainReturnsErrUnion: set.MainReturnsErrUnion, mainErrPayloadIsVoid: set.MainErrPayloadIsVoid,
                           pythonShim: set.PythonShim, posixPaths: posixPaths,
-                          libraryClasses: managed.SelectMany(l => l.Classes).ToList());
+                          libraryClasses: managed.SelectMany(l => l.Classes).ToList(),
+                          constructors: set.Constructors);
     }
 
     /// <summary>A managed library a program links against, as its manifest describes it.</summary>
@@ -523,6 +535,12 @@ public static partial class Compiler
                     // `main-void:` and `main:` are disjoint markers (the char after
                     // "main" differs: '-' vs ':'), so this branch and the next don't race.
                     if (line[FragMainVoid.Length..].Trim() == "1") { set.MainReturnsVoid = true; }
+                }
+                else if (line.StartsWith(FragCtor, StringComparison.Ordinal))
+                {
+                    var rest = line[FragCtor.Length..];
+                    var sp = rest.IndexOf(' ');
+                    if (sp > 0 && int.TryParse(rest[..sp], out var priority)) { set.Constructors.Add((priority, rest[(sp + 1)..])); }
                 }
                 else if (line.StartsWith(FragMain, StringComparison.Ordinal))
                 {

@@ -64,6 +64,18 @@ internal sealed partial class IrModule
     /// backend may leave out one nothing it emits reaches, as it does a library function.</summary>
     public HashSet<Symbol> LibraryGlobals { get; } = new(ReferenceEqualityComparer.Instance);
 
+    /// <summary>The functions defined <c>[[gnu::constructor]]</c>, in the order they were defined:
+    /// the program runs them before <c>main</c>, those with the lower
+    /// <see cref="Symbol.ConstructorPriority"/> first (see <see cref="ConstructorsInOrder"/>).</summary>
+    public List<Symbol> Constructors { get; } = new();
+
+    /// <summary><see cref="Constructors"/> in the order they run: by priority, and in definition
+    /// order among equals.</summary>
+    public IEnumerable<Symbol> ConstructorsInOrder => Constructors.OrderBy(s => s.ConstructorPriority ?? DefaultConstructorPriority);
+
+    /// <summary>The priority of a constructor that gives none (GCC's: after every one that does).</summary>
+    public const int DefaultConstructorPriority = 65536;
+
     public List<FuncDef> Functions { get; } = new();
     public List<GlobalVar> Globals { get; } = new();
     public List<StructTypeDef> Types { get; } = new();
