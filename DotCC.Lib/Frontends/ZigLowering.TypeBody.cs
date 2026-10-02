@@ -700,6 +700,7 @@ internal sealed partial class ZigLowering
                 return arm.Content switch
                 {
                     Zig.TypeArmEnum e => (ReifyInlineEnum(arm, e.Arg2), null),
+                    Zig.TypeArmEnumTyped et => (ReifyInlineEnum(arm, et.Arg5, et.Arg2), null),
                     Zig.TypeArmStruct s => (ReifyInlineStruct(arm, s.Arg2), null),
                     _ => throw new IrUnsupportedException("zig type arm: " + (arm.Content?.GetType().Name ?? "null")),
                 };

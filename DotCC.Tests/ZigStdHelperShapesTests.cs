@@ -19,6 +19,33 @@ namespace DotCC.Tests;
 [Collection("ZigFrontend")]
 public sealed class ZigStdHelperShapesTests
 {
+    [Fact]
+    public void A_tagged_enum_with_methods_is_an_arm_of_a_type_choosing_if()
+    {
+        // GH #282 (std.Io.File's Permissions): the chosen arm reifies as an enum on its tag type, its const registers and
+        // its methods lower as a named enum's would.
+        var cs = EmitZig("""
+            const small = true;
+            const P = if (small) enum(u8) {
+                b = 2,
+                c = 5,
+                _,
+                pub const default: @This() = .c;
+                pub fn code(p: @This()) u8 {
+                    return @intFromEnum(p);
+                }
+            } else enum(u16) {
+                d = 0,
+            };
+            pub fn main() u8 {
+                const p: P = .b;
+                return p.code() + P.default.code();
+            }
+            """);
+        cs.ShouldContain("enum __AnonEnum0 : byte");
+        cs.ShouldContain("__AnonEnum0_code(p) + __AnonEnum0_code(__AnonEnum0.c)");
+    }
+
     private static string EmitZig(string body)
     {
         var path = Path.Combine(Path.GetTempPath(), $"dotcc-zighelp-{Guid.NewGuid():N}.zig");

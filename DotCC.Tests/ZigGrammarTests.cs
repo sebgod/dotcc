@@ -53,6 +53,8 @@ public sealed class ZigGrammarTests
     [InlineData("fn f(o: ?u8, p: ?u8, g: bool) u8 { return o orelse if (g) 5 else p orelse 6; }")]
     [InlineData("const m: usize = a orelse (b orelse if (c) @compileError(\"x\") else @compileError(\"y\"));")]
     [InlineData("fn f(o: ?u8, p: E!u8) S { return .{ .n = o orelse if (p) |n| n + 1 else |_| 0 }; }")]
+    // GH #282: a tagged enum, with methods, as a type arm
+    [InlineData("const P = if (w) enum(u32) { a = 1, _ } else enum(u16) { b = 2, pub fn f(p: @This()) u16 { return @intFromEnum(p); } };")]
     public void Accepts_real_zig(string src) => TryParse(src).ShouldBeTrue();
 
     [Theory]

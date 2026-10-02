@@ -1023,6 +1023,9 @@ productions:
       # else struct {…};`): after the capture, `struct` / `enum` starts a TypeArm, not a RhsExpr.
       - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', TypeArm, 'else', TypeArm], action: ifExprCaptureTypeArms }
       - { lhs: TypeArm, rhs: ['enum', '{', EnumFields, '}'],   action: typeArmEnum }
+      # A tagged enum arm (std.Io.File's `Permissions = … orelse if (is_windows) enum(DWORD) { … } else …`, GH #282),
+      # members and methods as a named `enum(T)` has. After `enum`, `(` versus `{` is one token.
+      - { lhs: TypeArm, rhs: ['enum', '(', Type, ')', '{', EnumFields, '}'], action: typeArmEnumTyped }
       - { lhs: TypeArm, rhs: ['struct', '{', FieldDecls, '}'], action: typeArmStruct }
       # Value-position captured `if` — `if (opt) |x| thenExpr else elseExpr` (S4a). The `|` after the
       # `)` cannot start a RhsExpr (it is only an infix bitwise-or), so this is conflict-free with the

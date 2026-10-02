@@ -6898,6 +6898,37 @@ public sealed class ZigOracleTests
             "}\n", 56, "" },
         // GH #129: an `if` as the right operand of `orelse` / `catch`, unparenthesized: value arms, a `return` arm,
         // the greedy else arm (`… else lookup(y) orelse 30`), inside parentheses, and a capturing `if` as a field value.
+        // GH #282: a tagged enum with a const and methods as an arm of a type-choosing `if`, in an `else if` chain.
+        new object[] { "if_arm_tagged_enum",
+            "const is_windows = false;\n" +
+            "const small = true;\n" +
+            "\n" +
+            "const P = if (is_windows) enum(u32) {\n" +
+            "    a = 1,\n" +
+            "    _,\n" +
+            "} else if (small) enum(u8) {\n" +
+            "    b = 2,\n" +
+            "    c = 5,\n" +
+            "    _,\n" +
+            "\n" +
+            "    pub const default: @This() = .c;\n" +
+            "\n" +
+            "    pub fn code(p: @This()) u8 {\n" +
+            "        return @intFromEnum(p);\n" +
+            "    }\n" +
+            "\n" +
+            "    pub fn next(p: @This()) @This() {\n" +
+            "        return @enumFromInt(@intFromEnum(p) + 1);\n" +
+            "    }\n" +
+            "} else enum(u0) {\n" +
+            "    d = 0,\n" +
+            "};\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    const p: P = .b;\n" +
+            "    const q = P.default;\n" +
+            "    return p.code() * 10 + q.code() + p.next().code();\n" +
+            "}\n", 28, "" },
         new object[] { "orelse_catch_if",
             "const std = @import(\"std\");\n" +
             "\n" +
