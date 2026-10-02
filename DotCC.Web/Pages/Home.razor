@@ -163,9 +163,7 @@
 </section>
 
 @code {
-    /// <summary>Build a sandbox deep-link that pre-selects a language + starter example
-    /// (read by <c>Sandbox.AdoptDeepLink</c>). The example name is URL-encoded so
-    /// spaces / parens in names like "Hello (std.debug.print)" round-trip.</summary>
-    private static string Deep(string lang, string example)
-        => $"sandbox?lang={lang}&ex={Uri.EscapeDataString(example)}";
+    /// <summary>A sandbox deep-link that opens a language's starter example
+    /// (<see cref="Sandbox.LinkTo"/>).</summary>
+    private static string Deep(string lang, string example) => Sandbox.LinkTo(lang, example);
 }

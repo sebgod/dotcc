@@ -140,6 +140,14 @@ jobs:
           # Static hosts 404 on client-side deep links; GitHub Pages serves 404.html
           # for unknown paths, so a copy of index.html makes routes resolve.
           cp publish/wwwroot/index.html publish/wwwroot/404.html
+          # It does so with status 404, which link previews and crawlers take at its word.
+          # Each page's route gets a copy of its own (sandbox.html for /sandbox), which
+          # Pages serves for the extensionless path with status 200, query and all.
+          for route in $(sed -n 's|^@page "/\(.\+\)"$|\1|p' DotCC.Web/Pages/*.razor); do
+            mkdir -p "publish/wwwroot/$(dirname "$route")"
+            cp publish/wwwroot/index.html "publish/wwwroot/$route.html"
+            echo "route /$route -> $route.html"
+          done
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

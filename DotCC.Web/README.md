@@ -28,7 +28,10 @@ locally, build both (see `examples/cpython/README.md`) and copy them to
 `wwwroot/python/` (git-ignored). The **wat / C# / -E** tabs
 are pure `Compiler.EmitWat` / `EmitCSharp` / `Preprocess` string projections; the
 editor is CodeMirror 6; share-links pack the source into a `#src=…` fragment with the
-native `CompressionStream` API. Everything is client-side, and the only "server" is
+native `CompressionStream` API, after a `?lang=` naming its language. The address follows
+the selected language and example (`sandbox?lang=python&ex=Classes`), so it can be copied
+as a link to that example, and each page's route is published as its own copy of
+`index.html` (`sandbox.html`), so GitHub Pages serves a deep link with status 200. Everything is client-side, and the only "server" is
 GitHub Pages handing over static files.
 
 Besides the sandbox, the site has three story pages: **Home**, **Coverage**, and
