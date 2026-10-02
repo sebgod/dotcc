@@ -136,6 +136,9 @@ public sealed class WatWholeProgramTests
         // CPython's parser.c: an array of pointers to array compound literals at file scope.
         var wat = WithSources(paths => Compiler.EmitWat(paths),
             "typedef struct { const char *s; int n; } KW;\nstatic KW *table[] = { (KW[]) {{0, -1}}, (KW[]) {{\"if\", 1}, {0, -1}} };\nint main(void) { return table[1][0].n; }\n");
-        wat.ShouldContain("(func $__init_globals");
+        // All of it is data: the literals' storage, and the table of their addresses.
+        wat.ShouldNotContain("__init_globals");
+        wat.ShouldContain("\\69\\66\\00");          // "if"
+        wat.ShouldContain("\\ff\\ff\\ff\\ff");    // -1
     }
 }
