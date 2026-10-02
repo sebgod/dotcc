@@ -3,12 +3,14 @@
 
 /* dotcc's <stdlib.h> — memory, conversions, RNG, environment, program
    control, and generic sort/search. Implementations: malloc/free/strtod/
-   atof in DotCC.Libc/Libc.cs, the rest in DotCC.Libc/StdlibLib.cs. Length
-   arguments use plain `int` (dotcc's size_t stand-in). */
+   atof in DotCC.Libc/Libc.cs, the rest in DotCC.Libc/StdlibLib.cs. */
 
 #ifndef NULL
 #define NULL ((void *)0)
 #endif
+
+/* size_t (C11 7.22), the same typedef as <stddef.h>'s (C11 6.7p3 allows the repeat). */
+typedef unsigned long size_t;
 
 #define EXIT_SUCCESS 0
 #define EXIT_FAILURE 1
@@ -22,9 +24,9 @@ typedef struct ldiv_t { long quot; long rem; } ldiv_t;
 typedef struct lldiv_t { long long quot; long long rem; } lldiv_t;
 
 /* Memory management. */
-void* malloc(int size);
-void* calloc(int n, int size);
-void* realloc(void* p, int size);
+void* malloc(size_t size);
+void* calloc(size_t n, size_t size);
+void* realloc(void* p, size_t size);
 void free(void* p);
 
 /* String -> number conversions. strtod parses a leading double and (if endptr

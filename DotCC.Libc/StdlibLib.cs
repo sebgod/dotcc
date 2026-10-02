@@ -199,11 +199,21 @@ public static unsafe partial class Libc
     public static void* calloc(int n, int size) =>
         _dbgHeap ? DbgAlloc((nuint)n * (nuint)size, true) : NativeMemory.AllocZeroed((nuint)n, (nuint)size);
 
+    /// <summary><c>calloc</c> at C's own <c>size_t</c> parameters, as <c>&lt;stdlib.h&gt;</c>
+    /// declares it.</summary>
+    public static void* calloc(ulong n, ulong size) =>
+        _dbgHeap ? DbgAlloc((nuint)n * (nuint)size, true) : NativeMemory.AllocZeroed((nuint)n, (nuint)size);
+
     /// <summary><c>realloc(p, size)</c> — resize a prior allocation, preserving
     /// contents up to the smaller of old/new size. Routes to
     /// <see cref="NativeMemory.Realloc(void*, nuint)"/>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void* realloc(void* p, int size) =>
+        _dbgHeap ? DbgRealloc(p, (nuint)size) : NativeMemory.Realloc(p, (nuint)size);
+
+    /// <summary><c>realloc</c> at C's own <c>size_t</c> parameter, as <c>&lt;stdlib.h&gt;</c>
+    /// declares it.</summary>
+    public static void* realloc(void* p, ulong size) =>
         _dbgHeap ? DbgRealloc(p, (nuint)size) : NativeMemory.Realloc(p, (nuint)size);
 
     // ---------------------------------------------------------------------
