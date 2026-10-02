@@ -207,6 +207,7 @@ struct-array-member-init
 struct-hack-array
 struct-init
 struct-linked-list
+struct-param-assign
 struct-point
 subscript-commutes
 switch-day

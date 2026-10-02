@@ -3063,8 +3063,10 @@ internal sealed partial class WatBackend
     {
         // Parentheses around the target change nothing: `(x) = v`, a macro's `(p->f) = v`.
         while (a.Target is Paren tp) { a = a with { Target = tp.Inner }; }
-        // Fast path: a plain wasm value local — store-and-keep via local.tee.
-        if (a.Target is VarRef vr && !vr.Sym.IsGlobal && !_frame.ContainsKey(vr.Sym))
+        // Fast path: a plain wasm value local — store-and-keep via local.tee. Not a struct
+        // parameter, whose local holds the address of its copy: assigning to it copies into
+        // that copy (CPython's merge_lo `ssa = ms->a;`), it does not point it elsewhere.
+        if (a.Target is VarRef vr && !vr.Sym.IsGlobal && !_frame.ContainsKey(vr.Sym) && !IsAggregate(vr.Type))
         {
             CType produced;
             if (a.CompoundOp is { } cop)
