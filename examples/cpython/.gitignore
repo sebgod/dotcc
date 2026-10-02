@@ -1,4 +1,6 @@
 cpython-src/
 out/
+out-wat/
 build/
+build-wat/
 *.tmp/
