@@ -20,6 +20,12 @@ name: python
 #                  thin python, _heapq as an extension module it dlopens),
 #                  which must import _heapq from its .so and pass the same
 #                  runs.
+#   cpython-wasm   the same core and boot units compiled whole by dotcc's wat back
+#                  end into python.wasm (build-wat.sh), which must run under node
+#                  (run-wasm.sh) the hello, smoke.py and every program with the
+#                  output host CPython 3.13 prints: the interpreter the browser
+#                  sandbox runs (GH #269). It uploads python.wasm and the standard
+#                  library's pack.
 #   capi-oracle    the <Python.h> shim's differential oracle: CPythonOracleTests
 #                  builds each cpython-oracle.txt fixture with gcc against real
 #                  libpython 3.13 and requires dotcc's transcript to match it.
@@ -128,6 +134,90 @@ jobs:
             examples/cpython/out/summary.txt
             examples/cpython/out/cs/*.log
           if-no-files-found: ignore
+
+  cpython-wasm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      WABT_VERSION: '1.0.36'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - name: Install wabt ${{ env.WABT_VERSION }} (pinned + checksum-verified)
+        run: |
+          set -euo pipefail
+          base="https://github.com/WebAssembly/wabt/releases/download/${WABT_VERSION}"
+          asset="wabt-${WABT_VERSION}-ubuntu-20.04.tar.gz"
+          curl -fsSL "$base/$asset" -o "/tmp/$asset"
+          curl -fsSL "$base/$asset.sha256" -o "/tmp/$asset.sha256"
+          (cd /tmp && sha256sum -c "$asset.sha256")
+          tar -xzf "/tmp/$asset" -C /tmp
+          echo "/tmp/wabt-${WABT_VERSION}/bin" >> "$GITHUB_PATH"
+
+      - name: Build dotcc (Release, NuGet path)
+        run: dotnet build DotCC/DotCC.csproj -c Release --nologo -p:UseLocalLalrCc=false
+
+      # The key names the pinned tag, so bumping CPYTHON_TAG in fetch.sh misses
+      # the cache and fetch.sh clones the new tag.
+      - name: Pinned CPython tag
+        id: tag
+        run: echo "tag=$(grep -oP 'CPYTHON_TAG:-\K[^}]+' examples/cpython/fetch.sh)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the CPython sources
+        uses: actions/cache@v6
+        with:
+          path: examples/cpython/cpython-src
+          key: cpython-src-${{ steps.tag.outputs.tag }}-sparse2
+
+      - name: Fetch CPython (sparse, pinned tag)
+        run: bash examples/cpython/fetch.sh
+
+      - name: Setup Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Generate the frozen modules and Modules/config.c
+        run: PYTHON=python bash examples/cpython/generate.sh
+
+      - name: Compile CPython to python.wasm
+        run: bash examples/cpython/build-wat.sh
+
+      # --liftoff-only: V8's baseline compiler. Its optimizing compiler takes seconds over the
+      # eval loop's goto dispatch, and node waits for it at exit (a browser does it aside).
+      - name: Run Python on it
+        timeout-minutes: 30
+        working-directory: examples/cpython
+        env:
+          NODE_FLAGS: --liftoff-only
+        run: |
+          set -euo pipefail
+          bash run-wasm.sh -c "print('hello from python.wasm')"
+          bash run-wasm.sh smoke.py > smoke-wasm.out
+          diff -u smoke.expected smoke-wasm.out
+          RUN=run-wasm.sh PROGRAM_TIMEOUT=600 bash programs.sh
+
+      - name: Pack the standard library for the sandbox
+        run: python examples/cpython/pack-stdlib.py examples/cpython/cpython-src/Lib examples/cpython/build-wat/stdlib.bin
+
+      - name: Upload python.wasm and the standard library's pack
+        uses: actions/upload-artifact@v7
+        with:
+          name: python-wasm
+          path: |
+            examples/cpython/build-wat/python.wasm
+            examples/cpython/build-wat/stdlib.bin
 
   capi-oracle:
     runs-on: ubuntu-latest

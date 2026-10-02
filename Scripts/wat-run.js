@@ -14,6 +14,7 @@
 //                                           exit's) in decimal instead of its output
 //     --dir HOST[::GUEST]                   preopen directory HOST as GUEST (default: HOST)
 //     --env NAME=VALUE                      add NAME to the program's environment (none else)
+//     --argv0 NAME                          the program's argv[0] (default: the module's path)
 //   node wat-run.js --same expected actual  exit 0 when the two outputs match as the fixture
 //                                           tests compare them (\n line endings, trailing
 //                                           newlines trimmed)
@@ -124,12 +125,15 @@ if (!isMainThread) {
   let result = false;
   const dirs = [];
   const env = {};
+  let argv0 = null;
   while (argv.length && argv[0].startsWith('--')) {
     const opt = argv.shift();
     if (opt === '--result') { result = true; }
     else if (opt === '--dir') {
       const [host, guest] = argv.shift().split('::');
       dirs.push({ host, guest: guest ?? host });
+    } else if (opt === '--argv0') {
+      argv0 = argv.shift();
     } else if (opt === '--env') {
       const kv = argv.shift();
       const eq = kv.indexOf('=');
@@ -146,7 +150,7 @@ if (!isMainThread) {
     const run = {
       module: mod,
       discardStdout: result,
-      args: argv,
+      args: argv0 === null ? argv : [argv0, ...argv.slice(1)],
       env,
       dirs,
       nextTid: new Int32Array(new SharedArrayBuffer(4)).fill(1),

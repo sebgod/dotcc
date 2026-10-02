@@ -6,8 +6,9 @@
 #   programs.sh              every program
 #   programs.sh nbody lisp   just these
 #
-# Environment: PROGRAM_TIMEOUT (seconds per program, default 600) and
-# HOST_PYTHON (a host CPython 3.13 to time each program on as well).
+# Environment: PROGRAM_TIMEOUT (seconds per program, default 600),
+# HOST_PYTHON (a host CPython 3.13 to time each program on as well) and RUN (the
+# script that runs the interpreter, default run.sh; run-wasm.sh runs python.wasm).
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,7 +23,7 @@ trap 'rm -f "$out"' EXIT
 failed=0
 for name in "${names[@]}"; do
   start=$(now)
-  timeout "${PROGRAM_TIMEOUT:-600}" bash "$HERE/run.sh" "$name.py" > "$out" 2>&1
+  timeout "${PROGRAM_TIMEOUT:-600}" bash "$HERE/${RUN:-run.sh}" "$name.py" > "$out" 2>&1
   rc=$?
   took=$(elapsed "$start" "$(now)")
   if [ "$rc" -eq 0 ] && tr -d '\r' < "$out" | cmp -s - "$name.expected"; then status=ok; else status=FAIL; failed=1; fi
