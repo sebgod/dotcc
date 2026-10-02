@@ -9,8 +9,9 @@ name: pages
 # is its sole CI, and publishes it to https://sebgod.github.io/dotcc/.
 #
 # Runs on pushes to main that touch the app, the compiler it embeds (so the live
-# sandbox tracks the latest compiler) or the CPython programs the Python page shows,
-# and on manual dispatch for a forced redeploy.
+# sandbox tracks the latest compiler) or the CPython example (the programs the Python
+# page shows, and the build of python.wasm, which the sandbox's Python mode runs), and
+# on manual dispatch for a forced redeploy.
 # Pure managed publish target is browser-wasm (OS-neutral), so ubuntu publishes fine.
 
 on:
@@ -20,7 +21,7 @@ on:
       - 'DotCC.Web/**'
       - 'DotCC.Lib/**'
       - 'DotCC.Libc/**'
-      - 'examples/cpython/programs/**'
+      - 'examples/cpython/**'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
 
@@ -38,6 +39,8 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      WABT_VERSION: '1.0.36'
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -72,6 +75,53 @@ jobs:
           du -sh publish/wwwroot
           echo "Brotli (.br) payload total (what the browser actually downloads):"
           find publish/wwwroot -name '*.br' -printf '%s\n' | awk '{s+=$1} END {printf "%.2f MB\n", s/1024/1024}'
+
+      # The sandbox's Python mode (GH #269): CPython 3.13 compiled to wasm by dotcc's wat back
+      # end, and its standard library's pack, which the page's worker fetches from python/.
+      - name: Install wabt ${{ env.WABT_VERSION }} (pinned + checksum-verified)
+        run: |
+          set -euo pipefail
+          base="https://github.com/WebAssembly/wabt/releases/download/${WABT_VERSION}"
+          asset="wabt-${WABT_VERSION}-ubuntu-20.04.tar.gz"
+          curl -fsSL "$base/$asset" -o "/tmp/$asset"
+          curl -fsSL "$base/$asset.sha256" -o "/tmp/$asset.sha256"
+          (cd /tmp && sha256sum -c "$asset.sha256")
+          tar -xzf "/tmp/$asset" -C /tmp
+          echo "/tmp/wabt-${WABT_VERSION}/bin" >> "$GITHUB_PATH"
+
+      - name: Build dotcc (Release, NuGet path)
+        run: dotnet build DotCC/DotCC.csproj -c Release --nologo -p:UseLocalLalrCc=false
+
+      # The key names the pinned tag, so bumping CPYTHON_TAG in fetch.sh misses
+      # the cache and fetch.sh clones the new tag.
+      - name: Pinned CPython tag
+        id: tag
+        run: echo "tag=$(grep -oP 'CPYTHON_TAG:-\K[^}]+' examples/cpython/fetch.sh)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the CPython sources
+        uses: actions/cache@v6
+        with:
+          path: examples/cpython/cpython-src
+          key: cpython-src-${{ steps.tag.outputs.tag }}-sparse2
+
+      - name: Fetch CPython (sparse, pinned tag)
+        run: bash examples/cpython/fetch.sh
+
+      - name: Setup Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Generate the frozen modules and Modules/config.c
+        run: PYTHON=python bash examples/cpython/generate.sh
+
+      - name: Compile CPython to python.wasm, pack its standard library
+        run: |
+          set -euo pipefail
+          bash examples/cpython/build-wat.sh
+          mkdir -p publish/wwwroot/python
+          cp examples/cpython/build-wat/python.wasm publish/wwwroot/python/
+          python examples/cpython/pack-stdlib.py examples/cpython/cpython-src/Lib publish/wwwroot/python/stdlib.bin
 
       - name: Rewrite base href for the /dotcc/ project-site subpath
         run: |

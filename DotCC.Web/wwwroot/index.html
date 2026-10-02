@@ -32,7 +32,9 @@
     <script src="lib/wabt/libwabt.js"></script>
     <!-- Vendored CodeMirror 6 bundle (see lib/codemirror/README.md): window.dotccEditor. -->
     <script src="lib/codemirror/dotcc-codemirror.js"></script>
-    <!-- The run-pipeline interop (wat -> wasm -> run + fd_write capture). -->
+    <!-- WASI's argument, descriptor and path calls, over a file system in memory (window.WasiFs). -->
+    <script src="js/wasi-fs.js"></script>
+    <!-- The run-pipeline interop (wat -> wasm -> _start, and the Python worker). -->
     <script src="js/sandbox.js"></script>
     <script src="_framework/blazor.webassembly#[.{fingerprint}].js"></script>
 </body>

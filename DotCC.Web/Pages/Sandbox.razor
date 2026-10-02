@@ -4,8 +4,9 @@
 @using DotCC
 @inject IJSRuntime JS
 @inject NavigationManager Nav
+@implements IDisposable
 
-<PageTitle>dotcc sandbox: C &amp; Zig to .NET and wasm, in your browser</PageTitle>
+<PageTitle>dotcc sandbox: C, Zig and Python, compiled to wasm, in your browser</PageTitle>
 
 <header>
     <h1>dotcc <span class="tag">web sandbox</span></h1>
@@ -13,7 +14,8 @@
         A clang-shaped <strong>C&nbsp;→&nbsp;.NET/C#</strong> compiler with a
         WebAssembly backend, compiled to wasm and running <em>entirely in this
         tab</em>. Your code is transpiled by the real compiler, assembled to wasm,
-        and executed here. Nothing leaves your browser.
+        and executed here. Nothing leaves your browser. <strong>Python</strong> runs on
+        CPython 3.13 itself, its C sources compiled to wasm by dotcc.
     </p>
 </header>
 
@@ -24,6 +26,7 @@
                 <select @onchange="OnLangChanged">
                     <option value="c" selected="@(_lang == "c")">C</option>
                     <option value="zig" selected="@(_lang == "zig")">Zig</option>
+                    <option value="python" selected="@(_lang == "python")">Python</option>
                 </select>
             </label>
             <span class="filename">@SourceFileName</span>
@@ -42,6 +45,10 @@
             <button class="run" @onclick="RunAsync" disabled="@_busy">
                 @(_busy ? "Running…" : "▶ Run")
             </button>
+            @if (_busy && _lang == "python")
+            {
+                <button class="share" @onclick="StopAsync" title="Stop the running Python program">■ Stop</button>
+            }
             <button class="share" @onclick="ShareAsync" disabled="@_busy" title="Copy a self-contained link to this program">
                 🔗 Share
             </button>
@@ -88,7 +95,7 @@
                 }
                 else
                 {
-                    <div class="empty">Press Run to compile and execute.</div>
+                    <div class="empty">@(_lang == "python" ? "Press Run to run it on CPython (the first run downloads the interpreter)." : "Press Run to compile and execute.")</div>
                 }
             }
             else if (_tab == "wat")
@@ -136,17 +143,22 @@
 </div>
 
 @code {
-    // The active front-end language: "c" or "zig". Drives the file extension dotcc
+    // The active language: "c" or "zig", which dotcc compiles (the file extension it
     // dispatches on, which examples/flags/tabs show, and whether the C-only knobs
-    // (-std, warning flags, -E) apply. Zig has no C preprocessor and one fixed
-    // dialect, so those are hidden and the compile runs dialect=null / default warnings.
+    // (-std, warning flags, -E) apply: Zig has no C preprocessor and one fixed dialect, so
+    // those are hidden and the compile runs dialect=null / default warnings), or "python",
+    // which runs on CPython that dotcc compiled to wasm ahead of time (GH #269): no compile in
+    // the tab, so only the Output tab.
     private string _lang = "c";
 
     // The tab set: run output, then the "look inside the compiler" views (the wat
     // the backend emits, the C# projection, and, for C only, the -E token stream).
-    private string[] Tabs => _lang == "zig"
-        ? new[] { "Output", "wat", "wasm", "C#" }
-        : new[] { "Output", "wat", "wasm", "C#", "-E" };
+    private string[] Tabs => _lang switch
+    {
+        "python" => new[] { "Output" },
+        "zig" => new[] { "Output", "wat", "wasm", "C#" },
+        _ => new[] { "Output", "wat", "wasm", "C#", "-E" },
+    };
     private string _tab = "Output";
 
     private string _source = CExamples[0].Source;
@@ -181,11 +193,16 @@
     private const string WorkDir = "/work";
     private string SourcePath => WorkDir + (_lang == "zig" ? "/source.zig" : "/source.c");
 
-    /// <summary>The staged input file's basename, shown in the editor pane head.</summary>
-    private string SourceFileName => _lang == "zig" ? "source.zig" : "source.c";
+    /// <summary>The staged input file's basename, shown in the editor pane head (a Python
+    /// program runs as /main.py, the name its tracebacks show).</summary>
+    private string SourceFileName => _lang switch { "zig" => "source.zig", "python" => "main.py", _ => "source.c" };
 
-    /// <summary>The example set for the active front-end language.</summary>
-    private Example[] CurrentExamples => _lang == "zig" ? ZigExamples : CExamples;
+    /// <summary>The example set for the active language.</summary>
+    private Example[] CurrentExamples => _lang switch { "zig" => ZigExamples, "python" => PythonExamples, _ => CExamples };
+
+    /// <summary>The page's handle for the Python worker's progress calls
+    /// (<see cref="OnPythonOutput"/>, <see cref="OnPythonLoading"/>), made on the first run.</summary>
+    private DotNetObjectReference<Sandbox>? _self;
 
     // The CodeMirror instance lives in JS (window.dotccEditor); `_source` is the
     // authoritative C# copy, pulled from the editor right before each compile/share.
@@ -219,7 +236,7 @@
     private void AdoptDeepLink()
     {
         var (lang, ex) = ReadQuery();
-        if (lang is "c" or "zig") { _lang = lang; }
+        if (lang is "c" or "zig" or "python") { _lang = lang; }
         if (lang is null && ex is null) { return; }
         var first = CurrentExamples[0];
         _source = first.Source;
@@ -274,7 +291,7 @@
     private async Task OnLangChanged(ChangeEventArgs e)
     {
         var lang = e.Value?.ToString();
-        if (lang != "c" && lang != "zig") { return; }
+        if (lang is not ("c" or "zig" or "python")) { return; }
         _lang = lang;
         var first = CurrentExamples[0];
         _source = first.Source;
@@ -282,7 +299,10 @@
         _ran = false;
         _diagnostics = "";
         _hasError = false;
-        if (_tab == "-E") { _tab = "Output"; }
+        if (Array.IndexOf(Tabs, _tab) < 0) { _tab = "Output"; }
+        _hint = lang == "python"
+            ? "the first run downloads CPython 3.13 as wasm (about 4 MB), then runs offline"
+            : "first run warms the compiler (~a few seconds)";
         await JS.InvokeVoidAsync("dotccEditor.setValue", EditorId, first.Source);
     }
 
@@ -302,6 +322,11 @@
         StateHasChanged();
 
         await SyncFromEditor();
+        if (_lang == "python")
+        {
+            await RunPythonAsync();
+            return;
+        }
 
         // Compile on the .NET side: source -> wat (and C# / -E, for the view tabs).
         string? wat = null;
@@ -384,6 +409,58 @@
         _busy = false;
         StateHasChanged();
     }
+
+    /// <summary>Run the editor's Python on CPython in the page's worker
+    /// (<c>dotccSandbox.runPython</c>): its output fills the pane as it runs, through
+    /// <see cref="OnPythonOutput"/>, and Stop ends it.</summary>
+    private async Task RunPythonAsync()
+    {
+        _self ??= DotNetObjectReference.Create(this);
+        _stdout = "";
+        _stderr = "";
+        _exitCode = 0;
+        _ran = true;
+        _tab = "Output";
+        StateHasChanged();
+        try
+        {
+            var result = await JS.InvokeAsync<RunResult>("dotccSandbox.runPython", TimeSpan.FromDays(1), _source, _self);
+            _stdout = result.Stdout ?? _stdout;
+            _stderr = result.Stderr ?? _stderr;
+            if (result.Ok) { _exitCode = result.ExitCode; }
+            else { SetDiag($"{result.Stage} error: {result.Error}", isError: true); }
+        }
+        catch (Exception ex)
+        {
+            SetDiag($"run host error: {ex.Message}", isError: true);
+        }
+        _hint = "CPython 3.13, compiled to wasm by dotcc; the interpreter stays loaded for the next run";
+        _busy = false;
+        StateHasChanged();
+    }
+
+    /// <summary>What the running Python program has written so far, from the worker.</summary>
+    [JSInvokable]
+    public void OnPythonOutput(string stdout, string stderr)
+    {
+        _stdout = stdout;
+        _stderr = stderr;
+        StateHasChanged();
+    }
+
+    /// <summary>The worker is fetching the interpreter (the first run, or the first after a Stop
+    /// that the browser's cache does not serve).</summary>
+    [JSInvokable]
+    public void OnPythonLoading()
+    {
+        _hint = "downloading CPython 3.13 (python.wasm and its standard library)…";
+        StateHasChanged();
+    }
+
+    /// <summary>Stop the running Python program (its worker is terminated).</summary>
+    private async Task StopAsync() => await JS.InvokeVoidAsync("dotccSandbox.stopPython");
+
+    public void Dispose() => _self?.Dispose();
 
     /// <summary>Download the wasm binary the browser assembled on the last run, the
     /// same bytes the wasm tab inventoried (a pure-JS Blob download).</summary>
@@ -471,10 +548,9 @@
         public string? Error { get; set; }
     }
 
-    /// <summary>A named starter program (C or Zig). Kept to the surface the wat
-    /// backend runs today: integer arithmetic plus the <c>printf</c>/
-    /// <c>std.debug.print</c> I/O the fd_write shim carries; wider constructs get
-    /// added as the wat backend grows.</summary>
+    /// <summary>A named starter program (C, Zig or Python). The C and Zig ones keep to the
+    /// surface the wat backend runs today; the Python ones to the modules the interpreter
+    /// has (no <c>math</c>, <c>random</c> or <c>datetime</c> yet, see the Python page).</summary>
     private sealed record Example(string Name, string Source);
 
     private static readonly Example[] CExamples =
@@ -609,6 +685,142 @@
                 }
                 return sum; // 1+2+...+9 = 45
             }
+
+            """),
+    };
+
+    // Python starter programs, run on CPython 3.13 compiled to wasm by dotcc (each checked
+    // against host CPython's output when written).
+    private static readonly Example[] PythonExamples =
+    {
+        new("Hello",
+            """
+            import sys
+
+            print("Hello from CPython", sys.version.split()[0] + ", compiled to wasm by dotcc")
+            squares = {n: n * n for n in range(1, 8)}
+            print(squares)
+            print(sorted("dotcc compiles c to wasm".split(), key=len))
+
+            """),
+        new("Word count (re, Counter)",
+            """"
+            import re
+            from collections import Counter
+
+            text = """
+            It was the best of times, it was the worst of times, it was the age of
+            wisdom, it was the age of foolishness, it was the epoch of belief, it was
+            the epoch of incredulity, it was the season of Light, it was the season of
+            Darkness.
+            """
+            words = re.findall(r"[a-z]+", text.lower())
+            print(len(words), "words,", len(set(words)), "distinct")
+            for word, n in Counter(words).most_common(5):
+                print(f"{word:>6} {'#' * n} {n}")
+
+            """"),
+        new("Classes",
+            """
+            class Shape:
+                def __init__(self, name):
+                    self.name = name
+
+                def __repr__(self):
+                    return f"{type(self).__name__}({self.name!r}, area={self.area():.2f})"
+
+
+            class Rect(Shape):
+                def __init__(self, w, h):
+                    super().__init__(f"{w}x{h}")
+                    self.w, self.h = w, h
+
+                def area(self):
+                    return self.w * self.h
+
+
+            class Circle(Shape):
+                def __init__(self, r):
+                    super().__init__(f"r={r}")
+                    self.r = r
+
+                def area(self):
+                    return 3.141592653589793 * self.r ** 2
+
+
+            shapes = sorted([Rect(3, 4), Circle(1), Rect(1, 1), Circle(2)], key=lambda s: s.area())
+            for s in shapes:
+                print(s)
+            print("total area:", round(sum(s.area() for s in shapes), 3))
+
+            """),
+        new("Generators (itertools)",
+            """
+            import itertools
+
+
+            def primes():
+                found = []
+                for n in itertools.count(2):
+                    if all(n % p for p in found if p * p <= n):
+                        found.append(n)
+                        yield n
+
+
+            def fib():
+                a, b = 0, 1
+                while True:
+                    yield a
+                    a, b = b, a + b
+
+
+            print("primes:", list(itertools.islice(primes(), 15)))
+            print("fibonacci:", list(itertools.takewhile(lambda x: x < 1000, fib())))
+            print("2**100 =", 2 ** 100)
+            print("digits in 2**10000:", len(str(2 ** 10000)))
+
+            """),
+        new("JSON and exceptions",
+            """
+            import json
+
+            data = json.loads('{"name": "dotcc", "targets": ["C#", "wasm"], "stars": null}')
+            print(data["name"], "targets", " and ".join(data["targets"]))
+            print(json.dumps(data, indent=2, sort_keys=True))
+
+
+            def check(n):
+                if n < 0:
+                    raise ValueError(f"negative: {n}")
+                return n
+
+
+            for n in (3, -1):
+                try:
+                    print("ok", check(n))
+                except ValueError as e:
+                    print("error:", e)
+
+            try:
+                1 / 0
+            except ZeroDivisionError as e:
+                print("caught:", type(e).__name__, e)
+
+            """),
+        new("A traceback",
+            """
+            # An uncaught exception: CPython prints the traceback, with each frame's source line,
+            # to stderr, and the program ends with status 1.
+            def inner(record):
+                return record["missing"]
+
+
+            def outer():
+                return inner({"present": 1})
+
+
+            print("about to fail")
+            outer()
 
             """),
     };

@@ -38,3 +38,6 @@ ir-emit-probe.txt
 
 # Scripts/wat-probe.sh output
 out/wat-probe/
+
+# The sandbox Python mode's python.wasm and standard library, copied in for local runs (CI builds them).
+DotCC.Web/wwwroot/python/
