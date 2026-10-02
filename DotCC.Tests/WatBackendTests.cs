@@ -136,6 +136,29 @@ public sealed class WatBackendTests
     }
 
     [Fact]
+    public void Locals_of_disjoint_blocks_share_a_wasm_local_of_their_type()
+    {
+        // a and b are never alive at once, so b lives in a's wasm local (GH #276); r's block
+        // encloses both, and the long gets an i64 of its own.
+        var wat = Wat("int f(int c){ int r=0; if(c){ int a=c*2; r+=a; } else { int b=c+7; long w=b; r+=(int)w; } return r; }\n"
+            + "int main(void){ return f(1); }");
+        wat.ShouldContain("(local $r i32)\n    (local $a i32)\n    (local $w i64)\n");
+        wat.ShouldNotContain("(local $b ");
+        System.Text.RegularExpressions.Regex.Count(wat, @"local\.set \$a\n").ShouldBe(2);   // a = c*2, b = c+7
+    }
+
+    [Fact]
+    public void A_local_holds_its_wasm_local_for_its_whole_block()
+    {
+        // c's lifetime is its block, entered before a's: a goto over c's declaration still finds
+        // c's value, so a may not share it.
+        var wat = Wat("int main(void){ int n=0,out=0; { again: { int a=1; if(n) goto use; out+=a; } int c=7;"
+            + " use: out=out*10+c; if(n++==0) goto again; } return out; }");
+        wat.ShouldContain("(local $c i32)");
+        wat.ShouldContain("(local $a i32)");
+    }
+
+    [Fact]
     public void for_loop_emits_structured_block_and_loop()
     {
         var wat = Wat("int main(void){ int s=0; for(int i=0;i<3;i++) s+=i; return s; }");
