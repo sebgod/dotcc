@@ -412,6 +412,9 @@ internal sealed partial class WatBackend
 
             default: // FallOff — the natural end of the function
                 EmitFnEnd(fn, ret);
+                // A void function's end leaves by running off its body, but this block sits
+                // among the others in the dispatch loop: running off it would enter the next.
+                if (ret.Unqualified is CType.VoidType) { Line("return"); }
                 break;
         }
     }

@@ -490,6 +490,23 @@ public sealed class WatOracleTests
         + "    return 0;\n"
         + "}",
         "if=1 in=2 -1 3 4 7 9\n")]
+    // A void function's implicit end inside the goto dispatch returns rather than running into
+    // the next block (dlmalloc's free ran on into its own error path).
+    [InlineData("int putchar(int);\n"
+        + "static void f(int a, int b) {\n"
+        + "  if (a) {\n"
+        + "    if (b) {\n"
+        + "      if (a > 0) { putchar('A'); goto post; }\n"
+        + "    }\n"
+        + "  err:\n"
+        + "    putchar('E');\n"
+        + "  post:\n"
+        + "    putchar('P');\n"
+        + "  }\n"
+        + "  putchar('\\n');\n"
+        + "}\n"
+        + "int main(void) { f(1, 1); f(1, 0); f(0, 0); return 0; }",
+        "AP\nEP\n\n")]
     // strerror's glibc wording, strtoimax past 32 bits, the one "C" locale, and time() from
     // WASI's clock.
     [InlineData("#include <stdio.h>\n#include <string.h>\n#include <errno.h>\n#include <inttypes.h>\n#include <locale.h>\n#include <time.h>\n"
