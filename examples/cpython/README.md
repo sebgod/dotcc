@@ -82,8 +82,8 @@ to the static link.
 
 ```bash
 WAT2WASM=path/to/wat2wasm examples/cpython/build-wat.sh   # about a minute; build-wat/python.wasm, 4.4 MB
-NODE_FLAGS=--liftoff-only examples/cpython/run-wasm.sh -c "print('hello')"
-cd examples/cpython && NODE_FLAGS=--liftoff-only RUN=run-wasm.sh ./programs.sh
+examples/cpython/run-wasm.sh -c "print('hello')"
+cd examples/cpython && RUN=run-wasm.sh ./programs.sh
 python examples/cpython/pack-stdlib.py examples/cpython/cpython-src/Lib stdlib.bin   # for the sandbox
 ```
 
@@ -95,10 +95,10 @@ node, `run-wasm.sh` runs it through `Scripts/wat-run.js`, which preopens a home 
 `run.sh`'s (`build-wat/home/lib/python3.13` is the tree's `Lib/`) as `/py`, the module as
 `/py/bin/python.wasm` (its `sys.executable`) and the current directory as the program's `/`.
 `smoke.py` and every program in `programs/` print what host CPython 3.13 prints, and CI's
-`cpython-wasm` job (`python.yml`) checks that on every pull request. It starts in about half a second on V8's baseline compiler; `--liftoff-only`
-keeps node from waiting at exit for the optimizing compiler, which takes seconds over the
-eval loop's dispatch (a browser runs that in the background). This is the interpreter the
-browser sandbox runs (GH #269).
+`cpython-wasm` job (`python.yml`) checks that on every pull request. It starts in about
+0.6 s under node, and V8's optimizing compiler takes about a tenth of a second over the eval
+loop (GH #276, where the loop's 1952 wasm locals had made that seconds, and its code slower
+than the baseline compiler's). This is the interpreter the browser sandbox runs (GH #269).
 
 ## Probing the tree
 

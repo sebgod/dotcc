@@ -7,9 +7,9 @@
 #   run-wasm.sh -c "print('hello')"
 #   RUN=run-wasm.sh programs.sh
 #
-# Environment: NODE (default: node), NODE_FLAGS (more flags for node; --liftoff-only keeps
-# node from waiting at exit for its optimizing compiler, which takes seconds over the eval
-# loop), CPYTHON_SRC (default: cpython-src/), BUILD_OUT (default: build-wat/).
+# Environment: NODE (default: node), NODE_FLAGS (more flags for node, such as --liftoff-only
+# to run on V8's baseline compiler alone), CPYTHON_SRC (default: cpython-src/), BUILD_OUT
+# (default: build-wat/).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
