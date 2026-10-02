@@ -314,13 +314,57 @@ internal sealed partial class WatBackend
         Line("local.set $__lbl");
         Line("loop $__disp");
         _indent++;
-        for (var i = m - 1; i >= 0; i--) { Line($"block $cfb{i}"); _indent++; }
-        // Dispatch: jump to the block named by $__lbl. The default (>= m, never taken)
-        // is harmlessly aimed at block 0.
+        if (m <= FlatDispatchMax)
+        {
+            EmitDispatchGroup(order, 0, m, fn, ret);
+        }
+        else
+        {
+            // Two levels, so the nesting is about 2·√m deep rather than m: an outer br_table
+            // picks the group of k blocks $__lbl is in, an inner one the block within it.
+            // Every block ends in a transfer, so a group's last block never runs into the next.
+            var k = (int)System.Math.Ceiling(System.Math.Sqrt(m));
+            var groups = (m + k - 1) / k;
+            for (var g = groups - 1; g >= 0; g--) { Line($"block $cfg{g}"); _indent++; }
+            Line("local.get $__lbl");
+            Line($"i32.const {k}");
+            Line("i32.div_u");
+            var outer = string.Join(" ", Enumerable.Range(0, groups).Select(g => $"$cfg{g}"));
+            Line($"br_table {outer} $cfg0");
+            for (var g = 0; g < groups; g++)
+            {
+                _indent--;
+                Line("end"); // $cfg{g}
+                EmitDispatchGroup(order, g * k, System.Math.Min(m, (g + 1) * k), fn, ret);
+            }
+        }
+        _indent--;
+        Line("end"); // $__disp
+        Line("unreachable");
+    }
+
+    /// <summary>The most blocks a goto-using function dispatches over with one flat
+    /// <c>br_table</c>, which nests a <c>block</c> per CFG block. Past it the dispatch takes
+    /// two levels: wabt overflows its stack somewhere between 500 and 2000 nested blocks, and
+    /// CPython's eval loop has thousands.</summary>
+    private const int FlatDispatchMax = 256;
+
+    /// <summary>Dispatch over the CFG blocks <c>[lo, hi)</c> of <paramref name="order"/>: a
+    /// <c>block</c> per CFG block, a <c>br_table</c> on <c>$__lbl - lo</c> into them (its
+    /// default, never taken, aimed at the first), then each block's code and transfer after
+    /// the <c>end</c> its <c>br_table</c> entry branches to.</summary>
+    private void EmitDispatchGroup(List<CfgBlock> order, int lo, int hi, FuncDef fn, CType ret)
+    {
+        for (var i = hi - 1; i >= lo; i--) { Line($"block $cfb{i}"); _indent++; }
         Line("local.get $__lbl");
-        var table = string.Join(" ", Enumerable.Range(0, m).Select(i => $"$cfb{i}"));
-        Line($"br_table {table} $cfb0");
-        for (var i = 0; i < m; i++)
+        if (lo != 0)
+        {
+            Line($"i32.const {lo}");
+            Line("i32.sub");
+        }
+        var table = string.Join(" ", Enumerable.Range(lo, hi - lo).Select(i => $"$cfb{i}"));
+        Line($"br_table {table} $cfb{lo}");
+        for (var i = lo; i < hi; i++)
         {
             _indent--;
             Line("end"); // $cfb{i}
@@ -328,9 +372,6 @@ internal sealed partial class WatBackend
             foreach (var st in b.Code) { EmitStmt(st); }
             EmitCfgTransfer(b, fn, ret);
         }
-        _indent--;
-        Line("end"); // $__disp
-        Line("unreachable");
     }
 
     private static IEnumerable<CfgBlock> Successors(CfgBlock b) => b.Kind switch

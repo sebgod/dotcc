@@ -44,7 +44,8 @@ internal sealed record FrontendRequest(
     WarningFlags Warnings = WarningFlags.Default,
     bool TestMode = false,
     string? ObjectKey = null,
-    SourceLibrary? Library = null);
+    SourceLibrary? Library = null,
+    IReadOnlyDictionary<string, UnitFlags>? Units = null);
 
 /// <summary>
 /// A library compiled from C together with the program, the way the wat target carries its

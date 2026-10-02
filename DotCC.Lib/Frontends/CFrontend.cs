@@ -55,19 +55,39 @@ internal sealed class CFrontend : IFrontend
         // twice: once with an analysis visitor, once with the emit visitor.
         // `quiet` suppresses the preprocessor's diagnostics on the analysis
         // pass so #warning / #include messages don't print twice.
-        Item ParseUnit(string unitPath, global::LALR.CC.Parser parser, bool quiet, DialectGate? gate = null) =>
-            ParseUnitText(unitPath, File.ReadAllText(unitPath), parser, quiet, gate);
+        // A unit with flags of its own (a compilation database's entry) is preprocessed with
+        // its -D after the program's and its -I after the program's, as its own command line
+        // would have them; it gets a resolver of its own when it adds include directories.
+        var unitResolvers = new List<Compiler.IncludeResolver>();
+        Item ParseUnit(string unitPath, global::LALR.CC.Parser parser, bool quiet, DialectGate? gate = null)
+        {
+            var flags = req.Units is { } units && units.TryGetValue(unitPath, out var f) ? f : null;
+            return ParseUnitText(unitPath, File.ReadAllText(unitPath), parser, quiet, gate, flags);
+        }
 
-        Item ParseUnitText(string unitPath, string text, global::LALR.CC.Parser parser, bool quiet, DialectGate? gate = null)
+        Item ParseUnitText(string unitPath, string text, global::LALR.CC.Parser parser, bool quiet, DialectGate? gate = null,
+            UnitFlags? flags = null)
         {
             var source = Compiler.SpliceLineContinuations(text);
+            var unitIncludeDirs = flags is { IncludeDirs.Count: > 0 }
+                ? [.. includeDirs ?? [], .. flags.IncludeDirs]
+                : includeDirs;
+            var resolver = includeResolver;
+            if (flags is { IncludeDirs.Count: > 0 })
+            {
+                resolver = Compiler.BuildIncludeResolver(unitIncludeDirs, req.Library?.Header);
+                unitResolvers.Add(resolver);
+            }
+            var unitDefines = flags is { Defines.Count: > 0 }
+                ? Compiler.SeedDialectDefines(activeDialect, [.. defines ?? [], .. flags.Defines])
+                : seededDefines;
             // #embed search path: the TU's own directory first, then the -I dirs
             // (first-wins, mirroring #include). Resolved on the filesystem since
             // OnEmbed reads RAW bytes (distinct from the include text map).
             var embedDirs = new List<string>();
             if (Path.GetDirectoryName(unitPath) is { Length: > 0 } unitDir) { embedDirs.Add(unitDir); }
-            if (includeDirs is not null) { embedDirs.AddRange(includeDirs); }
-            var pre = new CPreprocessor(lexerTable, includeResolver, seededDefines, quiet, gate, embedDirs, embeds);
+            if (unitIncludeDirs is not null) { embedDirs.AddRange(unitIncludeDirs); }
+            var pre = new CPreprocessor(lexerTable, resolver, unitDefines, quiet, gate, embedDirs, embeds);
             pre.SetActiveFile(unitPath);
             using var lexer = Compiler.LexC(source, lexerTable);
             // Directives and #if conditions (macro-replaced by the same engine
@@ -202,7 +222,8 @@ internal sealed class CFrontend : IFrontend
             foreach (var d in gate.Diagnostics) { Console.Error.WriteLine("dotcc: warning: " + d); }
         }
         irBuilder.PublishImportAnalysis();
-        irBuilder.Module.UsesPythonShim = includeResolver.IncludedBuiltins.Contains("Python.h");
+        irBuilder.Module.UsesPythonShim = includeResolver.IncludedBuiltins.Contains("Python.h")
+            || unitResolvers.Any(r => r.IncludedBuiltins.Contains("Python.h"));
         return irBuilder.Module;
     }
 }
