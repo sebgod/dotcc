@@ -213,6 +213,7 @@ internal sealed partial class IrBuilder
         _libraryUnit = library;
         _file = file;
         _unitObjects.Clear();
+        _unitFunctions.Clear();
         Module.IsObject = ObjectKey is not null;
         if (root.Content is C.TuEmpty)
         {
@@ -226,6 +227,24 @@ internal sealed partial class IrBuilder
             for (var i = globalsBefore; i < Module.Globals.Count; i++) { Module.LibraryGlobals.Add(Module.Globals[i].Sym); }
         }
         if (ObjectKey is { } key) { QualifyTuLocals(key); }
+    }
+
+    /// <summary>The functions this unit has declared or defined. A function with internal linkage
+    /// that an earlier unit declared is not this unit's: the same name here is another function
+    /// (see <see cref="DeclareFunc"/>).</summary>
+    private readonly HashSet<Symbol> _unitFunctions = new(ReferenceEqualityComparer.Instance);
+
+    /// <summary>The next suffix <see cref="UniqueStaticName"/> gives each name.</summary>
+    private readonly Dictionary<string, int> _staticSuffixes = new(StringComparer.Ordinal);
+
+    /// <summary>A program-unique target name for one more function with internal linkage named
+    /// <paramref name="name"/>: <c>name__2</c>, <c>name__3</c> and on (<c>__1</c> is the first
+    /// static's, moved aside when an external function claims the name).</summary>
+    private string UniqueStaticName(string name)
+    {
+        var n = _staticSuffixes.TryGetValue(name, out var next) ? next : 2;
+        _staticSuffixes[name] = n + 1;
+        return $"{_symbols.Escape(name)}__{n}";
     }
 
     /// <summary>The file-scope objects this unit has defined so far, by name. A tentative
@@ -781,14 +800,29 @@ internal sealed partial class IrBuilder
                 if (site.Print == print)
                 {
                     // Identical re-definition: one emitted copy serves all TUs —
-                    // re-bind this TU's references to it and build nothing.
+                    // re-bind this TU's references to it and build nothing. A prototype
+                    // this unit declared first, which its calls so far hold, names it too.
+                    if (_symbols.Resolve(sig.Name) is { Kind: SymKind.Func } declared && declared != site.Sym && _unitFunctions.Contains(declared))
+                    {
+                        declared.TargetName = site.Sym.TargetName;
+                    }
                     _symbols.DeclareAlias(site.Sym);
+                    _unitFunctions.Add(site.Sym);
                     return;
                 }
             }
             var paramTypes = new List<CType>(sig.Params.Count);
             foreach (var (t, _) in sig.Params) { paramTypes.Add(t); }
-            if (sig.IsStatic)
+            if (sig.IsStatic && _symbols.Resolve(sig.Name) is { Kind: SymKind.Func, IsTuLocal: true } proto
+                && _unitFunctions.Contains(proto) && !sites.Exists(site => site.Sym == proto))
+            {
+                // This unit declared the function before defining it (CPython's unionobject.c
+                // `static PyObject *make_union(PyObject *);`): its calls hold that symbol,
+                // which DeclareFunc already gave a name of its own.
+                proto.Type = new CType.Func(sig.Return, paramTypes, sig.Variadic);
+                funcSym = proto;
+            }
+            else if (sig.IsStatic)
             {
                 // New definition has INTERNAL linkage: a fresh per-TU function
                 // under a uniquified TargetName.
@@ -800,9 +834,7 @@ internal sealed partial class IrBuilder
                     Storage = Storage.Static,
                     IsGlobal = true,
                     IsTuLocal = true,
-                    // Program-unique: a TU defines a static name at most once, so the
-                    // per-name site count suffices (same scheme as static locals' __s{n}).
-                    TargetName = $"{_symbols.Escape(sig.Name)}__{sites.Count + 1}",
+                    TargetName = UniqueStaticName(sig.Name),
                 });
             }
             else
@@ -828,11 +860,7 @@ internal sealed partial class IrBuilder
                 // (never assigned by the static-uniquify scheme above, which starts
                 // at __2); its callers hold the Symbol, so the rename rides through.
                 // The external then claims the canonical name.
-                var canonical = _symbols.Escape(sig.Name);
-                foreach (var site in sites)
-                {
-                    if (site.Sym.TargetName == canonical) { site.Sym.TargetName = $"{canonical}__1"; }
-                }
+                MoveStaticsAside(sig.Name);
                 funcSym = _symbols.Declare(new Symbol
                 {
                     Name = sig.Name,
@@ -851,6 +879,7 @@ internal sealed partial class IrBuilder
         }
 
         ApplyFnMarkers(funcSym);
+        _unitFunctions.Add(funcSym);
         if (_libraryUnit && !sig.IsStatic) { Module.LibraryFunctions.Add(sig.Name); }
         _symbols.BeginFunction();
         _setjmpCalls.Clear(); // per-function stray-setjmp tracking (see the field)
@@ -904,11 +933,20 @@ internal sealed partial class IrBuilder
 
     private Symbol DeclareFunc(FnSig sig, bool fromSystemHeader = false)
     {
+        // A re-declaration names the function an earlier declaration did: one in this unit
+        // (prototype then definition), or one with external linkage in any unit when this
+        // declaration has external linkage too. Another unit's function with internal linkage
+        // is not visible here, and a static declaration names this unit's own function.
         var existing = _symbols.Resolve(sig.Name);
-        if (existing is { Kind: SymKind.Func }) { return existing; } // re-declaration (proto then def)
+        if (existing is { Kind: SymKind.Func }
+            && (_unitFunctions.Contains(existing) || (!existing.IsTuLocal && !sig.IsStatic)))
+        {
+            _unitFunctions.Add(existing);
+            return existing;
+        }
         var paramTypes = new List<CType>(sig.Params.Count);
         foreach (var (t, _) in sig.Params) { paramTypes.Add(t); }
-        return _symbols.Declare(new Symbol
+        var sym = new Symbol
         {
             Name = sig.Name,
             Kind = SymKind.Func,
@@ -917,7 +955,41 @@ internal sealed partial class IrBuilder
             IsGlobal = true,
             IsTuLocal = sig.IsStatic,
             FromSystemHeader = fromSystemHeader,
-        });
+        };
+        _unitFunctions.Add(sym);
+        if (existing is not { Kind: SymKind.Func } && !_fnDefSites.ContainsKey(sig.Name))
+        {
+            return _symbols.Declare(sym);
+        }
+        // The name is another unit's already: a static here gets a name of its own, and an
+        // external function claims the canonical one, which a static holding it gives up.
+        if (sig.IsStatic)
+        {
+            sym.TargetName = UniqueStaticName(sig.Name);
+            return _symbols.DeclareAlias(sym);
+        }
+        MoveStaticsAside(sig.Name);
+        return _symbols.Declare(sym);
+    }
+
+    /// <summary>Move a function with internal linkage that holds <paramref name="name"/>'s
+    /// canonical target name aside to <c>name__1</c> (never given by
+    /// <see cref="UniqueStaticName"/>), for an external function that claims it. The static's
+    /// callers hold its symbol, so the rename rides through.</summary>
+    private void MoveStaticsAside(string name)
+    {
+        var canonical = _symbols.Escape(name);
+        if (_fnDefSites.TryGetValue(name, out var sites))
+        {
+            foreach (var site in sites)
+            {
+                if (site.Sym.IsTuLocal && site.Sym.TargetName == canonical) { site.Sym.TargetName = $"{canonical}__1"; }
+            }
+        }
+        if (_symbols.Resolve(name) is { Kind: SymKind.Func, IsTuLocal: true } other && other.TargetName == canonical)
+        {
+            other.TargetName = $"{canonical}__1";
+        }
     }
 
     // ---- function signatures --------------------------------------------
