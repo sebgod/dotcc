@@ -393,6 +393,13 @@ footer a { color: var(--accent); text-decoration: none; }
 .card h3 { margin: 0 0 .4rem; font-size: 1rem; }
 .card p { margin: 0 0 .8rem; color: var(--muted); font-size: .85rem; line-height: 1.5; flex: 1; }
 .card-go { color: var(--accent); font-size: .82rem; font-weight: 600; }
+.card-tag.astro { color: var(--ok); }
+
+/* LALR.CC, other work, support */
+.credits .arch-note a { color: var(--accent); text-decoration: none; }
+.credits .subhead { font-size: 1rem; margin: 1.5rem 0 .8rem; }
+.credits .cta-row { margin-top: .9rem; }
+.credits .more { margin: .9rem 0 0; font-size: .9rem; }
 
 /* how-it-works pipeline */
 .pipe-steps { list-style: none; padding: 0; margin: 1rem 0; display: grid; gap: .55rem; }
