@@ -17,6 +17,8 @@ holds the probe that measures how much of the tree compiles, with the CI job
 | `include/pyconfig.h` | dotcc's platform config: CPython's `./configure` output from Ubuntu x86_64, adjusted for dotcc (each change marked `dotcc:`). See its header. |
 | `probe.sh` | Compiles each unit with `dotcc --emit=obj` and compares the set that emits with `emits.txt`. |
 | `emits.txt` | The ratchet: the units that emit today. |
+| `probe-wat.sh`, `emits-wat.txt` | The same probe for the wat back end: each unit through `dotcc --target=wat --emit=obj` and `wat2wasm`, with its own ratchet. |
+| `build-wat.sh` | The interpreter as WebAssembly: writes a compilation database of the `core` and `boot` units and compiles them as one program with `dotcc --target=wat --compile-commands`, then assembles `build-wat/python.wasm`. |
 
 ## Building and running the interpreter
 
@@ -73,6 +75,28 @@ globals for both. The default module is `_heapq`, which the static interpreter
 does not carry (there `import _heapq` fails, and `heapq` falls back to Python).
 A NativeAOT program cannot load an assembly, so the NativeAOT interpreter keeps
 to the static link.
+
+### The interpreter as WebAssembly
+
+```bash
+WAT2WASM=path/to/wat2wasm examples/cpython/build-wat.sh   # about a minute; build-wat/python.wasm, 4.4 MB
+node --liftoff-only --stack-size=8000 Scripts/wat-run.js \
+  --dir "$PWD/examples/cpython/build/home::/py" --env PYTHONHOME=/py \
+  examples/cpython/build-wat/python.wasm -c "print('hello')"
+```
+
+`build-wat.sh` compiles the interpreter with dotcc's wat back end into one module, a WASI
+command: the wat libc (musl's stdio and libm, dlmalloc, and a POSIX layer over WASI's
+preopened directories) is compiled with it, and its static data (CPython's `_PyRuntime`,
+the type objects, the keyword tables) is laid out as data segments at compile time. Under
+node, `Scripts/wat-run.js` runs it: `--dir` preopens the home that `run.sh` sets up
+(`build/home/lib/python3.13` is the tree's `Lib/`) as `/py`, and `PYTHONHOME` points CPython
+at it. `smoke.py` and every program in `programs/` print what host CPython 3.13 prints (a
+program that writes files in its current directory, or checks `sys.executable`, needs a
+preopened `/`). It starts in about half a second on V8's baseline compiler; `--liftoff-only`
+keeps node from waiting at exit for the optimizing compiler, which takes seconds over the
+eval loop's dispatch (a browser runs that in the background). This is the interpreter the
+browser sandbox runs (GH #269).
 
 ## Probing the tree
 
