@@ -857,6 +857,7 @@ internal sealed partial class WatBackend
             if (loc.AddressTaken || IsAddressValued(loc.Type)) { Place(loc); }
             else { valueLocals.Add(loc); }
         }
+        var localDecls = AssignLocalSlots(fn.Body.Stmts, valueLocals);
         // A promoted malloc's buffer (an ArrayDecl over a pointer symbol) is frame memory.
         foreach (var s in fn.Body.Stmts) { ReserveArrayBuffers(s, ref cursor); }
         // Each call that passes or returns a struct by value gets slots of its own: a copy of
@@ -952,7 +953,7 @@ internal sealed partial class WatBackend
         }
         _out = prev;
 
-        foreach (var v in valueLocals) { Line($"(local ${v.TargetName} {_wat.RenderType(v.Type)})"); }
+        foreach (var (name, type) in localDecls) { Line($"(local ${name} {type})"); }
         foreach (var v in _syntheticLocals) { Line($"(local ${v.TargetName} {_wat.RenderType(v.Type)})"); }
         if (_hasFrame) { Line("(local $__fp i32)"); }
         foreach (var local in ScratchLocals()) { Line(local); }
@@ -1053,8 +1054,8 @@ internal sealed partial class WatBackend
                 break;
 
             // Brace-less sequence (multi-declarator decl that split into
-            // DeclStmt + ArrayDecl) — wat has no block scoping for locals
-            // anyway (CollectLocals hoists them), so emit flat like Block.
+            // DeclStmt + ArrayDecl): not a block, so its locals are the enclosing
+            // block's (see WalkScopes); emitted flat like Block.
             case Seq q:
                 foreach (var inner in q.Stmts) { EmitStmt(inner); }
                 break;
@@ -1085,7 +1086,7 @@ internal sealed partial class WatBackend
                     {
                         EmitExpr(init);
                         EmitConvert(init.Type, ld.Sym.Type);
-                        Line($"local.set ${ld.Sym.TargetName}");
+                        Line($"local.set ${LocalName(ld.Sym)}");
                     }
                 }
                 break;
@@ -1187,7 +1188,7 @@ internal sealed partial class WatBackend
             else
             {
                 EmitFrameAddr(buffer);
-                Line($"local.set ${ad.Sym.TargetName}");
+                Line($"local.set ${LocalName(ad.Sym)}");
             }
             return;
         }
@@ -1666,29 +1667,7 @@ internal sealed partial class WatBackend
     /// does not look into is one the backend refuses anyway.</summary>
     private static void ForEachExpr(CStmt s, Action<CExpr> visit)
     {
-        void E(CExpr? e)
-        {
-            if (e is null) { return; }
-            visit(e);
-            switch (e)
-            {
-                case Paren p: E(p.Inner); break;
-                case Unary u: E(u.Operand); break;
-                case Binary b: E(b.Left); E(b.Right); break;
-                case Assign a: E(a.Target); E(a.Value); break;
-                case Cast c: E(c.Operand); break;
-                case CondExpr ce: E(ce.Cond); E(ce.Then); E(ce.Else); break;
-                case Index ix: E(ix.Base); E(ix.Idx); break;
-                case Member m: E(m.Base); break;
-                case Call c: foreach (var a in c.Args) { E(a); } break;
-                case IndirectCall ic: E(ic.Callee); foreach (var a in ic.Args) { E(a); } break;
-                case CommaOp co: foreach (var a in co.Items) { E(a); } break;
-                case CommaSeq cs: foreach (var a in cs.Items) { E(a); } break;
-                case StructInit si: foreach (var m in si.Members) { E(m.Value); } break;
-                case ArrayValue av: foreach (var x in av.Elems) { E(x); } break;
-                case VaArgGet va: E(va.Ap); break;
-            }
-        }
+        void E(CExpr? e) => VisitExpr(e, visit);
         void Init(CExpr? init)
         {
             if (init is DefaultLit) { return; }
@@ -1721,6 +1700,32 @@ internal sealed partial class WatBackend
             }
         }
         S(s);
+    }
+
+    /// <summary>Visit <paramref name="e"/> and every expression nested in it (but not the
+    /// statements around it): the expression half of <see cref="ForEachExpr"/>.</summary>
+    private static void VisitExpr(CExpr? e, Action<CExpr> visit)
+    {
+        if (e is null) { return; }
+        visit(e);
+        switch (e)
+        {
+            case Paren p: VisitExpr(p.Inner, visit); break;
+            case Unary u: VisitExpr(u.Operand, visit); break;
+            case Binary b: VisitExpr(b.Left, visit); VisitExpr(b.Right, visit); break;
+            case Assign a: VisitExpr(a.Target, visit); VisitExpr(a.Value, visit); break;
+            case Cast c: VisitExpr(c.Operand, visit); break;
+            case CondExpr ce: VisitExpr(ce.Cond, visit); VisitExpr(ce.Then, visit); VisitExpr(ce.Else, visit); break;
+            case Index ix: VisitExpr(ix.Base, visit); VisitExpr(ix.Idx, visit); break;
+            case Member m: VisitExpr(m.Base, visit); break;
+            case Call c: foreach (var a in c.Args) { VisitExpr(a, visit); } break;
+            case IndirectCall ic: VisitExpr(ic.Callee, visit); foreach (var a in ic.Args) { VisitExpr(a, visit); } break;
+            case CommaOp co: foreach (var a in co.Items) { VisitExpr(a, visit); } break;
+            case CommaSeq cs: foreach (var a in cs.Items) { VisitExpr(a, visit); } break;
+            case StructInit si: foreach (var m in si.Members) { VisitExpr(m.Value, visit); } break;
+            case ArrayValue av: foreach (var x in av.Elems) { VisitExpr(x, visit); } break;
+            case VaArgGet va: VisitExpr(va.Ap, visit); break;
+        }
     }
 
     /// <summary>The wasm instruction a <c>&lt;math.h&gt;</c> function is, exactly, with its
@@ -2917,7 +2922,7 @@ internal sealed partial class WatBackend
             if (!IsAddressValued(v.Sym.Type)) { Line(LoadInstr(v.Sym.Type)); }
             return;
         }
-        Line($"local.get ${v.Sym.TargetName}");
+        Line($"local.get ${LocalName(v.Sym)}");
     }
 
     private void EmitUnary(Unary u)
@@ -2989,7 +2994,7 @@ internal sealed partial class WatBackend
 
         if (u.Operand is VarRef vr && !vr.Sym.IsGlobal && !_frame.ContainsKey(vr.Sym))
         {
-            var name = vr.Sym.TargetName;
+            var name = LocalName(vr.Sym);
             if (post)
             {
                 Line($"local.get ${name}");
@@ -3146,7 +3151,7 @@ internal sealed partial class WatBackend
             CType produced;
             if (a.CompoundOp is { } cop)
             {
-                Line($"local.get ${vr.Sym.TargetName}");
+                Line($"local.get ${LocalName(vr.Sym)}");
                 EmitCompoundStep(cop, vr.Type, a.Value);
                 produced = vr.Type;
             }
@@ -3156,7 +3161,7 @@ internal sealed partial class WatBackend
                 produced = a.Value.Type;
             }
             EmitConvert(produced, vr.Type);
-            Line($"local.tee ${vr.Sym.TargetName}");
+            Line($"local.tee ${LocalName(vr.Sym)}");
             return;
         }
 

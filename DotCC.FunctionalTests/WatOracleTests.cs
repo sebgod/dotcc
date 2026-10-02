@@ -94,6 +94,10 @@ public sealed class WatOracleTests
     // saved/restored per call): the dispatch loop runs after the one-time frame setup.
     [InlineData("int f(int n){ int arr[4]; int x=7; int* px=&x; int i=0; loop: if(i>=n) goto done; arr[i]=i*i; i++; goto loop; done: { int s=*px; for(int k=0;k<n;k++) s+=arr[k]; return s; } } int main(void){ return f(4); }", 21)]
     [InlineData("int sumrec(int n){ if(n<=0) goto base; return n+sumrec(n-1); base: return 0; } int main(void){ return sumrec(5); }", 15)]
+    // Locals of disjoint blocks share a wasm local (GH #276), but a local holds its wasm local
+    // for its whole block: the goto into `use` skips c's declaration, and c still has its 7.
+    [InlineData("int f(int c){ int r=0; if(c){ int a=c*2; r+=a; } else { int b=c+7; r+=b; } { int d=r*3; r=d+1; } return r; } int main(void){ return f(1)*100+f(0); }", 722)]
+    [InlineData("int main(void){ int n=0,out=0; { again: { int a=1; if(n) goto use; out+=a; } int c=7; use: out=out*10+c; if(n++==0) goto again; } return out; }", 177)]
     // decimal-float literal spellings without two digit runs around the point: a
     // point-free exponent (`1e10`/`1e-7` — the documented lexer gap), a leading dot
     // (`.5`), a trailing dot (`1.`), and a dot-before-exponent (`2.e3`).
