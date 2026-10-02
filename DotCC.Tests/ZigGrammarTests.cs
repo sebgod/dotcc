@@ -61,6 +61,12 @@ public sealed class ZigGrammarTests
     [InlineData("fn f(o: ?u8, c: bool) !?u8 { const v: ?u8 = blk: { const q = o orelse if (c) return error.U else break :blk null; break :blk q + 1; }; return v; }")]
     [InlineData("fn f(o: ?u8, d: u8) u8 { const v = blk: { const q = o orelse break :blk d; break :blk q + 1; }; return v; }")]
     [InlineData("fn f(xs: []const u8, d: u8) u8 { const v = blk: { for (xs) |x| { const y = if (x < 9) x else break :blk d; _ = y; } break :blk 0; }; return v; }")]
+    // GH #285: enum members named after primitive values, with a value, and qualified access to them
+    [InlineData("const P = enum(u8) { null = 0, all_ones = 255, _ };")]
+    [InlineData("const V = enum(u8) { none = 0, false = 1 + @intFromEnum(C.false), true = 2, _ };")]
+    [InlineData("const R = enum(u8) { undefined = 7, same_value };")]
+    [InlineData("const R = enum { undefined, other };")]
+    [InlineData("const t = Constant.true; const n = E.null; const u = E.undefined;")]
     public void Accepts_real_zig(string src) => TryParse(src).ShouldBeTrue();
 
     [Theory]

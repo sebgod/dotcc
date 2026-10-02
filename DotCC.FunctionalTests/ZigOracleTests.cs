@@ -6992,6 +6992,44 @@ public sealed class ZigOracleTests
             "pub fn main() u8 {\n" +
             "    return f(null, 7) + f(4, 0);\n" +
             "}\n", 12, "" },
+        // GH #285: enum members named after primitive values with a value (`null = 0`, `false = first + @intFromEnum(C.false)`,
+        // `undefined = 7`), a qualified `Constant.false`, and a switch over them.
+        new object[] { "keyword_enum_member_values",
+            "const Small = enum(u8) {\n" +
+            "    null = 0,\n" +
+            "    all_ones = 255,\n" +
+            "    _,\n" +
+            "};\n" +
+            "\n" +
+            "const Constant = enum(u8) { false, true, _ };\n" +
+            "const first: u8 = 10;\n" +
+            "\n" +
+            "const Value = enum(u8) {\n" +
+            "    none = 0,\n" +
+            "    false = first + @intFromEnum(Constant.false),\n" +
+            "    true = first + @intFromEnum(Constant.true),\n" +
+            "    _,\n" +
+            "};\n" +
+            "\n" +
+            "const Rule = enum(u8) {\n" +
+            "    undefined = 7,\n" +
+            "    same_value = 8,\n" +
+            "};\n" +
+            "\n" +
+            "fn kind(v: Value) u8 {\n" +
+            "    return switch (v) {\n" +
+            "        .true => 1,\n" +
+            "        .false => 2,\n" +
+            "        else => 3,\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    const a: Small = .null;\n" +
+            "    const v: Value = .true;\n" +
+            "    return @intFromEnum(a) + @intFromEnum(Small.all_ones) - 250 + @intFromEnum(v) + @intFromEnum(Value.false) +\n" +
+            "        @intFromEnum(Rule.undefined) + kind(v);\n" +
+            "}\n", 34, "" },
         new object[] { "orelse_catch_if",
             "const std = @import(\"std\");\n" +
             "\n" +

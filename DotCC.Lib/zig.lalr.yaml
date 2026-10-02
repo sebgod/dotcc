@@ -1382,6 +1382,13 @@ productions:
   - derivation: leftmost
     rules:
       - { lhs: Suffix, rhs: [Suffix, '.', IDENT],      action: field }
+      # A member named after a primitive value, qualified (std.zig.llvm Builder's `@intFromEnum(Constant.false)`, GH #285):
+      # after `.` the keyword is a plain name, as in the `.false` enum literal. The record is `field`'s, so every field site
+      # reads the spelling from the token.
+      - { lhs: Suffix, rhs: [Suffix, '.', 'true'],      action: field }
+      - { lhs: Suffix, rhs: [Suffix, '.', 'false'],     action: field }
+      - { lhs: Suffix, rhs: [Suffix, '.', 'null'],      action: field }
+      - { lhs: Suffix, rhs: [Suffix, '.', 'undefined'], action: field }
       - { lhs: Suffix, rhs: [Suffix, '.*'],             action: deref }
       - { lhs: Suffix, rhs: [Suffix, '.?'],             action: unwrap }
       - { lhs: Suffix, rhs: [Suffix, '[', Expr, ']'],  action: index }
@@ -1802,6 +1809,14 @@ productions:
       - { lhs: EnumField, rhs: ['false'],          action: enumField }
       - { lhs: EnumField, rhs: ['null'],           action: enumField }
       - { lhs: EnumField, rhs: [IDENT, '=', Expr], action: enumFieldInit }
+      # The same names with a value (GH #285: std.Io.Dispatch's `PackedPtr = enum(…) { null = 0, all_ones = …, _ }`, std.zig.llvm
+      # Builder's `false = first_constant + @intFromEnum(Constant.false)`), and `undefined` (std.debug.Dwarf's `undefined =
+      # 7`). After the name, `=` is not in FOLLOW(EnumField), so the split is one token.
+      - { lhs: EnumField, rhs: ['true', '=', Expr],      action: enumFieldInit }
+      - { lhs: EnumField, rhs: ['false', '=', Expr],     action: enumFieldInit }
+      - { lhs: EnumField, rhs: ['null', '=', Expr],      action: enumFieldInit }
+      - { lhs: EnumField, rhs: ['undefined'],            action: enumField }
+      - { lhs: EnumField, rhs: ['undefined', '=', Expr], action: enumFieldInit }
 
   # ===== tagged-union body (Milestone D3 + D2/D3-leftovers methods) =====
   # A MEMBER list (right-recursive over UnionMember, like struct's FieldDecls) so variants,
