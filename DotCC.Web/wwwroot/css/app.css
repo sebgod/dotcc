@@ -355,11 +355,12 @@ footer a { color: var(--accent); text-decoration: none; }
     display: flex; align-items: stretch; justify-content: center;
     gap: .8rem; flex-wrap: wrap;
     background: var(--panel); border: 1px solid var(--border); border-radius: .6rem;
-    padding: 1.4rem 1.2rem; margin: 1.5rem 0 1rem;
+    padding: 2.4rem 1.2rem 1.4rem; margin: 1.5rem 0 1rem;
 }
 .nm-col { display: flex; flex-direction: column; gap: .5rem; justify-content: center; position: relative; }
+/* Centred over its column and never wrapped: "front-ends" is wider than the C and Zig boxes. */
 .nm-label {
-    position: absolute; top: -1.5rem; left: 0; right: 0; text-align: center;
+    position: absolute; top: -1.7rem; left: 50%; transform: translateX(-50%); white-space: nowrap;
     font-family: var(--mono); font-size: .64rem; text-transform: uppercase; letter-spacing: .12em; color: var(--muted);
 }
 .nm-node {
@@ -455,7 +456,8 @@ footer a { color: var(--accent); text-decoration: none; }
     .hero h1 { font-size: 2rem; }
     .nm { flex-direction: column; align-items: center; }
     .nm-arrow { transform: rotate(90deg); }
-    .nm-label { position: static; margin-bottom: .2rem; }
+    .nm { padding-top: 1.4rem; }
+    .nm-label { position: static; transform: none; text-align: center; margin-bottom: .2rem; }
     .brand-tag { display: none; }
     /* Five nav links and the brand do not fit a phone's width on one line. */
     .topnav-inner { padding: .45rem 1rem; gap: .5rem; }
