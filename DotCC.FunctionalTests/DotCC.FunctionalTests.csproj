@@ -60,8 +60,10 @@
          once per toolchain; sources + exact build commands sit alongside in
          WasmProbeModules/README.md (the sidecar-is-the-reference pattern). -->
     <None Include="WasmProbeModules\**\*.wasm" CopyToOutputDirectory="PreserveNewest" />
-    <!-- The node runner the wat oracle shares with Scripts/wat-probe.sh (WatOracleTests.Runner). -->
+    <!-- The node runner the wat oracle shares with Scripts/wat-probe.sh (WatOracleTests.Runner),
+         and the WASI file calls it shares with the web sandbox. -->
     <None Include="..\Scripts\wat-run.js" Link="wat-run.js" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\DotCC.Web\wwwroot\js\wasi-fs.js" Link="wasi-fs.js" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

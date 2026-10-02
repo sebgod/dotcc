@@ -6,5 +6,7 @@ static FILE *ofl_head;
 
 FILE **__ofl_lock(void)
 {
+	/* A stream on the list (fopen, fdopen, tmpfile) buffers its output: exit flushes it. */
+	__dotcc_flush_at_exit = __stdio_exit;
 	return &ofl_head;
 }

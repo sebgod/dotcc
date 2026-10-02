@@ -53,5 +53,11 @@ internal sealed record FrontendRequest(
 /// data object; one per file, named after it, as musl lays its sources out), or null when the
 /// library has none. <see cref="Header"/> gives a header private to the library (musl's
 /// <c>libm.h</c>), which a library unit's <c>#include</c> finds before any other.
+/// <see cref="MainArguments"/> names the functions the program's entry calls for the arguments
+/// of a <c>main</c> that takes them (argc, then argv), which the front end binds with the rest.
 /// </summary>
-internal sealed record SourceLibrary(Func<string, string?> Unit, Func<string, string?> Header);
+internal sealed record SourceLibrary(Func<string, string?> Unit, Func<string, string?> Header)
+{
+    /// <summary>The library's functions that give <c>main</c> its argc and argv, or none.</summary>
+    public IReadOnlyList<string> MainArguments { get; init; } = [];
+}

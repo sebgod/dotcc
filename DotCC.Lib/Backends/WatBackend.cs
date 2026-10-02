@@ -449,6 +449,51 @@ internal sealed partial class WatBackend
         return sb.ToString();
     }
 
+    /// <summary>The program's entry, WASI's <c>_start</c>, which the host calls to run it: the
+    /// <c>[[gnu::constructor]]</c> functions, then <c>main</c>, then <c>exit</c> with main's value,
+    /// as returning from main is (C11 5.1.2.2.3). A main that takes argc and argv gets them from
+    /// the libc's <c>__dotcc_argc</c> and <c>__dotcc_argv</c> (WASI's args_get), which the front
+    /// end binds for it. The libc's exit, which a program that registers an atexit function or
+    /// buffers a stream has, runs those and flushes the streams; otherwise WASI's proc_exit ends
+    /// the program directly.</summary>
+    private string StartFunc(FuncDef main)
+    {
+        var sb = new StringBuilder("  (func $_start\n");
+        foreach (var ctor in Unit.ConstructorsInOrder)
+        {
+            sb.Append($"    call ${ctor.TargetName}\n");
+            if (ctor.Type is CType.Func { Return: var r } && r.Unqualified is not CType.VoidType) { sb.Append("    drop\n"); }
+        }
+        if (main.Params.Count > 2)
+        {
+            throw new IrUnsupportedException("a main that takes more than argc and argv");
+        }
+        string[] args = ["__dotcc_argc", "__dotcc_argv"];
+        for (var i = 0; i < main.Params.Count; i++)
+        {
+            if (Unit.Functions.FirstOrDefault(f => f.Sym.Name == args[i]) is not { } arg)
+            {
+                throw new IrUnsupportedException($"main's {main.Params[i].Name}: the program has no {args[i]}");
+            }
+            sb.Append($"    call ${arg.Sym.TargetName}\n");
+        }
+        sb.Append($"    call ${main.Sym.TargetName}\n");
+        var ret = (main.Sym.Type as CType.Func)?.Return ?? CType.Int;
+        if (ret.Unqualified is CType.VoidType) { sb.Append("    i32.const 0\n"); }
+        else if (_wat.RenderType(ret) == "i64") { sb.Append("    i32.wrap_i64\n"); }
+        if (Unit.Functions.FirstOrDefault(f => f.Sym.Name == "exit") is { } exit)
+        {
+            sb.Append($"    call ${exit.Sym.TargetName}\n");
+        }
+        else
+        {
+            _usesProcExit = true;
+            sb.Append("    call $proc_exit\n");
+        }
+        sb.Append("  )\n");
+        return sb.ToString();
+    }
+
     /// <summary>wasi-threads' entry point, which the host calls in a new thread's instance with the
     /// thread's id and the argument <c>thrd_create</c> passed to <c>__wasi_thread_spawn</c>: the
     /// thread's descriptor, whose first two fields (eight bytes each, as a pointer takes in memory)
@@ -506,6 +551,7 @@ internal sealed partial class WatBackend
             foreach (var name in needs.Table) { ReachFunction(name); }
             foreach (var key in needs.Globals) { ReachGlobal(key); }
         }
+        ReachFunction("_start");
         ReachFunction("main");
         if (_threaded) { ReachFunction("__dotcc_thread_main"); }
         ReachNeeds(roots);
@@ -605,6 +651,10 @@ internal sealed partial class WatBackend
             bodies.Add((fn.Sym.TargetName, _sb.ToString(start, _sb.Length - start), TakeNeeds()));
             if (fn.Sym.Name == "main") { hasMain = true; }
         }
+        // A program is a WASI command: the host runs it through _start. One unit on its own
+        // (--emit=obj) is not a program, and exports its main as it is.
+        var hasStart = hasMain && !_unitMode;
+        if (hasStart) { bodies.Add(("_start", StartFunc(unit.Functions.First(f => f.Sym.Name == "main")), TakeNeeds())); }
         var inits = GlobalInits(unit);
         AddNeeds(moduleNeeds);
         var reached = hasMain ? Reachable(bodies, inits, moduleNeeds) : default;
@@ -747,7 +797,8 @@ internal sealed partial class WatBackend
             m.Append("  (start $__init_globals)\n");
         }
         m.Append(RuntimeFuncDefs());
-        if (hasMain) { m.Append("  (export \"main\" (func $main))\n"); }
+        if (hasStart) { m.Append("  (export \"_start\" (func $_start))\n"); }
+        else if (hasMain) { m.Append("  (export \"main\" (func $main))\n"); }
         m.Append(")\n");
         return m.ToString();
     }
@@ -3281,7 +3332,9 @@ internal sealed partial class WatBackend
         // fill, and the program's end (WASI proc_exit; abort traps).
         if (c.Callee is "memcpy" or "memmove" && !UserDefines(c.Callee)) { EmitBulkMemory(c, "memory.copy"); return; }
         if (c.Callee == "memset" && !UserDefines("memset")) { EmitBulkMemory(c, "memory.fill"); return; }
-        if (c.Callee is "exit" or "_Exit" && !UserDefines(c.Callee))
+        // The libc's exit (WatLibc/exit.c), when the program has it, runs the atexit functions
+        // and flushes the streams first, then ends in _Exit.
+        if (c.Callee is "exit" or "_Exit" && !_defined.Contains(c.Callee))
         {
             _usesProcExit = true;
             EmitExpr(c.Args[0]);

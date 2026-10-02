@@ -35,6 +35,10 @@ public static partial class Compiler
     private static readonly Lazy<IReadOnlyDictionary<string, string>> _systemHeaders =
         new(LoadEmbeddedSystemHeaders);
 
+    // Declared before WatLibc, whose lookups read it.
+    private static readonly Lazy<(Dictionary<string, string> Units, Dictionary<string, string> Headers)> _watLibc =
+        new(LoadWatLibc);
+
     /// <summary>
     /// The wat target's libc, compiled from C with the program (<c>DotCC.Lib/WatLibc/</c>, each
     /// file embedded as <c>DotCC.WatLibc.&lt;file&gt;</c>). A unit defines one function or data
@@ -46,10 +50,11 @@ public static partial class Compiler
     /// </summary>
     internal static Frontends.SourceLibrary WatLibc { get; } = new(
         name => _watLibc.Value.Units.TryGetValue(name, out var text) ? text : null,
-        name => _watLibc.Value.Headers.TryGetValue(name, out var text) ? text : null);
-
-    private static readonly Lazy<(Dictionary<string, string> Units, Dictionary<string, string> Headers)> _watLibc =
-        new(LoadWatLibc);
+        name => _watLibc.Value.Headers.TryGetValue(name, out var text) ? text : null)
+    {
+        // WASI's args_get, as the C main(argc, argv) takes them (WatLibc/__dotcc_argv.c).
+        MainArguments = ["__dotcc_argc", "__dotcc_argv"],
+    };
 
     private static (Dictionary<string, string> Units, Dictionary<string, string> Headers) LoadWatLibc()
     {

@@ -1,18 +1,24 @@
-// Run one dotcc --target=wat module under node: instantiate it with a WASI preview1 shim
-// (fd_write, fd_read, fd_seek, fd_close, proc_exit, clock_time_get, random_get) and, for a
-// threaded module, wasi-threads (the shared memory it imports as env.memory, and thread-spawn,
-// a worker_threads Worker that instantiates the module over that memory and calls its
-// wasi_thread_start), then call main.
-// What the program writes to fd 1 and 2 goes straight to our stdout and stderr, from every
-// thread, in the order it is written. Scripts/wat-probe.sh and the wat oracle tests both run
-// modules through this file.
-//   node wat-run.js module.wasm             run it (exit: main's value & 0xff, 134 on a trap)
-//   node wat-run.js --result module.wasm    print main's value (exit's status if it exits) in
-//                                           decimal instead of the program's output
+// Run one dotcc --target=wat module under node: instantiate it with a WASI preview1 shim and,
+// for a threaded module, wasi-threads (the shared memory it imports as env.memory, and
+// thread-spawn, a worker_threads Worker that instantiates the module over that memory and calls
+// its wasi_thread_start), then run it through its _start export, as a WASI command is run.
+// The arguments, the environment and the file calls are wasi-fs.js's, which the browser
+// sandbox runs too; a --dir option preopens a host directory, which the program sees under a
+// name of its own. What the program writes to fd 1 and 2 goes straight to our stdout and
+// stderr, from every thread, in the order it is written. Scripts/wat-probe.sh and the wat
+// oracle tests both run modules through this file.
+//   node wat-run.js [options] module.wasm [arg...]
+//                                           run it with argv module.wasm arg... (exit: the
+//                                           program's status & 0xff, 134 on a trap)
+//     --result                              print the program's status (main's value, or
+//                                           exit's) in decimal instead of its output
+//     --dir HOST[::GUEST]                   preopen directory HOST as GUEST (default: HOST)
+//     --env NAME=VALUE                      add NAME to the program's environment (none else)
 //   node wat-run.js --same expected actual  exit 0 when the two outputs match as the fixture
 //                                           tests compare them (\n line endings, trailing
 //                                           newlines trimmed)
 const fs = require('fs');
+const path = require('path');
 const { Worker, isMainThread, workerData } = require('worker_threads');
 
 if (isMainThread && process.argv[2] === '--same') {
@@ -20,52 +26,40 @@ if (isMainThread && process.argv[2] === '--same') {
   process.exit(norm(process.argv[3]) === norm(process.argv[4]) ? 0 : 1);
 }
 
+// wasi-fs.js sits next to this file where the tests copy them both, and in the web sandbox's
+// scripts in the repository.
+const wasiFs = require(fs.existsSync(path.join(__dirname, 'wasi-fs.js'))
+  ? path.join(__dirname, 'wasi-fs.js')
+  : path.join(__dirname, '..', 'DotCC.Web', 'wwwroot', 'js', 'wasi-fs.js'));
+
 class Exit { constructor(code) { this.code = code; } }
 
 // The imports for one instance (the main one, or a thread's). `run` is shared by every thread:
-// the module, its shared memory (if it imports one), whether fd 1 is discarded (--result), and
-// the counter thread ids come from.
+// the module, its shared memory (if it imports one), whether fd 1 is discarded (--result), the
+// program's arguments, environment and preopened directories, and the counter thread ids come
+// from. Each instance has a descriptor table of its own.
 function imports(mod, run, getInstance) {
   const memory = () => getInstance().exports.memory.buffer;
+  const files = wasiFs.createWasi({
+    memory,
+    args: run.args,
+    env: run.env,
+    preopens: run.dirs.map((d) => ({ name: d.guest, fs: new wasiFs.NodeFs(d.host) })),
+    stdout: (bytes) => { if (!run.discardStdout) { fs.writeSync(1, bytes); } },
+    stderr: (bytes) => { fs.writeSync(2, bytes); },
+    // stdin is ours: a read takes what is there, up to n bytes, and null at the end.
+    stdin: (n) => {
+      const buf = Buffer.alloc(n);
+      let got;
+      try { got = fs.readSync(0, buf, 0, n, null); }
+      catch (e) { if (e.code === 'EOF') { got = 0; } else { throw e; } }
+      return got ? buf.subarray(0, got) : null;
+    },
+    // A sleep (poll_oneoff on a clock) blocks the thread.
+    sleep: (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms),
+  });
   const wasi = {
-    fd_write(fd, iovs, iovsLen, nwrittenPtr) {
-      const dv = new DataView(memory());
-      let written = 0;
-      for (let i = 0; i < iovsLen; i++) {
-        const ptr = dv.getUint32(iovs + i * 8, true);
-        const len = dv.getUint32(iovs + i * 8 + 4, true);
-        // Copy out of the (possibly shared) memory before writing.
-        const bytes = Buffer.from(new Uint8Array(memory(), ptr, len));
-        if (!(run.discardStdout && fd === 1)) { fs.writeSync(fd === 2 ? 2 : 1, bytes); }
-        written += len;
-      }
-      dv.setUint32(nwrittenPtr, written, true);
-      return 0;
-    },
-    // stdin is ours; fd 0 reads it, filling each iovec in turn until a read comes up short.
-    fd_read(fd, iovs, iovsLen, nreadPtr) {
-      if (fd !== 0) { return 8; }   // EBADF
-      const dv = new DataView(memory());
-      let total = 0;
-      for (let i = 0; i < iovsLen; i++) {
-        const ptr = dv.getUint32(iovs + i * 8, true);
-        const len = dv.getUint32(iovs + i * 8 + 4, true);
-        if (len === 0) { continue; }
-        const bytes = Buffer.alloc(len);
-        let got;
-        try { got = fs.readSync(0, bytes, 0, len, null); }
-        catch (e) { if (e.code === 'EOF') { got = 0; } else { return 29; } }   // EIO
-        new Uint8Array(memory(), ptr, got).set(bytes.subarray(0, got));
-        total += got;
-        if (got < len) { break; }
-      }
-      dv.setUint32(nreadPtr, total, true);
-      return 0;
-    },
-    // The standard streams are a terminal or a pipe: none of them seeks, and closing one is a
-    // no-op; there are no other descriptors.
-    fd_seek(fd, offset, whence, newOffsetPtr) { return fd <= 2 ? 70 : 8; },   // ESPIPE, EBADF
-    fd_close(fd) { return fd <= 2 ? 0 : 8; },
+    ...files,
     proc_exit(code) { throw new Exit(code); },
     // clock ids: 0 realtime, 1 monotonic, 2 process CPU time, 3 thread CPU time (nanoseconds).
     clock_time_get(id, precision, timePtr) {
@@ -75,6 +69,11 @@ function imports(mod, run, getInstance) {
       else if (id === 2 || id === 3) { const u = process.cpuUsage(); ns = BigInt(u.user + u.system) * 1000n; }
       else { return 28; }   // EINVAL
       new DataView(memory()).setBigUint64(timePtr, ns, true);
+      return 0;
+    },
+    clock_res_get(id, resPtr) {
+      if (id < 0 || id > 3) { return 28; }
+      new DataView(memory()).setBigUint64(resPtr, id === 0 ? 1000000n : 1000n, true);
       return 0;
     },
     random_get(buf, len) {
@@ -121,15 +120,35 @@ if (!isMainThread) {
     process.exit(code);
   }
 } else {
-  const result = process.argv[2] === '--result';
-  const file = process.argv[result ? 3 : 2];
-  let code = 0;
+  const argv = process.argv.slice(2);
+  let result = false;
+  const dirs = [];
+  const env = {};
+  while (argv.length && argv[0].startsWith('--')) {
+    const opt = argv.shift();
+    if (opt === '--result') { result = true; }
+    else if (opt === '--dir') {
+      const [host, guest] = argv.shift().split('::');
+      dirs.push({ host, guest: guest ?? host });
+    } else if (opt === '--env') {
+      const kv = argv.shift();
+      const eq = kv.indexOf('=');
+      env[kv.slice(0, eq)] = kv.slice(eq + 1);
+    } else {
+      process.stderr.write(`wat-run.js: unknown option ${opt}\n`);
+      process.exit(2);
+    }
+  }
+  const file = argv[0];
   let value = 0;
   try {
     const mod = new WebAssembly.Module(fs.readFileSync(file));
     const run = {
       module: mod,
       discardStdout: result,
+      args: argv,
+      env,
+      dirs,
       nextTid: new Int32Array(new SharedArrayBuffer(4)).fill(1),
       memory: WebAssembly.Module.imports(mod).some((i) => i.module === 'env' && i.name === 'memory')
         ? new WebAssembly.Memory({ initial: 1, maximum: 16384, shared: true })
@@ -137,11 +156,15 @@ if (!isMainThread) {
     };
     let instance;
     instance = new WebAssembly.Instance(mod, imports(mod, run, () => instance));
-    const v = instance.exports.main();
-    value = typeof v === 'bigint' ? Number(v) : (v ?? 0);
-    code = value & 0xff;
+    // A program ends in proc_exit with its status; a module that is not one (no _start) has
+    // its main called, whose value is the status.
+    if (instance.exports._start) { instance.exports._start(); }
+    else {
+      const v = instance.exports.main();
+      value = typeof v === 'bigint' ? Number(v) : (v ?? 0);
+    }
   } catch (e) {
-    if (e instanceof Exit) { value = e.code; code = e.code & 0xff; }
+    if (e instanceof Exit) { value = e.code; }
     else {
       // WAT_RUN_STACK=1 shows where: the wasm frames, by function name with wat2wasm --debug-names.
       process.stderr.write(`trap: ${e && (process.env.WAT_RUN_STACK ? e.stack : e.message)}\n`);
@@ -149,6 +172,6 @@ if (!isMainThread) {
     }
   }
   if (result) { fs.writeSync(1, String(value)); process.exit(0); }
-  // Returning from main ends the program, threads still running or not (C11 5.1.2.2.3).
-  process.exit(code);
+  // The program's end ends it, threads still running or not (C11 5.1.2.2.3).
+  process.exit(value & 0xff);
 }

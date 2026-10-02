@@ -25,5 +25,8 @@ int setvbuf(FILE *restrict f, char *restrict buf, int type, size_t size)
 
 	f->flags |= F_SVB;
 
+	/* dotcc: a stream given a buffer holds output back, which exit flushes. */
+	if (f->buf_size) __dotcc_flush_at_exit = __stdio_exit;
+
 	return 0;
 }

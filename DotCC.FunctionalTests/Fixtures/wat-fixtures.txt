@@ -67,6 +67,7 @@ cond-int-types
 console-utf8
 const-cast-unchecked
 const-qualifiers
+constructor-atexit
 cs-keyword-idents
 ctype-predicates
 declaration-specifiers
