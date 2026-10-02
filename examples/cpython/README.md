@@ -19,6 +19,8 @@ holds the probe that measures how much of the tree compiles, with the CI job
 | `emits.txt` | The ratchet: the units that emit today. |
 | `probe-wat.sh`, `emits-wat.txt` | The same probe for the wat back end: each unit through `dotcc --target=wat --emit=obj` and `wat2wasm`, with its own ratchet. |
 | `build-wat.sh` | The interpreter as WebAssembly: writes a compilation database of the `core` and `boot` units and compiles them as one program with `dotcc --target=wat --compile-commands`, then assembles `build-wat/python.wasm`. |
+| `run-wasm.sh` | Runs `python.wasm` under node (`Scripts/wat-run.js`) as `run.sh` runs the C# build; `RUN=run-wasm.sh programs.sh` runs the programs on it. |
+| `pack-stdlib.py` | Packs `Lib/` (less the test suites) into the one file the browser sandbox unpacks. |
 
 ## Building and running the interpreter
 
@@ -80,20 +82,20 @@ to the static link.
 
 ```bash
 WAT2WASM=path/to/wat2wasm examples/cpython/build-wat.sh   # about a minute; build-wat/python.wasm, 4.4 MB
-node --liftoff-only --stack-size=8000 Scripts/wat-run.js \
-  --dir "$PWD/examples/cpython/build/home::/py" --env PYTHONHOME=/py \
-  examples/cpython/build-wat/python.wasm -c "print('hello')"
+NODE_FLAGS=--liftoff-only examples/cpython/run-wasm.sh -c "print('hello')"
+cd examples/cpython && NODE_FLAGS=--liftoff-only RUN=run-wasm.sh ./programs.sh
+python examples/cpython/pack-stdlib.py examples/cpython/cpython-src/Lib stdlib.bin   # for the sandbox
 ```
 
 `build-wat.sh` compiles the interpreter with dotcc's wat back end into one module, a WASI
 command: the wat libc (musl's stdio and libm, dlmalloc, and a POSIX layer over WASI's
 preopened directories) is compiled with it, and its static data (CPython's `_PyRuntime`,
 the type objects, the keyword tables) is laid out as data segments at compile time. Under
-node, `Scripts/wat-run.js` runs it: `--dir` preopens the home that `run.sh` sets up
-(`build/home/lib/python3.13` is the tree's `Lib/`) as `/py`, and `PYTHONHOME` points CPython
-at it. `smoke.py` and every program in `programs/` print what host CPython 3.13 prints (a
-program that writes files in its current directory, or checks `sys.executable`, needs a
-preopened `/`). It starts in about half a second on V8's baseline compiler; `--liftoff-only`
+node, `run-wasm.sh` runs it through `Scripts/wat-run.js`, which preopens a home like
+`run.sh`'s (`build-wat/home/lib/python3.13` is the tree's `Lib/`) as `/py`, the module as
+`/py/bin/python.wasm` (its `sys.executable`) and the current directory as the program's `/`.
+`smoke.py` and every program in `programs/` print what host CPython 3.13 prints, and CI's
+`cpython-wasm` job (`python.yml`) checks that on every pull request. It starts in about half a second on V8's baseline compiler; `--liftoff-only`
 keeps node from waiting at exit for the optimizing compiler, which takes seconds over the
 eval loop's dispatch (a browser runs that in the background). This is the interpreter the
 browser sandbox runs (GH #269).
