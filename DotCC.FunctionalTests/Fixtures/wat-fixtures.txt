@@ -208,6 +208,7 @@ struct-hack-array
 struct-init
 struct-linked-list
 struct-point
+subscript-commutes
 switch-day
 switch-fallthrough
 switch-goto-fallthrough
