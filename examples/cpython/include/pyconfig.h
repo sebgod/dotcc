@@ -2091,3 +2091,28 @@ typedef unsigned long ino_t;   /* hit: pycore_pyhash.h */
 #include <time.h>
 /* perf trampoline needs an arch macro (__x86_64__) dotcc does not predefine */
 #undef PY_HAVE_PERF_TRAMPOLINE
+
+/* ===== dotcc --target=wat: a WASI program (GH #269) =====
+   Configured as CPython's wasm32-wasi build is, by what wasi-libc provides: no processes,
+   signals, dynamic loading, pipes or descriptor duplication, and no file modes or owners. The
+   rest (files and directories, links, the environment, clocks) is the wat libc over WASI. */
+#ifdef __wasm__
+#undef HAVE_ALARM
+#undef HAVE_CHMOD
+#undef HAVE_CHOWN
+#undef HAVE_DLOPEN
+#undef HAVE_DUP
+#undef HAVE_DUP2
+#undef HAVE_DYNAMIC_LOADING
+#undef HAVE_FORK
+#undef HAVE_GETPPID
+#undef HAVE_KILL
+#undef HAVE_MKFIFO
+#undef HAVE_PIPE
+#undef HAVE_SIGACTION
+#undef HAVE_SYSTEM
+#undef HAVE_SYS_RESOURCE_H
+#undef HAVE_SYS_WAIT_H
+#undef HAVE_WAIT
+#undef HAVE_WAITPID
+#endif
