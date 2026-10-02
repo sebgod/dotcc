@@ -2769,6 +2769,13 @@ internal sealed partial class IrBuilder
                : IsPtrish(then.Type) ? then.Type
                : IsPtrish(els.Type) ? els.Type
                : then.Type;
+        // A null pointer constant arm opposite a pointer is that pointer type's null (C11
+        // 6.5.15p6), as for == (Rel): dlmalloc's `m->top == 0 ? 0 : segment_holding(...)`.
+        if (IsPointerOperand(ty))
+        {
+            if (IsNullPointerConstant(then)) { then = new NullPtr { Type = ty }; }
+            if (IsNullPointerConstant(els)) { els = new NullPtr { Type = ty }; }
+        }
         return new CondExpr(cond, then, els) { Type = ty };
     }
 
