@@ -76,6 +76,44 @@ public sealed class ZigFallbackArmTests
     }
 
     [Fact]
+    public void A_jump_is_an_arm_of_a_value_if()
+    {
+        // GH #283. The jump hoists ahead of the statement as the statement it spells; the value is the other arm.
+        var cs = EmitZig("""
+            fn sumUntilBig(xs: []const u8) u8 {
+                var total: u8 = 0;
+                for (xs) |x| {
+                    const y = if (x < 100) x else break;
+                    total += if (y == 7) continue else y;
+                }
+                return total;
+            }
+            pub fn main() u8 { return sumUntilBig(&[_]u8{ 1, 7, 200 }); }
+            """);
+        System.Text.RegularExpressions.Regex.IsMatch(cs, @"if \(!\(x < 100\)\)\s+break;\s+byte y = x;").ShouldBeTrue(cs);
+        System.Text.RegularExpressions.Regex.IsMatch(cs, @"if \(y == 7\)\s+continue;\s+total \+= y;").ShouldBeTrue(cs);
+    }
+
+    [Fact]
+    public void An_if_whose_arms_both_leave_is_an_orelse_fallback()
+    {
+        // GH #283, std.Io.Dispatch's shape: on null, the condition picks the error return or the labeled break.
+        var cs = EmitZig("""
+            fn find(o: ?u8, c: bool) error{Unavailable}!?u8 {
+                const v: ?u8 = blk: {
+                    const q = o orelse if (c) return error.Unavailable else break :blk null;
+                    break :blk q + 1;
+                };
+                return v;
+            }
+            pub fn main() u8 { return ((find(4, true) catch return 9) orelse 0); }
+            """);
+        System.Text.RegularExpressions.Regex.IsMatch(cs,
+            @"if \(!Cond\.B\(o\.HasValue\)\)\s+\{\s+if \(Cond\.B\(c\)\)\s+return ErrUnion<byte\?>\.Err\(1\);\s+else\s+\{\s+__blk0 = null;\s+goto __blk0_end;")
+            .ShouldBeTrue(cs);
+    }
+
+    [Fact]
     public void Returning_a_captured_error_is_an_error_return()
     {
         // Previously `return e;` wrapped the error code as the SUCCESS payload.

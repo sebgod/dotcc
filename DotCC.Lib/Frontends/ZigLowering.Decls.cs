@@ -2066,6 +2066,10 @@ internal sealed partial class ZigLowering
                 return LowerIfReturnThen(ir.Arg2, ir.Arg5, ir.Arg7, sink);
             case Zig.IfExprElseReturn er when sink is not null:
                 return LowerIfElseReturn(er.Arg2, er.Arg4, er.Arg7, sink);
+            case Zig.IfExprThenJump tj when sink is not null:
+                return LowerIfEarlyJump(tj.Arg2, jumpOnTrue: true, tj.Arg4, tj.Arg6, sink);
+            case Zig.IfExprElseJump ej when sink is not null:
+                return LowerIfEarlyJump(ej.Arg2, jumpOnTrue: false, ej.Arg6, ej.Arg4, sink);
             // `comptime switch` / `comptime if` in value position: the inner form, whose comptime-known
             // subject already selects one arm at lowering time.
             case Zig.ComptimeSwitchExpr c: return LowerExprSink(c.Arg1, sink);

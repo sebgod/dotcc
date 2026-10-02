@@ -296,6 +296,7 @@ symbols:
   - VoidElem       # 190 `{}`, zig's void value, as a positional list element (`[3]void{ {}, {}, {} }`, task #114)
   - ConcatIf       # 191 `if (c) a else b` as the right operand of a whole-RHS `++` (`"0123456789" ++ if (upper) "ABCDEF" else "abcdef"`, task #170)
   - 'noinline'     # 192 `noinline fn`: an optimizer hint on a function (std.hash.XxHash3's `noinline fn hashLong`, task #177)
+  - JumpArm        # 193 a jump as an arm of a value `if`: `break [:l [v]]` / `continue [:l]` (GH #283)
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -904,7 +905,6 @@ productions:
   - derivation: rightmost
     rules:
       - { lhs: FallbackArm, rhs: ['break'],                     action: fbBreak }
-      - { lhs: FallbackArm, rhs: ['break', ':', IDENT],         action: fbBreakLabel }
       - { lhs: FallbackArm, rhs: ['break', ':', IDENT, BoolOr], action: fbBreakLabelValue }
       - { lhs: FallbackArm, rhs: ['continue'],                  action: fbContinue }
       - { lhs: FallbackArm, rhs: ['continue', ':', IDENT],      action: fbContinueLabel }
@@ -923,6 +923,25 @@ productions:
       # `catch |e| return switch (e) { … }` (task #80): the returned value is a switch expression, which is not in the
       # operator cascade. After `return`, `switch` is not in FIRST(BoolOr), so one token of lookahead picks it.
       - { lhs: CaptureArm,  rhs: ['return', SwitchExpr],        action: fbReturnSwitch }
+      # A jump as an arm of a value `if` (GH #283: `const y = if (x < 100) x else break;`, `total += if (x == 9) continue
+      # :outer else x;`). The records are FallbackArm's, which LowerFallbackArm lowers as the statements they spell. A
+      # break's value is a BoolOr, as FallbackArm's is: an arm can end an `orelse` fallback, and an Expr there would put
+      # `orelse` into the lookahead of the state every `x orelse …` shares after its left operand, where this group's
+      # precedence settles the conflict as a reduce (`f(a orelse continue)` stopped parsing). An `orelse` inside the value
+      # needs parentheses.
+      - { lhs: JumpArm, rhs: ['break'],                     action: fbBreak }
+      - { lhs: JumpArm, rhs: ['break', ':', IDENT, BoolOr], action: fbBreakLabelValue }
+      - { lhs: JumpArm, rhs: ['continue'],                  action: fbContinue }
+      - { lhs: JumpArm, rhs: ['continue', ':', IDENT],      action: fbContinueLabel }
+      # An `if` whose arms BOTH jump is noreturn, so after `orelse` / `catch` it is a statement-shaped fallback (std.Io.Dispatch's
+      # `… orelse if (concurrency) return error.ConcurrencyUnavailable else break :maybe_queue null;`). Only here, not in IfExpr:
+      # there `if (c) return v else …` is already IfExpr's, and the arm after `else` decides (`break` / `continue` / `return`
+      # start no RhsExpr), which a second `if (c) return v else JumpArm` in IfExpr would make a reduce/reduce conflict.
+      - { lhs: FallbackArm, rhs: ['if', '(', Expr, ')', JumpArm, 'else', JumpArm],           action: fbIfJumps }
+      - { lhs: FallbackArm, rhs: ['if', '(', Expr, ')', 'return', Expr, 'else', JumpArm],    action: fbIfReturnJump }
+      # The returned value after `else` is a BoolOr for the same reason; before `else` it is an Expr, the prefix it shares
+      # with IfExpr's `if (c) return v else …` (only `else` follows it, already in that lookahead).
+      - { lhs: FallbackArm, rhs: ['if', '(', Expr, ')', JumpArm, 'else', 'return', BoolOr],  action: fbIfJumpReturn }
 
   # ===== slice 2a: control-flow as expression =====
   # A value-position expression is either an operator-expression (the cascade,
@@ -1012,6 +1031,10 @@ productions:
       # Its mirror, the ELSE arm returning (std.heap.MemoryPool.create's `… else if (growable) x else return
       # error.OutOfMemory;`, task #200); `return` is not in FIRST(RhsExpr), so after `else` the split is one token.
       - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', RhsExpr, 'else', 'return', Expr], action: ifExprElseReturn }
+      # The same with a `break` / `continue` arm (GH #283): `const y = if (x < 100) x else break;`. JumpArm starts with
+      # `break` / `continue`, neither in FIRST(RhsExpr), so either arm's split is one token, as for `return`.
+      - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', RhsExpr, 'else', JumpArm], action: ifExprElseJump }
+      - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', JumpArm, 'else', RhsExpr], action: ifExprThenJump }
       # An `if` choosing between two inline container TYPES (a type const's RHS, folded at lowering time).
       - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', TypeArm, 'else', TypeArm], action: ifExprTypeArms }
       # One arm a type NAME, the other an inline container (std.Io.Terminal's `pub const WindowsApi = if (!is_windows)
@@ -1862,6 +1885,11 @@ productions:
     rules:
       - { lhs: OrElse, rhs: [OrElse, 'orelse', 'return'],         action: orElseReturnVoid }
       - { lhs: OrElse, rhs: [OrElse, 'catch', 'return'],          action: catchReturnVoid }
+      # The value-less labeled break, last for the same reason (GH #283): in the rightmost group with its value form, its
+      # reduce outranked the shift of a value starting with an IDENT, `comptime` or `fn`, so `x orelse break :blk d`
+      # failed at `d` while `x orelse break :blk 7` parsed. Here the value form takes it.
+      - { lhs: FallbackArm, rhs: ['break', ':', IDENT], action: fbBreakLabel }
+      - { lhs: JumpArm,     rhs: ['break', ':', IDENT], action: fbBreakLabel }
 
   # Inline assembly (std.crypto.sha2's SHA-NI / ARMv8 paths). The template is a STRING (zig allows any comptime
   # string; std always writes a literal), so an Expr is never followed by `:` here, keeping the label invariant.

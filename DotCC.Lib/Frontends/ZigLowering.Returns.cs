@@ -302,6 +302,9 @@ internal sealed partial class ZigLowering
         Zig.FbBreakLabelValue b => Hoisted(() => LowerLabeledBreak(Tok(b.Arg2), b.Arg3)),
         Zig.FbContinueLabel c => LowerLabeledLoopJump(Tok(c.Arg2), isContinue: true),
         Zig.FbBlock b        => LowerStmt(b.Arg0),
+        Zig.FbIfJumps j      => LowerIfExits(j.Arg2, () => LowerFallbackArm(j.Arg4), () => LowerFallbackArm(j.Arg6)),
+        Zig.FbIfReturnJump j => LowerIfExits(j.Arg2, () => Hoisted(() => LowerReturn(j.Arg5)), () => LowerFallbackArm(j.Arg7)),
+        Zig.FbIfJumpReturn j => LowerIfExits(j.Arg2, () => LowerFallbackArm(j.Arg4), () => Hoisted(() => LowerReturn(j.Arg7))),
         _ => throw new IrUnsupportedException("internal: fallback arm " + (arm.Content?.GetType().Name ?? "null")),
     };
     /// <summary>Whether a fallback arm can finish NORMALLY — i.e. fall off its end into the code after
@@ -519,18 +522,43 @@ internal sealed partial class ZigLowering
     /// from the function, the other is the value. The condition is evaluated exactly once, before the rest of the
     /// statement, as zig does; when it is comptime-known not to take the returning arm, the return is dropped.</summary>
     private CExpr LowerIfEarlyReturn(Item condItem, bool returnOnTrue, Item returnedItem, Item valueItem, CType? sink)
+        => LowerIfEarlyExit(condItem, returnOnTrue, () => Hoisted(() => LowerReturn(returnedItem)), valueItem, sink,
+            returnOnTrue ? "zig value `if (c) return x else y`" : "zig value `if (c) x else return y`");
+
+    /// <summary>A value <c>if</c> with a <c>break</c> / <c>continue</c> arm (GH #283: <c>const y = if (x &lt; 100) x else
+    /// break;</c>), the jump twin of <see cref="LowerIfEarlyReturn"/>: the statement hoists <c>if (c) jump;</c> (or <c>if
+    /// (!c)</c>) ahead of itself, the jump lowered as the statement it spells (<see cref="LowerFallbackArm"/>), and the
+    /// expression is the other arm.</summary>
+    private CExpr LowerIfEarlyJump(Item condItem, bool jumpOnTrue, Item jumpArm, Item valueItem, CType? sink)
+        => LowerIfEarlyExit(condItem, jumpOnTrue, () => LowerFallbackArm(jumpArm), valueItem, sink,
+            jumpOnTrue ? "zig value `if (c) break else y`" : "zig value `if (c) x else break`");
+
+    /// <summary>The shared body of <see cref="LowerIfEarlyReturn"/> and <see cref="LowerIfEarlyJump"/>: one arm leaves (the
+    /// <paramref name="exit"/> statement), the other is the value. The condition is evaluated exactly once, before the
+    /// rest of the statement, as zig does; when it is comptime-known not to take the exit, the exit is dropped.</summary>
+    private CExpr LowerIfEarlyExit(Item condItem, bool exitOnTrue, System.Func<CStmt> exit, Item valueItem, CType? sink,
+        string what)
     {
-        if (TryFoldComptimeCondition(condItem) is { } known && known != returnOnTrue)
+        if (TryFoldComptimeCondition(condItem) is { } known && known != exitOnTrue)
         {
             return sink is null ? LowerExpr(valueItem) : LowerExprSink(valueItem, sink);
         }
         var savedImpure = _hoistImpureSeen;
         var cond = LowerExpr(condItem);
-        var test = returnOnTrue ? cond : new Unary(UnOp.LogNot, cond) { Type = CType.Int };
-        var early = Hoisted(() => LowerReturn(returnedItem));
+        var test = exitOnTrue ? cond : new Unary(UnOp.LogNot, cond) { Type = CType.Int };
+        var early = exit();
         _hoistImpureSeen = savedImpure;
-        RequireHoistable(returnOnTrue ? "zig value `if (c) return x else y`" : "zig value `if (c) x else return y`")
-            .Add(new If(test, early, null));
+        RequireHoistable(what).Add(new If(test, early, null));
         return sink is null ? LowerExpr(valueItem) : LowerExprSink(valueItem, sink);
+    }
+
+    /// <summary>An <c>if</c> whose arms both leave, as a fallback (GH #283, std.Io.Dispatch's <c>… orelse if (concurrency)
+    /// return error.ConcurrencyUnavailable else break :maybe_queue null;</c>): the condition, then one of the two exits. A
+    /// comptime-known condition keeps only its exit.</summary>
+    private CStmt LowerIfExits(Item condItem, System.Func<CStmt> thenExit, System.Func<CStmt> elseExit)
+    {
+        if (TryFoldComptimeCondition(condItem) is { } taken) { return taken ? thenExit() : elseExit(); }
+        var cond = LowerExpr(condItem);
+        return new If(cond, thenExit(), elseExit());
     }
 }
