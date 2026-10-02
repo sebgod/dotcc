@@ -782,15 +782,25 @@ public sealed class WatBackendTests
     }
 
     [Fact]
-    public void A_global_lives_at_a_fixed_address_and_a_start_function_initializes_it()
+    public void A_global_lives_at_a_fixed_address_and_its_initializer_is_data()
     {
-        // C's static storage: a fixed address in the data area (from 1024 up), zero until
-        // the start function stores its initializer, and read and written through memory.
+        // C's static storage: a fixed address in the data area (from 1024 up), its constant
+        // initializer laid out at compile time as a data segment (memory starts zeroed, so only
+        // the bytes that are not zero), and read and written through memory.
         var wat = Wat("int counter = 5;\nint main(void){ counter++; return counter; }");
-        wat.ShouldContain("(start $__init_globals)");
-        wat.ShouldContain("(func $__init_globals\n    i32.const 1024\n    i32.const 5\n    i32.store");
+        wat.ShouldContain("(data (i32.const 1024) \"\\05\")");
         wat.ShouldContain("i32.const 1024\n    i32.load");
+        wat.ShouldNotContain("__init_globals");
         wat.ShouldNotContain("local.get $counter");
+    }
+
+    [Fact]
+    public void A_static_initializer_that_is_not_constant_is_stored_at_start()
+    {
+        // A value the module cannot compute without running code (GNU C lets a static
+        // initializer read another object) stays a store in the start function.
+        var wat = Wat("static const int a = 4;\nstatic int b = a * 2;\nint main(void){ return b; }");
+        wat.ShouldContain("(start $__init_globals)");
     }
 
     [Fact]
@@ -914,7 +924,7 @@ public sealed class WatBackendTests
         try
         {
             var wat = Compiler.EmitWat(new[] { a, b });
-            wat.ShouldContain("i32.const 1024\n    i32.const 5\n    i32.store");
+            wat.ShouldContain("(data (i32.const 1024) \"\\05\")");
             wat.ShouldContain("(func $main (result i32)\n    call $bump\n    i32.const 1024\n    i32.load");
         }
         finally { File.Delete(a); File.Delete(b); }
@@ -956,7 +966,8 @@ public sealed class WatBackendTests
         // unit for the extern object as it binds a unit for a called function.
         var wat = Wat("#include <math.h>\nint main(void) { return exp(1.0) > 2.0; }");
         wat.ShouldContain("(func $exp ");
-        wat.ShouldContain("(func $__init_globals");
+        // Its table is data: the first of __exp_data's doubles, invln2N (0x1.71547652b82fep0 * 128).
+        wat.ShouldContain("\\fe\\82\\2b\\65\\47\\15\\67\\40");
     }
 
     [Fact]
@@ -1146,15 +1157,16 @@ public sealed class WatBackendTests
         // `{ 3, { 7, 8, 9 } }` for `struct { int n; int items[]; }`: 4 + 3 * 4 bytes, the
         // elements stored from the member's offset.
         var wat = Wat("struct counted { int n; int items[]; };\nstruct counted bag = { 3, { 7, 8, 9 } };\nint other = 1;\nint main(void) { return bag.items[2] + other; }");
-        wat.ShouldContain("i32.const 1036\n    i32.const 9\n    i32.store");
-        wat.ShouldContain("i32.const 1040\n    i32.const 1\n    i32.store");
+        wat.ShouldContain("(data (i32.const 1024) \"\\03\\00\\00\\00\\07\\00\\00\\00\\08\\00\\00\\00\\09\")");
+        wat.ShouldContain("(data (i32.const 1040) \"\\01\")");
     }
 
     [Fact]
     public void A_hole_in_a_static_aggregate_array_stays_zero()
     {
         var wat = Wat("struct meta { int valid; int fmt; };\nstatic const struct meta md[3] = { [2] = { 1, 3 } };\nint main(void) { return md[0].fmt + md[2].fmt; }");
-        wat.ShouldContain("(start $__init_globals)");
+        // md[2] is 16 bytes in; md[0] and md[1] are memory's zeros.
+        wat.ShouldContain("(data (i32.const 1040) \"\\01\\00\\00\\00\\03\")");
     }
 
     [Fact]

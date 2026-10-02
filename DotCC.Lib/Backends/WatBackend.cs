@@ -528,12 +528,12 @@ internal sealed partial class WatBackend
     /// format) reaches nothing, and a library unit nothing reaches, function or object, costs
     /// the module nothing. The program's own objects are all kept.</summary>
     private (HashSet<string> Functions, HashSet<object> Globals) Reachable(
-        List<(string Name, string Text, Needs Needs)> bodies, List<(GlobalVar Global, string Text, Needs Needs)> inits, Needs roots)
+        List<(string Name, string Text, Needs Needs)> bodies, List<GlobalInit> inits, Needs roots)
     {
         var byName = new Dictionary<string, (string Text, Needs Needs)>(StringComparer.Ordinal);
         foreach (var (name, text, needs) in bodies) { byName[name] = (text, needs); }
         var initsByKey = new Dictionary<object, Needs>();
-        foreach (var (g, _, needs) in inits) { initsByKey[GlobalKey(g.Sym)] = needs; }
+        foreach (var init in inits) { initsByKey[GlobalKey(init.Global.Sym)] = init.Needs; }
         var functions = new HashSet<string>(StringComparer.Ordinal);
         var globals = new HashSet<object>();
         var work = new Stack<string>();
@@ -555,9 +555,9 @@ internal sealed partial class WatBackend
         ReachFunction("main");
         if (_threaded) { ReachFunction("__dotcc_thread_main"); }
         ReachNeeds(roots);
-        foreach (var (g, _, _) in inits)
+        foreach (var init in inits)
         {
-            if (!Unit.LibraryGlobals.Contains(g.Sym)) { ReachGlobal(GlobalKey(g.Sym)); }
+            if (!Unit.LibraryGlobals.Contains(init.Global.Sym)) { ReachGlobal(GlobalKey(init.Global.Sym)); }
         }
         while (work.Count > 0 || globalWork.Count > 0)
         {
@@ -671,11 +671,14 @@ internal sealed partial class WatBackend
             throw new IrUnsupportedException(string.Join("\n", _undefinedUsed));
         }
         var initBody = new StringBuilder();
-        foreach (var (g, text, needs) in inits)
+        foreach (var init in inits)
         {
+            var g = init.Global;
             if (reached.Globals is { } gs && Unit.LibraryGlobals.Contains(g.Sym) && !gs.Contains(GlobalKey(g.Sym))) { continue; }
-            initBody.Append(text);
-            AddNeeds(needs);
+            if (init.Image is { } image) { AddImageSegments(init.Addr, image); }
+            foreach (var (addr, bytes) in init.Literals ?? []) { AddImageSegments(addr, bytes); }
+            initBody.Append(init.Text);
+            AddNeeds(init.Needs);
         }
         var initGlobals = GlobalsInitFunc(initBody.ToString());
         // I/O pulls the WASI import + exported memory + sink globals; the heap only
@@ -2370,17 +2373,27 @@ internal sealed partial class WatBackend
             _dataEnd = AlignUp(_dataEnd, SlotAlign(g.Sym.Type));
             if (g.Sym.IsTuLocal) { _tuGlobals[g.Sym] = _dataEnd; } else { _globals[g.Sym.TargetName] = _dataEnd; }
             if (!g.Sym.IsTuLocal && g.Sym.Type.Unqualified is CType.Array) { _globalArrays.Add(g.Sym.TargetName); }
-            var size = Math.Max(1, WasmSizeOf(g.Sym.Type));
-            // An initialized flexible array member (a GNU extension) gives the object storage
-            // for its elements, from the member's offset, which may lie inside the struct's
-            // tail padding, as gcc lays it out.
-            if (g.Flexible is { } tail)
-            {
-                size = Math.Max(size, FlexibleOffset(g.Sym.Type, tail) + tail.Elems.Count * WasmSizeOf(tail.Element));
-            }
-            _dataEnd += size;
+            _dataEnd += GlobalSize(g);
         }
     }
+
+    /// <summary>The bytes a file-scope object takes. An initialized flexible array member (a GNU
+    /// extension) gives the object storage for its elements, from the member's offset, which
+    /// may lie inside the struct's tail padding, as gcc lays it out.</summary>
+    private int GlobalSize(GlobalVar g)
+    {
+        var size = Math.Max(1, WasmSizeOf(g.Sym.Type));
+        if (g.Flexible is { } tail)
+        {
+            size = Math.Max(size, FlexibleOffset(g.Sym.Type, tail) + tail.Elems.Count * WasmSizeOf(tail.Element));
+        }
+        return size;
+    }
+
+    /// <summary>A global's initializer as the module carries it: the bytes it lays out at
+    /// <see cref="Addr"/> when every value is a constant (<see cref="StaticImage"/>), else the
+    /// stores the start function runs (<see cref="Text"/>), with what either needs.</summary>
+    private sealed record GlobalInit(GlobalVar Global, string Text, Needs Needs, byte[]? Image, int Addr, List<(int Addr, byte[] Bytes)>? Literals = null);
 
     /// <summary>Push a global's address (its value, for an array or an aggregate).</summary>
     private void EmitGlobalAddr(Symbol sym)
@@ -2413,9 +2426,9 @@ internal sealed partial class WatBackend
     /// (<see cref="GlobalsInitFunc"/>). A global with no initializer needs no store (zero storage
     /// is already zero). An array's elements and a struct's members are stored one by one, as a
     /// local's are.</summary>
-    private List<(GlobalVar Global, string Text, Needs Needs)> GlobalInits(IrModule unit)
+    private List<GlobalInit> GlobalInits(IrModule unit)
     {
-        var inits = new List<(GlobalVar Global, string Text, Needs Needs)>();
+        var inits = new List<GlobalInit>();
         var prev = _out;
         _indent = 2;
         _hasFrame = false;
@@ -2429,6 +2442,12 @@ internal sealed partial class WatBackend
                 var body = new StringBuilder();
                 _out = body;
                 if (!TryGlobalAddr(g.Sym, out var at)) { throw new InvalidOperationException($"global '{g.Sym.Name}' was never placed"); }
+                // Constants are data (see WatBackend.StaticData.cs); anything else is stored at start.
+                if (StaticImage(g, init, GlobalSize(g)) is { } image)
+                {
+                    inits.Add(new GlobalInit(g, "", TakeNeeds(), image.Image, at, image.Literals));
+                    continue;
+                }
                 switch (init)
                 {
                     case PinnedArray pa:
@@ -2451,7 +2470,7 @@ internal sealed partial class WatBackend
                     var step = WasmSizeOf(tail.Element);
                     for (var i = 0; i < tail.Elems.Count; i++) { StoreInitValue(first + i * step, tail.Element, tail.Elems[i]); }
                 }
-                inits.Add((g, body.ToString(), TakeNeeds()));
+                inits.Add(new GlobalInit(g, body.ToString(), TakeNeeds(), null, at));
             }
         }
         finally
@@ -5945,6 +5964,7 @@ internal sealed partial class WatBackend
         _dataEnd = AlignUp(_dataEnd, System.Math.Max(1, align));
         var at = _dataEnd;
         _dataEnd += System.Math.Max(1, size);
+        _staticLiterals.Add((at, _dataEnd));
         return at;
     }
 
