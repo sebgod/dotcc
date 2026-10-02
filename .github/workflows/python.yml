@@ -194,13 +194,9 @@ jobs:
       - name: Compile CPython to python.wasm
         run: bash examples/cpython/build-wat.sh
 
-      # --liftoff-only: V8's baseline compiler. Its optimizing compiler takes seconds over the
-      # eval loop's goto dispatch, and node waits for it at exit (a browser does it aside).
       - name: Run Python on it
         timeout-minutes: 30
         working-directory: examples/cpython
-        env:
-          NODE_FLAGS: --liftoff-only
         run: |
           set -euo pipefail
           bash run-wasm.sh -c "print('hello from python.wasm')"
