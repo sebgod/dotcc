@@ -88,6 +88,21 @@ public sealed class NullPointerConstantTests
     }
 
     [Fact]
+    public void a_zero_arm_of_a_conditional_opposite_a_pointer_is_null()
+    {
+        // C11 6.5.15p6: the result is the pointer type and the constant its null pointer
+        // (dlmalloc's `m->top == 0 ? 0 : segment_holding(m, ...)`); C# rejects the int arm
+        // (CS0029). Either arm.
+        var emitted = Emit("""
+            struct seg { struct seg *next; };
+            static struct seg *f(int c, struct seg *s) { struct seg *a = c ? 0 : s; struct seg *b = c ? s->next : 0; return a ? a : b; }
+            int main(void) { return f(1, 0) == 0; }
+            """);
+        emitted.ShouldContain("c != 0 ? null : s");
+        emitted.ShouldContain("c != 0 ? s->next : null");
+    }
+
+    [Fact]
     public void comparing_an_integer_with_zero_stays_zero()
     {
         var emitted = Emit("""
