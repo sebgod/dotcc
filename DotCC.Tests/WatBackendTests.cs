@@ -547,30 +547,26 @@ public sealed class WatBackendTests
     }
 
     [Fact]
-    public void malloc_emits_a_bump_allocator_with_a_heap_pointer_global()
+    public void malloc_is_the_libcs_dlmalloc_over_the_runtimes_sbrk()
     {
-        // A non-struct malloc reaches the backend (the IR's malloc->stack peephole
-        // only fires for struct pointees) and lowers to the bump allocator: a
-        // heap-pointer global and a $malloc that grows linear memory. No I/O is used,
-        // so no fd_write import and the memory stays unexported.
+        // malloc is the wat libc's (dlmalloc, compiled from C) at C's own size_t parameter, so
+        // it can sit in a function pointer; it takes its memory through the runtime's sbrk,
+        // which moves the break global and grows linear memory. No I/O, no WASI import.
         var wat = Wat("#include <stdlib.h>\nint main(void){ int *p = malloc(sizeof(int)); *p = 42; return *p; }");
+        wat.ShouldContain("(func $malloc (param $bytes i64) (result i32)");
+        wat.ShouldContain("(func $__sbrk (param $inc i32) (result i32)");
         wat.ShouldContain("(global $__hp");
-        wat.ShouldContain("(func $malloc (param $n i32) (result i32)");
         wat.ShouldContain("memory.grow");
         wat.ShouldContain("call $malloc");
-        wat.ShouldNotContain("fd_write");
-        wat.ShouldNotContain("export \"memory\"");
+        wat.ShouldNotContain("(import");
     }
 
     [Fact]
-    public void free_lowers_to_a_drop_with_no_runtime_function()
+    public void free_returns_memory_to_the_libcs_malloc()
     {
-        // free is a no-op for the bump allocator: evaluate the argument and drop it,
-        // emitting no $free function (and no call to one).
         var wat = Wat("#include <stdlib.h>\nint main(void){ int *p = malloc(sizeof(int)); *p = 1; free(p); return 0; }");
-        wat.ShouldContain("call $malloc");
-        wat.ShouldNotContain("(func $free");
-        wat.ShouldNotContain("call $free");
+        wat.ShouldContain("(func $free (param $mem i32)");
+        wat.ShouldContain("call $free");
     }
 
     [Fact]

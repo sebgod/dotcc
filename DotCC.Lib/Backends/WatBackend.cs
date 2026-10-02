@@ -341,7 +341,7 @@ internal sealed partial class WatBackend
     // names backed by hand-written wat. Unlike the I/O runtime they pull no WASI
     // import: malloc bumps the $__hp global and grows linear memory itself.
     private static readonly HashSet<string> HeapFns =
-        new(StringComparer.Ordinal) { "malloc", "calloc", "realloc" };
+        new(StringComparer.Ordinal) { "__sbrk" };
     // The runtime helpers/functions the module needs, including those reached only
     // through printf expansion. Closed over dependencies by NeedRuntime.
     private HashSet<string> _runtimeUsed = new(StringComparer.Ordinal);
@@ -383,8 +383,6 @@ internal sealed partial class WatBackend
             // The heap allocators: calloc/realloc are written in terms of malloc.
             // malloc itself has no helper deps (it uses the $__hp global + memory.grow);
             // free isn't a runtime function at all (it lowers to an inline drop).
-            case "calloc": NeedRuntime("malloc"); break;
-            case "realloc": NeedRuntime("malloc"); break;
         }
     }
 
@@ -632,7 +630,7 @@ internal sealed partial class WatBackend
         var initGlobals = GlobalsInitFunc(initBody.ToString());
         // I/O pulls the WASI import + exported memory + sink globals; the heap only
         // needs its bump-pointer global. A program can use either, both, or neither.
-        var usesHeap = _runtimeUsed.Contains("malloc");
+        var usesHeap = _runtimeUsed.Contains("__sbrk");
         var usesIo = _runtimeUsed.Any(n => !HeapFns.Contains(n));
         // The printf float formatter's big-integer needs a limb-count global.
         var usesBn = _runtimeUsed.Contains("__bn");
@@ -708,8 +706,8 @@ internal sealed partial class WatBackend
         }
         if (usesHeap && !_threaded)
         {
-            // The bump-allocation pointer: next free heap byte, growing UP from the end
-            // of the initial page (malloc grows linear memory past it on demand).
+            // The heap's break (sbrk's): its next free byte, growing UP from the stack top
+            // (the libc's malloc moves it, and the memory grows past it on demand).
             m.Append($"  (global $__hp (mut i32) (i32.const {stackTop}))\n");
         }
         if (usesIo)
@@ -3266,10 +3264,16 @@ internal sealed partial class WatBackend
 
         // The heap allocators lower to calls into the hand-written bump allocator;
         // free is a no-op drop. A user-defined one wins and routes through below.
-        if (c.Callee == "malloc" && !UserDefines("malloc")) { EmitHeapAlloc(c, "malloc", 1); return; }
-        if (c.Callee == "calloc" && !UserDefines("calloc")) { EmitHeapAlloc(c, "calloc", 2); return; }
-        if (c.Callee == "realloc" && !UserDefines("realloc")) { EmitHeapAlloc(c, "realloc", 2); return; }
-        if (c.Callee == "free" && !UserDefines("free")) { EmitFree(c); return; }
+        // The libc's malloc (compiled from C) moves the heap's break through this.
+        if (c.Callee == "__builtin_dotcc_sbrk" && !UserDefines(c.Callee) && c.Args.Count == 1)
+        {
+            NeedRuntime("__sbrk");
+            EmitExpr(c.Args[0]);
+            EmitConvert(c.Args[0].Type, CType.Int);
+            Line("call $__sbrk");
+            EmitConvert(new CType.Pointer(CType.Void), c.Type);
+            return;
+        }
 
         // What a wasm instruction does is not a library call: the bulk-memory copies and
         // fill, and the program's end (WASI proc_exit; abort traps).
@@ -3338,41 +3342,6 @@ internal sealed partial class WatBackend
         // renamed out of the way of a same-named external one (BuildFuncDef) differs from
         // the C name.
         Line($"call ${(c.CalleeSym is { Kind: SymKind.Func } fs ? fs.TargetName : c.Callee)}");
-    }
-
-    /// <summary>Lower a heap allocator call (<c>malloc</c>/<c>calloc</c>/<c>realloc</c>)
-    /// to the hand-written bump allocator. Each argument is pushed as an i32: sizes
-    /// arrive as the <c>int</c> size_t stand-in, but a <c>sizeof</c> product is i64, so
-    /// wrap. The runtime function leaves the (i32) result pointer.</summary>
-    private void EmitHeapAlloc(Call c, string name, int argc)
-    {
-        if (c.Args.Count != argc)
-        {
-            throw new IrUnsupportedException($"the wat target expects {name} with {argc} argument(s)");
-        }
-        NeedRuntime(name);
-        foreach (var arg in c.Args)
-        {
-            EmitExpr(arg);
-            if (ValType(arg.Type) == "i64") { Line("i32.wrap_i64"); }
-        }
-        Line($"call ${name}");
-    }
-
-    /// <summary><c>free(p)</c> — a no-op for the bump allocator. Evaluate the argument
-    /// (for any side effects) and drop it; emit no call, so no <c>$free</c> exists.</summary>
-    private void EmitFree(Call c)
-    {
-        if (c.Args.Count != 1)
-        {
-            throw new IrUnsupportedException("the wat target expects free with 1 argument");
-        }
-        EmitExpr(c.Args[0]);
-        Line("drop");
-        // free returns void; but if it was implicitly declared (no <stdlib.h>) the IR
-        // types the call as int and the statement context will drop a "result" — leave
-        // one so the stack stays balanced. With the prototype, c.Type is void: no-op.
-        if (c.Type.Unqualified is not CType.VoidType) { Line($"{ValType(c.Type)}.const 0"); }
     }
 
     /// <summary>Expand a <c>printf</c> with a string-literal format at compile time — the
@@ -5432,38 +5401,31 @@ internal sealed partial class WatBackend
 """);
         }
 
-        // ---- heap: a bump allocator over the region above the shadow stack --------
-        // $__hp bumps UP from the stack top; the stack grows DOWN below it, so they
-        // never meet. Each block carries an i32 size header (payload at
-        // block+8, kept 8-aligned) so realloc can copy the old bytes; free never
-        // reclaims. malloc grows linear memory on demand and returns NULL if it can't.
-        if (_runtimeUsed.Contains("malloc") && _threaded)
+        // ---- heap: sbrk over the region above the shadow stack ----------------------
+        // The break $__hp starts at the stack top and moves UP; the stack grows DOWN below
+        // it, so they never meet. The libc's malloc (dlmalloc, compiled from C) claims the
+        // memory it manages through it; the memory grows when the break passes its end.
+        if (_runtimeUsed.Contains("__sbrk") && _threaded)
         {
-            // Threads share the heap: claim [block, end) by moving the cell in memory with a
-            // compare-exchange (another thread may have moved it first: try again), then grow
-            // the memory until it covers the claim (another thread may grow it meanwhile).
+            // Threads share the break: move the cell in memory with a compare-exchange
+            // (another thread may have moved it first: try again), then grow the memory until
+            // it covers the claim (another thread may grow it meanwhile).
             sb.Append($$"""
-  (func $malloc (param $n i32) (result i32)
-    (local $block i32) (local $end i32)
+  (func $__sbrk (param $inc i32) (result i32)
+    (local $old i32) (local $end i32)
     loop $claim
       i32.const {{HeapCellAddr}}
       i32.atomic.load
-      local.set $block
-      local.get $block
-      i32.const 8
-      i32.add
-      local.get $n
-      i32.const 7
-      i32.add
-      i32.const -8
-      i32.and
+      local.set $old
+      local.get $old
+      local.get $inc
       i32.add
       local.set $end
       i32.const {{HeapCellAddr}}
-      local.get $block
+      local.get $old
       local.get $end
       i32.atomic.rmw.cmpxchg
-      local.get $block
+      local.get $old
       i32.ne
       br_if $claim
     end
@@ -5488,47 +5450,36 @@ internal sealed partial class WatBackend
         i32.const -1
         i32.eq
         if
-          i32.const 0
+          i32.const -1
           return
         end
         br $grow
       end
     end
-    local.get $block
-    local.get $n
-    i32.store
-    local.get $block
-    i32.const 8
-    i32.add
+    local.get $old
   )
 
 """);
         }
-        else if (_runtimeUsed.Contains("malloc"))
+        else if (_runtimeUsed.Contains("__sbrk"))
         {
             sb.Append("""
-  (func $malloc (param $n i32) (result i32)
-    (local $block i32) (local $end i32)
+  (func $__sbrk (param $inc i32) (result i32)
+    (local $old i32) (local $end i32)
     global.get $__hp
-    local.set $block             ;; block = heap pointer (8-aligned)
-    local.get $block             ;; end = block + 8 (header) + align8(n)
-    i32.const 8
-    i32.add
-    local.get $n
-    i32.const 7
-    i32.add
-    i32.const -8
-    i32.and
+    local.set $old
+    local.get $old
+    local.get $inc
     i32.add
     local.set $end
-    block $enough                ;; grow linear memory if the bump would overrun it
+    block $enough                ;; grow linear memory past the new break
       local.get $end
       memory.size
       i32.const 16
-      i32.shl                    ;; current size in bytes (pages * 65536)
+      i32.shl
       i32.le_u
       br_if $enough
-      local.get $end             ;; grow by ceil((end - bytes) / 65536) pages
+      local.get $end
       memory.size
       i32.const 16
       i32.shl
@@ -5541,119 +5492,13 @@ internal sealed partial class WatBackend
       i32.const -1
       i32.eq
       if
-        i32.const 0              ;; grow failed → NULL
+        i32.const -1             ;; no more memory: sbrk's (void *)-1
         return
       end
     end
     local.get $end
-    global.set $__hp             ;; commit the bump
-    local.get $block             ;; store the size header
-    local.get $n
-    i32.store
-    local.get $block             ;; return the payload pointer (block + 8)
-    i32.const 8
-    i32.add
-  )
-
-""");
-        }
-
-        if (_runtimeUsed.Contains("calloc"))
-        {
-            sb.Append("""
-  (func $calloc (param $nmemb i32) (param $size i32) (result i32)
-    (local $bytes i32) (local $p i32) (local $i i32)
-    local.get $nmemb
-    local.get $size
-    i32.mul
-    local.set $bytes
-    local.get $bytes
-    call $malloc
-    local.set $p
-    local.get $p                 ;; zero the payload when non-NULL
-    if
-      block $zdone
-        loop $zlp
-          local.get $i
-          local.get $bytes
-          i32.ge_u
-          br_if $zdone
-          local.get $p
-          local.get $i
-          i32.add
-          i32.const 0
-          i32.store8
-          local.get $i
-          i32.const 1
-          i32.add
-          local.set $i
-          br $zlp
-        end
-      end
-    end
-    local.get $p
-  )
-
-""");
-        }
-
-        if (_runtimeUsed.Contains("realloc"))
-        {
-            sb.Append("""
-  (func $realloc (param $p i32) (param $n i32) (result i32)
-    (local $np i32) (local $old i32) (local $cnt i32) (local $i i32)
-    local.get $p                 ;; realloc(NULL, n) == malloc(n)
-    i32.eqz
-    if
-      local.get $n
-      call $malloc
-      return
-    end
-    local.get $p                 ;; old payload size from the header
-    i32.const 8
-    i32.sub
-    i32.load
-    local.set $old
-    local.get $n                 ;; allocate the new block
-    call $malloc
-    local.set $np
-    local.get $np
-    i32.eqz
-    if
-      i32.const 0                ;; allocation failed → NULL (old block kept)
-      return
-    end
-    local.get $old               ;; cnt = min(old, n)
-    local.get $n
-    i32.lt_u
-    if (result i32)
-      local.get $old
-    else
-      local.get $n
-    end
-    local.set $cnt
-    block $cdone                 ;; copy cnt bytes old → new
-      loop $clp
-        local.get $i
-        local.get $cnt
-        i32.ge_u
-        br_if $cdone
-        local.get $np
-        local.get $i
-        i32.add
-        local.get $p
-        local.get $i
-        i32.add
-        i32.load8_u
-        i32.store8
-        local.get $i
-        i32.const 1
-        i32.add
-        local.set $i
-        br $clp
-      end
-    end
-    local.get $np
+    global.set $__hp
+    local.get $old
   )
 
 """);

@@ -507,6 +507,34 @@ public sealed class WatOracleTests
         + "}\n"
         + "int main(void) { f(1, 1); f(1, 0); f(0, 0); return 0; }",
         "AP\nEP\n\n")]
+    // The C heap is dlmalloc over the runtime's sbrk: blocks freed are reused, realloc moves and
+    // keeps the bytes, calloc zeroes, and malloc and free work through function pointers; the sum
+    // is a native gcc build's.
+    [InlineData("#include <stdio.h>\n"
+        + "#include <stdlib.h>\n"
+        + "#include <string.h>\n"
+        + "int main(void) {\n"
+        + "    unsigned long sum = 0;\n"
+        + "    char *keep[1000];\n"
+        + "    for (int round = 0; round < 50; round++) {\n"
+        + "        for (int i = 0; i < 1000; i++) {\n"
+        + "            size_t n = (size_t)((i * 37 + round * 101) % 900 + 1);\n"
+        + "            keep[i] = malloc(n);\n"
+        + "            memset(keep[i], i & 0xff, n);\n"
+        + "        }\n"
+        + "        for (int i = 0; i < 1000; i += 2) { free(keep[i]); keep[i] = NULL; }\n"
+        + "        for (int i = 1; i < 1000; i += 2) { keep[i] = realloc(keep[i], 1200); sum += (unsigned char)keep[i][0]; }\n"
+        + "        for (int i = 0; i < 1000; i++) free(keep[i]);\n"
+        + "    }\n"
+        + "    int *z = calloc(1000, sizeof(int));\n"
+        + "    for (int i = 0; i < 1000; i++) sum += z[i];\n"
+        + "    free(z);\n"
+        + "    void *(*m)(size_t) = malloc; void (*f)(void *) = free;\n"
+        + "    void *p = m(64); f(p);\n"
+        + "    printf(\"sum=%lu\\n\", sum);\n"
+        + "    return 0;\n"
+        + "}",
+        "sum=3130400\n")]
     // strerror's glibc wording, strtoimax past 32 bits, the one "C" locale, and time() from
     // WASI's clock.
     [InlineData("#include <stdio.h>\n#include <string.h>\n#include <errno.h>\n#include <inttypes.h>\n#include <locale.h>\n#include <time.h>\n"

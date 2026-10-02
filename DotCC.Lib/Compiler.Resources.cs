@@ -65,10 +65,32 @@ public static partial class Compiler
                 ?? throw new InvalidOperationException($"missing embedded libc resource: {name}");
             using var reader = new StreamReader(stream);
             var text = reader.ReadToEnd();
-            if (fileName.EndsWith(".c", StringComparison.Ordinal)) { units[fileName[..^2]] = text; }
+            if (fileName.EndsWith(".c", StringComparison.Ordinal))
+            {
+                units[fileName[..^2]] = text;
+                // A unit that defines more than the name it is filed under (dlmalloc's one file
+                // for malloc, free, calloc and realloc) lists the others on a line of its own:
+                // "dotcc-libc: also defines free calloc realloc". The front end binds a unit once,
+                // whichever of its names a program uses first.
+                foreach (var alias in AlsoDefines(text)) { units[alias] = text; }
+            }
             else if (fileName.EndsWith(".h", StringComparison.Ordinal)) { headers[fileName] = SpliceLineContinuations(text); }
         }
         return (units, headers);
+    }
+
+    /// <summary>The names a library unit's <c>dotcc-libc: also defines</c> line lists.</summary>
+    private static IEnumerable<string> AlsoDefines(string text)
+    {
+        const string tag = "dotcc-libc: also defines";
+        var at = text.IndexOf(tag, StringComparison.Ordinal);
+        if (at < 0) { yield break; }
+        var end = text.IndexOf('\n', at);
+        var line = text[(at + tag.Length)..(end < 0 ? text.Length : end)];
+        foreach (var name in line.Replace("*/", " ").Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            yield return name;
+        }
     }
 
     private static Dictionary<string, string> LoadEmbeddedSystemHeaders()
