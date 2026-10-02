@@ -141,10 +141,14 @@ internal static class Program
             Description = "Add a directory to the native-library (-l) search path. Repeatable; the glued -L/dir form is accepted too.",
             AllowMultipleArgumentsPerToken = false,
         };
+        var compileCommandsOpt = new Option<string?>("--compile-commands")
+        {
+            Description = "Compile the units a compilation database (compile_commands.json) lists, each with its own -D and -I, into one program. --target=wat only.",
+        };
         var root = new RootCommand("dotcc — a C compiler frontend that transpiles to .NET 10 / C# 14.")
         {
             inputArg, outOpt, emitOpt, targetOpt, preprocessOpt, includeOpt, defineOpt, compileOpt, sharedOpt, assemblyOpt, stdOpt,
-            pedanticOpt, pedanticErrorsOpt, wconversionOpt, wnoDiscardedQualifiersOpt, wimplicitFallthroughOpt, sanitizeOpt, posixPathsOpt, mdOpt, mmdOpt, mfOpt, mtOpt, linkOpt, libDirOpt,
+            pedanticOpt, pedanticErrorsOpt, wconversionOpt, wnoDiscardedQualifiersOpt, wimplicitFallthroughOpt, sanitizeOpt, posixPathsOpt, mdOpt, mmdOpt, mfOpt, mtOpt, linkOpt, libDirOpt, compileCommandsOpt,
         };
         // Accept-and-ignore unknown flags (-Wall, -O2, -g, -f*, -m*, …) instead
         // of erroring out, so dotcc survives being driven by ./configure / make,
@@ -221,7 +225,7 @@ internal static class Program
             var depFile = parse.GetValue(mfOpt);
             var depTargets = parse.GetValue(mtOpt) ?? Array.Empty<string>();
 
-            if (inputs.Length == 0)
+            if (inputs.Length == 0 && parse.GetValue(compileCommandsOpt) is null)
             {
                 Console.Error.WriteLine("dotcc: error: no input files");
                 return 1;
@@ -261,14 +265,123 @@ internal static class Program
                 emit = EmitKind.File;
             }
 
+            Dictionary<string, UnitFlags>? units = null;
+            if (parse.GetValue(compileCommandsOpt) is { } database)
+            {
+                if (!string.Equals(target, "wat", StringComparison.OrdinalIgnoreCase))
+                {
+                    Console.Error.WriteLine("dotcc: error: --compile-commands needs --target=wat");
+                    return 1;
+                }
+                try { units = ReadCompileCommands(database); }
+                catch (Exception ex) when (ex is IOException or System.Text.Json.JsonException or InvalidDataException)
+                {
+                    Console.Error.WriteLine($"dotcc: error: cannot read the compilation database '{database}': {ex.Message}");
+                    return 1;
+                }
+                inputs = [.. inputs, .. units.Keys];
+            }
+
             return Run(inputs, output, emit, target, preprocessOnly, includes, defines, sharedFlag, dialect,
-                       mdFlag, mmdFlag, depFile, depTargets, debugHeapFlag, imports, warnings, posixPathsFlag, assemblyFlag);
+                       mdFlag, mmdFlag, depFile, depTargets, debugHeapFlag, imports, warnings, posixPathsFlag, assemblyFlag, units);
         });
 
         return root.Parse(args).Invoke();
     }
 
     private enum EmitKind { Csproj, File, Build, Obj }
+
+    /// <summary>
+    /// The units a compilation database (<c>compile_commands.json</c>, as CMake and Bear write
+    /// it) lists, by full path, each with the <c>-D</c> and <c>-I</c> of its own command line
+    /// (an entry's <c>arguments</c>, or its <c>command</c> split as a shell would), relative
+    /// paths taken against its <c>directory</c>. Other flags are the build's business, not the
+    /// preprocessor's, and are ignored.
+    /// </summary>
+    private static Dictionary<string, UnitFlags> ReadCompileCommands(string path)
+    {
+        using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path));
+        if (doc.RootElement.ValueKind != System.Text.Json.JsonValueKind.Array)
+        {
+            throw new InvalidDataException("expected a JSON array of entries");
+        }
+        var baseDir = Path.GetDirectoryName(Path.GetFullPath(path)) ?? ".";
+        var units = new Dictionary<string, UnitFlags>(StringComparer.Ordinal);
+        foreach (var entry in doc.RootElement.EnumerateArray())
+        {
+            var dir = entry.TryGetProperty("directory", out var d) && d.GetString() is { } ds
+                ? Path.GetFullPath(ds, baseDir) : baseDir;
+            var file = entry.TryGetProperty("file", out var f) && f.GetString() is { } fs
+                ? fs : throw new InvalidDataException("an entry has no \"file\"");
+            List<string> args;
+            if (entry.TryGetProperty("arguments", out var a) && a.ValueKind == System.Text.Json.JsonValueKind.Array)
+            {
+                args = [.. a.EnumerateArray().Select(x => x.GetString() ?? "")];
+            }
+            else if (entry.TryGetProperty("command", out var c) && c.GetString() is { } cs)
+            {
+                args = SplitCommandLine(cs);
+            }
+            else
+            {
+                throw new InvalidDataException($"the entry for '{file}' has neither \"arguments\" nor \"command\"");
+            }
+            var defines = new List<string>();
+            var includes = new List<string>();
+            for (var i = 1; i < args.Count; i++)
+            {
+                var arg = args[i];
+                if (arg is "-D" or "-I" && i + 1 < args.Count)
+                {
+                    (arg == "-D" ? defines : includes).Add(arg == "-D" ? args[++i] : Path.GetFullPath(args[++i], dir));
+                }
+                else if (arg.StartsWith("-D", StringComparison.Ordinal)) { defines.Add(arg[2..]); }
+                else if (arg.StartsWith("-I", StringComparison.Ordinal)) { includes.Add(Path.GetFullPath(arg[2..], dir)); }
+            }
+            units[Path.GetFullPath(file, dir)] = new UnitFlags(defines, includes);
+        }
+        return units;
+    }
+
+    /// <summary>A command line split into its words as a POSIX shell splits it: blanks separate
+    /// words, single quotes keep everything, double quotes keep all but a backslash before
+    /// <c>"</c>, <c>\</c>, <c>$</c> or <c>`</c>, and a backslash outside quotes keeps the next
+    /// character.</summary>
+    private static List<string> SplitCommandLine(string command)
+    {
+        var words = new List<string>();
+        var word = new System.Text.StringBuilder();
+        var inWord = false;
+        for (var i = 0; i < command.Length; i++)
+        {
+            var ch = command[i];
+            if (char.IsWhiteSpace(ch))
+            {
+                if (inWord) { words.Add(word.ToString()); word.Clear(); inWord = false; }
+                continue;
+            }
+            inWord = true;
+            if (ch == '\'')
+            {
+                var end = command.IndexOf('\'', i + 1);
+                if (end < 0) { end = command.Length; }
+                word.Append(command, i + 1, end - i - 1);
+                i = end;
+            }
+            else if (ch == '"')
+            {
+                for (i++; i < command.Length && command[i] != '"'; i++)
+                {
+                    if (command[i] == '\\' && i + 1 < command.Length && command[i + 1] is '"' or '\\' or '$' or '`') { i++; }
+                    word.Append(command[i]);
+                }
+            }
+            else if (ch == '\\' && i + 1 < command.Length) { word.Append(command[++i]); }
+            else { word.Append(ch); }
+        }
+        if (inWord) { words.Add(word.ToString()); }
+        return words;
+    }
 
     /// <summary>
     /// <c>EmitKind</c> → <see cref="EmitMode"/> flattening, as a C# 14 extension member so the
@@ -314,7 +427,8 @@ internal static class Program
         ImportOptions? imports = null,
         WarningFlags warnings = WarningFlags.Default,
         bool posixPaths = false,
-        bool managedLibrary = false)
+        bool managedLibrary = false,
+        IReadOnlyDictionary<string, UnitFlags>? units = null)
     {
         imports ??= ImportOptions.Empty;
         if (preprocessOnly)
@@ -345,7 +459,7 @@ internal static class Program
             {
                 Console.Error.WriteLine("dotcc: warning: -l/-L native library imports are ignored for --target=wat");
             }
-            return RunWat(inputPaths, outputPath, includeDirs, defines, dialect, warnings);
+            return RunWat(inputPaths, outputPath, includeDirs, defines, dialect, warnings, unit: emit == EmitKind.Obj, units);
         }
 
         // Separate compilation: `--emit=obj a.c -o a.cs` compiles ONE translation
@@ -546,7 +660,9 @@ internal static class Program
     /// <summary>
     /// Compile the <c>.c</c> inputs to a WebAssembly-text module and write it to
     /// <c>-o</c> (else stdout). Whole-program, like the default C# path; linking of
-    /// pre-compiled wasm objects isn't a thing yet (milestone-2+).
+    /// pre-compiled wasm objects isn't a thing yet. With <paramref name="unit"/>
+    /// (<c>--emit=obj</c>) one unit is compiled on its own, what it does not define
+    /// imported from <c>env</c>, for measuring a code base unit by unit.
     /// </summary>
     private static int RunWat(
         string[] inputPaths,
@@ -554,7 +670,9 @@ internal static class Program
         string[] includeDirs,
         string[] defines,
         CDialect dialect,
-        WarningFlags warnings)
+        WarningFlags warnings,
+        bool unit,
+        IReadOnlyDictionary<string, UnitFlags>? units = null)
     {
         var sources = inputPaths.Where(p =>
             p.EndsWith(".c", StringComparison.OrdinalIgnoreCase) ||
@@ -564,10 +682,17 @@ internal static class Program
             Console.Error.WriteLine("dotcc: error: --target=wat needs .c or .zig source input");
             return 1;
         }
+        if (unit && sources.Length != 1)
+        {
+            Console.Error.WriteLine("dotcc: --target=wat --emit=obj compiles one .c at a time");
+            return 2;
+        }
         string wat;
         try
         {
-            wat = Compiler.EmitWat(sources, includeDirs, defines, dialect, warnings);
+            wat = unit
+                ? Compiler.EmitWatUnit(sources[0], includeDirs, defines, dialect, warnings)
+                : Compiler.EmitWat(sources, includeDirs, defines, dialect, warnings, units);
         }
         catch (CompileException ex)
         {

@@ -392,6 +392,38 @@ internal sealed partial class WatBackend
 
     public static string Run(IrModule unit) => new WatBackend().Module(unit);
 
+    /// <summary>Compile one translation unit on its own (<c>--target=wat --emit=obj</c>): what it
+    /// calls, takes the address of or reads and does not define, nor finds in the wat libc, is
+    /// imported from the module <c>env</c> under its C name instead of refused, so the unit's own
+    /// lowering is what succeeds or fails. The module has no <c>main</c> and keeps every function;
+    /// it is for measuring a code base unit by unit (CPython's wat probe), not for running.</summary>
+    public static string RunUnit(IrModule unit) => new WatBackend { _unitMode = true }.Module(unit);
+
+    /// <summary>Set for <see cref="RunUnit"/>.</summary>
+    private bool _unitMode;
+
+    /// <summary>In <see cref="RunUnit"/>'s mode, the functions the unit uses and nothing defines,
+    /// by the name the module calls them under → their C name and wasm signature; and the extern
+    /// objects, by C name, whose address the module reads from an imported global.</summary>
+    private readonly SortedDictionary<string, (string CName, string Sig)> _unitFuncImports = new(StringComparer.Ordinal);
+    private readonly SortedSet<string> _unitDataImports = new(StringComparer.Ordinal);
+
+    /// <summary>Import the function <paramref name="cName"/>, called as <paramref name="targetName"/>,
+    /// from <c>env</c> with the signature of <paramref name="type"/>, or, unprototyped, of the call's
+    /// arguments and result.</summary>
+    private void ImportUnitFunction(string targetName, string cName, CType.Func? type, Call? call)
+    {
+        string sig;
+        if (type is not null) { sig = SigText(type); }
+        else if (call is not null)
+        {
+            sig = string.Concat(call.Args.Select(a => $" (param {ValType(a.Type)})"))
+                + (call.Type.Unqualified is CType.VoidType ? "" : $" (result {ValType(call.Type)})");
+        }
+        else { throw new IrUnsupportedException($"the wat target has no signature for '{cName}'"); }
+        _unitFuncImports[targetName] = (cName, sig);
+    }
+
     /// <summary>The module and field a <c>__wasi_&lt;name&gt;</c> function is imported from:
     /// <c>wasi_snapshot_preview1.&lt;name&gt;</c>, except wasi-threads' <c>wasi.thread-spawn</c>.</summary>
     private static (string Module, string Field) WasiImport(string cName) =>
@@ -511,18 +543,19 @@ internal sealed partial class WatBackend
     /// (see <see cref="Reachable"/>) brings none of them in.</summary>
     private sealed record Needs(
         HashSet<string> Runtime, SortedDictionary<string, string> Wasi, bool ProcExit, bool Longjmp,
-        HashSet<string> Table, HashSet<object> Globals);
+        HashSet<string> Table, HashSet<object> Globals, SortedSet<string> Undefined);
 
     /// <summary>Hand over what has been needed since the last call, and start afresh.</summary>
     private Needs TakeNeeds()
     {
-        var needs = new Needs(_runtimeUsed, _wasiImports, _usesProcExit, _usesLongjmp, _tableUsed, _globalsUsed);
+        var needs = new Needs(_runtimeUsed, _wasiImports, _usesProcExit, _usesLongjmp, _tableUsed, _globalsUsed, _undefinedUsed);
         _runtimeUsed = new HashSet<string>(StringComparer.Ordinal);
         _wasiImports = new SortedDictionary<string, string>(StringComparer.Ordinal);
         _usesProcExit = false;
         _usesLongjmp = false;
         _tableUsed = new HashSet<string>(StringComparer.Ordinal);
         _globalsUsed = new HashSet<object>();
+        _undefinedUsed = new SortedSet<string>(StringComparer.Ordinal);
         return needs;
     }
 
@@ -535,12 +568,19 @@ internal sealed partial class WatBackend
         _usesLongjmp |= needs.Longjmp;
         _tableUsed.UnionWith(needs.Table);
         _globalsUsed.UnionWith(needs.Globals);
+        _undefinedUsed.UnionWith(needs.Undefined);
     }
 
     /// <summary>The functions whose table slot the code emitted since the last
     /// <see cref="TakeNeeds"/> uses, and the globals it addresses.</summary>
     private HashSet<string> _tableUsed = new(StringComparer.Ordinal);
     private HashSet<object> _globalsUsed = new();
+
+    /// <summary>What the code emitted since the last <see cref="TakeNeeds"/> uses that nothing
+    /// defines (a refusal's message each), emitted as a trap. Like a linker, the module minds
+    /// only those its kept code reaches: a unit's function nothing calls may name what this
+    /// build leaves out (CPython's <c>dlopen</c> loader, with dynamic loading off).</summary>
+    private SortedSet<string> _undefinedUsed = new(StringComparer.Ordinal);
 
     /// <summary>A direct call in emitted wat, capturing its target's name.</summary>
     [System.Text.RegularExpressions.GeneratedRegex(@"\bcall \$([^\s()]+)")]
@@ -578,6 +618,10 @@ internal sealed partial class WatBackend
             AddNeeds(needs);
         }
         var funcs = kept.ToString();
+        if (_undefinedUsed.Count > 0)
+        {
+            throw new IrUnsupportedException(string.Join("\n", _undefinedUsed));
+        }
         var initBody = new StringBuilder();
         foreach (var (g, text, needs) in inits)
         {
@@ -610,6 +654,14 @@ internal sealed partial class WatBackend
         {
             var (module, field) = WasiImport(name);
             m.Append($"  (import \"{module}\" \"{field}\" (func ${name}{sig}))\n");
+        }
+        foreach (var (name, (cName, sig)) in _unitFuncImports)
+        {
+            m.Append($"  (import \"env\" \"{cName}\" (func ${name}{sig}))\n");
+        }
+        foreach (var name in _unitDataImports)
+        {
+            m.Append($"  (import \"env\" \"&{name}\" (global $__addr_{name} i32))\n");
         }
         if (_threaded)
         {
@@ -2294,7 +2346,15 @@ internal sealed partial class WatBackend
         }
         if (!TryGlobalAddr(sym, out var addr))
         {
-            throw new IrUnsupportedException($"the wat target has no definition of the global '{sym.Name}'");
+            if (_unitMode && !sym.IsTuLocal)
+            {
+                _unitDataImports.Add(sym.TargetName);
+                Line($"global.get $__addr_{sym.TargetName}");
+                return;
+            }
+            _undefinedUsed.Add($"the wat target has no definition of the global '{sym.Name}'");
+            Line("unreachable");
+            return;
         }
         Line($"i32.const {addr}");
     }
@@ -2379,7 +2439,12 @@ internal sealed partial class WatBackend
         var name = fn.TargetName;
         if (!_defined.Contains(fn.Name))
         {
-            throw new IrUnsupportedException($"the wat target cannot take the address of '{fn.Name}', which the program does not define");
+            if (!_unitMode)
+            {
+                _undefinedUsed.Add($"the wat target cannot take the address of '{fn.Name}', which the program does not define");
+                return 0;
+            }
+            ImportUnitFunction(name, fn.Name, fn.Type.Unqualified as CType.Func, null);
         }
         _tableUsed.Add(name);
         if (!_fnTableIndex.TryGetValue(name, out var index))
@@ -2401,9 +2466,7 @@ internal sealed partial class WatBackend
             CType.Pointer { Pointee: var pt } when pt.Unqualified is CType.Func pf => pf,
             _ => throw new IrUnsupportedException($"the wat target cannot call through a {fnType.Describe()}"),
         };
-        var sig = (IsAggregate(f.Return) ? " (param i32)" : "") + string.Concat(f.Params.Where(p => p.Unqualified is not CType.VoidType).Select(p => $" (param {ValType(p)})"))
-            + (f.Variadic ? " (param i32)" : "")
-            + (f.Return.Unqualified is CType.VoidType ? "" : $" (result {ValType(f.Return)})");
+        var sig = SigText(f);
         if (!_sigTypes.TryGetValue(sig, out var name))
         {
             name = $"$__sig{_sigTypes.Count}";
@@ -2411,6 +2474,13 @@ internal sealed partial class WatBackend
         }
         return name;
     }
+
+    /// <summary>The wasm parameters and result of a function of type <paramref name="f"/>: a struct
+    /// result's slot first, the parameters, and a variadic function's argument buffer last.</summary>
+    private string SigText(CType.Func f) =>
+        (IsAggregate(f.Return) ? " (param i32)" : "") + string.Concat(f.Params.Where(p => p.Unqualified is not CType.VoidType).Select(p => $" (param {ValType(p)})"))
+        + (f.Variadic ? " (param i32)" : "")
+        + (f.Return.Unqualified is CType.VoidType ? "" : $" (result {ValType(f.Return)})");
 
     /// <summary>A call through a function pointer: the arguments (each converted to its
     /// parameter's type when the pointer's type gives them), then the pointer (a table
@@ -2645,6 +2715,23 @@ internal sealed partial class WatBackend
                 EmitAggregateInit(siSlot, si.Type, si);
                 EmitFrameAddr(siSlot);
                 break;
+            case StructInit staticSi when _absoluteInit && IsAggregate(staticSi.Type):
+            {
+                // A compound literal in a static initializer has static storage (C11 6.5.2.5p5):
+                // an object of its own in the data area, its members stored by the start function.
+                var at = ReserveStatic(WasmSizeOf(staticSi.Type), SlotAlign(staticSi.Type));
+                StoreAggregateMembers(at, staticSi.Type, staticSi);
+                Line($"i32.const {at}");
+                break;
+            }
+            case StackArray staticSa when _absoluteInit:
+            {
+                var step = WasmSizeOf(staticSa.Element);
+                var at = ReserveStatic(step * staticSa.Elems.Count, SlotAlign(staticSa.Element));
+                for (var i = 0; i < staticSa.Elems.Count; i++) { StoreInitValue(at + i * step, staticSa.Element, staticSa.Elems[i]); }
+                Line($"i32.const {at}");
+                break;
+            }
             case StackArray sa when _literalSlots.TryGetValue(sa, out var saSlot):
             {
                 var step = WasmSizeOf(sa.Element);
@@ -2729,6 +2816,8 @@ internal sealed partial class WatBackend
                 _indent--;
                 Line("end");
                 break;
+            case NameRef unresolved:
+                throw new IrUnsupportedException($"the wat target cannot use '{unresolved.RawName}', which nothing declares");
             default:
                 throw new IrUnsupportedException($"the wat target does not yet support the expression {e.GetType().Name}");
         }
@@ -3232,9 +3321,16 @@ internal sealed partial class WatBackend
                 var result = c.Type.Unqualified is CType.VoidType ? "" : $" (result {ValType(c.Type)})";
                 _wasiImports[c.Callee] = string.Concat(wasiParams.Select(p => $" (param {ValType(p)})")) + result;
             }
+            else if (_unitMode)
+            {
+                ImportUnitFunction(c.CalleeSym is { Kind: SymKind.Func } us ? us.TargetName : c.Callee, c.Callee, CalleeFunc(c), c);
+            }
             else
             {
-                throw new IrUnsupportedException($"call to '{c.Callee}': no unit defines it, and the wat libc has no source for it");
+                // Refused only if kept code reaches this call (see _undefinedUsed): a trap meanwhile.
+                _undefinedUsed.Add($"call to '{c.Callee}': no unit defines it, and the wat libc has no source for it");
+                Line("unreachable");
+                return;
             }
         }
         EmitCallArgs(c, c.Args, c.ParamTypes);
@@ -3786,7 +3882,7 @@ internal sealed partial class WatBackend
                 Line(StoreInstr(scalar.Type));
                 EmitFrameAddr(scalarSlot);
                 break;
-            case StructInit or StackArray when _literalSlots.ContainsKey(lv):
+            case StructInit or StackArray when _literalSlots.ContainsKey(lv) || _absoluteInit:
                 EmitExpr(lv);   // a compound literal is an lvalue: its slot, filled
                 break;
             case VarRef { Sym.Kind: SymKind.Param } ap when IsAggregate(ap.Sym.Type) && !_frame.ContainsKey(ap.Sym):
@@ -5942,6 +6038,16 @@ internal sealed partial class WatBackend
 
     private static int AlignUp(int x, int a) => (x + a - 1) & ~(a - 1);
 
+    /// <summary>Static storage of <paramref name="size"/> bytes in the data area, zero until the
+    /// start function stores into it: the object of a compound literal in a static initializer.</summary>
+    private int ReserveStatic(int size, int align)
+    {
+        _dataEnd = AlignUp(_dataEnd, System.Math.Max(1, align));
+        var at = _dataEnd;
+        _dataEnd += System.Math.Max(1, size);
+        return at;
+    }
+
     private void NarrowI32(CType to)
     {
         var u = to.Unqualified;
@@ -5982,5 +6088,10 @@ internal sealed partial class WatBackend
     private static bool IsSignedInt(CType t) =>
         t.Unqualified is CType.Prim { Integer: true, Signed: true } or CType.Enum;
 
-    private void Line(string text) => _out.Append(' ', _indent * 2).Append(text).Append('\n');
+    private void Line(string text) => _out.Append(' ', Math.Min(_indent, MaxIndent) * 2).Append(text).Append('\n');
+
+    /// <summary>The deepest indentation a line gets. Whitespace means nothing in wat, and a
+    /// function with thousands of goto labels (CPython's eval loop) nests a block per label, so
+    /// indenting by depth alone made its text hundreds of megabytes of spaces.</summary>
+    private const int MaxIndent = 32;
 }

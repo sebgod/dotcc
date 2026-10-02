@@ -31,6 +31,12 @@ public sealed record ImportOptions(
     public bool HasAny => LinkLibraries.Count > 0 || StaticArchives.Count > 0;
 }
 
+/// <summary>A translation unit's own preprocessor flags, as a compilation database
+/// (<c>compile_commands.json</c>) gives each file: <paramref name="Defines"/> (<c>NAME</c> or
+/// <c>NAME=VALUE</c>) after the program's, and <paramref name="IncludeDirs"/> searched after the
+/// program's <c>-I</c> directories.</summary>
+public sealed record UnitFlags(IReadOnlyList<string> Defines, IReadOnlyList<string> IncludeDirs);
+
 /// <summary>
 /// Public compiler API. Two top-level entry points:
 /// <list type="bullet">
@@ -67,7 +73,8 @@ public static partial class Compiler
         WarningFlags warnings = WarningFlags.Default,
         bool testMode = false,
         string? objectKey = null,
-        Frontends.SourceLibrary? library = null)
+        Frontends.SourceLibrary? library = null,
+        IReadOnlyDictionary<string, UnitFlags>? units = null)
     {
         // clang's shape (`clang: error: no such file or directory: 'x.c'`), checked before any frontend
         // opens the file, so a missing input is a diagnostic rather than an unhandled IO exception.
@@ -79,7 +86,7 @@ public static partial class Compiler
             }
         }
         var request = new Frontends.FrontendRequest(
-            inputPaths, includeDirs, defines, dialect, names, warnings, testMode, objectKey, library);
+            inputPaths, includeDirs, defines, dialect, names, warnings, testMode, objectKey, library, units);
         var anyZig = inputPaths.Any(IsZigSource);
         var anyC = inputPaths.Any(p => !IsZigSource(p));
         if (anyZig && anyC) { return BuildMixedIr(request); }
@@ -236,11 +243,30 @@ public static partial class Compiler
         IReadOnlyList<string>? includeDirs = null,
         IReadOnlyList<string>? defines = null,
         CDialect? dialect = null,
-        WarningFlags warnings = WarningFlags.Default)
+        WarningFlags warnings = WarningFlags.Default,
+        IReadOnlyDictionary<string, UnitFlags>? units = null)
     {
         var irBuilder = BuildIr(inputPaths, includeDirs, ["__wasm__=1", .. defines ?? []], dialect,
-            new Backends.WatNameLegalizer(), warnings, library: WatLibc);
+            new Backends.WatNameLegalizer(), warnings, library: WatLibc, units: units);
         return Backends.WatBackend.Run(irBuilder);
+    }
+
+    /// <summary>
+    /// Compile one translation unit to a wat module on its own (<c>--target=wat --emit=obj</c>):
+    /// what it uses and neither it nor the wat libc defines becomes an import from <c>env</c>
+    /// instead of an error, so the result says whether the unit's own code lowers. The module is
+    /// for measuring a code base unit by unit (<c>examples/cpython/probe-wat.sh</c>), not for running.
+    /// </summary>
+    public static string EmitWatUnit(
+        string inputPath,
+        IReadOnlyList<string>? includeDirs = null,
+        IReadOnlyList<string>? defines = null,
+        CDialect? dialect = null,
+        WarningFlags warnings = WarningFlags.Default)
+    {
+        var irBuilder = BuildIr([inputPath], includeDirs, ["__wasm__=1", .. defines ?? []], dialect,
+            new Backends.WatNameLegalizer(), warnings, library: WatLibc);
+        return Backends.WatBackend.RunUnit(irBuilder);
     }
 
     /// <summary>

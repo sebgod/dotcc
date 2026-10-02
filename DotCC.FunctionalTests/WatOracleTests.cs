@@ -476,6 +476,20 @@ public sealed class WatOracleTests
         + "    return 0;\n"
         + "}",
         "[h\u00c3\u00a9llo] [   ab] [cd     |] [h] [\u00c3\u00a9]\n-1 7\n2 52 0\n3 77 3 233 116 [abc]\nw:\u00c3\u00a9 5\n6\n\u00c3\u00a9\u00e2\u0082\u00ac!\nZ\n")]
+    // Compound literals in static initializers have static storage (CPython's parser.c keeps its
+    // keyword tables as an array of pointers to array compound literals).
+    [InlineData("#include <stdio.h>\n"
+        + "typedef struct { const char *s; int n; } KW;\n"
+        + "struct P { int x, y; };\n"
+        + "static KW *table[] = { (KW[]) {{0, -1}}, (KW[]) {{\"if\", 1}, {\"in\", 2}, {0, -1}} };\n"
+        + "static struct P *pp = &(struct P){ 3, 4 };\n"
+        + "static int *ints = (int[]){ 7, 8, 9 };\n"
+        + "int main(void) {\n"
+        + "    for (KW *k = table[1]; k->s; k++) printf(\"%s=%d \", k->s, k->n);\n"
+        + "    printf(\"%d %d %d %d %d\\n\", table[0][0].n, pp->x, pp->y, ints[0], ints[2]);\n"
+        + "    return 0;\n"
+        + "}",
+        "if=1 in=2 -1 3 4 7 9\n")]
     // strerror's glibc wording, strtoimax past 32 bits, the one "C" locale, and time() from
     // WASI's clock.
     [InlineData("#include <stdio.h>\n#include <string.h>\n#include <errno.h>\n#include <inttypes.h>\n#include <locale.h>\n#include <time.h>\n"
