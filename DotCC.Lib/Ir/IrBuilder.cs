@@ -1074,6 +1074,7 @@ internal sealed partial class IrBuilder
     {
         var canonical = tag ?? alias ?? throw new IrUnsupportedException("struct with neither tag nor typedef name");
         RejectReservedTypeName(canonical, isUnion ? "union" : "struct");
+        var priorPromoted = _promoted.TryGetValue(canonical, out var prior) ? new Dictionary<string, (string Hidden, string Nested)>(prior, StringComparer.Ordinal) : null;
         var fields = BuildStructFields(memberList, canonical);
         if (_emittedTypes.Add(canonical))
         {
@@ -1081,6 +1082,14 @@ internal sealed partial class IrBuilder
             _structIsUnion[canonical] = isUnion;
             var runtimeOwned = synthetic && RuntimeTypeNames.IsRuntimeOwnedAggregate(canonical);
             Types.Add(new StructTypeDef(canonical, fields, isUnion, IsRuntimeOwned: runtimeOwned));
+        }
+        else
+        {
+            // Another unit's definition of a type already registered (a header struct every
+            // unit includes): the first definition's fields stand, and so must its anonymous
+            // members' routes, which building this one renumbered.
+            if (priorPromoted is null) { _promoted.Remove(canonical); }
+            else { _promoted[canonical] = priorPromoted; }
         }
         // `struct Tag` and the typedef alias both resolve to the canonical type.
         if (alias is not null) { _typedefs[alias] = new CType.Named(canonical); }
