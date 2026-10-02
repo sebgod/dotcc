@@ -38,12 +38,57 @@ public sealed class WatBackendTests
     }
 
     [Fact]
-    public void module_defines_and_exports_main()
+    public void A_program_is_a_wasi_command_its_start_calls_main()
     {
+        // The host runs a program through _start, as WASI runs a command: main, then its value
+        // to proc_exit (the program uses neither exit nor atexit, so no libc exit comes along).
         var wat = Wat("int main(void){ return 0; }");
         wat.ShouldContain("(module");
         wat.ShouldContain("(func $main (result i32)");
-        wat.ShouldContain("(export \"main\" (func $main))");
+        wat.ShouldContain("(func $_start\n    call $main\n    call $proc_exit\n  )");
+        wat.ShouldContain("(export \"_start\" (func $_start))");
+        wat.ShouldNotContain("(export \"main\"");
+    }
+
+    [Fact]
+    public void A_main_that_takes_arguments_gets_them_from_args_get()
+    {
+        // main(argc, argv): the libc's __dotcc_argc and __dotcc_argv read WASI's args_get.
+        var wat = Wat("int main(int argc, char **argv){ return argc + (argv[0] != 0); }");
+        wat.ShouldContain("(func $_start\n    call $__dotcc_argc\n    call $__dotcc_argv\n    call $main");
+        wat.ShouldContain("\"args_get\"");
+        wat.ShouldContain("\"args_sizes_get\"");
+    }
+
+    [Fact]
+    public void Constructors_run_before_main_by_priority()
+    {
+        // [[gnu::constructor]] (GCC's attribute, C23's namespaced spelling): _start calls each
+        // before main, those with the lower priority first, then the rest in definition order.
+        var wat = Wat("int putchar(int);\n"
+            + "[[gnu::constructor]] static void late(void) { putchar('L'); }\n"
+            + "[[gnu::constructor(101)]] static void early(void) { putchar('E'); }\n"
+            + "int main(void){ return 0; }");
+        wat.ShouldContain("(func $_start\n    call $early\n    call $late\n    call $main");
+    }
+
+    [Fact]
+    public void A_constructor_takes_no_parameters()
+    {
+        Should.Throw<CompileException>(() => Wat("[[gnu::constructor]] static void f(int x) { (void)x; }\nint main(void){ return 0; }"))
+            .Message.ShouldContain("constructor 'f' must take no parameters");
+    }
+
+    [Fact]
+    public void Exit_and_atexit_are_the_libcs()
+    {
+        // A program that registers an atexit function ends through the libc's exit, which calls
+        // it (and flushes the streams) before proc_exit.
+        var wat = Wat("#include <stdlib.h>\nint putchar(int);\nstatic void bye(void) { putchar('B'); }\n"
+            + "int main(void){ atexit(bye); return 3; }");
+        wat.ShouldContain("(func $atexit ");
+        wat.ShouldContain("(func $exit ");
+        wat.ShouldContain("call $main\n    call $exit");
     }
 
     [Fact]
@@ -551,14 +596,15 @@ public sealed class WatBackendTests
     {
         // malloc is the wat libc's (dlmalloc, compiled from C) at C's own size_t parameter, so
         // it can sit in a function pointer; it takes its memory through the runtime's sbrk,
-        // which moves the break global and grows linear memory. No I/O, no WASI import.
+        // which moves the break global and grows linear memory. No I/O: the one WASI import is
+        // proc_exit, which ends the program with main's value.
         var wat = Wat("#include <stdlib.h>\nint main(void){ int *p = malloc(sizeof(int)); *p = 42; return *p; }");
         wat.ShouldContain("(func $malloc (param $bytes i64) (result i32)");
         wat.ShouldContain("(func $__sbrk (param $inc i32) (result i32)");
         wat.ShouldContain("(global $__hp");
         wat.ShouldContain("memory.grow");
         wat.ShouldContain("call $malloc");
-        wat.ShouldNotContain("(import");
+        wat.ShouldNotContain("fd_write");
     }
 
     [Fact]

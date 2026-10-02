@@ -9,8 +9,9 @@
      threads at once.
    - nothing is weak (dotcc has no weak symbols), so what musl reaches through a weak alias
      (__stdout_used and the like) is reached directly, and the hooks that exist only to pull
-     __stdio_exit in are gone; the standard streams are unbuffered (see stdout.c), so there is
-     nothing to flush at exit yet. */
+     __stdio_exit in are gone: the stdio layer points exit's __dotcc_flush_at_exit at
+     __stdio_exit once a stream that can hold output back exists (__ofl_lock, setvbuf). The
+     standard streams are unbuffered (see stdout.c). */
 
 #include <stdio.h>
 #include <stdarg.h>
@@ -67,6 +68,11 @@ hidden size_t __stdio_read(FILE *, unsigned char *, size_t);
 hidden size_t __stdio_write(FILE *, const unsigned char *, size_t);
 hidden off_t __stdio_seek(FILE *, off_t, int);
 hidden int __stdio_close(FILE *);
+
+/* exit's flush of the streams (exit.c), null until a stream that can hold output back exists,
+   and what it points at then. */
+extern void (*__dotcc_flush_at_exit)(void);
+hidden void __stdio_exit(void);
 
 hidden int __toread(FILE *);
 hidden int __towrite(FILE *);

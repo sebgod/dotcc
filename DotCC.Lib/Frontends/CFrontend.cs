@@ -190,7 +190,10 @@ internal sealed class CFrontend : IFrontend
             var tried = new HashSet<string>(StringComparer.Ordinal);
             // A unit filed under several names is bound once (see Compiler.WatLibc).
             var bound = new HashSet<string>(ReferenceEqualityComparer.Instance);
-            while (irBuilder.UndefinedCalledFunctions().Concat(irBuilder.ExternDataReferenced)
+            // The entry hands a main that takes arguments the library's argc and argv.
+            IReadOnlyList<string> entry = irBuilder.Module.Functions.Any(f => f.Sym.Name == "main" && f.Params.Count > 0)
+                ? library.MainArguments : [];
+            while (irBuilder.UndefinedCalledFunctions().Concat(irBuilder.ExternDataReferenced).Concat(entry)
                        .Where(tried.Add).ToList() is { Count: > 0 } wanted)
             {
                 foreach (var name in wanted)
