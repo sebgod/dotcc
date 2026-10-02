@@ -186,6 +186,7 @@ static-address-order
 static-extern-same-name
 static-local-array
 static-locals
+static-prototype-across-units
 static-struct-init
 stdbool-c23
 stddef-types
