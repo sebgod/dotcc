@@ -46,6 +46,13 @@ public sealed class ZigGrammarTests
     [InlineData("fn k(c: bool) i32 { var x = 0; x = if (c) 1 else 2; return x; }")]
     [InlineData("fn n(a: bool, b: bool) i32 { return if (a) 1 else if (b) 2 else 3; }")] // nested
     [InlineData("fn m(c: bool) i32 { return if (c) 1 else 2 + 3; }")] // greedy else: else = (2 + 3)
+    // GH #129: an `if` as the right operand of `orelse` / `catch`, without parentheses
+    [InlineData("fn f(o: ?u8, g: bool) u8 { return o orelse if (g) 5 else 6; }")]
+    [InlineData("fn f(o: E!u8, g: bool) u8 { return o catch if (g) 5 else 6; }")]
+    [InlineData("fn f(o: ?u8, g: bool) u8 { const v: u8 = o orelse if (g) 5 else return 6; return v; }")]
+    [InlineData("fn f(o: ?u8, p: ?u8, g: bool) u8 { return o orelse if (g) 5 else p orelse 6; }")]
+    [InlineData("const m: usize = a orelse (b orelse if (c) @compileError(\"x\") else @compileError(\"y\"));")]
+    [InlineData("fn f(o: ?u8, p: E!u8) S { return .{ .n = o orelse if (p) |n| n + 1 else |_| 0 }; }")]
     public void Accepts_real_zig(string src) => TryParse(src).ShouldBeTrue();
 
     [Theory]

@@ -60,6 +60,22 @@ public sealed class ZigFallbackArmTests
     }
 
     [Fact]
+    public void An_if_is_the_right_operand_of_orelse_and_catch_without_parentheses()
+    {
+        // GH #129. The `if` is the fallback; its else arm is greedy, as zig's is, so the second
+        // `orelse` belongs to the arm rather than to the whole expression.
+        var cs = EmitZig(Prelude + """
+            fn pick(x: u8, g: bool) u8 { return lookup(x) orelse if (g) 1 else 2; }
+            fn chain(x: u8, y: u8, g: bool) u8 { return lookup(x) orelse if (g) 40 else lookup(y) orelse 30; }
+            fn soft(x: u8, g: bool) u8 { return parse(x) catch if (g) 3 else 4; }
+            pub fn main() u8 { return pick(1, true) + chain(1, 7, false) + soft(0, true); }
+            """);
+        cs.ShouldContain("lookup(x) ?? (byte)((Cond.B(g) ? 1 : 2))");
+        cs.ShouldContain("Cond.B(g) ? 40 : (int)((lookup(y) ?? 30))");
+        cs.ShouldContain("(Cond.B(g) ? 3 : 4)");
+    }
+
+    [Fact]
     public void Returning_a_captured_error_is_an_error_return()
     {
         // Previously `return e;` wrapped the error code as the SUCCESS payload.
