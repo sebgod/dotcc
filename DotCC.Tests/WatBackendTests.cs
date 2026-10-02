@@ -325,12 +325,15 @@ public sealed class WatBackendTests
     }
 
     [Fact]
-    public void fprintf_to_a_non_standard_stream_is_rejected()
+    public void fprintf_to_a_file_goes_through_the_libcs_streams()
     {
-        // Only stdout/stderr map to WASI fds; a real FILE* has no wat runtime, so it
-        // fails loud rather than miscompiling to the wrong fd.
-        Should.Throw<CompileException>(() => Wat(
-            "#include <stdio.h>\nint main(void){ FILE* f = fopen(\"x\", \"w\"); fprintf(f, \"hi\"); return 0; }"));
+        // fopen (musl's, over the libc's open and WASI's path_open) gives a FILE the stdio layer
+        // writes through; the program that opens one ends through exit, which flushes it.
+        var wat = Wat("#include <stdio.h>\nint main(void){ FILE* f = fopen(\"x\", \"w\"); fprintf(f, \"hi\"); return 0; }");
+        wat.ShouldContain("(func $fopen ");
+        wat.ShouldContain("(func $open ");
+        wat.ShouldContain("\"path_open\"");
+        wat.ShouldContain("call $main\n    call $exit");
     }
 
     [Fact]
@@ -838,14 +841,16 @@ public sealed class WatBackendTests
     [Fact]
     public void A_function_pointer_is_a_table_index_called_through_call_indirect()
     {
-        // A function used as a value gets a slot in the module's funcref table (from 1; 0 is
-        // the null pointer, which traps when called) and a call through a pointer checks the
-        // signature, declared once as a module type.
+        // A function used as a value gets a slot in the module's funcref table (from 2: 0 is the
+        // null pointer and 1 <signal.h>'s SIG_IGN, which trap when called) and a call through a
+        // pointer checks the signature, declared once as a module type. A static pointer to it
+        // is its slot, as data.
         var wat = Wat("int add(int a, int b){ return a + b; }\nint (*op)(int, int) = add;\n"
             + "int main(void){ int (*f)(int, int) = &add; return f(2, 3) + op(4, 5); }");
         wat.ShouldContain("(type $__sig0 (func (param i32) (param i32) (result i32)))");
-        wat.ShouldContain("(table 2 funcref)");
-        wat.ShouldContain("(elem (i32.const 1) func $add)");
+        wat.ShouldContain("(table 3 funcref)");
+        wat.ShouldContain("(elem (i32.const 2) func $add)");
+        wat.ShouldContain("(data (i32.const 1024) \"\\02\")");
         wat.ShouldContain("call_indirect (type $__sig0)");
     }
 

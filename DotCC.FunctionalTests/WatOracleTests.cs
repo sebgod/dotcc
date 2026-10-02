@@ -552,6 +552,106 @@ public sealed class WatOracleTests
         RunWatStdout(source).ShouldBe(expected);
     }
 
+    /// <summary>The POSIX layer over WASI, end to end: the program's arguments and environment,
+    /// and files and directories in a host directory the runner preopens as <c>/work</c>
+    /// (wasi-fs.js over node's fs, as the browser sandbox runs it over a tree in memory): the
+    /// current directory, which the libc keeps itself, buffered streams (the last one flushed by
+    /// exit), stat, seeking, renaming, a directory's entries, errors, and a path outside every
+    /// preopened directory.</summary>
+    [Fact]
+    public void Files_arguments_and_the_environment_go_through_wasi()
+    {
+        if (!Requested)
+        {
+            Assert.Skip($"set {RunEnv}=1 to run the wat execution oracle (needs wabt's wat2wasm + node on PATH).");
+        }
+        var work = Directory.CreateTempSubdirectory("dotcc-wat-work").FullName;
+        var c = Path.Combine(Path.GetTempPath(), $"dotcc-wat-{Guid.NewGuid():N}.c");
+        File.WriteAllText(c,
+            "#include <stdio.h>\n"
+            + "#include <stdlib.h>\n"
+            + "#include <string.h>\n"
+            + "#include <errno.h>\n"
+            + "#include <fcntl.h>\n"
+            + "#include <unistd.h>\n"
+            + "#include <dirent.h>\n"
+            + "#include <sys/stat.h>\n"
+            + "\n"
+            + "static int cmp(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }\n"
+            + "\n"
+            + "int main(int argc, char **argv)\n"
+            + "{\n"
+            + "    char buf[256];\n"
+            + "    struct stat st;\n"
+            + "    printf(\"argc=%d arg1=%s cwd=%s\\n\", argc, argv[1], getcwd(buf, sizeof buf));\n"
+            + "    printf(\"HOME=%s X=%s\\n\", getenv(\"HOME\"), getenv(\"X\") ? getenv(\"X\") : \"(none)\");\n"
+            + "    setenv(\"X\", \"1\", 1);\n"
+            + "    setenv(\"X\", \"2\", 0);\n"
+            + "    unsetenv(\"HOME\");\n"
+            + "    printf(\"X=%s HOME=%s\\n\", getenv(\"X\"), getenv(\"HOME\") ? getenv(\"HOME\") : \"(none)\");\n"
+            + "    if (mkdir(\"/work/d\", 0755) || chdir(\"/work/d\")) { perror(\"mkdir\"); return 1; }\n"
+            + "    printf(\"cwd=%s\\n\", getcwd(buf, sizeof buf));\n"
+            + "    FILE *f = fopen(\"a.txt\", \"w\");\n"
+            + "    for (int i = 0; i < 1000; i++) { fprintf(f, \"line %d\\n\", i); }\n"
+            + "    fclose(f);\n"
+            + "    stat(\"a.txt\", &st);\n"
+            + "    printf(\"size=%ld reg=%d dir=%d\\n\", (long)st.st_size, S_ISREG(st.st_mode), S_ISDIR(st.st_mode));\n"
+            + "    f = fopen(\"../d/./a.txt\", \"r\");\n"
+            + "    int n = 0;\n"
+            + "    while (fgets(buf, sizeof buf, f)) { n++; }\n"
+            + "    fseek(f, 0, SEEK_SET);\n"
+            + "    fgets(buf, sizeof buf, f);\n"
+            + "    printf(\"lines=%d first=%s\", n, buf);\n"
+            + "    fclose(f);\n"
+            + "    f = fopen(\"a.txt\", \"a\");\n"
+            + "    fputs(\"tail\\n\", f);\n"
+            + "    fclose(f);\n"
+            + "    int fd = open(\"a.txt\", O_RDONLY);\n"
+            + "    lseek(fd, -5, SEEK_END);\n"
+            + "    n = (int)read(fd, buf, 10);\n"
+            + "    buf[n] = 0;\n"
+            + "    close(fd);\n"
+            + "    printf(\"end=%s\", buf);\n"
+            + "    rename(\"a.txt\", \"b.txt\");\n"
+            + "    printf(\"a=%d b=%d\\n\", access(\"a.txt\", F_OK), access(\"b.txt\", F_OK));\n"
+            + "    mkdir(\"sub\", 0755);\n"
+            + "    fclose(fopen(\"sub/x\", \"w\"));\n"
+            + "    DIR *d = opendir(\".\");\n"
+            + "    char *names[16];\n"
+            + "    int k = 0;\n"
+            + "    struct dirent *e;\n"
+            + "    while ((e = readdir(d)) && k < 16) { names[k++] = strdup(e->d_name); }\n"
+            + "    closedir(d);\n"
+            + "    qsort(names, k, sizeof names[0], cmp);\n"
+            + "    for (int i = 0; i < k; i++) { printf(\"entry %s\\n\", names[i]); }\n"
+            + "    int r = rmdir(\"sub\");\n"
+            + "    printf(\"rmdir sub: %d %s\\n\", r, strerror(errno));\n"
+            + "    unlink(\"sub/x\");\n"
+            + "    printf(\"rmdir sub: %d\\n\", rmdir(\"sub\"));\n"
+            + "    unlink(\"b.txt\");\n"
+            + "    chdir(\"/work\");\n"
+            + "    printf(\"rmdir d: %d\\n\", rmdir(\"d\"));\n"
+            + "    r = open(\"/elsewhere/x\", O_RDONLY);\n"
+            + "    printf(\"outside: %d %s\\n\", r, strerror(errno));\n"
+            + "    f = fopen(\"/work/kept.txt\", \"w\");\n"
+            + "    fprintf(f, \"flushed at exit\\n\");\n"
+            + "    return 0;\n"
+            + "}\n");
+        try
+        {
+            var stdout = RunWatModuleStdout(Compiler.EmitWat(new[] { c }), latin1: true,
+                runnerArgs: ["--dir", $"{work}::/work", "--env", "HOME=/home/u"], programArgs: ["one"]);
+            stdout.ShouldBe("argc=2 arg1=one cwd=/\nHOME=/home/u X=(none)\nX=1 HOME=(none)\ncwd=/work/d\nsize=8890 reg=1 dir=0\nlines=1000 first=line 0\nend=tail\na=-1 b=0\nentry .\nentry ..\nentry b.txt\nentry sub\nrmdir sub: -1 Directory not empty\nrmdir sub: 0\nrmdir d: 0\noutside: -1 No such file or directory\n");
+            File.ReadAllText(Path.Combine(work, "kept.txt")).ShouldBe("flushed at exit\n");
+            Directory.GetFileSystemEntries(work).Length.ShouldBe(1);
+        }
+        finally
+        {
+            File.Delete(c);
+            Directory.Delete(work, recursive: true);
+        }
+    }
+
     /// <summary>The node runner the wat oracle and <c>Scripts/wat-probe.sh</c> share
     /// (<c>Scripts/wat-run.js</c>, copied next to the tests): a WASI preview1 shim, wasi-threads
     /// over worker_threads for a threaded module, and the program's fd 1 and 2 straight to node's,
@@ -595,8 +695,11 @@ public sealed class WatOracleTests
     /// <summary>wat2wasm → node over an emitted module, returning what it wrote to fd 1: its bytes
     /// decoded as UTF-8 (as a fixture's <c>expected-stdout.txt</c> is read), or, for the inline
     /// programs above, one char per byte (<paramref name="latin1"/>). Its exit status is its own
-    /// (main's value, or exit's); a trap fails the test.</summary>
-    internal static string RunWatModuleStdout(string watText, bool latin1 = false)
+    /// (main's value, or exit's); a trap fails the test. <paramref name="runnerArgs"/> go to
+    /// wat-run.js (<c>--dir</c>, <c>--env</c>), <paramref name="programArgs"/> to the program,
+    /// after its own name.</summary>
+    internal static string RunWatModuleStdout(string watText, bool latin1 = false,
+        IReadOnlyList<string>? runnerArgs = null, IReadOnlyList<string>? programArgs = null)
     {
         var stem = Path.Combine(Path.GetTempPath(), $"dotcc-wat-{Guid.NewGuid():N}");
         string wat = stem + ".wat", wasm = stem + ".wasm";
@@ -604,7 +707,8 @@ public sealed class WatOracleTests
         {
             File.WriteAllText(wat, watText);
             Exec("wat2wasm", [.. Wat2WasmFeatures, wat, "-o", wasm]);
-            return Exec("node", [Runner, wasm], latin1 ? System.Text.Encoding.Latin1 : System.Text.Encoding.UTF8, anyStatus: true);
+            return Exec("node", [Runner, .. runnerArgs ?? [], wasm, .. programArgs ?? []],
+                latin1 ? System.Text.Encoding.Latin1 : System.Text.Encoding.UTF8, anyStatus: true);
         }
         finally
         {
