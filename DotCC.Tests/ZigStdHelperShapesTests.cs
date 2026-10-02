@@ -6573,6 +6573,30 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void Primitive_value_names_take_a_value_and_a_qualified_reference()
+    {
+        var cs = EmitZig("""
+            const Constant = enum(u8) { false, true, _ };
+            const Value = enum(u8) {
+                null = 0,
+                false = 10 + @intFromEnum(Constant.false),
+                true = 10 + @intFromEnum(Constant.true),
+                undefined = 7,
+                _,
+            };
+            pub fn main() u8 {
+                return @intFromEnum(Value.true) + @intFromEnum(Value.undefined);
+            }
+            """);
+        // GH #285 (std.Io.Dispatch's `null = 0`, std.zig.llvm Builder's `false = first_constant + @intFromEnum(Constant.false)`).
+        cs.ShouldContain("@null = 0,");
+        cs.ShouldContain("@false = 10,");
+        cs.ShouldContain("@true = 11,");
+        cs.ShouldContain("undefined = 7,");
+        cs.ShouldContain("(byte)Value.@true + (byte)Value.undefined");
+    }
+
+    [Fact]
     public void An_enum_field_without_a_comma_must_be_the_last()
     {
         var ex = Should.Throw<Exception>(() => EmitZig("""
