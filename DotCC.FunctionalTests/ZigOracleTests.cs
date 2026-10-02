@@ -6896,6 +6896,59 @@ public sealed class ZigOracleTests
             "pub fn main() u8 {\n" +
             "    return g(40) + g(3) * 2 + g(10) * 3;\n" +
             "}\n", 56, "" },
+        // GH #129: an `if` as the right operand of `orelse` / `catch`, unparenthesized: value arms, a `return` arm,
+        // the greedy else arm (`… else lookup(y) orelse 30`), inside parentheses, and a capturing `if` as a field value.
+        new object[] { "orelse_catch_if",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "const E = error{Bad};\n" +
+            "\n" +
+            "fn parse(x: u8) E!u8 {\n" +
+            "    if (x == 0) return error.Bad;\n" +
+            "    return x;\n" +
+            "}\n" +
+            "\n" +
+            "fn lookup(x: u8) ?u8 {\n" +
+            "    return if (x > 5) x else null;\n" +
+            "}\n" +
+            "\n" +
+            "fn orElseIf(x: u8, g: bool) u8 {\n" +
+            "    return lookup(x) orelse if (g) 1 else 2;\n" +
+            "}\n" +
+            "\n" +
+            "fn catchIf(x: u8, g: bool) u8 {\n" +
+            "    return parse(x) catch if (g) 3 else 4;\n" +
+            "}\n" +
+            "\n" +
+            "fn orElseIfReturn(x: u8, g: bool) u8 {\n" +
+            "    const v: u8 = lookup(x) orelse if (g) 10 else return 20;\n" +
+            "    return v + 1;\n" +
+            "}\n" +
+            "\n" +
+            "fn chained(x: u8, y: u8, g: bool) u8 {\n" +
+            "    // The `if` is greedy: its else arm is `lookup(y) orelse 30`.\n" +
+            "    return lookup(x) orelse if (g) 40 else lookup(y) orelse 30;\n" +
+            "}\n" +
+            "\n" +
+            "fn grouped(x: u8, g: bool) u8 {\n" +
+            "    return (lookup(x) orelse if (g) @as(u8, 50) else 60) + 1;\n" +
+            "}\n" +
+            "\n" +
+            "const Limit = struct { n: u8 };\n" +
+            "\n" +
+            "fn field(x: u8, y: u8) Limit {\n" +
+            "    return .{ .n = lookup(x) orelse if (parse(y)) |p| p + 1 else |_| 0 };\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() void {\n" +
+            "    std.debug.print(\"{d} {d} {d}\\n\", .{ orElseIf(7, true), orElseIf(1, true), orElseIf(1, false) });\n" +
+            "    std.debug.print(\"{d} {d} {d}\\n\", .{ catchIf(9, true), catchIf(0, true), catchIf(0, false) });\n" +
+            "    std.debug.print(\"{d} {d} {d}\\n\", .{ orElseIfReturn(8, true), orElseIfReturn(1, true), orElseIfReturn(1, false) });\n" +
+            "    std.debug.print(\"{d} {d} {d} {d}\\n\", .{ chained(6, 0, true), chained(1, 0, true), chained(1, 7, false), chained(1, 1, false) });\n" +
+            "    std.debug.print(\"{d} {d} {d}\\n\", .{ grouped(9, true), grouped(0, true), grouped(0, false) });\n" +
+            "    std.debug.print(\"{d} {d} {d}\\n\", .{ field(6, 0).n, field(1, 4).n, field(1, 0).n });\n" +
+            "}\n", 0,
+            "7 1 2\n9 3 4\n9 11 20\n6 40 7 30\n10 51 61\n6 5 0" },
         // Task #140: std.crypto.blake3's shapes: a late-declared struct const in a field extent, `@intCast` slice bounds,
         // open slices of a many-item pointer, and an array local copied through a pointer.
         new object[] { "blake3_shapes",

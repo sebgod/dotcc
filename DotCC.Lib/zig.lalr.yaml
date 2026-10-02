@@ -992,6 +992,15 @@ productions:
       # error rather than a silent `(a ++ if …) ++ e`. No Mul starts with `if`, so after `Add ++` the `if` is a clean shift.
       - { lhs: RhsExpr, rhs: [Add, '++', ConcatIf], action: concatIf }
       - { lhs: ConcatIf, rhs: ['if', '(', Expr, ')', Prefix, 'else', Prefix], action: concatIfOperand }
+      # `const v: u8 = opt orelse if (g) 5 else return 6;` (GH #129; std.heap's page_size_max, std.Io.Threaded's
+      # async_limit): an `if` as the right operand of `orelse` / `catch`, with every IfExpr form (value, `return` and
+      # type arms, captures). Only as a WHOLE right-hand side, like `++ if` above: the if-expression is last, so its
+      # greedy else arm takes whatever follows, as zig's does (`a orelse if (c) b else d orelse e` falls back to
+      # `d orelse e`), and no operator is left over to apply to the `if`. After `OrElse 'orelse'`, an `if` lookahead
+      # starts no BoolOr and no FallbackArm, so the shift is conflict-free. The records are the plain `orElse` /
+      # `catchOp`, whose fallback is the IfExpr, as `x orelse (if (g) 5 else 6)` gives it through the grouping.
+      - { lhs: RhsExpr, rhs: [OrElse, 'orelse', IfExpr], action: orElse }
+      - { lhs: RhsExpr, rhs: [OrElse, 'catch', IfExpr],  action: catchOp }
 
   - derivation: none
     rules:
@@ -1496,6 +1505,10 @@ productions:
       # `if` / `switch` are not in FIRST(Expr), so the field value stays conflict-free, as RhsExpr's are.
       - { lhs: FieldValue, rhs: [IfExpr] }
       - { lhs: FieldValue, rhs: [SwitchExpr] }
+      # `.async_limit = options.async_limit orelse if (cpu_count) |n| .limited(n - 1) else |_| .nothing` (GH #129):
+      # the `orelse if` / `catch if` of RhsExpr, as a field value.
+      - { lhs: FieldValue, rhs: [OrElse, 'orelse', IfExpr], action: orElse }
+      - { lhs: FieldValue, rhs: [OrElse, 'catch', IfExpr],  action: catchOp }
 
   # ===== switch prongs (Milestone C2) =====
   # LEFT-recursive prong list — the form that makes the optional trailing comma a clean
