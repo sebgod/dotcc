@@ -142,7 +142,11 @@ if (!isMainThread) {
     code = value & 0xff;
   } catch (e) {
     if (e instanceof Exit) { value = e.code; code = e.code & 0xff; }
-    else { process.stderr.write(`trap: ${e && e.message}\n`); process.exit(result ? 1 : 134); }
+    else {
+      // WAT_RUN_STACK=1 shows where: the wasm frames, by function name with wat2wasm --debug-names.
+      process.stderr.write(`trap: ${e && (process.env.WAT_RUN_STACK ? e.stack : e.message)}\n`);
+      process.exit(result ? 1 : 134);
+    }
   }
   if (result) { fs.writeSync(1, String(value)); process.exit(0); }
   // Returning from main ends the program, threads still running or not (C11 5.1.2.2.3).

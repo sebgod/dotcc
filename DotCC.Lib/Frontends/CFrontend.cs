@@ -188,12 +188,14 @@ internal sealed class CFrontend : IFrontend
         if (req.Library is { } library)
         {
             var tried = new HashSet<string>(StringComparer.Ordinal);
+            // A unit filed under several names is bound once (see Compiler.WatLibc).
+            var bound = new HashSet<string>(ReferenceEqualityComparer.Instance);
             while (irBuilder.UndefinedCalledFunctions().Concat(irBuilder.ExternDataReferenced)
                        .Where(tried.Add).ToList() is { Count: > 0 } wanted)
             {
                 foreach (var name in wanted)
                 {
-                    if (library.Unit(name) is not { } text) { continue; }
+                    if (library.Unit(name) is not { } text || !bound.Add(text)) { continue; }
                     var root = ParseUnitText(
                         $"{Compiler.IncludeResolver.LibraryDir}/{name}.c", text, irParser, quiet: true);
                     irBuilder.AddUnit(root, $"{name}.c", library: true);
