@@ -40,6 +40,12 @@ char* strpbrk(char* s, char* accept);
 char* strtok_r(char* str, char* delim, char** saveptr);
 char* strtok(char* str, char* delim);
 
+/* A copy of s (of at most n bytes of it, then a NUL) from malloc, or NULL (C23 7.26.2.6,
+   7.26.2.7); s's length, but at most n (POSIX strnlen). */
+char* strdup(const char* s);
+char* strndup(const char* s, size_t n);
+size_t strnlen(const char* s, size_t n);
+
 /* Error-number -> message text (see <errno.h>). */
 char* strerror(int errnum);
 
