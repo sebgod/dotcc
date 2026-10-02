@@ -738,15 +738,15 @@ internal sealed partial class WatBackend
         }
         if (_tableUsed.Count > 0 || funcs.Contains("call_indirect", StringComparison.Ordinal))
         {
-            // Slot 0 stays empty: the null function pointer, which call_indirect traps on. So does
-            // the slot of a function only code the module left out took the address of.
-            m.Append($"  (table {_fnTable.Count + 1} funcref)\n");
+            // The slots before FirstTableSlot stay empty, and so does the slot of a function only
+            // code the module left out took the address of: call_indirect traps on them.
+            m.Append($"  (table {_fnTable.Count + FirstTableSlot} funcref)\n");
             for (var i = 0; i < _fnTable.Count; i++)
             {
                 if (!_tableUsed.Contains(_fnTable[i])) { continue; }
                 var run = i;
                 while (run + 1 < _fnTable.Count && _tableUsed.Contains(_fnTable[run + 1])) { run++; }
-                m.Append($"  (elem (i32.const {i + 1}) func {string.Join(" ", _fnTable.Skip(i).Take(run - i + 1).Select(n => "$" + n))})\n");
+                m.Append($"  (elem (i32.const {i + FirstTableSlot}) func {string.Join(" ", _fnTable.Skip(i).Take(run - i + 1).Select(n => "$" + n))})\n");
                 i = run;
             }
         }
@@ -2500,6 +2500,11 @@ internal sealed partial class WatBackend
             ? offset
             : throw new IrUnsupportedException($"the wat target cannot place the flexible array member '{tail.Field}'");
 
+    /// <summary>The first table slot a function gets. Slot 0 is the null function pointer, and
+    /// slot 1 is <c>&lt;signal.h&gt;</c>'s <c>SIG_IGN</c>, <c>(void (*)(int))1</c>, which no function's
+    /// pointer may equal.</summary>
+    private const int FirstTableSlot = 2;
+
     /// <summary>The table index of function <paramref name="fn"/>, the value a pointer to it
     /// holds, given it on first use.</summary>
     private int TableIndex(Symbol fn)
@@ -2518,7 +2523,7 @@ internal sealed partial class WatBackend
         if (!_fnTableIndex.TryGetValue(name, out var index))
         {
             _fnTable.Add(name);
-            index = _fnTable.Count;
+            index = _fnTable.Count + FirstTableSlot - 1;
             _fnTableIndex[name] = index;
         }
         return index;

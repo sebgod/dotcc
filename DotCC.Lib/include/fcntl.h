@@ -22,6 +22,7 @@
 #define O_RDONLY   0x0
 #define O_WRONLY   0x1
 #define O_RDWR     0x2
+#define O_ACCMODE  0x3
 #define O_CREAT    0x40
 #define O_EXCL     0x80
 #define O_TRUNC    0x200
@@ -34,6 +35,9 @@
 #define O_NOCTTY    0x100
 #define O_NOFOLLOW  0x20000
 #define O_CLOEXEC   0x80000
+/* Linux's value: open fails ENOTDIR unless path is a directory (the wat target, where opendir
+   opens one; the C# runtime's open does not check it). */
+#define O_DIRECTORY 0x10000
 
 int fcntl(int fd, int cmd, ...);
 

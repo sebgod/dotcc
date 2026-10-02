@@ -74,6 +74,8 @@ hidden int __stdio_close(FILE *);
 extern void (*__dotcc_flush_at_exit)(void);
 hidden void __stdio_exit(void);
 
+hidden int __fmodeflags(const char *);
+
 hidden int __toread(FILE *);
 hidden int __towrite(FILE *);
 

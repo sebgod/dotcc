@@ -50,6 +50,22 @@ bit-identical results to the same sources built natively (checked against gcc in
   `wchar_t`, which are dotcc's own) where it included `<wctype.h>`, from which it used nothing;
   the `va_list` forms are declared in `../include/scanf_impl.h`.
 
+- **Streams over files** (`src/stdio/fopen.c`, `__fdopen.c` as `fdopen.c`, `__fmodeflags.c`)
+  and `perror`. Edits: `fopen` opens through the libc's own POSIX `open` (`../open.c`, over
+  WASI's `path_open`) and closes with `close`, not the syscalls; `fdopen` is defined under its
+  own name (musl's `__fdopen` behind a weak alias), sets append mode with `fcntl` and line
+  buffering with `isatty` (musl asks `ioctl(TIOCGWINSZ)`), and gives the stream no lock.
+  `setvbuf` points exit's flush at `__stdio_exit` when it gives a stream a buffer (dotcc's
+  `__ofl_lock` does too, for every stream on the open-file list): musl reaches its exit flush
+  through weak symbols.
+- **Strings**: `strdup`, `strndup`, `strnlen` (`src/string/`), unedited.
+- **The environment** (`src/env/getenv.c`, `setenv.c`, `unsetenv.c`, `putenv.c`'s `__putenv`
+  as `__putenv.c`, `setenv.c`'s `__env_rm_add` as `__env_rm_add.c`, `src/string/strchrnul.c`
+  as `__strchrnul.c`). Edits: each includes `../include/env_impl.h`, which declares what musl's
+  internal headers did and makes `__environ` `environ` (the libc's `../environ.c`, filled from
+  WASI's `environ_get` by a constructor); the weak dummy `__env_rm_add`s are gone (the real one
+  is linked); `__strchrnul` drops its word-at-a-time path (`__GNUC__` only).
+
 What musl's build gets from its own headers, these get from `../include/`: `libm.h` and
 `features.h` adapted from musl's `src/internal/` and `src/include/`, a `math.h` with
 musl's `double_t`, `INFINITY` and classification macros, and a `stdio_impl.h` whose
