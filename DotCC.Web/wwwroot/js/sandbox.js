@@ -235,11 +235,13 @@ window.dotccSandbox = (function () {
     return new Uint8Array(await new Response(stream.readable).arrayBuffer());
   }
 
-  /** Compress `source` and build a shareable "#src=…" URL; also copies it to the
-   *  clipboard (best effort). Returns the URL string. */
-  async function makeShareLink(source) {
+  /** Compress `source` and build a shareable "?lang=…#src=…" URL (the language the
+   *  sandbox opens it in, then the program); also copies it to the clipboard (best
+   *  effort). Returns the URL string. */
+  async function makeShareLink(source, lang) {
     const packed = await pipe(enc.encode(source), new CompressionStream("deflate-raw"));
-    const url = `${location.origin}${location.pathname}#src=${b64urlFromBytes(packed)}`;
+    const query = lang ? `?lang=${encodeURIComponent(lang)}` : "";
+    const url = `${location.origin}${location.pathname}${query}#src=${b64urlFromBytes(packed)}`;
     try { await navigator.clipboard.writeText(url); } catch { /* clipboard may be blocked; URL still returned */ }
     // Reflect it in the address bar too, without adding a history entry.
     try { history.replaceState(null, "", url); } catch { /* non-fatal */ }

@@ -177,7 +177,7 @@
     private bool _hasError;
     private bool _ran;
     private bool _busy;
-    private string _hint = "first run warms the compiler (~a few seconds)";
+    private string _hint = HintFor("c");
 
     // Compiler-option flags (read at Run time; passed to EmitWat/EmitCSharp/Preprocess).
     private string _std = "c17";
@@ -209,7 +209,8 @@
     private const string EditorId = "editor";
 
     /// <summary>On first render, adopt any program the URL carries: a "#src=…" share
-    /// link (round-tripped playground source) takes priority, else a "?lang=&amp;ex="
+    /// link (round-tripped playground source, in the language its <c>?lang=</c> names, C for
+    /// a link from before links named one) takes priority, else a "?lang=&amp;ex="
     /// deep-link from the story pages pre-selects a language + starter example. Then
     /// mount the CodeMirror editor with the resolved source. JS interop is only legal
     /// once the component has rendered (this app is client-side WASM, no prerender).</summary>
@@ -219,6 +220,7 @@
         var shared = await JS.InvokeAsync<string?>("dotccSandbox.readShareSource");
         if (!string.IsNullOrEmpty(shared))
         {
+            if (ReadQuery().lang is { } lang && IsLanguage(lang)) { _lang = lang; }
             _source = shared;
             _example = "(shared link)";
         }
@@ -226,17 +228,40 @@
         {
             AdoptDeepLink();
         }
+        _hint = HintFor(_lang);
         await JS.InvokeVoidAsync("dotccEditor.create", EditorId, _source);
         StateHasChanged();
     }
 
-    /// <summary>Honour a <c>?lang=c|zig&amp;ex=&lt;example name&gt;</c> deep-link (how the
-    /// landing / coverage pages open the sandbox on a specific program). Sets the language
-    /// and picks the named example from that language's set, defaulting to its first.</summary>
+    /// <summary>True for a language the sandbox runs: <c>c</c>, <c>zig</c> or <c>python</c>.</summary>
+    private static bool IsLanguage(string lang) => lang is "c" or "zig" or "python";
+
+    /// <summary>The hint beside Run before a language's first run.</summary>
+    private static string HintFor(string lang) => lang == "python"
+        ? "the first run downloads CPython 3.13 as wasm (about 4 MB), then runs offline"
+        : "first run warms the compiler (~a few seconds)";
+
+    /// <summary>The sandbox's address for <paramref name="example"/> of <paramref name="lang"/>:
+    /// <c>sandbox?lang=c|zig|python&amp;ex=&lt;example name&gt;</c>, read back by
+    /// <see cref="AdoptDeepLink"/>. The landing page's cards link this way, and the page keeps
+    /// its own address at it as the language and example change (<see cref="FollowSelection"/>).
+    /// The name is URL-encoded, so spaces and parentheses ("Sum (exit code)") round-trip.</summary>
+    public static string LinkTo(string lang, string example)
+        => $"sandbox?lang={lang}&ex={Uri.EscapeDataString(example)}";
+
+    /// <summary>Point the address bar at the selected language and example, replacing the
+    /// history entry (Back still leaves the sandbox), so a copied or reloaded address opens
+    /// what is on screen. A shared program's <c>#src=</c> goes with it: it is no longer
+    /// in the editor.</summary>
+    private void FollowSelection() => Nav.NavigateTo(LinkTo(_lang, _example), replace: true);
+
+    /// <summary>Honour a <c>?lang=c|zig|python&amp;ex=&lt;example name&gt;</c> deep-link (see
+    /// <see cref="LinkTo"/>). Sets the language and picks the named example from that
+    /// language's set, defaulting to its first.</summary>
     private void AdoptDeepLink()
     {
         var (lang, ex) = ReadQuery();
-        if (lang is "c" or "zig" or "python") { _lang = lang; }
+        if (lang is not null && IsLanguage(lang)) { _lang = lang; }
         if (lang is null && ex is null) { return; }
         var first = CurrentExamples[0];
         _source = first.Source;
@@ -282,6 +307,7 @@
             _diagnostics = "";
             _hasError = false;
             await JS.InvokeVoidAsync("dotccEditor.setValue", EditorId, picked.Source);
+            FollowSelection();
         }
     }
 
@@ -291,7 +317,7 @@
     private async Task OnLangChanged(ChangeEventArgs e)
     {
         var lang = e.Value?.ToString();
-        if (lang is not ("c" or "zig" or "python")) { return; }
+        if (lang is null || !IsLanguage(lang)) { return; }
         _lang = lang;
         var first = CurrentExamples[0];
         _source = first.Source;
@@ -300,16 +326,15 @@
         _diagnostics = "";
         _hasError = false;
         if (Array.IndexOf(Tabs, _tab) < 0) { _tab = "Output"; }
-        _hint = lang == "python"
-            ? "the first run downloads CPython 3.13 as wasm (about 4 MB), then runs offline"
-            : "first run warms the compiler (~a few seconds)";
+        _hint = HintFor(lang);
         await JS.InvokeVoidAsync("dotccEditor.setValue", EditorId, first.Source);
+        FollowSelection();
     }
 
     private async Task ShareAsync()
     {
         await SyncFromEditor();
-        var url = await JS.InvokeAsync<string>("dotccSandbox.makeShareLink", _source);
+        var url = await JS.InvokeAsync<string>("dotccSandbox.makeShareLink", _source, _lang);
         _hint = url.Length > 60 ? "link copied to clipboard ✓" : url;
         StateHasChanged();
     }
