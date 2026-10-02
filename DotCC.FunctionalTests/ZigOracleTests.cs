@@ -6929,6 +6929,69 @@ public sealed class ZigOracleTests
             "    const q = P.default;\n" +
             "    return p.code() * 10 + q.code() + p.next().code();\n" +
             "}\n", 28, "" },
+        // GH #283: jumps as arms of a value `if`: `break`, `continue`, a labeled `continue :outer`, and an `if` whose
+        // arms both leave (`return` / `break :blk null`) as an `orelse` fallback, std.Io.Dispatch's shape.
+        new object[] { "if_arm_jumps",
+            "const E = error{Unavailable};\n" +
+            "\n" +
+            "fn find(o: ?u8, c: bool) E!?u8 {\n" +
+            "    const v: ?u8 = blk: {\n" +
+            "        const q = o orelse if (c) return error.Unavailable else break :blk null;\n" +
+            "        break :blk q + 1;\n" +
+            "    };\n" +
+            "    return v;\n" +
+            "}\n" +
+            "\n" +
+            "fn sumUntilBig(xs: []const u8) u8 {\n" +
+            "    var total: u8 = 0;\n" +
+            "    for (xs) |x| {\n" +
+            "        const y = if (x < 100) x else break;\n" +
+            "        total += y;\n" +
+            "    }\n" +
+            "    return total;\n" +
+            "}\n" +
+            "\n" +
+            "fn doubleNonZero(xs: []const u8) u8 {\n" +
+            "    var total: u8 = 0;\n" +
+            "    for (xs) |x| {\n" +
+            "        const y = if (x == 0) continue else x * 2;\n" +
+            "        total += y;\n" +
+            "    }\n" +
+            "    return total;\n" +
+            "}\n" +
+            "\n" +
+            "fn skipRowsWithNine(rows: []const []const u8) u8 {\n" +
+            "    var total: u8 = 0;\n" +
+            "    outer: for (rows) |row| {\n" +
+            "        for (row) |x| {\n" +
+            "            total += if (x == 9) continue :outer else x;\n" +
+            "        }\n" +
+            "    }\n" +
+            "    return total;\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = (find(4, true) catch return 90) orelse 0;\n" +
+            "    const b = (find(null, false) catch return 91) orelse 7;\n" +
+            "    const c: u8 = if (find(null, true)) |_| 0 else |_| 3;\n" +
+            "    const d = sumUntilBig(&[_]u8{ 1, 2, 3, 200, 4 });\n" +
+            "    const e = doubleNonZero(&[_]u8{ 0, 1, 0, 2 });\n" +
+            "    const f = skipRowsWithNine(&[_][]const u8{ &[_]u8{ 1, 9, 5 }, &[_]u8{ 2, 3 } });\n" +
+            "    return a + b + c + d + e + f;\n" +
+            "}\n", 33, "" },
+        // GH #283: a labeled break whose value starts with an identifier (`orelse break :blk d`); the value-less form's
+        // reduce had outranked the identifier, so only a literal value parsed.
+        new object[] { "orelse_break_label_identifier",
+            "fn f(o: ?u8, d: u8) u8 {\n" +
+            "    const v = blk: {\n" +
+            "        const q = o orelse break :blk d;\n" +
+            "        break :blk q + 1;\n" +
+            "    };\n" +
+            "    return v;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return f(null, 7) + f(4, 0);\n" +
+            "}\n", 12, "" },
         new object[] { "orelse_catch_if",
             "const std = @import(\"std\");\n" +
             "\n" +

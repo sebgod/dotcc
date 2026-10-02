@@ -55,6 +55,12 @@ public sealed class ZigGrammarTests
     [InlineData("fn f(o: ?u8, p: E!u8) S { return .{ .n = o orelse if (p) |n| n + 1 else |_| 0 }; }")]
     // GH #282: a tagged enum, with methods, as a type arm
     [InlineData("const P = if (w) enum(u32) { a = 1, _ } else enum(u16) { b = 2, pub fn f(p: @This()) u16 { return @intFromEnum(p); } };")]
+    // GH #283: jumps as arms of a value `if`, and an `if` whose arms both jump as an `orelse` fallback
+    [InlineData("fn f(xs: []const u8) u8 { var t: u8 = 0; for (xs) |x| { const y = if (x < 100) x else break; t += y; } return t; }")]
+    [InlineData("fn f(xs: []const u8) u8 { var t: u8 = 0; for (xs) |x| { t += if (x == 0) continue else x; } return t; }")]
+    [InlineData("fn f(o: ?u8, c: bool) !?u8 { const v: ?u8 = blk: { const q = o orelse if (c) return error.U else break :blk null; break :blk q + 1; }; return v; }")]
+    [InlineData("fn f(o: ?u8, d: u8) u8 { const v = blk: { const q = o orelse break :blk d; break :blk q + 1; }; return v; }")]
+    [InlineData("fn f(xs: []const u8, d: u8) u8 { const v = blk: { for (xs) |x| { const y = if (x < 9) x else break :blk d; _ = y; } break :blk 0; }; return v; }")]
     public void Accepts_real_zig(string src) => TryParse(src).ShouldBeTrue();
 
     [Theory]
