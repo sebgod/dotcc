@@ -2855,6 +2855,12 @@ internal sealed partial class IrBuilder
     {
         var base_ = BuildExpr(s.Arg0);
         var idx = BuildExpr(s.Arg2);
+        // E1[E2] is (*((E1)+(E2))) (C11 6.5.2.1p2), so either operand may be the pointer: musl's
+        // getenv reads `l[*e]`. The pointer is the base.
+        if (base_.Type.IsInteger && idx.Type.Unqualified is CType.Pointer or CType.Array)
+        {
+            (base_, idx) = (idx, base_);
+        }
         var elem = base_.Type switch
         {
             CType.Pointer p => p.Pointee,
