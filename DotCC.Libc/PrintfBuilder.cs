@@ -19,7 +19,11 @@ namespace DotCC.Libc;
 /// (<c>byte*</c>) can't be boxed, and printf's <c>%s</c> in our lowering
 /// takes a <c>byte*</c>. The fluent shape sidesteps boxing entirely. The
 /// struct holds a <see cref="TextWriter"/> reference (so it can be obtained
-/// from <c>fprintf(stream, fmt)</c>) and a <c>byte*</c> cursor.
+/// from <c>fprintf(stream, fmt)</c>) and the rest of the format as a
+/// <see cref="ReadOnlySpan{T}"/>, so a literal format can be handed over as
+/// <c>"…"u8</c> by safe code (<see cref="Libc.printf(ReadOnlySpan{byte})"/>): a span
+/// keeps whatever it views alive and tracked, where a pointer held across the
+/// <c>Arg</c> calls would need it pinned.
 /// </para>
 /// <para>
 /// Supported format string: <c>%[-+0 #][width][.precision][lhzL]conv</c>
@@ -31,15 +35,32 @@ namespace DotCC.Libc;
 public unsafe ref struct PrintfBuilder
 {
     private readonly TextWriter _w;
-    private byte* _fmt;
+    private ReadOnlySpan<byte> _fmt;   // the format not consumed yet, up to (not including) its NUL
     private int _count;   // UTF-8 bytes written so far — printf's return value (C99 §7.21.6.3)
 
+    /// <summary>A builder over the NUL-terminated format at <paramref name="fmt"/>.</summary>
     public PrintfBuilder(TextWriter writer, byte* fmt)
     {
         _w = writer;
-        _fmt = fmt;
+        _fmt = System.Runtime.InteropServices.MemoryMarshal.CreateReadOnlySpanFromNullTerminated(fmt);
         _count = 0;
     }
+
+    /// <summary>A builder over the format in <paramref name="fmt"/>, which ends at its first NUL as a C string does
+    /// (a literal's <c>"…\0"u8</c>), or at its end.</summary>
+    public PrintfBuilder(TextWriter writer, ReadOnlySpan<byte> fmt)
+    {
+        _w = writer;
+        var nul = fmt.IndexOf((byte)0);
+        _fmt = nul >= 0 ? fmt[..nul] : fmt;
+        _count = 0;
+    }
+
+    /// <summary>The format byte <paramref name="i"/> places ahead, or 0 past its end (C's NUL).</summary>
+    private readonly byte At(int i) => i < _fmt.Length ? _fmt[i] : (byte)0;
+
+    /// <summary>Step past <paramref name="n"/> format bytes.</summary>
+    private void Skip(int n) => _fmt = _fmt[System.Math.Min(n, _fmt.Length)..];
 
     /// <summary>Write <paramref name="s"/> to the sink and accumulate its UTF-8
     /// byte length into the running output count that <see cref="Done"/> returns.
@@ -471,37 +492,37 @@ public unsafe ref struct PrintfBuilder
     /// </summary>
     public int Done()
     {
-        while (*_fmt != 0)
+        while (At(0) != 0)
         {
-            if (*_fmt == (byte)'%' && _fmt[1] == (byte)'%')
+            if (At(0) == (byte)'%' && At(1) == (byte)'%')
             {
                 _w.Write('%');
                 _count++;
-                _fmt += 2;
+                Skip(2);
                 continue;
             }
-            WriteUtf8Codepoint(ref _fmt);
+            WriteUtf8Codepoint();
         }
         return _count;
     }
 
     private Spec ConsumeUntilSpec()
     {
-        while (*_fmt != 0)
+        while (At(0) != 0)
         {
-            if (*_fmt == (byte)'%')
+            if (At(0) == (byte)'%')
             {
-                _fmt++;
-                if (*_fmt == (byte)'%')
+                Skip(1);
+                if (At(0) == (byte)'%')
                 {
                     _w.Write('%');
                     _count++;
-                    _fmt++;
+                    Skip(1);
                     continue;
                 }
                 return ParseSpec();
             }
-            WriteUtf8Codepoint(ref _fmt);
+            WriteUtf8Codepoint();
         }
         return new Spec { Conv = 0, Width = -1, Precision = -1 };
     }
@@ -514,43 +535,43 @@ public unsafe ref struct PrintfBuilder
     private Spec ParseSpec()
     {
         var s = new Spec { Width = -1, Precision = -1 };
-        while (*_fmt != 0)
+        while (At(0) != 0)
         {
-            switch (*_fmt)
+            switch (At(0))
             {
-                case (byte)'-': s.Left = true; _fmt++; continue;
-                case (byte)'+': s.Plus = true; _fmt++; continue;
-                case (byte)' ': s.Space = true; _fmt++; continue;
-                case (byte)'0': s.Zero = true; _fmt++; continue;
-                case (byte)'#': s.Alt = true; _fmt++; continue;
+                case (byte)'-': s.Left = true; Skip(1); continue;
+                case (byte)'+': s.Plus = true; Skip(1); continue;
+                case (byte)' ': s.Space = true; Skip(1); continue;
+                case (byte)'0': s.Zero = true; Skip(1); continue;
+                case (byte)'#': s.Alt = true; Skip(1); continue;
             }
             break;
         }
-        while (*_fmt >= (byte)'0' && *_fmt <= (byte)'9')
+        while (At(0) >= (byte)'0' && At(0) <= (byte)'9')
         {
             if (s.Width < 0) { s.Width = 0; }
-            s.Width = s.Width * 10 + (*_fmt - (byte)'0');
-            _fmt++;
+            s.Width = s.Width * 10 + (At(0) - (byte)'0');
+            Skip(1);
         }
-        if (*_fmt == (byte)'.')
+        if (At(0) == (byte)'.')
         {
-            _fmt++;
+            Skip(1);
             s.Precision = 0;
-            while (*_fmt >= (byte)'0' && *_fmt <= (byte)'9')
+            while (At(0) >= (byte)'0' && At(0) <= (byte)'9')
             {
-                s.Precision = s.Precision * 10 + (*_fmt - (byte)'0');
-                _fmt++;
+                s.Precision = s.Precision * 10 + (At(0) - (byte)'0');
+                Skip(1);
             }
         }
         // Length modifiers — recognized but ignored (the Arg overload has
         // already supplied the type information).
-        while (*_fmt == (byte)'l' || *_fmt == (byte)'L'
-            || *_fmt == (byte)'h' || *_fmt == (byte)'z')
+        while (At(0) == (byte)'l' || At(0) == (byte)'L'
+            || At(0) == (byte)'h' || At(0) == (byte)'z')
         {
-            _fmt++;
+            Skip(1);
         }
-        s.Conv = *_fmt;
-        if (s.Conv != 0) { _fmt++; }
+        s.Conv = At(0);
+        if (s.Conv != 0) { Skip(1); }
         return s;
     }
 
@@ -595,16 +616,19 @@ public unsafe ref struct PrintfBuilder
         return s.PadLeft(spec.Width, ' ');
     }
 
-    private void WriteUtf8Codepoint(ref byte* p)
+    /// <summary>Write the format's next UTF-8 code point as text and step past it (a sequence the format cuts short
+    /// is written as far as it goes).</summary>
+    private void WriteUtf8Codepoint()
     {
-        byte b = *p;
-        if (b < 0x80) { _w.Write((char)b); _count++; p++; return; }
+        byte b = _fmt[0];
+        if (b < 0x80) { _w.Write((char)b); _count++; Skip(1); return; }
         int len = 1;
         if ((b & 0xE0) == 0xC0) { len = 2; }
         else if ((b & 0xF0) == 0xE0) { len = 3; }
         else if ((b & 0xF8) == 0xF0) { len = 4; }
-        _w.Write(System.Text.Encoding.UTF8.GetString(p, len));
+        len = System.Math.Min(len, _fmt.Length);
+        _w.Write(System.Text.Encoding.UTF8.GetString(_fmt[..len]));
         _count += len;
-        p += len;
+        Skip(len);
     }
 }

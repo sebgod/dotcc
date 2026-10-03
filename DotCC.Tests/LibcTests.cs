@@ -120,6 +120,17 @@ public sealed unsafe class LibcTests
             .ShouldBe("hi world!");
 
     [Fact]
+    public void printf_over_a_span_format_stops_at_its_nul_and_counts_bytes()
+    {
+        // The span overload the C# backend uses for a literal format (`printf("…\0"u8)`): the format ends at its
+        // first NUL as a C string does, `%%` is a percent, and the count is UTF-8 bytes.
+        var n = 0;
+        CaptureStdout(() => n = printf("%d%% caf\u00e9\n\0ignored"u8).Arg(7).Done())
+            .ShouldBe("7% caf\u00e9\n");
+        n.ShouldBe(9);
+    }
+
+    [Fact]
     public void printf_percent_percent_literal() =>
         CaptureStdout(() => printf(L("100%%\0"u8)).Done())
             .ShouldBe("100%");

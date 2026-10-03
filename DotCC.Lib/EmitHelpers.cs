@@ -294,6 +294,13 @@ internal static class EmitHelpers
     /// <c>char[N]</c> (a string literal does NOT decay under <c>sizeof</c>).
     /// </summary>
     internal static string EncodeStringLiteral(IReadOnlyList<string> rawQuotedSegments, out int byteLength)
+        => $"Libc.L({EncodeStringSpan(rawQuotedSegments, out byteLength)})";
+
+    /// <summary>The literal as a <c>ReadOnlySpan&lt;byte&gt;</c> expression over its bytes and NUL, the operand
+    /// <see cref="EncodeStringLiteral(IReadOnlyList{string}, out int)"/> takes the address of: <c>"…\0"u8</c>, or a
+    /// constant <c>new byte[]{ … }</c> (which Roslyn also lays out as static data) for a literal with a byte past ASCII.
+    /// Safe code can hold it (the C# backend's span-format <c>printf</c>).</summary>
+    internal static string EncodeStringSpan(IReadOnlyList<string> rawQuotedSegments, out int byteLength)
     {
         var items = new List<StrItem>();
         foreach (var seg in rawQuotedSegments) { DecodeCStringBody(StripStrQuotes(seg), items); }
@@ -301,11 +308,11 @@ internal static class EmitHelpers
         {
             var (arr, n) = EmitByteArray(items);
             byteLength = n + 1;   // + NUL
-            return $"Libc.L({arr})";
+            return arr;
         }
         var (escaped, len) = EmitU8(items);
         byteLength = len + 1;     // + NUL
-        return $"Libc.L(\"{escaped}\\0\"u8)";
+        return $"\"{escaped}\\0\"u8";
     }
 
     // ---- char16_t (UTF-16) literals -------------------------------------
