@@ -20,11 +20,13 @@ internal sealed partial class ZigLowering
     private CStmt LowerProngExprStmt(Item e) => e.Content switch
     {
         // In a LABELED switch (`r: switch (x) { 0 => 10, … }`), a bare value prong is the switch's value: `break :r 10`.
-        // (`unreachable` stays the trap it is.)
-        _ when _activeSwitchValueLabel is { } valueLabel && !IsUnreachableItem(e) => LowerLabeledBreak(valueLabel, e),
+        // (`unreachable` stays the trap it is.) Each is a statement of its own prong, so what its value hoists
+        // (`0 => a orelse return 9`, `… else continue :round .away`) runs in that prong, not ahead of the whole switch,
+        // where the statement holding a labeled value switch had taken it (GH #286).
+        _ when _activeSwitchValueLabel is { } valueLabel && !IsUnreachableItem(e) => Hoisted(() => LowerLabeledBreak(valueLabel, e)),
         Zig.SwitchExpr s => LowerSwitchStmt(s.Arg2, s.Arg5),
         Zig.SwitchExprTrailing s => LowerSwitchStmt(s.Arg2, s.Arg5),
-        _ => new ExprStmt(LowerExpr(e)),
+        _ => Hoisted(() => new ExprStmt(LowerExpr(e))),
     };
     /// <summary>The label a labeled switch hands to its OWN switch statement (<see cref="LowerLabeledValue"/>), taken
     /// by that switch as it starts, so no switch nested in one of its prongs inherits it.</summary>
@@ -193,7 +195,9 @@ internal sealed partial class ZigLowering
         var previousLabel = _activeSwitchValueLabel;
         _activeSwitchValueLabel = _pendingSwitchValueLabel;   // this switch's own label, or null for any other switch
         _pendingSwitchValueLabel = null;
-        try { return WithSwitchBarrier(() => LowerSwitchStmtCore(subjectItem, prongsItem)); }
+        var continueLabel = _pendingSwitchContinueLabel;      // a labeled switch's label, which a continue may name
+        _pendingSwitchContinueLabel = null;
+        try { return WithSwitchBarrier(() => LowerSwitchStmtCore(subjectItem, prongsItem, continueLabel)); }
         finally { _activeSwitchValueLabel = previousLabel; }
     }
     /// <summary>Run <paramref name="lowerSwitch"/>, which builds a C# <c>switch</c>, as a barrier for an
@@ -214,9 +218,13 @@ internal sealed partial class ZigLowering
         Zig.PjBreakLabelValue b => Hoisted(() => LowerLabeledBreak(Tok(b.Arg2), b.Arg3)),
         Zig.PjContinue => new Continue(),
         Zig.PjContinueLabel c => LowerLabeledLoopJump(Tok(c.Arg2), isContinue: true),
+        Zig.PjContinueLabelValue c => LowerSwitchContinue(Tok(c.Arg2), c.Arg3),
         _ => throw new IrUnsupportedException("zig switch jump prong: " + (jump.Content?.GetType().Name ?? "null")),
     };
-    private CStmt LowerSwitchStmtCore(Item subjectItem, Item prongsItem)
+    /// <summary>The body of <see cref="LowerSwitchStmt"/>. <paramref name="continueLabel"/> is the switch's label when it
+    /// is a labeled switch, whose prongs a <c>continue :label operand</c> may run again (<see cref="LowerRedispatchingSwitch"/>);
+    /// a compile-time-selected prong is lowered alone, as before.</summary>
+    private CStmt LowerSwitchStmtCore(Item subjectItem, Item prongsItem, string? continueLabel = null)
     {
         // A switch over a comptime-known VALUE selects its prong now, as zig does. While an `inline` loop
         // unrolls (`switch (fmt[i])` in std.Io.Writer.print) the loop's comptime control (a `break` in the
@@ -253,6 +261,10 @@ internal sealed partial class ZigLowering
         if (uname is not null && _unions.TryGetValue(uname, out var info))
         {
             return LowerUnionSwitch(subject, prongsItem, info);
+        }
+        if (continueLabel is not null)
+        {
+            return LowerRedispatchingSwitch(continueLabel, subject, s => LowerSwitch(s, prongsItem));
         }
         return LowerSwitch(subject, prongsItem);
     }
