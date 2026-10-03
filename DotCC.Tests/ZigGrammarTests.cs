@@ -67,6 +67,11 @@ public sealed class ZigGrammarTests
     [InlineData("const R = enum(u8) { undefined = 7, same_value };")]
     [InlineData("const R = enum { undefined, other };")]
     [InlineData("const t = Constant.true; const n = E.null; const u = E.undefined;")]
+    // GH #286: a labeled switch's `continue :label operand`, as a statement, a prong body, a value `if` arm and a fallback
+    [InlineData("fn f(s: State) void { state: switch (s) { .a => { continue :state .b; }, .b => {} } }")]
+    [InlineData("fn f(s: State) u8 { return sw: switch (s) { .a => continue :sw .b, .b => 1 }; }")]
+    [InlineData("fn f(s: State, v: u8) u8 { return r: switch (s) { .a => if (v < 5) 0 else continue :r .b, .b => 1 }; }")]
+    [InlineData("fn f(s: State, o: ?State) void { sw: switch (s) { .a => { const n = o orelse continue :sw .b; _ = n; }, .b => {} } }")]
     public void Accepts_real_zig(string src) => TryParse(src).ShouldBeTrue();
 
     [Theory]

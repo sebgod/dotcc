@@ -675,9 +675,12 @@ productions:
       # the `;` lookahead selects this no-value form over the value-carrying `break :blk v;` above
       # (`;` isn't in RhsExpr's first set — a clean shift/reduce). Lowered to a `goto` to the loop's
       # break / continue label (the continue label sits at the end of the loop body, so the natural
-      # iteration step still runs). `continue` never carries a value, so it has only this form.
+      # iteration step still runs). A loop's `continue` carries no value.
       - { lhs: Stmt, rhs: ['break', ':', IDENT, ';'],    action: stmtBreakLabel }
       - { lhs: Stmt, rhs: ['continue', ':', IDENT, ';'], action: stmtContinueLabel }
+      # A labeled SWITCH's does (GH #286, zig 0.14): `continue :state .identifier;` runs the switch again on the new
+      # operand (std.zig.Tokenizer's state machine). After the label, `;` versus an Expr start is one token.
+      - { lhs: Stmt, rhs: ['continue', ':', IDENT, Expr, ';'], action: stmtContinueLabelValue }
       # `defer Stmt` / `errdefer Stmt` (Milestone H) — scope-exit cleanup. The body is a
       # full Stmt (an `expr;`, a `_ = expr;` discard, or a braced Block). A unique leading
       # keyword at statement position, so no conflict with the other Stmt forms (like break/
@@ -907,7 +910,7 @@ productions:
       - { lhs: FallbackArm, rhs: ['break'],                     action: fbBreak }
       - { lhs: FallbackArm, rhs: ['break', ':', IDENT, BoolOr], action: fbBreakLabelValue }
       - { lhs: FallbackArm, rhs: ['continue'],                  action: fbContinue }
-      - { lhs: FallbackArm, rhs: ['continue', ':', IDENT],      action: fbContinueLabel }
+      - { lhs: FallbackArm, rhs: ['continue', ':', IDENT, BoolOr], action: fbContinueLabelValue }
       - { lhs: FallbackArm, rhs: [Block],                       action: fbBlock }
       - { lhs: FallbackArm, rhs: [SwitchExpr],                  action: fbSwitch }
       # `arg_index orelse init: { const arg = self.next_arg; self.next_arg += 1; break :init arg; }`
@@ -932,7 +935,8 @@ productions:
       - { lhs: JumpArm, rhs: ['break'],                     action: fbBreak }
       - { lhs: JumpArm, rhs: ['break', ':', IDENT, BoolOr], action: fbBreakLabelValue }
       - { lhs: JumpArm, rhs: ['continue'],                  action: fbContinue }
-      - { lhs: JumpArm, rhs: ['continue', ':', IDENT],      action: fbContinueLabel }
+      # A labeled switch's continue with its new operand (GH #286: std.math.big.int's `… else continue :round .away`).
+      - { lhs: JumpArm, rhs: ['continue', ':', IDENT, BoolOr], action: fbContinueLabelValue }
       # An `if` whose arms BOTH jump is noreturn, so after `orelse` / `catch` it is a statement-shaped fallback (std.Io.Dispatch's
       # `… orelse if (concurrency) return error.ConcurrencyUnavailable else break :maybe_queue null;`). Only here, not in IfExpr:
       # there `if (c) return v else …` is already IfExpr's, and the arm after `else` decides (`break` / `continue` / `return`
@@ -1660,6 +1664,8 @@ productions:
       - { lhs: ProngJump, rhs: ['break', ':', IDENT, RhsExpr],  action: pjBreakLabelValue }
       - { lhs: ProngJump, rhs: ['continue'],                    action: pjContinue }
       - { lhs: ProngJump, rhs: ['continue', ':', IDENT],        action: pjContinueLabel }
+      # `.raw => continue :sw .block_header,` (GH #286): a labeled switch's continue, with its new operand.
+      - { lhs: ProngJump, rhs: ['continue', ':', IDENT, RhsExpr], action: pjContinueLabelValue }
 
   # Case values: a comma-list of value Exprs, or `else` (the default). The `,` here never
   # clashes with the prong-separator `,` because FOLLOW(CaseVals) = { '=>' } — after a value
@@ -1905,6 +1911,9 @@ productions:
       # failed at `d` while `x orelse break :blk 7` parsed. Here the value form takes it.
       - { lhs: FallbackArm, rhs: ['break', ':', IDENT], action: fbBreakLabel }
       - { lhs: JumpArm,     rhs: ['break', ':', IDENT], action: fbBreakLabel }
+      # And the value-less labeled continue, now that a labeled switch's continue takes an operand (GH #286).
+      - { lhs: FallbackArm, rhs: ['continue', ':', IDENT], action: fbContinueLabel }
+      - { lhs: JumpArm,     rhs: ['continue', ':', IDENT], action: fbContinueLabel }
 
   # Inline assembly (std.crypto.sha2's SHA-NI / ARMv8 paths). The template is a STRING (zig allows any comptime
   # string; std always writes a literal), so an Expr is never followed by `:` here, keeping the label invariant.

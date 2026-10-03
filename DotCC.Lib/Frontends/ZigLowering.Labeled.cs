@@ -34,10 +34,17 @@ internal sealed partial class ZigLowering
     private CStmt LowerLabeledValue(Item labeled, CType? sink, Func<Symbol, CStmt> consume) => labeled.Content switch
     {
         Zig.LabeledBlock lb => LowerLabeledValueBlock(Tok(lb.Arg0), lb.Arg2, sink, consume),
-        Zig.LabeledSwitch { Arg2.Content: Zig.SwitchExpr sw } ls => LowerLabeledValueBody(Tok(ls.Arg0), () => LowerLabeledSwitchBody(Tok(ls.Arg0), sw.Arg2, sw.Arg5), sink, consume),
-        Zig.LabeledSwitch { Arg2.Content: Zig.SwitchExprTrailing st } ls => LowerLabeledValueBody(Tok(ls.Arg0), () => LowerLabeledSwitchBody(Tok(ls.Arg0), st.Arg2, st.Arg5), sink, consume),
+        Zig.LabeledSwitch { Arg2.Content: Zig.SwitchExpr sw } ls => LowerLabeledValueBody(Tok(ls.Arg0), () => LowerContinuableSwitchBody(Tok(ls.Arg0), sw.Arg2, sw.Arg5), sink, consume),
+        Zig.LabeledSwitch { Arg2.Content: Zig.SwitchExprTrailing st } ls => LowerLabeledValueBody(Tok(ls.Arg0), () => LowerContinuableSwitchBody(Tok(ls.Arg0), st.Arg2, st.Arg5), sink, consume),
         _ => throw new IrUnsupportedException("internal: not a labeled value: " + (labeled.Content?.GetType().Name ?? "null")),
     };
+    /// <summary>A labeled switch's own body as a value (<see cref="LowerLabeledSwitchBody"/>), which a <c>continue
+    /// :label operand</c> may run again (<see cref="LowerRedispatchingSwitch"/>).</summary>
+    private CStmt LowerContinuableSwitchBody(string label, Item subjectItem, Item prongsItem)
+    {
+        _pendingSwitchContinueLabel = label;
+        return LowerLabeledSwitchBody(label, subjectItem, prongsItem);
+    }
     /// <summary>A labeled switch's body: the switch as a statement, its bare value prongs breaking to <paramref name="label"/>.</summary>
     private CStmt LowerLabeledSwitchBody(string label, Item subjectItem, Item prongsItem)
     {
@@ -202,8 +209,16 @@ internal sealed partial class ZigLowering
         var (label, lowerBody) = labeled.Content switch
         {
             Zig.LabeledBlock lb => (Tok(lb.Arg0), (Func<CStmt>)(() => LowerBlock(lb.Arg2))),
-            Zig.LabeledSwitch { Arg2.Content: Zig.SwitchExpr sw } ls => (Tok(ls.Arg0), () => LowerSwitchStmt(sw.Arg2, sw.Arg5)),
-            Zig.LabeledSwitch { Arg2.Content: Zig.SwitchExprTrailing st } ls => (Tok(ls.Arg0), () => LowerSwitchStmt(st.Arg2, st.Arg5)),
+            Zig.LabeledSwitch { Arg2.Content: Zig.SwitchExpr sw } ls => (Tok(ls.Arg0), () =>
+            {
+                _pendingSwitchContinueLabel = Tok(ls.Arg0);
+                return LowerSwitchStmt(sw.Arg2, sw.Arg5);
+            }),
+            Zig.LabeledSwitch { Arg2.Content: Zig.SwitchExprTrailing st } ls => (Tok(ls.Arg0), () =>
+            {
+                _pendingSwitchContinueLabel = Tok(ls.Arg0);
+                return LowerSwitchStmt(st.Arg2, st.Arg5);
+            }),
             _ => throw new IrUnsupportedException("internal: not a labeled block: " + (labeled.Content?.GetType().Name ?? "null")),
         };
         var n = _loopLabelCounter++;
@@ -218,5 +233,71 @@ internal sealed partial class ZigLowering
         return t.BreakUsed
             ? new Seq(new List<CStmt> { body, new Labeled(t.BreakLabel, new Block(new List<CStmt>())) })
             : body;
+    }
+
+    /// <summary>The label of the labeled switch about to be lowered (statement or value form), set just before its
+    /// <see cref="LowerSwitchStmt"/> and taken by it, so no switch nested in a prong inherits it (GH #286).</summary>
+    private string? _pendingSwitchContinueLabel;
+
+    /// <summary>The runtime labeled switches whose prongs are being lowered, innermost on top: what a <c>continue
+    /// :label operand</c> runs again (<see cref="LowerSwitchContinue"/>).</summary>
+    private readonly Stack<SwitchContinueTarget> _switchContinueTargets = new();
+
+    /// <summary>The counter that names a labeled switch's operand temp (<c>__lsw&lt;n&gt;</c>), apart from the block
+    /// counter so other temps keep their numbers.</summary>
+    private int _switchContinueCounter;
+
+    /// <summary>A runtime labeled switch: its label, the temp holding its operand, the label before the switch a
+    /// <c>continue</c> jumps back to, and whether one did.</summary>
+    private sealed class SwitchContinueTarget(string label, Symbol temp, string topLabel)
+    {
+        public string Label { get; } = label;
+        public Symbol Temp { get; } = temp;
+        public string TopLabel { get; } = topLabel;
+        public bool Used { get; set; }
+    }
+
+    /// <summary>A labeled switch over a runtime operand (GH #286, zig 0.14's state-machine idiom: <c>state: switch
+    /// (State.start) { .start =&gt; continue :state .identifier, … }</c>). The operand goes to a temp the switch
+    /// reads, and <c>continue :state x</c> assigns the temp and jumps back to a label before the switch, which runs
+    /// again on the new operand. The label is placed only when a continue used it; the temp is there regardless,
+    /// since the prongs read it before that is known, which costs a copy of the operand. A tagged-union operand is
+    /// not copied (a pointer capture points into the operand itself), so it takes no continue yet.</summary>
+    private CStmt LowerRedispatchingSwitch(string label, CExpr subject, Func<CExpr, CStmt> lowerSwitch)
+    {
+        var n = _switchContinueCounter++;
+        var temp = _symbols.Declare(new Symbol { Name = "__lsw" + n, Kind = SymKind.Var, Type = subject.Type });
+        var target = new SwitchContinueTarget(label, temp, "__lsw" + n + "_top");
+        _switchContinueTargets.Push(target);
+        CStmt body;
+        try { body = lowerSwitch(new VarRef(temp) { Type = temp.Type, IsLValue = true }); }
+        finally { _switchContinueTargets.Pop(); }
+        return new Seq(new List<CStmt>
+        {
+            new DeclStmt(new List<LocalDecl> { new(temp, subject) }),
+            target.Used ? new Labeled(target.TopLabel, body) : body,
+        });
+    }
+
+    /// <summary>Lower <c>continue :label operand</c> (GH #286): the operand, at the switch operand's type, goes to the
+    /// labeled switch's temp, and the switch runs again (<see cref="LowerRedispatchingSwitch"/>). Innermost first.</summary>
+    private CStmt LowerSwitchContinue(string label, Item operandItem)
+    {
+        var target = _switchContinueTargets.FirstOrDefault(t => t.Label == label)
+            ?? throw new IrUnsupportedException(
+                $"`continue :{label} <operand>`: ':{label}' is not a labeled switch over a runtime operand that dotcc runs "
+                + "again (a loop's continue takes no operand; a switch over a tagged union, or one selected at compile time, "
+                + "takes no continue yet)");
+        return Hoisted(() =>
+        {
+            var operand = LowerExprSink(operandItem, target.Temp.Type);
+            target.Used = true;
+            var tref = new VarRef(target.Temp) { Type = target.Temp.Type, IsLValue = true };
+            return new Block(new List<CStmt>
+            {
+                new ExprStmt(new Assign(null, tref, operand) { Type = target.Temp.Type }),
+                new Goto(target.TopLabel),
+            });
+        });
     }
 }

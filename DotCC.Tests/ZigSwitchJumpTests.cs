@@ -19,6 +19,57 @@ namespace DotCC.Tests;
 [Collection("ZigFrontend")]
 public sealed class ZigSwitchJumpTests
 {
+    [Fact]
+    public void A_labeled_switch_continue_runs_the_switch_again_on_its_operand()
+    {
+        // GH #286 (zig 0.14, std.zig.Tokenizer's state machine): the operand is a temp the switch reads, and `continue
+        // :state .x` assigns it and jumps back to a label before the switch.
+        var cs = EmitZig("""
+            const State = enum { start, ident, done };
+            fn run(s: []const u8) u8 {
+                var i: usize = 0;
+                var n: u8 = 0;
+                state: switch (State.start) {
+                    .start => {
+                        if (i >= s.len) continue :state .done;
+                        continue :state .ident;
+                    },
+                    .ident => {
+                        i += 1;
+                        n += 1;
+                        continue :state .start;
+                    },
+                    .done => {},
+                }
+                return n;
+            }
+            pub fn main() u8 { return run("abc"); }
+            """);
+        cs.ShouldContain("State __lsw0 = State.start;");
+        cs.ShouldContain("__lsw0_top:");
+        System.Text.RegularExpressions.Regex.IsMatch(cs, @"__lsw0 = State\.done;\s+goto __lsw0_top;").ShouldBeTrue(cs);
+    }
+
+    [Fact]
+    public void A_bare_prong_value_hoists_inside_its_prong()
+    {
+        // GH #286: `0 => a orelse return 9` in a labeled value switch hoists its early return into its own prong; the
+        // statement holding the switch had taken it, ahead of the whole switch.
+        var cs = EmitZig("""
+            fn h(x: u8, a: ?u8) u8 {
+                const r: u8 = sw: switch (x) {
+                    0 => a orelse return 9,
+                    1 => break :sw 3,
+                    else => 2,
+                };
+                return r;
+            }
+            pub fn main() u8 { return h(1, null); }
+            """);
+        System.Text.RegularExpressions.Regex.IsMatch(cs, @"case 0:\s+if \(!Cond\.B\(a\.HasValue\)\)\s+\{\s+return 9;").ShouldBeTrue(cs);
+        cs.ShouldNotContain("goto case 1;");   // the prong ends in its break to the label; no dead fall-through after it
+    }
+
     private static string EmitZig(string body)
     {
         var path = Path.Combine(Path.GetTempPath(), $"dotcc-zigsj-{Guid.NewGuid():N}.zig");

@@ -301,6 +301,7 @@ internal sealed partial class ZigLowering
         Zig.FbBreakLabel b   => LowerLabeledLoopJump(Tok(b.Arg2), isContinue: false),
         Zig.FbBreakLabelValue b => Hoisted(() => LowerLabeledBreak(Tok(b.Arg2), b.Arg3)),
         Zig.FbContinueLabel c => LowerLabeledLoopJump(Tok(c.Arg2), isContinue: true),
+        Zig.FbContinueLabelValue c => LowerSwitchContinue(Tok(c.Arg2), c.Arg3),
         Zig.FbBlock b        => LowerStmt(b.Arg0),
         Zig.FbIfJumps j      => LowerIfExits(j.Arg2, () => LowerFallbackArm(j.Arg4), () => LowerFallbackArm(j.Arg6)),
         Zig.FbIfReturnJump j => LowerIfExits(j.Arg2, () => Hoisted(() => LowerReturn(j.Arg5)), () => LowerFallbackArm(j.Arg7)),
@@ -324,7 +325,8 @@ internal sealed partial class ZigLowering
     private static bool IsNoReturnStmt(Item stmt) => stmt.Content switch
     {
         Zig.StmtReturn or Zig.StmtReturnVoid or Zig.StmtBreak or Zig.StmtContinue
-          or Zig.StmtBreakValue or Zig.StmtBreakLabelValue or Zig.StmtBreakLabel or Zig.StmtContinueLabel => true,
+          or Zig.StmtBreakValue or Zig.StmtBreakLabelValue or Zig.StmtBreakLabel or Zig.StmtContinueLabel
+          or Zig.StmtContinueLabelValue => true,
         Zig.StmtExpr { Arg0.Content: Zig.Ident u } when Tok(u.Arg0) == "unreachable" => true,   // an identifier in this grammar
         Zig.StmtExpr { Arg0.Content: Zig.BuiltinCall bc } when Tok(bc.Arg0) is "@panic" or "@trap" => true,
         _ => false,

@@ -296,6 +296,7 @@ internal sealed partial class ZigLowering
             case Zig.LabeledLoop ll:       return LowerLabeledLoop(Tok(ll.Arg0), ll.Arg2);
             case Zig.StmtBreakLabel b:     return LowerLabeledLoopJump(Tok(b.Arg2), isContinue: false);
             case Zig.StmtContinueLabel c:  return LowerLabeledLoopJump(Tok(c.Arg2), isContinue: true);
+            case Zig.StmtContinueLabelValue cv: return LowerSwitchContinue(Tok(cv.Arg2), cv.Arg3);
 
             // `lbl: { … break :lbl; … }` — a labeled block STATEMENT (task #130): a void block `break :lbl;` leaves.
             case Zig.LabeledBlockStmt lbs: return LowerLabeledBlockStmt(lbs.Arg0);

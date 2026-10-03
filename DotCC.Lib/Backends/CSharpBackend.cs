@@ -1334,6 +1334,8 @@ internal sealed class CSharpBackend
         // doesn't append a dead `break;` after it (CS0162).
         ExprStmt es => IsUnreachableCall(es.Expr),
         Block b => b.Stmts.Count > 0 && Terminates(b.Stmts[^1]),
+        // A statement with its hoisted temps ahead of it (a prong whose value hoists, GH #286) ends as its last does.
+        Seq q => q.Stmts.Count > 0 && Terminates(q.Stmts[^1]),
         If f => f.Else is { } e && Terminates(f.Then) && Terminates(e),
         Labeled l => Terminates(l.Body),
         // A defer/errdefer guard adds no fall-through path of its own: the try/finally

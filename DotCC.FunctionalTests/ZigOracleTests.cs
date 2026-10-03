@@ -7030,6 +7030,124 @@ public sealed class ZigOracleTests
             "    return @intFromEnum(a) + @intFromEnum(Small.all_ones) - 250 + @intFromEnum(v) + @intFromEnum(Value.false) +\n" +
             "        @intFromEnum(Rule.undefined) + kind(v);\n" +
             "}\n", 34, "" },
+        // GH #286: zig 0.14's labeled switch. `continue :state .x` runs the switch again on a new operand: a tokenizer
+        // state machine over `State.start`, an integer re-dispatch, a value switch's `if` arm (std.math.big.int's
+        // `… else continue :round .away`), prong-body continues, and a `break :sw` out.
+        new object[] { "labeled_switch_continue",
+            "const State = enum { start, ident, number, done };\n" +
+            "\n" +
+            "fn classify(s: []const u8) u8 {\n" +
+            "    var i: usize = 0;\n" +
+            "    var idents: u8 = 0;\n" +
+            "    var numbers: u8 = 0;\n" +
+            "    state: switch (State.start) {\n" +
+            "        .start => {\n" +
+            "            if (i >= s.len) continue :state .done;\n" +
+            "            const c = s[i];\n" +
+            "            if (c >= 'a' and c <= 'z') continue :state .ident;\n" +
+            "            if (c >= '0' and c <= '9') continue :state .number;\n" +
+            "            i += 1;\n" +
+            "            continue :state .start;\n" +
+            "        },\n" +
+            "        .ident => {\n" +
+            "            while (i < s.len and s[i] >= 'a' and s[i] <= 'z') i += 1;\n" +
+            "            idents += 1;\n" +
+            "            continue :state .start;\n" +
+            "        },\n" +
+            "        .number => {\n" +
+            "            while (i < s.len and s[i] >= '0' and s[i] <= '9') i += 1;\n" +
+            "            numbers += 1;\n" +
+            "            continue :state .start;\n" +
+            "        },\n" +
+            "        .done => {},\n" +
+            "    }\n" +
+            "    return idents * 10 + numbers;\n" +
+            "}\n" +
+            "\n" +
+            "fn collatzSteps(n0: u32) u32 {\n" +
+            "    var steps: u32 = 0;\n" +
+            "    var n = n0;\n" +
+            "    sw: switch (n0 % 2) {\n" +
+            "        0 => {\n" +
+            "            if (n == 1) break :sw;\n" +
+            "            n /= 2;\n" +
+            "            steps += 1;\n" +
+            "            continue :sw n % 2;\n" +
+            "        },\n" +
+            "        else => {\n" +
+            "            if (n == 1) break :sw;\n" +
+            "            n = 3 * n + 1;\n" +
+            "            steps += 1;\n" +
+            "            continue :sw n % 2;\n" +
+            "        },\n" +
+            "    }\n" +
+            "    return steps;\n" +
+            "}\n" +
+            "\n" +
+            "const Mode = enum { away, nearest_even, down };\n" +
+            "\n" +
+            "fn pick(m: Mode, v: u8) u8 {\n" +
+            "    return round: switch (m) {\n" +
+            "        .away => v + 1,\n" +
+            "        .down => v,\n" +
+            "        .nearest_even => if (v <= 5) 0 else continue :round .away,\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "fn hopsFrom(m: Mode) u8 {\n" +
+            "    var hops: u8 = 0;\n" +
+            "    sw: switch (m) {\n" +
+            "        .down => {\n" +
+            "            hops += 1;\n" +
+            "            continue :sw .nearest_even;\n" +
+            "        },\n" +
+            "        .nearest_even => {\n" +
+            "            hops += 10;\n" +
+            "            continue :sw .away;\n" +
+            "        },\n" +
+            "        .away => break :sw,\n" +
+            "    }\n" +
+            "    return hops;\n" +
+            "}\n" +
+            "\n" +
+            "fn chain(m: Mode) u8 {\n" +
+            "    const r: u8 = sw: switch (m) {\n" +
+            "        .down => continue :sw .nearest_even,\n" +
+            "        .nearest_even => continue :sw .away,\n" +
+            "        .away => 42,\n" +
+            "    };\n" +
+            "    return r;\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    return classify(\"ab 12 cd3\") + @as(u8, @intCast(collatzSteps(6))) + pick(.nearest_even, 3) + pick(.nearest_even, 9) +\n" +
+            "        pick(.down, 4) + hopsFrom(.down) + chain(.down);\n" +
+            "}\n", 97, "" },
+        // GH #286: what a bare prong value hoists (`0 => a orelse return 9`) runs in its own prong, not ahead of the
+        // whole switch; a plain switch's `0 => sink(a orelse return 7)` had been refused as unhoistable.
+        new object[] { "prong_value_hoists_in_its_prong",
+            "var seen: u8 = 0;\n" +
+            "fn sink(v: u8) void {\n" +
+            "    seen += v;\n" +
+            "}\n" +
+            "fn g(x: u8, a: ?u8) u8 {\n" +
+            "    switch (x) {\n" +
+            "        0 => sink(a orelse return 7),\n" +
+            "        else => sink(1),\n" +
+            "    }\n" +
+            "    return seen;\n" +
+            "}\n" +
+            "fn h(x: u8, a: ?u8) u8 {\n" +
+            "    const r: u8 = sw: switch (x) {\n" +
+            "        0 => a orelse return 9,\n" +
+            "        1 => break :sw 3,\n" +
+            "        else => 2,\n" +
+            "    };\n" +
+            "    return r;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return g(1, null) + h(1, null) * 10;\n" +
+            "}\n", 31, "" },
         new object[] { "orelse_catch_if",
             "const std = @import(\"std\");\n" +
             "\n" +
