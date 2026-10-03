@@ -3680,7 +3680,15 @@ internal sealed partial class CSharpBackend
             };
             var chain = IsScanfFamily(c.Callee) ? ".Read(" : ".Arg(";
             var sb = new StringBuilder(head);
-            for (var i = fixedCount; i < a.Count; i++) { sb.Append(chain).Append(a[i]).Append(')'); }
+            for (var i = fixedCount; i < a.Count; i++)
+            {
+                // A string literal passed to printf goes over as its `"…\0"u8` span too (PrintfBuilder.Arg(ReadOnlySpan<byte>)),
+                // so the call keeps no pointer (NeedsUnsafe). One argument per lowered argument here, as for printf.
+                var arg = c.Callee == "printf" && a.Count == c.Args.Count && LiteralString(c.Args[i]) is { } litArg
+                    ? DotCC.EmitHelpers.EncodeStringSpan(litArg.Segments, out _)
+                    : a[i];
+                sb.Append(chain).Append(arg).Append(')');
+            }
             sb.Append(".Done()");
             return sb.ToString();
         }
@@ -3704,12 +3712,13 @@ internal sealed partial class CSharpBackend
     /// plus the wide <c>w*printf</c> family (same lowering; the wide format is
     /// transcoded to UTF-8 at runtime).</summary>
     /// <summary>The string literal a <c>printf</c> call's format is, or null (a format from a variable).</summary>
-    private static LitStr? LiteralFormat(Call c)
+    private static LitStr? LiteralFormat(Call c) => c.Args.Count == 0 ? null : LiteralString(c.Args[0]);
+
+    /// <summary>The string literal <paramref name="e"/> is, through parentheses, or null.</summary>
+    private static LitStr? LiteralString(CExpr e)
     {
-        if (c.Args.Count == 0) { return null; }
-        var f = c.Args[0];
-        while (f is Paren p) { f = p.Inner; }
-        return f as LitStr;
+        while (e is Paren p) { e = p.Inner; }
+        return e as LitStr;
     }
 
     private static bool IsPrintfFamily(string callee) =>

@@ -404,6 +404,21 @@ public unsafe ref struct PrintfBuilder
     /// <summary>A mutable zig byte slice for <c>%s</c>: as <see cref="Arg(ConstSlice{byte})"/>.</summary>
     public PrintfBuilder Arg(Slice<byte> v) => Arg((ConstSlice<byte>)v);
 
+    /// <summary>A string argument as a span: the C# backend's form for a string literal passed to <c>printf</c>
+    /// (<c>"…\0"u8</c>), which safe code can hold. It is the C string it stands for, pinned for the call, so every
+    /// conversion treats it as <see cref="Arg(byte*)"/> does: <c>%s</c> with its precision and width, <c>%p</c> its
+    /// address. A span with no NUL is copied with one appended.</summary>
+    public PrintfBuilder Arg(ReadOnlySpan<byte> v)
+    {
+        if (v.IndexOf((byte)0) < 0)
+        {
+            var terminated = new byte[v.Length + 1];
+            v.CopyTo(terminated);
+            v = terminated;
+        }
+        fixed (byte* p = v) { return Arg(p); }
+    }
+
     public PrintfBuilder Arg(byte* v)
     {
         var spec = ConsumeUntilSpec();

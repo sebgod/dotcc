@@ -71,6 +71,23 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
+    public void A_printf_with_a_literal_string_argument_is_safe_csharp()
+    {
+        // A string literal passed to printf goes over as its span too (PrintfBuilder.Arg(ReadOnlySpan<byte>)).
+        var src = WriteTemp("""
+            #include <stdio.h>
+            int main(void) { printf("%s=%d\n", "x", 1); return 0; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("internal static int main()");
+            emitted.ShouldContain("printf(\"%s=%d\\n\\0\"u8).Arg(\"x\\0\"u8).Arg(1).Done()");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void A_function_over_plain_values_is_safe_csharp()
     {
         // `unsafe` only where C# needs it: a function over scalars and pointer-free structs is a plain static method,

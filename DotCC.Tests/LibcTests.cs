@@ -131,6 +131,13 @@ public sealed unsafe class LibcTests
     }
 
     [Fact]
+    public void printf_s_takes_a_span_argument_as_the_c_string_it_stands_for() =>
+        // The C# backend's form for a literal %s argument (`.Arg("…\0"u8)`): precision and width apply as to a char*,
+        // and a span with no NUL ends where the span does.
+        CaptureStdout(() => printf("[%s|%.2s|%5s|%s]\0"u8).Arg("abc\0"u8).Arg("xyz\0"u8).Arg("hi\0"u8).Arg("no-nul"u8).Done())
+            .ShouldBe("[abc|xy|   hi|no-nul]");
+
+    [Fact]
     public void printf_percent_percent_literal() =>
         CaptureStdout(() => printf(L("100%%\0"u8)).Done())
             .ShouldBe("100%");
