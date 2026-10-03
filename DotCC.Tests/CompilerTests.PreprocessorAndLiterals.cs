@@ -587,7 +587,7 @@ public sealed partial class CompilerTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("static unsafe int main()");
+            emitted.ShouldContain("static int main()");
         }
         finally { File.Delete(src); }
     }
