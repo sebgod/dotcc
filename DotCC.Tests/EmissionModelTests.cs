@@ -31,9 +31,9 @@ public sealed class EmissionModelTests
     public void user_functions_are_static_methods_of_a_class()
     {
         var emitted = Emit("int add(int a, int b) { return a + b; } int main(void) { return add(1, 2); }");
-        emitted.ShouldContain("static unsafe class DotCcProgram");
+        emitted.ShouldContain("static class DotCcProgram");
         emitted.ShouldContain("using static DotCcProgram;");
-        emitted.ShouldContain("internal static unsafe int add(int a, int b)");
+        emitted.ShouldContain("internal static int add(int a, int b)");
     }
 
     [Fact]
@@ -47,7 +47,7 @@ public sealed class EmissionModelTests
         src.Append($"int main(void) {{ return f0() + f{n - 1}(); }}\n");
         var emitted = Emit(src.ToString());
         emitted.ShouldContain("using static DotCcProgram;\nusing static DotCcProgram2;");
-        emitted.ShouldContain("static unsafe class DotCcProgram2\n{\n    internal static unsafe int f8192(void)".Replace("(void)", "()"));
+        emitted.ShouldContain("static class DotCcProgram2\n{\n    internal static int f8192(void)".Replace("(void)", "()"));
         emitted.ShouldNotContain("class DotCcProgram3");
     }
 
@@ -62,7 +62,7 @@ public sealed class EmissionModelTests
             static op g = &neg;
             int main(void) { return g(5); }
             """);
-        emitted.ShouldContain("internal static unsafe int neg(int x)");
+        emitted.ShouldContain("internal static int neg(int x)");
         emitted.ShouldContain("&neg");
     }
 
@@ -77,7 +77,7 @@ public sealed class EmissionModelTests
             int odd(int n) { return n == 0 ? 0 : even(n - 1); }
             int main(void) { return even(10); }
             """);
-        emitted.ShouldContain("internal static unsafe int even(int n)");
-        emitted.ShouldContain("internal static unsafe int odd(int n)");
+        emitted.ShouldContain("internal static int even(int n)");
+        emitted.ShouldContain("internal static int odd(int n)");
     }
 }

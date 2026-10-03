@@ -29,7 +29,7 @@ public sealed partial class CompilerTests
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
             // Compilation must succeed (not throw).
-            emitted.ShouldContain("static unsafe int main()");
+            emitted.ShouldContain("static int main()");
             // The assertion text must not appear as a live call.
             emitted.ShouldNotContain("always true");
         }
@@ -52,7 +52,7 @@ public sealed partial class CompilerTests
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
             // Compilation must succeed and main must be present.
-            emitted.ShouldContain("static unsafe int main()");
+            emitted.ShouldContain("static int main()");
             // Neither assertion message should appear as a live call.
             emitted.ShouldNotContain("int too small");
         }
@@ -144,7 +144,7 @@ public sealed partial class CompilerTests
             _Static_assert(sizeof(ssize_t) == sizeof(long), "LP64");
             int main() { return 0; }
             """);
-        try { Compiler.EmitCSharp(new[] { src }).ShouldContain("static unsafe int main()"); }
+        try { Compiler.EmitCSharp(new[] { src }).ShouldContain("static int main()"); }
         finally { File.Delete(src); }
     }
 
@@ -164,7 +164,7 @@ public sealed partial class CompilerTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("static unsafe int main()");
+            emitted.ShouldContain("static int main()");
             emitted.ShouldNotContain("enum + ternary fold");
         }
         finally { File.Delete(src); }
@@ -185,7 +185,7 @@ public sealed partial class CompilerTests
         {
             var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c23"));
             // Keyword was recognized (no parse error), function emitted.
-            emitted.ShouldContain("static unsafe int main()");
+            emitted.ShouldContain("static int main()");
             // Assertion text not present as a live call.
             emitted.ShouldNotContain("math works");
         }
@@ -703,7 +703,7 @@ public sealed partial class CompilerTests
             var program = Compiler.LinkObjects(new[] { objA, objB });
             // Both functions present and entry-point wired.
             program.ShouldContain("side(");
-            program.ShouldContain("static unsafe int main(");
+            program.ShouldContain("static int main(");
             program.ShouldContain("return main();");  // arity-0 entry dispatch
         }
         finally { File.Delete(a); File.Delete(b); File.Delete(objA); File.Delete(objB); }

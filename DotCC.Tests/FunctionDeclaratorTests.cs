@@ -48,7 +48,7 @@ public sealed class FunctionDeclaratorTests
             """);
         emitted.ShouldContain("public static unsafe int total = 3;");
         emitted.ShouldContain("return twice(total) + thrice(1);");
-        emitted.ShouldContain("static unsafe int thrice(int x)");
+        emitted.ShouldContain("static int thrice(int x)");
     }
 
     [Fact]
@@ -120,7 +120,7 @@ public sealed class FunctionDeclaratorTests
             static int zero(void) { return 0; }
             int main(void) { return zero(); }
             """);
-        emitted.ShouldContain("static unsafe int zero()");
+        emitted.ShouldContain("static int zero()");
     }
 
     [Theory]

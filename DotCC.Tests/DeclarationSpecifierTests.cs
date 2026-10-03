@@ -90,7 +90,7 @@ public sealed class DeclarationSpecifierTests
             static size_type twice(register size_type n) { register size_type r = 2 * n; return r; }
             int main(void) { for (register int i = 0; i < 1; i++) {} return (int)twice(1); }
             """);
-        emitted.ShouldContain("static unsafe ulong twice(ulong n)");
+        emitted.ShouldContain("static ulong twice(ulong n)");
         emitted.ShouldContain("ulong r = (ulong)(2) * n;");
     }
 

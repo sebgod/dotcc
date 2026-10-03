@@ -42,7 +42,7 @@ public sealed class ZigVoidValueTests
                 return larger({}, 42, 7, &lessThan);
             }
             """);
-        cs.ShouldContain("static unsafe CBool lessThan(byte a, byte b)");
+        cs.ShouldContain("static CBool lessThan(byte a, byte b)");
         cs.ShouldContain("larger__void(byte a, byte b, delegate*<byte, byte, CBool> less)");
         cs.ShouldContain("larger__void(42, 7, &lessThan)");
         cs.ShouldContain("less(a, b)");

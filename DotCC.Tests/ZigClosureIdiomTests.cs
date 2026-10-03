@@ -48,7 +48,7 @@ public sealed class ZigClosureIdiomTests
             """);
         cs.ShouldContain("first__u8_void_asc__u8__Anon_inner(");
         cs.ShouldContain("asc__u8__Anon_inner(items.Ptr[1], items.Ptr[0])");
-        cs.ShouldContain("static unsafe CBool asc__u8__Anon_inner(byte a, byte b)");
+        cs.ShouldContain("static CBool asc__u8__Anon_inner(byte a, byte b)");
     }
 
     [Fact]

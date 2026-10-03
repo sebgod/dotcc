@@ -676,11 +676,30 @@ public static partial class Compiler
     internal static string LibraryClassPrefix(string assemblyName)
         => "DotCcLib_" + new string(assemblyName.Select(c => char.IsAsciiLetterOrDigit(c) ? c : '_').ToArray());
 
-    /// <summary>A function record's text with <paramref name="access"/> on its declaration, which
-    /// the backend emits as <c>static unsafe</c> with no access modifier (see
-    /// <c>CSharpBackend.Run</c>) for the shell to supply.</summary>
-    private static string WithAccess(string fnText, string access)
-        => fnText.Replace("static unsafe ", access + " static unsafe ", StringComparison.Ordinal);
+    /// <summary>A function record's text with <paramref name="access"/> on each member declaration, which the
+    /// backend emits with no access modifier for the shell to supply: <c>static unsafe …</c>, or <c>static …</c> for a
+    /// function that needs no unsafe context (<c>CSharpBackend.NeedsUnsafe</c>). A declaration starts a line (the
+    /// bodies are indented), so only the start of a line is rewritten, never text inside one.</summary>
+    internal static string WithAccess(string fnText, string access)
+    {
+        var sb = new System.Text.StringBuilder(fnText.Length + 64);
+        var start = 0;
+        while (start < fnText.Length)
+        {
+            var nl = fnText.IndexOf('\n', start);
+            var end = nl < 0 ? fnText.Length : nl + 1;
+            if (string.CompareOrdinal(fnText, start, "static ", 0, 7) == 0) { sb.Append(access).Append(' '); }
+            else if (string.CompareOrdinal(fnText, start, "    static unsafe ", 0, 18) == 0)
+            {
+                // An emitted helper member already indented one level (a Zig error-name table).
+                sb.Append("    ").Append(access).Append(' ');
+                start += 4;
+            }
+            sb.Append(fnText, start, end - start);
+            start = end;
+        }
+        return sb.ToString();
+    }
 
     /// <summary>A global or storage record's members as <c>internal</c>: the backend declares a
     /// file-scope object's field (or property) and its helpers <c>public</c> in the globals class.</summary>

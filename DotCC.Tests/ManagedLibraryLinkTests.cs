@@ -61,11 +61,11 @@ public sealed class ManagedLibraryLinkTests : IDisposable
     public void Access_follows_linkage_and_every_type_is_public()
     {
         var (program, _) = Compiler.LinkAssembly(Objects(("a.c", LibA), ("b.c", LibB)), "mylib");
-        program.ShouldContain("public static unsafe class DotCcLib_mylib_Program\n");
+        program.ShouldContain("public static class DotCcLib_mylib_Program\n");
         program.ShouldContain("public static unsafe class DotCcLib_mylib_Globals\n");
-        program.ShouldContain("public static unsafe int add(int x)");
+        program.ShouldContain("public static int add(int x)");
         program.ShouldContain("public static unsafe int* counter_addr()");
-        Regex.IsMatch(program, @"internal static unsafe int bump__a_[0-9a-f]{6}\(int x\)").ShouldBeTrue();
+        Regex.IsMatch(program, @"internal static int bump__a_[0-9a-f]{6}\(int x\)").ShouldBeTrue();
         program.ShouldContain("    public static unsafe int counter = 0;");
         Regex.IsMatch(program, @"    internal static unsafe int hidden__b_[0-9a-f]{6} = 7;").ShouldBeTrue();
         program.ShouldContain("public unsafe struct point\n");
@@ -114,7 +114,7 @@ public sealed class ManagedLibraryLinkTests : IDisposable
     public void The_class_names_are_the_assembly_name_as_an_identifier()
     {
         var (program, _) = Compiler.LinkAssembly(Objects(("a.c", LibA)), "python3.13");
-        program.ShouldContain("public static unsafe class DotCcLib_python3_13_Program\n");
+        program.ShouldContain("public static class DotCcLib_python3_13_Program\n");
         program.ShouldContain("public static unsafe class DotCcLib_python3_13_Globals\n");
     }
 

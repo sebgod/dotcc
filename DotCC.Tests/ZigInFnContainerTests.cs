@@ -104,7 +104,7 @@ public sealed class ZigInFnContainerTests
                 return @intCast(p.get());
             }
             """);
-        cs.ShouldContain("internal static unsafe int main__P_get(main__P self)");
+        cs.ShouldContain("internal static int main__P_get(main__P self)");
         cs.ShouldContain("return (byte)main__P_get(p);");
     }
 

@@ -121,7 +121,7 @@ public sealed class ZigStdHelperShapesTests
     public void TypeOf_over_several_operands_is_their_peer_type()
     {
         var cs = EmitZig(Program);
-        cs.ShouldContain("internal static unsafe ushort clampLike__u16_ci1_ci250(ushort val)");
+        cs.ShouldContain("internal static ushort clampLike__u16_ci1_ci250(ushort val)");
     }
 
     [Fact]
@@ -1283,7 +1283,7 @@ public sealed class ZigStdHelperShapesTests
         // TYPE seed, one instance per container and no runtime slot; `x != if (c) a else b` is a comparison operand; a type
         // body's `comptime check(…);` evaluates to void.
         cs.ShouldContain("uint t = use__u64_tpFull(3) + use__u64_tpSmall(1);");
-        cs.ShouldContain("internal static unsafe uint use__u64_tpFull(uint x)");
+        cs.ShouldContain("internal static uint use__u64_tpFull(uint x)");
         cs.ShouldContain("? (byte)3 : (byte)(0)");
         cs.ShouldContain("Checked__4 c = new Checked__4 { v = 4 };");
     }
@@ -1798,7 +1798,7 @@ public sealed class ZigStdHelperShapesTests
         // Task #104: `union(enum) { … }` / `union { … }` inline as a parameter, field or local annotation type is reified per
         // occurrence under an anonymous name, exactly like a named union, so a switch over it and its capture prongs
         // resolve the same way. zig returns 76.
-        cs.ShouldContain("internal static unsafe ushort weigh(__AnonUnion3 x)");
+        cs.ShouldContain("internal static ushort weigh(__AnonUnion3 x)");
         cs.ShouldContain("tag = new __AnonUnion0 { __tag = __AnonUnion0_Tag.pair");
         cs.ShouldContain("raw = new __AnonUnion2 { word = 258 }");
         cs.ShouldContain("__AnonUnion4 local = new __AnonUnion4 { __tag = __AnonUnion4_Tag.off };");
@@ -3738,7 +3738,7 @@ public sealed class ZigStdHelperShapesTests
         // zig returns 148.
         cs.ShouldContain("Header h = Header_alloc(5);");
         cs.ShouldContain("ulong total = h.n + size(Kind.c) + 0UL + (ulong)(0);");
-        cs.ShouldContain("internal static unsafe CBool Box__u8_0_same(Box__u8_0 self)\n    {\n        return true;");
+        cs.ShouldContain("internal static CBool Box__u8_0_same(Box__u8_0 self)\n    {\n        return true;");
     }
 
     [Fact]
@@ -3925,7 +3925,7 @@ public sealed class ZigStdHelperShapesTests
         // `if`. zig returns 15.
         cs.ShouldContain("case 1:\n                if (*hits < 10)\n                    inc(hits);\n                break;");
         cs.ShouldContain("default:\n                if (v > 5)\n                    inc(hits);\n                break;");
-        cs.ShouldContain("internal static unsafe byte check__0_2()\n    {\n        return 2;");
+        cs.ShouldContain("internal static byte check__0_2()\n    {\n        return 2;");
     }
 
     [Fact]
@@ -4162,7 +4162,7 @@ public sealed class ZigStdHelperShapesTests
         // Task #142 (std.meta.Tag / activeTag): `@typeInfo(U).@"union".tag_type orelse @compileError(…)` in a type position
         // is the tag enum (the synthesized `U_Tag`, or `Kind` for `union(Kind)`), and `@as(Tag(U), u)` reads the active
         // tag. zig returns 153.
-        cs.ShouldContain("internal static unsafe U_Tag activeTag__U(U u)\n    {\n        return (U_Tag)u.__tag;");
+        cs.ShouldContain("internal static U_Tag activeTag__U(U u)\n    {\n        return (U_Tag)u.__tag;");
         cs.ShouldContain("Kind k = activeTag__W(new W { __tag = Kind.big, __payload = new W_Payload { big = 9 } });");
     }
 
@@ -4338,7 +4338,7 @@ public sealed class ZigStdHelperShapesTests
         // and sizes `@Vector(n, u8)`; `pick(u32)` is null, so `orelse break :blk` jumps NOW and the block's rest, whose
         // `@Vector(n, u8)` has no `n`, is never lowered. zig returns 132.
         cs.ShouldContain("System.Runtime.Intrinsics.Vector64<byte> v = System.Runtime.Intrinsics.Vector64.Create((byte)3);\n            return (ulong)(8L + ZigVec.ReduceAdd(v));");
-        cs.ShouldContain("internal static unsafe ulong lanes__u32()\n    {\n        {\n            goto __blk1_brk;\n        }\n        __blk1_brk:");
+        cs.ShouldContain("internal static ulong lanes__u32()\n    {\n        {\n            goto __blk1_brk;\n        }\n        __blk1_brk:");
     }
 
     [Fact]
@@ -4436,7 +4436,7 @@ public sealed class ZigStdHelperShapesTests
             """);
         // Task #150: `const s = @typeInfo(T).pointer.size;` binds the comptime tag (as `.signedness` does), so `s == .many`
         // folds per instance. zig returns 50.
-        cs.ShouldContain("internal static unsafe byte kind__p_u16_many()\n    {\n        return 20;");
+        cs.ShouldContain("internal static byte kind__p_u16_many()\n    {\n        return 20;");
     }
 
     [Fact]
@@ -5085,8 +5085,8 @@ public sealed class ZigStdHelperShapesTests
         // Task #163 (std.crypto.keccak_p's `12 + 2 * math.log2(f / 25)` over `comptime f: u11`): a value seed carries its
         // declared width, and an anytype argument is zig's type, not C's promoted `int`: `f / 25` is a `u11` (unsigned,
         // 11 bits) and a bare `comptime n: u5` a `u5`. zig returns 126.
-        cs.ShouldContain("internal static unsafe ushort bitsOf__u16w11(ushort x)");
-        cs.ShouldContain("internal static unsafe byte signOf__u8w5(byte x)");
+        cs.ShouldContain("internal static ushort bitsOf__u16w11(ushort x)");
+        cs.ShouldContain("internal static byte signOf__u8w5(byte x)");
     }
 
     [Fact]
@@ -5123,8 +5123,8 @@ public sealed class ZigStdHelperShapesTests
         // Task #163 (std.math.log2's `log2_int(switch (int_info.signedness) { .signed => @Int(…), .unsigned => T }, …)`): the
         // switch over a comptime tag selects its prong, whose width (`T`'s 11 bits) the type argument carries into
         // `Log2Int(T)`. zig returns 24.
-        cs.ShouldContain("internal static unsafe ushort log2__u16w11(ushort x)");
-        cs.ShouldContain("internal static unsafe byte log2Int__u11(ushort x)");
+        cs.ShouldContain("internal static ushort log2__u16w11(ushort x)");
+        cs.ShouldContain("internal static byte log2Int__u11(ushort x)");
     }
 
     [Fact]
@@ -5311,7 +5311,7 @@ public sealed class ZigStdHelperShapesTests
             "}\n");
         // Task #165: u8 -> u16, u8 -> i16, i8 -> i32, a u8 wrap back into u8, and `u8 + u16` (a u16) into a u32 all fit.
         // zig returns 117.
-        cs.ShouldContain("internal static unsafe short toSigned(byte x)");
+        cs.ShouldContain("internal static short toSigned(byte x)");
     }
 
     [Theory]
@@ -5353,7 +5353,7 @@ public sealed class ZigStdHelperShapesTests
             "}\n");
         // Task #167: a u8 into a u32 parameter, a u32 field, a u16 element and a u16 local, and `usize + u8`, all fit. zig
         // returns 40.
-        cs.ShouldContain("internal static unsafe uint take(uint x)");
+        cs.ShouldContain("internal static uint take(uint x)");
     }
 
     [Fact]
@@ -5602,7 +5602,7 @@ public sealed class ZigStdHelperShapesTests
             """);
         // Task #174 (std.hash.XxHash3's disableAutoVectorization): an empty `asm volatile ("" : : [x] "r" (x))` emits no
         // instruction and writes nothing, only an optimizer barrier, so it lowers to nothing. zig returns 42.
-        cs.ShouldContain("internal static unsafe void barrier__u64(ulong x)");
+        cs.ShouldContain("internal static void barrier__u64(ulong x)");
         cs.ShouldContain("barrier__u64(x);");
     }
 
@@ -5734,8 +5734,8 @@ public sealed class ZigStdHelperShapesTests
         // Task #177 (std.hash.XxHash3's `noinline fn hashLong`, which had failed xxhash.zig's parse at line 678): `noinline`
         // on a top-level fn and on struct and enum methods, `pub` or not, is an optimizer hint, so each lowers as a plain fn;
         // `noinline_count` stays an identifier. zig returns 23.
-        cs.ShouldContain("internal static unsafe byte add(byte a, byte b)");
-        cs.ShouldContain("internal static unsafe byte sub(byte a, byte b)");
+        cs.ShouldContain("internal static byte add(byte a, byte b)");
+        cs.ShouldContain("internal static byte sub(byte a, byte b)");
         cs.ShouldContain("byte noinline_count = 1;");
     }
 

@@ -127,7 +127,7 @@ public sealed class ConstCheckTests
         var emit = Emit("""
             int main(void) { int x = 5; x = 6; x++; return x; }
             """);
-        emit.ShouldContain("static unsafe int main");
+        emit.ShouldContain("static int main");
     }
 
     // ---- discard-qualifier warnings (gcc -Wdiscarded-qualifiers) -----------

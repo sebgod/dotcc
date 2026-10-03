@@ -75,7 +75,7 @@ Load-bearing rules:
 - **Types are structural, not incidental.** Every IR expression carries a `CType`; every recognition (malloc→stack promotion, `_Generic`, `sizeof` folding, enum decay) is structural over IR nodes + the type spine — **never text-matching on emitted output**.
 - **Fail loudly, grow on purpose.** An unhandled grammar `action:` record falls to the binder's `default:` → a loud `IrUnsupportedException` naming the node type. Emit pins for every new production keep that gap closed.
 - **Grammar edits:** `symbols:` are append-only (index = symbol ID); an unresolved conflict throws `GrammarConflictException` — fix the grammar via precedence groups, never catch it. Full conventions in [`docs/architecture.md`](docs/architecture.md#grammar-conventions).
-- **Emit shape:** `char` → `byte`, `"foo"` → `L("foo\0"u8)` (pinned UTF-8 RVA), `printf` → fluent ref-struct builder, C functions → `static unsafe` methods on a top-level class (so `&fn` works). Full codegen table in [`docs/architecture.md`](docs/architecture.md#code-generation-strategy).
+- **Emit shape:** `char` → `byte`, `"foo"` → `L("foo\0"u8)` (pinned UTF-8 RVA), `printf` → fluent ref-struct builder, C functions → `static` methods on a top-level class (so `&fn` works), `unsafe` only when they need it. Full codegen table in [`docs/architecture.md`](docs/architecture.md#code-generation-strategy).
 - **LALR.CC wiring:** sibling working copy auto-detected (`UseLocalLalrCc`, `Directory.Build.props`); CI always builds the NuGet path. Details ibid.
 
 ## Testing essentials (full reference + oracle env vars: [`docs/testing.md`](docs/testing.md))

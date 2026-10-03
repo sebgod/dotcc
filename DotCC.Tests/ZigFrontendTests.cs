@@ -44,7 +44,7 @@ public sealed class ZigFrontendTests
     /// against the user's own lowered code or it matches something in the runtime instead.</summary>
     private static string UserCode(string cs)
     {
-        var start = cs.IndexOf("static unsafe class DotCcProgram", StringComparison.Ordinal);
+        var start = cs.IndexOf("static class DotCcProgram", StringComparison.Ordinal);
         if (start < 0) { return cs; }
         var end = cs.IndexOf("\n// ----", start, StringComparison.Ordinal);
         return end < 0 ? cs[start..] : cs[start..end];

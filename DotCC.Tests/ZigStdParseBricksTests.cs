@@ -77,8 +77,8 @@ public sealed class ZigStdParseBricksTests
                 return b.get();
             }
             """);
-        cs.ShouldContain("static unsafe byte add(byte a, byte b)");
-        cs.ShouldContain("static unsafe byte Box_get(Box self)");
+        cs.ShouldContain("static byte add(byte a, byte b)");
+        cs.ShouldContain("static byte Box_get(Box self)");
         cs.ShouldContain("add(40, 2)");
     }
 
