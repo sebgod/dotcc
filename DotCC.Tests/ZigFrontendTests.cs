@@ -1224,15 +1224,15 @@ public sealed class ZigFrontendTests
     public void Lowers_variadic_printf_to_the_fluent_builder()
     {
         // `extern fn printf(format: [*c]const u8, ...) c_int;` — the variadic libc
-        // prototype. The `[*c]const u8` format param lowers to `byte*`, the `"…"`
-        // literal to the same pooled `Libc.L(…)` pointer a C string gets, and the call
-        // routes through the printf-family fluent builder: the format is the fixed arg,
+        // prototype. The `[*c]const u8` format param lowers to `byte*`, a `"…"` literal
+        // format to its `"…\0"u8` span (Libc.printf(ReadOnlySpan<byte>)) as a C one does,
+        // and the call routes through the printf-family fluent builder: the format is the fixed arg,
         // and the variadic argument — `@as(c_int, 42)`, since a bare literal is rejected
         // (see Rejects_… below) — rides the `.Arg(…)` tail as the cast value `(int)42`.
         var cs = EmitZig(
             "extern fn printf(format: [*c]const u8, ...) c_int;\n" +
             "pub fn main() u8 { _ = printf(\"Hi %d\\n\", @as(c_int, 42)); return 0; }\n");
-        cs.ShouldContain("printf(Libc.L(");   // format → pooled UTF-8 pointer, fluent head
+        cs.ShouldContain("printf(\"Hi %d\\n\\0\"u8)");   // the literal format as its UTF-8 span, fluent head
         cs.ShouldContain(".Arg((int)42)");     // the variadic argument: @as(c_int, 42) → (int)42
         cs.ShouldContain(".Done()");           // builder terminator
     }

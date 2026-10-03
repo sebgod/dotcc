@@ -90,6 +90,9 @@ internal sealed partial class CSharpBackend
         CommaSeq cs => cs.Items.All(IsSafeExpr),
         Member m => !m.Arrow && IsSafeExpr(m.Base),
         StructInit si => si.Members.All(fi => IsSafeType(fi.FieldType) && IsSafeExpr(fi.Value)),
+        // `printf("…", x)`: the literal format goes over as a span (Libc.printf(ReadOnlySpan<byte>)), and the
+        // arguments are safe when their values are.
+        Call { Callee: "printf" } pc when LiteralFormat(pc) is not null => pc.Args.Skip(1).All(IsSafeExpr),
         Call c => c.Args.All(IsSafeExpr) && (c.ParamTypes is null || c.ParamTypes.All(IsSafeType))
                   && (c.CalleeSym is null || c.CalleeSym.Type is CType.Func { Variadic: false } cf
                       && cf.Params.All(IsSafeType) && IsSafeType(cf.Return)),

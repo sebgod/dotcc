@@ -3657,6 +3657,9 @@ internal sealed partial class CSharpBackend
             // sscanf(src, fmt).Read(p).Read(q).Done()  etc.
             var (fixedCount, head) = c.Callee switch
             {
+                // A string-literal format goes over as its `"…\0"u8` span (Libc.printf(ReadOnlySpan<byte>)): no
+                // pointer, so the call needs no unsafe context (NeedsUnsafe).
+                "printf" when LiteralFormat(c) is { } lit => (1, $"printf({DotCC.EmitHelpers.EncodeStringSpan(lit.Segments, out _)})"),
                 "printf" => (1, $"printf({Arg(a, 0)})"),
                 "fprintf" => (2, $"fprintf({Arg(a, 0)}, {Arg(a, 1)})"),
                 "sprintf" => (2, $"sprintf({Arg(a, 0)}, {Arg(a, 1)})"),
@@ -3700,6 +3703,15 @@ internal sealed partial class CSharpBackend
     /// <c>printf(fmt).Arg(x).Done()</c> form (variadic format functions) — narrow
     /// plus the wide <c>w*printf</c> family (same lowering; the wide format is
     /// transcoded to UTF-8 at runtime).</summary>
+    /// <summary>The string literal a <c>printf</c> call's format is, or null (a format from a variable).</summary>
+    private static LitStr? LiteralFormat(Call c)
+    {
+        if (c.Args.Count == 0) { return null; }
+        var f = c.Args[0];
+        while (f is Paren p) { f = p.Inner; }
+        return f as LitStr;
+    }
+
     private static bool IsPrintfFamily(string callee) =>
         callee is "printf" or "fprintf" or "sprintf" or "snprintf"
                or "wprintf" or "fwprintf" or "swprintf";

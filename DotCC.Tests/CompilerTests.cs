@@ -53,6 +53,24 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
+    public void A_printf_with_a_literal_format_is_safe_csharp()
+    {
+        // The literal format goes over as its `"…\0"u8` span (Libc.printf(ReadOnlySpan<byte>)), so a function whose
+        // only pointer was its printf format needs no unsafe context.
+        var src = WriteTemp("""
+            #include <stdio.h>
+            int main(void) { printf("%d!\n", 6); return 0; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("internal static int main()");
+            emitted.ShouldContain("printf(\"%d!\\n\\0\"u8).Arg(6).Done()");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void A_function_over_plain_values_is_safe_csharp()
     {
         // `unsafe` only where C# needs it: a function over scalars and pointer-free structs is a plain static method,

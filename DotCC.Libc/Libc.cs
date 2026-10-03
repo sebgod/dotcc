@@ -559,6 +559,12 @@ public static unsafe partial class Libc
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static PrintfBuilder printf(byte* fmt) => fprintf(stdout, fmt);
 
+    /// <summary><c>printf(fmt)</c> over a format span: the C# backend hands a string-literal format over as its
+    /// <c>"…\0"u8</c> span, which safe code can do, so a function whose only pointer was its <c>printf</c> format
+    /// needs no unsafe context. The format ends at its first NUL, as a C string does.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static PrintfBuilder printf(ReadOnlySpan<byte> fmt) => new(WriterFor(stdout), fmt);
+
     /// <inheritdoc cref="printf(byte*)"/>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static PrintfBuilder Printf(byte* fmt) => printf(fmt);
