@@ -179,6 +179,32 @@ public static partial class Compiler
     /// surfaces alike.</summary>
     internal const int FunctionsPerClass = 8192;
 
+    /// <summary>The user functions as the static classes that hold them: <c>DotCcProgram</c>, and past
+    /// <see cref="FunctionsPerClass"/> functions <c>DotCcProgram2</c>, <c>DotCcProgram3</c>, …, each method made
+    /// <c>internal</c> so <c>using static</c> surfaces it. Returns the class names and their source.</summary>
+    private static (string[] Names, string Source) ProgramClasses(IReadOnlyList<string> emittedFns)
+    {
+        var fnChunks = emittedFns.Count == 0 ? new[] { System.Array.Empty<string>() } : emittedFns.Chunk(FunctionsPerClass).ToArray();
+        var names = fnChunks.Select((_, i) => i == 0 ? "DotCcProgram" : $"DotCcProgram{i + 1}").ToArray();
+        var source = string.Join("\n\n", fnChunks.Select((chunk, i) =>
+            $"static unsafe class {names[i]}\n{{\n"
+            + IndentBlock(string.Join("\n\n", chunk).Replace("static unsafe ", "internal static unsafe "), "    ")
+            + "\n}"));
+        return (names, source);
+    }
+
+    /// <summary><see cref="EmitMode.Translation"/>: the program's own C#, in the order the full shell has it (its
+    /// <c>typedef</c> aliases, its functions, its type declarations, its globals), and nothing of the shell.</summary>
+    private static string BuildTranslation(string programClasses, string structDecls, string usingAliases, string globals)
+    {
+        var parts = new List<string>();
+        if (usingAliases.Trim().Length > 0) { parts.Add(usingAliases.Trim()); }
+        parts.Add(programClasses);
+        if (structDecls.Trim().Length > 0) { parts.Add(structDecls.Trim()); }
+        if (globals.Trim().Length > 0) { parts.Add("static unsafe class DotCcGlobals\n{\n" + globals + "}"); }
+        return string.Join("\n\n", parts) + "\n";
+    }
+
     internal static string BuildShell(
         int mainArity,
         IReadOnlyList<string> emittedFns,
@@ -258,13 +284,12 @@ public static partial class Compiler
         // `main(...)` call, file-scope `&fn` initializers, and inter-function calls).
         // Past FunctionsPerClass the functions continue in DotCcProgram2, DotCcProgram3, ...;
         // C function names are unique in a program, so the imports never collide.
-        var fnChunks = emittedFns.Count == 0 ? new[] { System.Array.Empty<string>() } : emittedFns.Chunk(FunctionsPerClass).ToArray();
-        var programClassNames = fnChunks.Select((_, i) => i == 0 ? "DotCcProgram" : $"DotCcProgram{i + 1}").ToArray();
+        var (programClassNames, programClasses) = ProgramClasses(emittedFns);
         var programUsings = string.Join("\n", programClassNames.Select(n => $"using static {n};"));
-        var programClasses = string.Join("\n\n", fnChunks.Select((chunk, i) =>
-            $"static unsafe class {programClassNames[i]}\n{{\n"
-            + IndentBlock(string.Join("\n\n", chunk).Replace("static unsafe ", "internal static unsafe "), "    ")
-            + "\n}"));
+        if (emit == EmitMode.Translation)
+        {
+            return BuildTranslation(programClasses, structDecls, usingAliases, globals);
+        }
         // A `void`-returning main (Zig's `pub fn main() void`; also a non-standard
         // `void main()` in C) can't be `return`ed from the int-typed entry, so it is
         // called for effect and followed by `return 0;`. An int-returning main is

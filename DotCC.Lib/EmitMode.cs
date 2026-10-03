@@ -44,4 +44,10 @@ public enum EmitMode
     /// name with internal linkage stays <c>internal</c>. No <c>main</c>, no native exports. Linked
     /// from objects by <see cref="Compiler.LinkAssembly"/>.</summary>
     Assembly,
+
+    /// <summary>The program's own translation only: its functions (the <c>DotCcProgram</c> classes), its type
+    /// declarations, its <c>typedef</c> aliases and its globals (<c>DotCcGlobals</c>), without the shell, the entry,
+    /// the <c>Cond</c> class or the embedded runtime. A view of what the input became (the web sandbox's
+    /// "C# (translated)" tab), not a program that compiles on its own; the CLI offers no <c>--emit</c> for it.</summary>
+    Translation,
 }

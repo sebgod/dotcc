@@ -53,6 +53,33 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
+    public void EmitCSharp_translation_mode_is_only_what_the_input_became()
+    {
+        // The web sandbox's "C# (translated)" tab: the program's functions, types, typedef aliases and globals, without
+        // the shell, the entry or the embedded runtime that make up most of the full file.
+        var src = WriteTemp("""
+            typedef struct { int x; } Point;
+            int counter = 3;
+            int bump(Point p) { return p.x + counter++; }
+            int main() { Point p = { 4 }; return bump(p); }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src }, emit: EmitMode.Translation);
+            emitted.ShouldStartWith("static unsafe class DotCcProgram");
+            emitted.ShouldContain("unsafe struct Point");
+            emitted.ShouldContain("internal static unsafe int bump(");
+            emitted.ShouldContain("static unsafe class DotCcGlobals");
+            emitted.ShouldNotContain("#:property");
+            emitted.ShouldNotContain("using static Libc;");
+            emitted.ShouldNotContain("__DotCcEntry");
+            emitted.ShouldNotContain("class Libc");
+            emitted.ShouldNotContain("class Cond");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void EmitCSharp_throws_on_parse_error()
     {
         var src = WriteTemp("int main() { return }"); // missing operand
