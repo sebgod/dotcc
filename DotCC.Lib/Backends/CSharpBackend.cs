@@ -52,7 +52,7 @@ internal sealed record LinkRecord(LinkRecordKind Kind, string Name, bool TuLocal
 /// Phase 0 covers the vertical slice; it grows alongside the builder until the
 /// IR path reaches parity with the legacy emitter.
 /// </summary>
-internal sealed class CSharpBackend
+internal sealed partial class CSharpBackend
 {
     /// <summary>The backend's lexical projection of the neutral IR — currently the
     /// type-spelling map (<see cref="ITarget"/>, the seam a second target slots
@@ -127,9 +127,8 @@ internal sealed class CSharpBackend
         if (unit.ZigErrorCodes is { Count: > 0 } errNames)
         {
             var errorName = new StringBuilder();
-            // NB: emit `static unsafe` (no access modifier) — the shell rewrites `static unsafe ` →
-            // `internal static unsafe ` (exe) / `public static unsafe ` (lib), so a literal
-            // `internal` here would be doubled (CS1004). Matches `Func` above.
+            // NB: emit `static unsafe` (no access modifier): the shell adds `internal` (exe) / `public` (lib) to
+            // every member declaration (Compiler.WithAccess), so a literal `internal` here would be doubled (CS1004).
             errorName.Append("    /// <summary>Zig `@errorName`: a flat error code → its name as `[]const u8`.</summary>\n");
             errorName.Append("    static unsafe ConstSlice<byte> __zigErrorName(ushort code) => code switch\n    {\n");
             foreach (var kv in errNames.OrderBy(kv => kv.Value))
@@ -647,7 +646,8 @@ internal sealed class CSharpBackend
         // faithful lowering of C's "please inline this". Short spelling: the shell's
         // usings include System.Runtime.CompilerServices.
         if (fn.Sym.IsInline) { sb.Append("[MethodImpl(MethodImplOptions.AggressiveInlining)]\n"); }
-        sb.Append($"static unsafe {Cs(retTy)} {fn.Sym.TargetName}({ps})\n");
+        // `unsafe` only where the function needs it (NeedsUnsafe): a function over plain values is safe C#.
+        sb.Append(NeedsUnsafe(fn) ? "static unsafe " : "static ").Append($"{Cs(retTy)} {fn.Sym.TargetName}({ps})\n");
         // C lets a goto jump INTO a nested block; C# scopes labels to their
         // block. Hoist labeled tails until every goto is legal (no-op for the
         // overwhelming majority of functions — see GotoScopeNormalizer).

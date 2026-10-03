@@ -881,7 +881,7 @@ public sealed partial class CompilerTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("static unsafe int main()");
+            emitted.ShouldContain("static int main()");
             emitted.ShouldContain("return 7;");
         }
         finally { File.Delete(src); }
@@ -941,7 +941,7 @@ public sealed partial class CompilerTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("static unsafe int main()");
+            emitted.ShouldContain("static int main()");
             emitted.ShouldContain("return 200;");
         }
         finally { File.Delete(src); }

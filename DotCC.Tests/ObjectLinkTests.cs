@@ -50,7 +50,7 @@ public sealed class ObjectLinkTests : IDisposable
             ("a.c", "struct P { int x; }; int side(void) { struct P p; p.x = 1; return p.x; }"),
             ("b.c", "struct P { int x; }; int side(void); int main(void) { return side(); }"));
         Regex.Matches(program, @"unsafe struct P\b").Count.ShouldBe(1);
-        program.ShouldContain("static unsafe int side(");
+        program.ShouldContain("static int side(");
         program.ShouldContain("return main();");
     }
 

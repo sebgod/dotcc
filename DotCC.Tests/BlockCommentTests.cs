@@ -43,9 +43,9 @@ public sealed class BlockCommentTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("static unsafe int after(int x)");
-            emitted.ShouldContain("static unsafe int before()");
-            emitted.ShouldContain("static unsafe int main");
+            emitted.ShouldContain("static int after(int x)");
+            emitted.ShouldContain("static int before()");
+            emitted.ShouldContain("static int main");
         }
         finally { File.Delete(src); }
     }
@@ -60,7 +60,7 @@ public sealed class BlockCommentTests
             """);
         try
         {
-            Compiler.EmitCSharp(new[] { src }).ShouldContain("static unsafe int main");
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("static int main");
         }
         finally { File.Delete(src); }
     }

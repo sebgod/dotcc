@@ -59,7 +59,7 @@ public sealed class StdioLimitsTests
         try
         {
             // Compiles and the macros resolve to integer constants.
-            Compiler.EmitCSharp(new[] { src }).ShouldContain("static unsafe int main");
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("static int main");
         }
         finally { File.Delete(src); }
     }
@@ -73,7 +73,7 @@ public sealed class StdioLimitsTests
             """);
         try
         {
-            Compiler.EmitCSharp(new[] { src }).ShouldContain("static unsafe int main");
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("static int main");
         }
         finally { File.Delete(src); }
     }

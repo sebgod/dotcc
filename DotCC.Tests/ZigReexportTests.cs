@@ -66,7 +66,7 @@ public sealed class ZigReexportTests
             }
             """, ("lib.zig", Lib), ("inner.zig", Inner));
         cs.ShouldContain("inner__add(inner__double(10), 22)");
-        cs.ShouldContain("static unsafe byte inner__double(byte x)");
+        cs.ShouldContain("static byte inner__double(byte x)");
     }
 
     [Fact]

@@ -33,7 +33,7 @@ public sealed class ParenFnNameTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("static unsafe int add(int a, int b)");
+            emitted.ShouldContain("static int add(int a, int b)");
         }
         finally { File.Delete(src); }
     }
@@ -49,7 +49,7 @@ public sealed class ParenFnNameTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("static unsafe int twice(int x)");
+            emitted.ShouldContain("static int twice(int x)");
         }
         finally { File.Delete(src); }
     }
@@ -66,7 +66,7 @@ public sealed class ParenFnNameTests
         {
             // Prototype emits nothing, but it must parse without error.
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("static unsafe int main");
+            emitted.ShouldContain("static int main");
         }
         finally { File.Delete(src); }
     }
@@ -81,7 +81,7 @@ public sealed class ParenFnNameTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("static unsafe int answer()");
+            emitted.ShouldContain("static int answer()");
         }
         finally { File.Delete(src); }
     }

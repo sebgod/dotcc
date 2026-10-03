@@ -74,7 +74,7 @@ public sealed class ZigComptimeEngineTests
             }
             """);
         cs.ShouldContain("byte* buf = stackalloc byte[3];");
-        System.Text.RegularExpressions.Regex.Matches(cs, @"static unsafe ulong three\(\)").Count.ShouldBe(1);
+        System.Text.RegularExpressions.Regex.Matches(cs, @"static ulong three\(\)").Count.ShouldBe(1);
     }
 
     [Fact]

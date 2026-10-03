@@ -78,7 +78,7 @@ public sealed class FnTypedParamTests
             static int (named)(int x) { return x + 1; }
             int main(void) { return named(1); }
             """);
-        emitted.ShouldContain("static unsafe int named(int x)");
+        emitted.ShouldContain("static int named(int x)");
     }
 
     [Fact]

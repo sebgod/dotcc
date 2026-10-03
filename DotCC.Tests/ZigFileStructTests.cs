@@ -68,7 +68,7 @@ public sealed class ZigFileStructTests
         cs.ShouldContain("Box__Box b = Box__init(30);");
         cs.ShouldContain("Box__Box c = Box__init(0);");
         cs.ShouldContain("Box__add(&b, 11)");
-        cs.ShouldContain("static unsafe Box__Box Box__init(byte v)");
+        cs.ShouldContain("static Box__Box Box__init(byte v)");
     }
 
     [Fact]

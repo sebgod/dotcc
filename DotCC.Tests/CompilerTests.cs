@@ -32,7 +32,7 @@ public sealed partial class CompilerTests
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
 
-            emitted.ShouldContain("static unsafe int main()");
+            emitted.ShouldContain("static int main()");
             emitted.ShouldContain("return 0;");
             // file-based program header so the result is `dotnet run --file`-able
             emitted.ShouldStartWith("#:property AllowUnsafeBlocks=true");
@@ -53,6 +53,36 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
+    public void A_function_over_plain_values_is_safe_csharp()
+    {
+        // `unsafe` only where C# needs it: a function over scalars and pointer-free structs is a plain static method,
+        // and the program class itself is not unsafe; a string literal, a pointer or an address keeps `unsafe`.
+        var src = WriteTemp("""
+            #include <stdio.h>
+            struct pair { int a, b; };
+            int factorial(int n) { return n <= 1 ? 1 : n * factorial(n - 1); }
+            int sum(struct pair p) { return p.a + p.b; }
+            int first(int *xs) { return xs[0]; }
+            int main(void) {
+                struct pair p = { 2, 3 };
+                int xs[1] = { 7 };
+                printf("%d %d %d\n", factorial(5), sum(p), first(xs));
+                return 0;
+            }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("static class DotCcProgram\n");
+            emitted.ShouldContain("internal static int factorial(int n)");
+            emitted.ShouldContain("internal static int sum(pair p)");
+            emitted.ShouldContain("internal static unsafe int first(int* xs)");
+            emitted.ShouldContain("internal static unsafe int main()");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void EmitCSharp_translation_mode_is_only_what_the_input_became()
     {
         // The web sandbox's "C# (translated)" tab: the program's functions, types, typedef aliases and globals, without
@@ -66,9 +96,9 @@ public sealed partial class CompilerTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src }, emit: EmitMode.Translation);
-            emitted.ShouldStartWith("static unsafe class DotCcProgram");
+            emitted.ShouldStartWith("static class DotCcProgram");
             emitted.ShouldContain("unsafe struct Point");
-            emitted.ShouldContain("internal static unsafe int bump(");
+            emitted.ShouldContain("internal static int bump(");
             emitted.ShouldContain("static unsafe class DotCcGlobals");
             emitted.ShouldNotContain("#:property");
             emitted.ShouldNotContain("using static Libc;");
@@ -785,7 +815,7 @@ public sealed partial class CompilerTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("static unsafe int f(int x)");
+            emitted.ShouldContain("static int f(int x)");
             // only one definition of f, not a stray prototype artifact
             (emitted.Split("int f(int x)").Length - 1).ShouldBe(1);
         }
@@ -803,7 +833,7 @@ public sealed partial class CompilerTests
             """);
         try
         {
-            Compiler.EmitCSharp(new[] { src }).ShouldContain("static unsafe int twice(int x)");
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("static int twice(int x)");
         }
         finally { File.Delete(src); }
     }

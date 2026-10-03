@@ -547,7 +547,7 @@ public sealed partial class CompilerTests
         {
             var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17"));
             emitted.ShouldContain("[MethodImpl(MethodImplOptions.AggressiveInlining)]");
-            emitted.ShouldContain("internal static unsafe int sq(int x)");
+            emitted.ShouldContain("internal static int sq(int x)");
         }
         finally { File.Delete(src); }
     }
@@ -564,9 +564,9 @@ public sealed partial class CompilerTests
         {
             var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17"));
             emitted.ShouldContain(
-                "[MethodImpl(MethodImplOptions.AggressiveInlining)]\n    internal static unsafe int cube(int x)");
+                "[MethodImpl(MethodImplOptions.AggressiveInlining)]\n    internal static int cube(int x)");
             emitted.ShouldContain(
-                "[MethodImpl(MethodImplOptions.AggressiveInlining)]\n    internal static unsafe long add(long a, long b)");
+                "[MethodImpl(MethodImplOptions.AggressiveInlining)]\n    internal static long add(long a, long b)");
         }
         finally { File.Delete(src); }
     }
@@ -579,7 +579,7 @@ public sealed partial class CompilerTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17"));
-            emitted.ShouldContain("static unsafe int plain(int x)");
+            emitted.ShouldContain("static int plain(int x)");
             emitted.ShouldNotContain("[MethodImpl(MethodImplOptions.AggressiveInlining)]\n    internal static unsafe int plain");
         }
         finally { File.Delete(src); }
@@ -606,7 +606,7 @@ public sealed partial class CompilerTests
             emitted.ShouldContain(
                 "[MethodImpl(MethodImplOptions.AggressiveInlining)]\n    internal static unsafe Cell* bump(Cell* c)");
             emitted.ShouldContain(
-                "[MethodImpl(MethodImplOptions.AggressiveInlining)]\n    internal static unsafe Cell make(int x)");
+                "[MethodImpl(MethodImplOptions.AggressiveInlining)]\n    internal static Cell make(int x)");
         }
         finally { File.Delete(src); }
     }
@@ -627,7 +627,7 @@ public sealed partial class CompilerTests
             // The typedef return type `Status` resolves to `int` in the typed IR,
             // and the specifier surfaces as [DoesNotReturn] on the emitted method.
             var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17"));
-            emitted.ShouldContain("internal static unsafe int die()");
+            emitted.ShouldContain("internal static int die()");
             emitted.ShouldContain("[System.Diagnostics.CodeAnalysis.DoesNotReturn]");
         }
         finally { File.Delete(src); }
@@ -668,7 +668,7 @@ public sealed partial class CompilerTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("internal static unsafe void die()");
+            emitted.ShouldContain("internal static void die()");
             emitted.ShouldContain("[System.Diagnostics.CodeAnalysis.DoesNotReturn]");
         }
         finally { File.Delete(src); }
@@ -706,7 +706,7 @@ public sealed partial class CompilerTests
             foreach (var std in new[] { "c11", "c17", "c23" })
             {
                 var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse(std));
-                emitted.ShouldContain("internal static unsafe void die()");
+                emitted.ShouldContain("internal static void die()");
                 emitted.ShouldContain("[System.Diagnostics.CodeAnalysis.DoesNotReturn]");
             }
         }
@@ -776,7 +776,7 @@ public sealed partial class CompilerTests
             // And the keyword form: works under c23 (function emitted, carrying
             // [DoesNotReturn]), parse error pre-C23.
             var emitted = Compiler.EmitCSharp(new[] { asKeyword }, dialect: CDialect.Parse("c23"));
-            emitted.ShouldContain("internal static unsafe void die()");
+            emitted.ShouldContain("internal static void die()");
             emitted.ShouldContain("[System.Diagnostics.CodeAnalysis.DoesNotReturn]");
             Should.Throw<CompileException>(
                 () => Compiler.EmitCSharp(new[] { asKeyword }, dialect: CDialect.Parse("c17")));

@@ -70,7 +70,7 @@ public sealed class LineContinuationTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("static unsafe int main");
+            emitted.ShouldContain("static int main");
             // The macro expanded across the continuation.
             emitted.ShouldContain("40");
             emitted.ShouldContain("2");

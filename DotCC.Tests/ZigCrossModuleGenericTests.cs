@@ -62,7 +62,7 @@ public sealed class ZigCrossModuleGenericTests
         cs.ShouldContain("util__maxOf__u8(10, 7)");
         cs.ShouldContain("util__addN__20(3)");
         cs.ShouldContain("util__twice__u8((byte)3)");
-        cs.ShouldContain("static unsafe byte util__maxOf__u8(byte a, byte b)");
+        cs.ShouldContain("static byte util__maxOf__u8(byte a, byte b)");
         cs.ShouldNotContain("maxOf()");   // the placeholder template signature is never called
     }
 
@@ -84,7 +84,7 @@ public sealed class ZigCrossModuleGenericTests
         call.Groups[1].Value.ShouldStartWith("util__lenOf__s");
         call.Groups[2].Value.ShouldBe(call.Groups[1].Value);
         call.Groups[3].Value.ShouldNotBe(call.Groups[1].Value);
-        System.Text.RegularExpressions.Regex.Matches(cs, @"static unsafe byte util__lenOf__s[0-9a-f]{8}\(\)").Count.ShouldBe(2);
+        System.Text.RegularExpressions.Regex.Matches(cs, @"static byte util__lenOf__s[0-9a-f]{8}\(\)").Count.ShouldBe(2);
         cs.ShouldContain("return (byte)3UL;");
         cs.ShouldContain("return (byte)5UL;");
     }
@@ -103,8 +103,8 @@ public sealed class ZigCrossModuleGenericTests
                 return util.f() + f();
             }
             """, ("util.zig", "pub fn f() u8 {\n    return 40;\n}\n"));
-        cs.ShouldContain("static unsafe byte util__f()");
-        cs.ShouldContain("static unsafe byte f()");
+        cs.ShouldContain("static byte util__f()");
+        cs.ShouldContain("static byte f()");
         cs.ShouldContain("util__f() + f()");
     }
 
@@ -119,7 +119,7 @@ public sealed class ZigCrossModuleGenericTests
                 return util.double(21);
             }
             """, ("util.zig", "pub fn double(x: u8) u8 {\n    return x + x;\n}\n"));
-        cs.ShouldContain("static unsafe byte util__double(byte x)");
+        cs.ShouldContain("static byte util__double(byte x)");
         cs.ShouldContain("return util__double(21);");
         cs.ShouldNotContain("__@");
     }

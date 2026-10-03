@@ -51,7 +51,7 @@ public sealed class AttributeTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("static unsafe int main()");
+            emitted.ShouldContain("static int main()");
             // No attribute SYNTAX survives into the emitted C#…
             emitted.ShouldNotContain("[[");
             emitted.ShouldNotContain("nodiscard");
@@ -134,7 +134,7 @@ public sealed class AttributeTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c23"));
-            emitted.ShouldContain("static unsafe int main()");
+            emitted.ShouldContain("static int main()");
             emitted.ShouldContain("uns_add");
             emitted.ShouldContain("rep_id");
             // No attribute SYNTAX leaks, and specifically no cosmetic [Pure] lowering…
@@ -178,7 +178,7 @@ public sealed class AttributeTests
         {
             var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17"));
             emitted.ShouldContain("[System.Diagnostics.CodeAnalysis.DoesNotReturn]");
-            emitted.ShouldContain("static unsafe void die()");
+            emitted.ShouldContain("static void die()");
         }
         finally { File.Delete(src); }
     }
@@ -228,7 +228,7 @@ public sealed class AttributeTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c23"));
-            emitted.ShouldContain("static unsafe int main()");
+            emitted.ShouldContain("static int main()");
             emitted.ShouldNotContain("[[");
             // The keyword-shaped Attr production feeds the same marker as the
             // bare-ID path: [DoesNotReturn] lands on the emitted method.

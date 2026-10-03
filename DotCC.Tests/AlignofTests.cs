@@ -42,7 +42,7 @@ public sealed class AlignofTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("static unsafe int main()");
+            emitted.ShouldContain("static int main()");
             // Folded away — no _Alignof survives into the emitted C#.
             emitted.ShouldNotContain("_Alignof");
         }
@@ -61,7 +61,7 @@ public sealed class AlignofTests
             """);
         try
         {
-            Compiler.EmitCSharp(new[] { src }).ShouldContain("static unsafe int main()");
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("static int main()");
         }
         finally { File.Delete(src); }
     }
@@ -82,7 +82,7 @@ public sealed class AlignofTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("static unsafe int main()");
+            emitted.ShouldContain("static int main()");
             emitted.ShouldNotContain("_Alignas");
         }
         finally { File.Delete(src); }
@@ -157,7 +157,7 @@ public sealed class AlignofTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c23"));
-            emitted.ShouldContain("static unsafe int main()");
+            emitted.ShouldContain("static int main()");
         }
         finally { File.Delete(src); }
     }
