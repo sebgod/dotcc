@@ -25,8 +25,10 @@ library into `python/stdlib.bin` (`examples/cpython/pack-stdlib.py`). The page's
 unpacks the library into an in-memory file system and runs the editor's code as
 `/main.py`, off the page's thread, so Stop can end a program that never does. To try it
 locally, build both (see `examples/cpython/README.md`) and copy them to
-`wwwroot/python/` (git-ignored). The **wat / C# / -E** tabs
-are pure `Compiler.EmitWat` / `EmitCSharp` / `Preprocess` string projections; the
+`wwwroot/python/` (git-ignored). The **wat / C# / C# (translated) / -E** tabs
+are pure `Compiler.EmitWat` / `EmitCSharp` / `Preprocess` string projections (the translated
+tab is `EmitMode.Translation`: only the program's own functions, types and globals, without the
+shell and the embedded runtime; the wat and C# tabs each download their text); the
 editor is CodeMirror 6; share-links pack the source into a `#src=…` fragment with the
 native `CompressionStream` API, after a `?lang=` naming its language. The address follows
 the selected language and example (`sandbox?lang=python&ex=Classes`), so it can be copied
