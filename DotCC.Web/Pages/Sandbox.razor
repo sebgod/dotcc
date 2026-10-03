@@ -100,6 +100,13 @@
             }
             else if (_tab == "wat")
             {
+                @if (!string.IsNullOrEmpty(_wat))
+                {
+                    <div class="emit-actions">
+                        <button class="download" @onclick="DownloadWatAsync">⬇ Download .wat</button>
+                        <span class="hint">the module dotcc emitted; assemble it with: wat2wasm --enable-threads --enable-exceptions program.wat</span>
+                    </div>
+                }
                 <pre class="code">@(_wat ?? "")</pre>
             }
             else if (_tab == "wasm")
@@ -127,6 +134,16 @@
                     </div>
                 }
                 <pre class="code">@(_csharp ?? "")</pre>
+            }
+            else if (_tab == "C# (translated)")
+            {
+                @if (!string.IsNullOrEmpty(_csharpTranslated))
+                {
+                    <div class="emit-actions">
+                        <span class="hint">only what your code became: its functions, types and globals, without the program shell and the embedded runtime (the C# tab has the whole file, and its download)</span>
+                    </div>
+                }
+                <pre class="code">@(_csharpTranslated ?? "")</pre>
             }
             else if (_tab == "-E")
             {
@@ -156,8 +173,8 @@
     private string[] Tabs => _lang switch
     {
         "python" => new[] { "Output" },
-        "zig" => new[] { "Output", "wat", "wasm", "C#" },
-        _ => new[] { "Output", "wat", "wasm", "C#", "-E" },
+        "zig" => new[] { "Output", "wat", "wasm", "C#", "C# (translated)" },
+        _ => new[] { "Output", "wat", "wasm", "C#", "C# (translated)", "-E" },
     };
     private string _tab = "Output";
 
@@ -165,6 +182,9 @@
     private string _example = CExamples[0].Name;
     private string? _wat;
     private string? _csharp;
+    // The same compile's C# with only what the input became (Compiler.EmitCSharp's EmitMode.Translation): its
+    // functions, types and globals, without the shell and the spliced runtime that fill most of the full file.
+    private string? _csharpTranslated;
     private string? _preprocessed;
     // The read-only WF0 inventory of the wasm binary the browser just assembled from
     // our wat (fable-web.md WEB6): section layout, counts, import/export surface,
@@ -375,6 +395,8 @@
             string csWarnings = "";
             try { _csharp = Emit(() => Compiler.EmitCSharp(new[] { SourcePath }, dialect: dialect, warnings: warnings), out csWarnings); }
             catch { _csharp = "// (C# emit unavailable for this program)"; }
+            try { _csharpTranslated = Emit(() => Compiler.EmitCSharp(new[] { SourcePath }, emit: EmitMode.Translation, dialect: dialect, warnings: warnings), out _); }
+            catch { _csharpTranslated = "// (C# emit unavailable for this program)"; }
             _preprocessed = dialect is { } d ? Preprocess(d) : null;
 
             var diag = DedupeLines(watWarnings, csWarnings);
@@ -497,6 +519,11 @@
     /// directives inline), so the saved file runs as-is via `dotnet run`.</summary>
     private async Task DownloadCSharpAsync() =>
         await JS.InvokeVoidAsync("dotccSandbox.downloadText", "program.cs", _csharp ?? "", "text/x-csharp");
+
+    /// <summary>Download the wat module from the last run, the text the wat tab shows, which wat2wasm assembles
+    /// (with the threads and exceptions features the sandbox's own assembly enables).</summary>
+    private async Task DownloadWatAsync() =>
+        await JS.InvokeVoidAsync("dotccSandbox.downloadText", "program.wat", _wat ?? "", "text/plain");
 
     /// <summary>Run a compiler entry point while capturing the diagnostics it writes
     /// to <see cref="Console.Error"/> (warnings), restoring the previous writer after.</summary>
