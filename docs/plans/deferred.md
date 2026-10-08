@@ -223,8 +223,8 @@ CPU). Segment status: `docs/plans/road-to-zig-std.md`, "The target-identity segm
 ## Zig — the big open parse buckets (not cuts; just next)
 
 These are ranked live in [`std-parse-probe.report.txt`](std-parse-probe.report.txt) — the
-report *is* the worklist. Current head (2026-08-08, 32.0% parse-clean): top-level
-file-is-a-struct fields (`$`/bare-IDENT in state 0/128, 25 files each), `)`-in-440 (23),
-`(`-in-276 (20), statement-position `if`/`switch` in a value slot (15 each), `align(N)`.
-S4a retired the former `'|'`-in-518 bucket (value-position captures). See the S9 table in
-[`road-to-zig-std.md`](road-to-zig-std.md).
+report *is* the worklist. Current head (2026-10-09, 341 of 553 files, 61.7% parse-clean): empty files
+(25, the installed std's 0-byte `test.zig`s), `align(N)` on a container-level declaration (20), `extern var`
+(13), `packed struct(uN)` as an inline field type (9), a labeled block as a field value (8), `if` in a type
+slot (6). The 2026-08 head (file-is-a-struct fields, `)`-in-440, `(`-in-276, statement-position `if`/`switch`)
+is retired. See the S9 table in [`road-to-zig-std.md`](road-to-zig-std.md).
