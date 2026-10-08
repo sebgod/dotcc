@@ -2410,8 +2410,8 @@ public sealed class ZigStdHelperShapesTests
         // the helper iterating it is called only from the comptime block, so zig accepts it. `return .{ … }` at a `?Entry`
         // result is the optional's payload. zig returns 58.
         cs.ShouldContain("values = Libc.GlobalArrayFrom<byte>(new byte[]{ (byte)1, (byte)3, (byte)10 }), len = 3u, longest = 5u");
-        cs.ShouldContain("public static unsafe Table small = Table_init__ct");
-        cs.ShouldContain("public static unsafe Table other = Table_init__ct");
+        cs.ShouldContain("public static Table small = Table_init__ct");
+        cs.ShouldContain("public static Table other = Table_init__ct");
         cs.ShouldContain("return new Entry { key = k, value = t.values[i] };");
     }
 
