@@ -10,14 +10,14 @@ namespace DotCC.Backends;
 /// Which functions need an unsafe context. A C function becomes a C# method marked <c>unsafe</c> only when it uses
 /// what C# allows only there: a pointer, an address, an array (a pointer or a fixed buffer here), a string literal
 /// (a <c>byte*</c>), varargs, and the like. A function over plain values (<c>int factorial(int n)</c>) is emitted
-/// without it. The test is a whitelist over the IR: every type the function touches must be a pointer-free scalar,
-/// enum or struct, and every node one of the plain kinds below; anything else keeps <c>unsafe</c>. So a node this
+/// without it. The test is a whitelist over the IR: every type the function touches must be a scalar, an enum or a
+/// struct value, and every node one of the plain kinds below; anything else keeps <c>unsafe</c>. So a node this
 /// does not know stays unsafe, and a miss could only be a C# compile error (CS0214), never a different program:
 /// <c>unsafe</c> changes no IL.
 /// </summary>
 internal sealed partial class CSharpBackend
 {
-    /// <summary>Each struct or union, by name, whether its fields are all safe (<see cref="IsSafeStruct"/>).</summary>
+    /// <summary>Each struct or union, by name, whether the module defines it (<see cref="IsSafeStruct"/>).</summary>
     private readonly Dictionary<string, bool> _safeStructs = new(System.StringComparer.Ordinal);
 
     /// <summary>True when <paramref name="fn"/> must be an <c>unsafe</c> method (see the class summary).</summary>
@@ -51,7 +51,7 @@ internal sealed partial class CSharpBackend
     };
 
     /// <summary>A type a safe method may hold: an integer, floating, boolean or complex scalar, <c>void</c>, an enum,
-    /// or a struct or union whose fields are (<see cref="IsSafeStruct"/>).</summary>
+    /// or the value of a struct or union the module defines (<see cref="IsSafeStruct"/>).</summary>
     private bool IsSafeType(CType t) => t.Unqualified switch
     {
         CType.Prim => true,
@@ -62,15 +62,14 @@ internal sealed partial class CSharpBackend
         _ => false,
     };
 
-    /// <summary>A struct or union of the module whose fields are all safe types and none an array (a fixed buffer or
-    /// an inline-array wrapper). An unknown name (an opaque type) or a runtime-owned one is not.</summary>
+    /// <summary>A struct or union the module defines. Safe code may hold, copy, pass and return its value whatever its
+    /// fields are: a struct with a pointer field or a fixed buffer is still a plain value type (the members are what is
+    /// <c>unsafe</c>, see <see cref="UnsafeFor"/>), and reading such a field is an expression of a pointer or array type,
+    /// which <see cref="IsSafeExpr"/> refuses on its type. An unknown name (an opaque type) is not.</summary>
     private bool IsSafeStruct(string name)
     {
         if (_safeStructs.TryGetValue(name, out var known)) { return known; }
-        _safeStructs[name] = false;   // a cycle reaches it only through a pointer, which is unsafe anyway
-        var def = _module?.Types.FirstOrDefault(t => t.Name == name);
-        var safe = def is { IsRuntimeOwned: false }
-            && def.Fields.All(fd => fd.Type.Unqualified is not CType.Array && IsSafeType(fd.Type));
+        var safe = _module?.Types.Any(t => t.Name == name) == true;
         _safeStructs[name] = safe;
         return safe;
     }

@@ -113,6 +113,29 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
+    public void A_struct_value_with_pointer_fields_is_safe_to_pass_and_read_its_plain_members()
+    {
+        // Safe C# may hold, copy, pass and return a struct value whatever its fields; only reading the pointer or the
+        // fixed buffer needs an unsafe context.
+        var src = WriteTemp("""
+            struct node { int value; struct node *next; char tag[4]; };
+            int value_of(struct node n) { return n.value; }
+            struct node same(struct node n) { struct node m = n; return m; }
+            int has_next(struct node n) { return n.next != 0; }
+            int main(void) { struct node n = { 3 }; return value_of(same(n)) + has_next(n); }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src }, emit: EmitMode.Translation);
+            emitted.ShouldContain("internal static int value_of(node n)");
+            emitted.ShouldContain("internal static node same(node n)");
+            emitted.ShouldContain("internal static unsafe int has_next(node n)");
+            emitted.ShouldContain("internal static int main()");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void A_call_to_a_function_only_declared_keeps_unsafe()
     {
         // `add` has a prototype and no body: with `-l` it binds to a `delegate* unmanaged` field of DotCcImports, whose

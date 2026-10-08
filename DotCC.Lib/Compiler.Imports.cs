@@ -98,17 +98,17 @@ public static partial class Compiler
         sb.Append("// Each field is bound once by __BindAll() (before main, or on first touch\n");
         sb.Append("// in -shared mode) to the address the named symbol resolves to in the -l\n");
         sb.Append("// libraries, searched in order — first that exports it wins (ld.so model).\n");
-        sb.Append("static unsafe class DotCcImports\n{\n");
+        sb.Append("static class DotCcImports\n{\n");
         foreach (var (name, ft) in fields)
         {
-            sb.Append($"    internal static {ft} {EmitHelpers.Id(name)};\n");
+            sb.Append($"    internal static unsafe {ft} {EmitHelpers.Id(name)};\n");
         }
         sb.Append('\n');
         if (libraryMode)
         {
             sb.Append("    static DotCcImports() => __BindAll(); // no entry point in -shared; bind on first field touch\n\n");
         }
-        sb.Append("    internal static void __BindAll()\n    {\n");
+        sb.Append("    internal static unsafe void __BindAll()\n    {\n");
         sb.Append("        var __dirs = new string[] { ");
         sb.Append(string.Join(", ", imports.LibraryDirs.Select(CsStringLiteral)));
         sb.Append(" };\n");
@@ -169,7 +169,7 @@ public static partial class Compiler
         sb.Append("// Resolved at NativeAOT publish against the linked archives (the csproj's\n");
         sb.Append("// <DirectPInvoke>/<NativeLibrary> items). `dotnet run` throws DllNotFound —\n");
         sb.Append("// these need `dotnet publish -c Release -r <RID>`.\n");
-        sb.Append("static unsafe class DotCcStaticImports\n{\n");
+        sb.Append("static class DotCcStaticImports\n{\n");
         foreach (var sym in candidates.OrderBy(s => s.Name, StringComparer.Ordinal))
         {
             var fn = (Ir.CType.Func)sym.Type;
@@ -178,7 +178,9 @@ public static partial class Compiler
             // EntryPoint = the raw C symbol; the C# method name is the keyword-escaped
             // form the call sites emit (so a bare call binds to this extern).
             sb.Append($"    [{dll}({CsStringLiteral(libName)}, EntryPoint = {CsStringLiteral(sym.Name)}, ExactSpelling = true, CallingConvention = {cdecl})]\n");
-            sb.Append($"    internal static extern {ret} {EmitHelpers.Id(sym.Name)}({ps});\n");
+            // `unsafe` only on a stub whose signature holds a pointer (`int add(int, int)` needs none).
+            var modifier = fn.Params.Append(fn.Return).All(t => Backends.CSharpBackend.UnsafeFor(t).Length == 0) ? "" : "unsafe ";
+            sb.Append($"    internal static {modifier}extern {ret} {EmitHelpers.Id(sym.Name)}({ps});\n");
         }
         sb.Append("}\n");
         return sb.ToString();

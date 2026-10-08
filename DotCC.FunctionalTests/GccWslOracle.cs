@@ -217,7 +217,10 @@ internal static class GccWslOracle
 
     private static void EnsureInitialised()
     {
-        if (_initialised) { return; }
+        // No unlocked `_initialised` fast path: the flag is set when the probe STARTS, so a test class running in
+        // parallel would read it while the probe is still running, see `_available` false and skip silently (the
+        // native-import oracle skipped that way while its consumer stopped compiling). Every caller takes the lock,
+        // so a second one waits for the first probe to finish.
         lock (_initLock)
         {
             if (_initialised) { return; }
