@@ -28,6 +28,28 @@ internal sealed partial class CSharpBackend
         return fn.Params.Any(p => !IsSafeType(p.Type)) || !fn.Body.Stmts.All(IsSafeStmt);
     }
 
+    /// <summary>The <c>unsafe </c> modifier a field (or element) of type <paramref name="t"/> needs, or nothing. Types and
+    /// classes are never <c>unsafe</c> themselves; a member is, when its type is one C# allows only in an unsafe context.
+    /// A scalar, an enum or a struct value is not (a struct that holds pointers is still a plain value type), nor a zig
+    /// value type (a slice, optional, error union, tuple or list) over such elements; anything else (a pointer, a function
+    /// pointer, a kind this does not know) is.</summary>
+    internal static string UnsafeFor(CType t) => IsPointerFree(t) ? "" : "unsafe ";
+
+    /// <summary>Whether a value of type <paramref name="t"/> is spelled in C# with no pointer type in it (see
+    /// <see cref="UnsafeFor"/>).</summary>
+    private static bool IsPointerFree(CType t) => t.Unqualified switch
+    {
+        CType.Prim or CType.VoidType or CType.Enum or CType.ComplexType or CType.Float128Type or CType.Named
+            or CType.ErrorSetType or CType.Allocator => true,
+        CType.Slice s => IsPointerFree(s.Element),
+        CType.Optional { Inner: CType.Array } => true,   // a generated value type holding the elements (OptionalArrayTypesText)
+        CType.Optional o => IsPointerFree(o.Inner),
+        CType.ErrorUnion eu => IsPointerFree(eu.Payload),
+        CType.ZigList zl => IsPointerFree(zl.Element),
+        CType.Tuple tu => tu.Elements.All(IsPointerFree),
+        _ => false,
+    };
+
     /// <summary>A type a safe method may hold: an integer, floating, boolean or complex scalar, <c>void</c>, an enum,
     /// or a struct or union whose fields are (<see cref="IsSafeStruct"/>).</summary>
     private bool IsSafeType(CType t) => t.Unqualified switch

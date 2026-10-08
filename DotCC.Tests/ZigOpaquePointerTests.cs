@@ -60,7 +60,7 @@ public sealed class ZigOpaquePointerTests
                 return t.send(undefined, 42);
             }
             """);
-        cs.ShouldContain("public delegate*<void*, byte, byte> send;");
+        cs.ShouldContain("public unsafe delegate*<void*, byte, byte> send;");
         cs.ShouldContain("static unsafe byte sendNone(void* r, byte n)");
         cs.ShouldContain("return t.send(default(void*), 42);");
         cs.ShouldNotContain("File__File");     // the failed file-as-struct

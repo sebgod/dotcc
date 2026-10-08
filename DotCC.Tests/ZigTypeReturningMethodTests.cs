@@ -59,8 +59,8 @@ public sealed class ZigTypeReturningMethodTests
                 return @as(u8, @intCast(t.keyBox().get())) + t.valueBox().get();
             }
             """);
-        cs.ShouldContain("unsafe struct Table__u16_u8_Box__u8");
-        cs.ShouldContain("unsafe struct Table__u16_u8_Box__u16");
+        cs.ShouldContain("struct Table__u16_u8_Box__u8");
+        cs.ShouldContain("struct Table__u16_u8_Box__u16");
         // The made struct sees the owner's nested type, and its method is an ordinary reified method.
         cs.ShouldContain("public Table__u16_u8__Mark mark;");
         cs.ShouldContain("ushort Table__u16_u8_Box__u16_get(Table__u16_u8_Box__u16 self)");
@@ -84,8 +84,8 @@ public sealed class ZigTypeReturningMethodTests
                 return p.a + p.b + @as(u8, @intCast(q.a - q.b));
             }
             """);
-        cs.ShouldContain("unsafe struct Shapes_Pair__u8");
-        cs.ShouldContain("unsafe struct Shapes_Pair__u16");
+        cs.ShouldContain("struct Shapes_Pair__u8");
+        cs.ShouldContain("struct Shapes_Pair__u16");
     }
 
     [Fact]
@@ -111,7 +111,7 @@ public sealed class ZigTypeReturningMethodTests
             }
             """);
         cs.ShouldContain("public Inner__u16_opt30 inner;");
-        cs.ShouldContain("unsafe struct Inner__u16_optnull");
+        cs.ShouldContain("struct Inner__u16_optnull");
         cs.ShouldContain("Inner__u16_optnull b = ");
     }
 }

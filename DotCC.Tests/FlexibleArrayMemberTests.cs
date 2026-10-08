@@ -41,7 +41,7 @@ public sealed class FlexibleArrayMemberTests
             int main(void) { return 0; }
             """);
         // Aligned to its element: C's size is 4, where the kept `tag` alone would be 1.
-        emitted.ShouldContain("LayoutKind.Sequential, Size = 4)]\nunsafe struct wide\n{\n    public byte tag;\n}");
+        emitted.ShouldContain("LayoutKind.Sequential, Size = 4)]\nstruct wide\n{\n    public byte tag;\n}");
         emitted.ShouldContain("return ((int*)((byte*)w + 4))[i];");
     }
 
@@ -56,7 +56,7 @@ public sealed class FlexibleArrayMemberTests
             char second(struct tagged *t) { return t->name[1]; }
             int main(void) { return 0; }
             """);
-        emitted.ShouldContain("LayoutKind.Sequential, Size = 8)]\nunsafe struct tagged");
+        emitted.ShouldContain("LayoutKind.Sequential, Size = 8)]\nstruct tagged");
         emitted.ShouldContain("((byte*)((byte*)t + 8))[1]");
     }
 
@@ -69,7 +69,7 @@ public sealed class FlexibleArrayMemberTests
             char first(struct q *p) { return p->tail[0]; }
             int main(void) { return 0; }
             """);
-        emitted.ShouldContain("LayoutKind.Sequential, Size = 32)]\nunsafe struct q");
+        emitted.ShouldContain("LayoutKind.Sequential, Size = 32)]\nstruct q");
         emitted.ShouldContain("((byte*)((byte*)p + 32))[0]");
     }
 
@@ -81,7 +81,7 @@ public sealed class FlexibleArrayMemberTests
             int second(struct tmpl *t) { return t->items[1].index; }
             int main(void) { return (int)sizeof(struct tmpl); }
             """);
-        emitted.ShouldContain("LayoutKind.Sequential, Size = 8)]\nunsafe struct tmpl");
+        emitted.ShouldContain("LayoutKind.Sequential, Size = 8)]\nstruct tmpl");
         emitted.ShouldContain("return ((__Anon0*)((byte*)t + 8))[1].index;");
     }
 

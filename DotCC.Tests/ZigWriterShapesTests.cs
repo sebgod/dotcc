@@ -101,7 +101,7 @@ public sealed class ZigWriterShapesTests
     public void The_address_of_a_container_const_is_static_storage()
     {
         var cs = EmitZig(Program);
-        cs.ShouldContain("public static unsafe Sink__VTable Sink__vtable__static;");
+        cs.ShouldContain("public static Sink__VTable Sink__vtable__static;");
         cs.ShouldContain("__o->put = &Sink_put;\n        __o->reset = &Sink_resetInner;\n");
         cs.ShouldContain("vtable = (Sink__VTable*)System.Runtime.CompilerServices.Unsafe.AsPointer(ref Sink__vtable__static)");
         cs.ShouldNotContain("Sink__VTable __cl");

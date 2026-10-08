@@ -52,7 +52,7 @@ public sealed class DeclaratorListTests
             int counter = 3, table[4] = { 1, 2, 3, 4 }, *cursor;
             int main(void) { cursor = table + counter; return *cursor; }
             """);
-        emitted.ShouldContain("public static unsafe int counter = 3;");
+        emitted.ShouldContain("public static int counter = 3;");
         emitted.ShouldContain("public static unsafe int* table = Libc.GlobalArrayFrom<int>(new int[]{ 1, 2, 3, 4 });");
         emitted.ShouldContain("public static unsafe int* cursor;");
     }
@@ -85,7 +85,7 @@ public sealed class DeclaratorListTests
             int main(void) { int n = { 5 }; return n + braced; }
             """);
         emitted.ShouldContain("int n = 5;");
-        emitted.ShouldContain("public static unsafe int braced = 42;");
+        emitted.ShouldContain("public static int braced = 42;");
     }
 
     [Fact]
@@ -95,7 +95,7 @@ public sealed class DeclaratorListTests
             static int bump(void) { static int calls = 0, seen[3]; seen[calls % 3]++; return ++calls; }
             int main(void) { return bump(); }
             """);
-        emitted.ShouldContain("public static unsafe int calls__s0 = 0;");
+        emitted.ShouldContain("public static int calls__s0 = 0;");
         emitted.ShouldContain("public static unsafe int* seen__s1 = Libc.GlobalArrayZeroed<int>(3);");
     }
 
@@ -120,7 +120,7 @@ public sealed class DeclaratorListTests
             int main(void) { return primes[count - 1]; }
             """);
         emitted.ShouldContain("public static unsafe int* primes = ");
-        emitted.ShouldContain("public static unsafe int count = 3;");
+        emitted.ShouldContain("public static int count = 3;");
     }
 
     [Fact]
@@ -130,9 +130,9 @@ public sealed class DeclaratorListTests
             struct mode { char rawmode[6], *m; int flags[2], n; };
             int main(void) { struct mode md; md.n = 1; return md.n; }
             """);
-        emitted.ShouldContain("public fixed byte rawmode[6];");
-        emitted.ShouldContain("public byte* m;");
-        emitted.ShouldContain("public fixed int flags[2];");
+        emitted.ShouldContain("public unsafe fixed byte rawmode[6];");
+        emitted.ShouldContain("public unsafe byte* m;");
+        emitted.ShouldContain("public unsafe fixed int flags[2];");
     }
 
     [Theory]

@@ -71,8 +71,8 @@ public sealed class ZigPackedStructTests
     public void A_backed_packed_struct_and_a_returned_one_are_byte_packed()
     {
         var cs = EmitZig(Program);
-        cs.ShouldMatch(@"StructLayout\(System\.Runtime\.InteropServices\.LayoutKind\.Sequential, Pack = 1\)\]\s*unsafe struct Flags");
-        cs.ShouldMatch(@"StructLayout\(System\.Runtime\.InteropServices\.LayoutKind\.Sequential, Pack = 1\)\]\s*unsafe struct Mask__16");
+        cs.ShouldMatch(@"StructLayout\(System\.Runtime\.InteropServices\.LayoutKind\.Sequential, Pack = 1\)\]\s*struct Flags");
+        cs.ShouldMatch(@"StructLayout\(System\.Runtime\.InteropServices\.LayoutKind\.Sequential, Pack = 1\)\]\s*struct Mask__16");
     }
 
     [Fact]

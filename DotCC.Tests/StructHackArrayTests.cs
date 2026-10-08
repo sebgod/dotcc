@@ -79,7 +79,7 @@ public sealed class StructHackArrayTests
             var emitted = Compiler.EmitCSharp(new[] { src });
             emitted.ShouldContain("InlineArray(1)");
             emitted.ShouldContain("__IA_Bag_items");
-            emitted.ShouldContain("public U* _e;");
+            emitted.ShouldContain("public unsafe U* _e;");
         }
         finally { File.Delete(src); }
     }

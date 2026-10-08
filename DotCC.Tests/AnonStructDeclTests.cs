@@ -38,7 +38,7 @@ public sealed class AnonStructDeclTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("unsafe struct __Anon0");
+            emitted.ShouldContain("struct __Anon0");
             // array of the synth struct, elements as positional object-inits
             emitted.ShouldContain("new __Anon0 { left = 10, right = 10 }");
             emitted.ShouldContain("new __Anon0 { left = 14, right = 13 }");
@@ -55,7 +55,7 @@ public sealed class AnonStructDeclTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("unsafe struct __Anon0");
+            emitted.ShouldContain("struct __Anon0");
             emitted.ShouldContain("__Anon0 pt = new __Anon0 { a = 5, b = 6 }");
         }
         finally { File.Delete(src); }
@@ -91,7 +91,7 @@ public sealed class AnonStructDeclTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("unsafe struct Point");
+            emitted.ShouldContain("struct Point");
             emitted.ShouldContain("Point p = new Point { x = 3, y = 4 }");
             emitted.ShouldNotContain("__NestS");
         }

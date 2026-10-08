@@ -74,7 +74,7 @@ public sealed class ZigGenericMethodTests
             }
             """);
         cs.ShouldContain("Tagged__u8_2 Store__u8_with__2(Store__u8 self)");
-        cs.ShouldContain("unsafe struct Tagged__u8_2");
+        cs.ShouldContain("struct Tagged__u8_2");
     }
 
     [Fact]

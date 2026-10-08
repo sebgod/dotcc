@@ -120,7 +120,7 @@ public sealed class DeclarationSpecifierTests
             int later = 7;
             """);
         emitted.ShouldContain("[MethodImpl(MethodImplOptions.AggressiveInlining)]\n    internal static unsafe int* counter_ptr()");
-        emitted.ShouldContain("public static unsafe int calls__s0 = 0;");
+        emitted.ShouldContain("public static int calls__s0 = 0;");
         emitted.ShouldContain("int w = 1;");
     }
 

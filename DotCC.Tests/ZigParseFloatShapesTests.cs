@@ -234,6 +234,6 @@ public sealed class ZigParseFloatShapesTests
     public void A_reified_struct_const_sizes_its_array_field()
     {
         var cs = EmitZig(ShapesProgram);
-        cs.ShouldMatch(@"unsafe struct Decimal__f64\s*\{[^}]*public fixed byte digits\[12\];");
+        cs.ShouldMatch(@"struct Decimal__f64\s*\{[^}]*public unsafe fixed byte digits\[12\];");
     }
 }

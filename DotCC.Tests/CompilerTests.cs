@@ -88,6 +88,31 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
+    public void Types_and_the_globals_class_are_never_unsafe_only_their_members_are()
+    {
+        // No type-level `unsafe`: a struct's pointer field and fixed buffer are `unsafe` members of a plain struct, and a
+        // global is `unsafe` only when its type or initializer is (`int limit = 5;` is not).
+        var src = WriteTemp("""
+            struct node { int value; struct node *next; char tag[4]; };
+            int limit = 5;
+            int *cursor;
+            const char *name = "n";
+            int main(void) { struct node n = { 1, 0, "ab" }; cursor = &n.value; return limit - *cursor - 4; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldNotContain("unsafe struct node");
+            emitted.ShouldContain("struct node\n{\n    public int value;\n    public unsafe node* next;\n    public unsafe fixed byte tag[4];");
+            emitted.ShouldContain("static class DotCcGlobals\n");
+            emitted.ShouldContain("public static int limit = 5;");
+            emitted.ShouldContain("public static unsafe int* cursor;");
+            emitted.ShouldContain("public static unsafe byte* name = ");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void A_function_over_plain_values_is_safe_csharp()
     {
         // `unsafe` only where C# needs it: a function over scalars and pointer-free structs is a plain static method,
@@ -132,9 +157,9 @@ public sealed partial class CompilerTests
         {
             var emitted = Compiler.EmitCSharp(new[] { src }, emit: EmitMode.Translation);
             emitted.ShouldStartWith("static class DotCcProgram");
-            emitted.ShouldContain("unsafe struct Point");
+            emitted.ShouldContain("struct Point");
             emitted.ShouldContain("internal static int bump(");
-            emitted.ShouldContain("static unsafe class DotCcGlobals");
+            emitted.ShouldContain("static class DotCcGlobals");
             emitted.ShouldNotContain("#:property");
             emitted.ShouldNotContain("using static Libc;");
             emitted.ShouldNotContain("__DotCcEntry");
@@ -611,7 +636,7 @@ public sealed partial class CompilerTests
             emitted.ShouldContain("public uint hi {");
             emitted.ShouldContain("(__bf0 >> 8)");           // hi sits after lo and the 4-bit padding
             emitted.ShouldContain("public int count;");
-            emitted.ShouldContain("public int* where;");
+            emitted.ShouldContain("public unsafe int* where;");
         }
         finally { File.Delete(src); }
     }
@@ -831,7 +856,7 @@ public sealed partial class CompilerTests
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
             // exactly one field for x (from the definition, not the extern decl)
-            var fieldCount = emitted.Split("unsafe int x").Length - 1;
+            var fieldCount = emitted.Split("public static int x").Length - 1;
             fieldCount.ShouldBe(1);
             emitted.ShouldContain("int x = 5");
         }
