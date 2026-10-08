@@ -113,6 +113,22 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
+    public void A_call_to_a_function_only_declared_keeps_unsafe()
+    {
+        // `add` has a prototype and no body: with `-l` it binds to a `delegate* unmanaged` field of DotCcImports, whose
+        // call needs an unsafe context, so its caller stays `unsafe` even over plain ints.
+        var src = WriteTemp("""
+            int add(int, int);
+            int main(void) { return add(2, 3); }
+            """);
+        try
+        {
+            Compiler.EmitCSharp(new[] { src }, emit: EmitMode.Translation).ShouldContain("internal static unsafe int main()");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void A_function_over_plain_values_is_safe_csharp()
     {
         // `unsafe` only where C# needs it: a function over scalars and pointer-free structs is a plain static method,

@@ -117,6 +117,9 @@ internal sealed partial class CSharpBackend
         // their values are.
         Call { Callee: "printf" } pc when LiteralFormat(pc) is not null
             => pc.Args.Skip(1).All(arg => LiteralString(arg) is not null || IsSafeExpr(arg)),
+        // A function the program only declares (`int add(int, int);`, no body anywhere in it) may be bound at link time to
+        // a native import, a `delegate* unmanaged` field of DotCcImports (`-l`), whose call needs an unsafe context.
+        Call { CalleeSym: { } ps } when _module?.ProtoOnlyReferenced.ContainsKey(ps.Name) == true => false,
         Call c => c.Args.All(IsSafeExpr) && (c.ParamTypes is null || c.ParamTypes.All(IsSafeType))
                   && (c.CalleeSym is null || c.CalleeSym.Type is CType.Func { Variadic: false } cf
                       && cf.Params.All(IsSafeType) && IsSafeType(cf.Return)),
