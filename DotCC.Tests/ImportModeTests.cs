@@ -89,8 +89,10 @@ public sealed class ImportModeTests
             Dynamic("blobby"), "blob.h", "int blob_size(int n);");
 
         // GOT table + the field, rendered with the C calling convention.
-        emit.ShouldContain("static unsafe class DotCcImports");
-        emit.ShouldContain("delegate* unmanaged[Cdecl]<int, int> blob_size");
+        // The class is plain; the fn-pointer field and the binder that stores through `void*` are the unsafe members.
+        emit.ShouldContain("static class DotCcImports\n");
+        emit.ShouldContain("internal static unsafe delegate* unmanaged[Cdecl]<int, int> blob_size;");
+        emit.ShouldContain("internal static unsafe void __BindAll()");
         // Surfaced by bare name, bound before main from the named library.
         emit.ShouldContain("using static DotCcImports;");
         emit.ShouldContain("DotCcImports.__BindAll();");
@@ -166,10 +168,10 @@ public sealed class ImportModeTests
         var (emit, _) = EmitWithImports(
             "#include \"blob.h\"\nint main(void){ return blob_size(3); }",
             Static("/opt/libblob.a"), "blob.h", "int blob_size(int n);");
-        emit.ShouldContain("static unsafe class DotCcStaticImports");
+        emit.ShouldContain("static class DotCcStaticImports\n");
         emit.ShouldContain("DllImport(\"blob\"");              // libblob.a → "blob"
         emit.ShouldContain("EntryPoint = \"blob_size\"");
-        emit.ShouldContain("internal static extern int blob_size(");
+        emit.ShouldContain("internal static extern int blob_size(");   // no pointer in the signature: not unsafe
         emit.ShouldContain("using static DotCcStaticImports;");
         emit.ShouldNotContain("__BindAll");                    // static binds at the native link
     }
