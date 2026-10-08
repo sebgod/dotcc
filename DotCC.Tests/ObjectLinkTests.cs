@@ -49,7 +49,7 @@ public sealed class ObjectLinkTests : IDisposable
         var program = Link(
             ("a.c", "struct P { int x; }; int side(void) { struct P p; p.x = 1; return p.x; }"),
             ("b.c", "struct P { int x; }; int side(void); int main(void) { return side(); }"));
-        Regex.Matches(program, @"unsafe struct P\b").Count.ShouldBe(1);
+        Regex.Matches(program, @"struct P\b").Count.ShouldBe(1);
         program.ShouldContain("static int side(");
         program.ShouldContain("return main();");
     }
@@ -80,7 +80,7 @@ public sealed class ObjectLinkTests : IDisposable
         var program = Link(
             ("a.c", "#include \"shape.h\"\nint side_of(struct Shape* s) { return s->side; }"),
             ("b.c", "#include \"shape.h\"\nint side_of(struct Shape* s);\nint main(void) { struct Shape s; s.side = 3; return side_of(&s); }"));
-        Regex.Matches(program, @"unsafe struct Shape\b").Count.ShouldBe(1);
+        Regex.Matches(program, @"struct Shape\b").Count.ShouldBe(1);
         Regex.Matches(program, @"struct __AnonU_[0-9a-f]{16}\b").Count.ShouldBe(1);
     }
 
@@ -113,7 +113,7 @@ public sealed class ObjectLinkTests : IDisposable
             ("a.c", "struct Buf { int n; char data[4]; };\nint len(struct Buf* b) { return b->n; }"),
             ("b.c", "struct Buf { int n; char data[4]; };\nint len(struct Buf* b);\n"
                   + "int main(void) { struct Buf b = { 2, { 'h', 'i' } }; return len(&b); }"));
-        Regex.Matches(program, @"unsafe struct Buf\b").Count.ShouldBe(1);
+        Regex.Matches(program, @"struct Buf\b").Count.ShouldBe(1);
         program.ShouldContain("Buf __dotcc_init(");
     }
 
@@ -125,7 +125,7 @@ public sealed class ObjectLinkTests : IDisposable
         var program = Link(
             ("a.c", "typedef struct Lock Lock;\nint held(Lock* l) { return l != 0; }"),
             ("b.c", "typedef struct Lock Lock;\nint held(Lock* l);\nint main(void) { return held(0); }"));
-        Regex.Matches(program, @"unsafe struct Lock\b").Count.ShouldBe(1);
+        Regex.Matches(program, @"struct Lock\b").Count.ShouldBe(1);
     }
 
     [Fact]
@@ -135,7 +135,7 @@ public sealed class ObjectLinkTests : IDisposable
             ("a.c", "struct Node;\nint count(struct Node* n);\nint main(void) { return count(0); }"),
             ("b.c", "struct Node { int value; struct Node* next; };\n"
                   + "int count(struct Node* n) { return n ? 1 + count(n->next) : 0; }"));
-        Regex.Matches(program, @"unsafe struct Node\b").Count.ShouldBe(1);
+        Regex.Matches(program, @"struct Node\b").Count.ShouldBe(1);
         program.ShouldContain("public int value;");
     }
 

@@ -201,7 +201,7 @@ public static partial class Compiler
         if (usingAliases.Trim().Length > 0) { parts.Add(usingAliases.Trim()); }
         parts.Add(programClasses);
         if (structDecls.Trim().Length > 0) { parts.Add(structDecls.Trim()); }
-        if (globals.Trim().Length > 0) { parts.Add("static unsafe class DotCcGlobals\n{\n" + globals + "}"); }
+        if (globals.Trim().Length > 0) { parts.Add("static class DotCcGlobals\n{\n" + globals + "}"); }
         return string.Join("\n\n", parts) + "\n";
     }
 
@@ -438,7 +438,7 @@ public static partial class Compiler
             // C file-scope variables, collected as static fields. Empty
             // class when no globals are declared — harmless but kept for
             // shell-shape stability.
-            static unsafe class DotCcGlobals
+            static class DotCcGlobals
             {
             {{globals}}}
 
@@ -559,7 +559,7 @@ public static partial class Compiler
 
             // C file-scope variables, collected as static fields: one object per
             // name for the whole process, whichever assembly takes its address.
-            public static unsafe class {{globalsClass}}
+            public static class {{globalsClass}}
             {
             {{globals}}}
 
@@ -680,7 +680,7 @@ public static partial class Compiler
             // C file-scope variables, collected as static fields (same as
             // exe mode). DotCcLib reaches them via `using static DotCcGlobals;`
             // — adding that import here too so library-mode emits work.
-            static unsafe class DotCcGlobals
+            static class DotCcGlobals
             {
             {{globals}}}
 

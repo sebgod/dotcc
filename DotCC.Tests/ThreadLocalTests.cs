@@ -41,8 +41,8 @@ public sealed class ThreadLocalTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("[ThreadStatic]\n    public static unsafe int tls_count;");
-            emitted.ShouldContain("[ThreadStatic]\n    public static unsafe long tls_static;");
+            emitted.ShouldContain("[ThreadStatic]\n    public static int tls_count;");
+            emitted.ShouldContain("[ThreadStatic]\n    public static long tls_static;");
         }
         finally { File.Delete(src); }
     }
@@ -61,7 +61,7 @@ public sealed class ThreadLocalTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("[ThreadStatic]\n    public static unsafe int a = 0;");
+            emitted.ShouldContain("[ThreadStatic]\n    public static int a = 0;");
             emitted.ShouldContain("[ThreadStatic]\n    public static unsafe int* p = null;");
         }
         finally { File.Delete(src); }
@@ -114,7 +114,7 @@ public sealed class ThreadLocalTests
             foreach (var std in new[] { "c11", "c17", "c23" })
             {
                 Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse(std))
-                    .ShouldContain("[ThreadStatic]\n    public static unsafe int tls_v;");
+                    .ShouldContain("[ThreadStatic]\n    public static int tls_v;");
             }
         }
         finally { File.Delete(src); }
@@ -142,7 +142,7 @@ public sealed class ThreadLocalTests
         try
         {
             Compiler.EmitCSharp(new[] { src })
-                .ShouldContain("[ThreadStatic]\n    public static unsafe int tl = 0;");
+                .ShouldContain("[ThreadStatic]\n    public static int tl = 0;");
         }
         finally { File.Delete(src); }
     }

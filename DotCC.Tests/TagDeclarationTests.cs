@@ -49,7 +49,7 @@ public sealed class TagDeclarationTests
             static const struct constdef { const char *name; int value; } conf_table[] = { { "a", 1 } };
             int main(void) { return conf_table[0].value; }
             """);
-        emitted.ShouldContain("unsafe struct constdef");
+        emitted.ShouldContain("struct constdef");
         emitted.ShouldContain("public static unsafe constdef* conf_table = Libc.GlobalArrayFrom<constdef>(new constdef[]{ new constdef { name = ");
     }
 
@@ -60,7 +60,7 @@ public sealed class TagDeclarationTests
             typedef struct { int x; } Foo, *FooPtr;
             int main(void) { Foo f = { 1 }; FooPtr p = &f; return p->x; }
             """);
-        emitted.ShouldContain("unsafe struct Foo");
+        emitted.ShouldContain("struct Foo");
         emitted.ShouldContain("Foo* p = &f;");
         emitted.ShouldNotContain("__Anon");
     }
@@ -74,9 +74,9 @@ public sealed class TagDeclarationTests
             typedef union StackValue { long val; struct { int lo; unsigned short delta; } tbc; } StackValue;
             int main(void) { StackValue sv; sv.tbc.lo = 7; return sv.tbc.lo; }
             """);
-        emitted.ShouldContain("unsafe struct StackValue");
+        emitted.ShouldContain("struct StackValue");
         emitted.ShouldContain(" tbc;");
-        emitted.ShouldContain("unsafe struct __Anon");
+        emitted.ShouldContain("struct __Anon");
     }
 
     [Fact]
@@ -133,7 +133,7 @@ public sealed class TagDeclarationTests
             struct outer { struct inner { int v; } in; union { int i; unsigned u; }; int n; };
             int main(void) { struct outer o; struct inner copy; o.in.v = 2; copy = o.in; o.i = 1; return copy.v + o.u; }
             """);
-        emitted.ShouldContain("unsafe struct inner");
+        emitted.ShouldContain("struct inner");
         emitted.ShouldContain("public inner @in;");
     }
 
@@ -147,7 +147,7 @@ public sealed class TagDeclarationTests
                 return first.next->key;
             }
             """);
-        emitted.ShouldContain("unsafe struct node");
+        emitted.ShouldContain("struct node");
         emitted.ShouldContain("node second = new node { key = 2, next = null }, first = new node { key = 1, next = &second };");
     }
 

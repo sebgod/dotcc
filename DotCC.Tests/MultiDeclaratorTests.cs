@@ -71,7 +71,7 @@ public sealed class MultiDeclaratorTests
             var emitted = Compiler.EmitCSharp(new[] { src });
             emitted.ShouldContain("public int a;");
             emitted.ShouldContain("public int b;");
-            emitted.ShouldContain("public int* p;");
+            emitted.ShouldContain("public unsafe int* p;");
             emitted.ShouldContain("public int q;");
         }
         finally { File.Delete(src); }

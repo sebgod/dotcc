@@ -1600,8 +1600,8 @@ public sealed partial class CompilerTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("LayoutKind.Sequential, Size = 4)]\nunsafe struct Vec\n{\n    public int len;\n}");  // FAM left out
-            emitted.ShouldContain("public fixed int cells[4];");   // sized
+            emitted.ShouldContain("LayoutKind.Sequential, Size = 4)]\nstruct Vec\n{\n    public int len;\n}");  // FAM left out
+            emitted.ShouldContain("public unsafe fixed int cells[4];");   // sized
         }
         finally { File.Delete(src); }
     }
@@ -1673,7 +1673,7 @@ public sealed partial class CompilerTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("unsafe struct __Anon0");                    // nested union type
+            emitted.ShouldContain("struct __Anon0");                    // nested union type
             emitted.ShouldContain("FieldOffset(0)]\n    public int i;");        // overlapping
             emitted.ShouldContain("FieldOffset(0)]\n    public double d;");
             emitted.ShouldContain("public __Anon0 __anon___Anon0;");           // synth field in Value
@@ -1726,7 +1726,7 @@ public sealed partial class CompilerTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("unsafe struct Point");
+            emitted.ShouldContain("struct Point");
             emitted.ShouldContain("new Point { x = 3, y = 4 }");
         }
         finally { File.Delete(src); }
@@ -1752,9 +1752,9 @@ public sealed partial class CompilerTests
             var emitted = Compiler.EmitCSharp(new[] { src });
             // Full struct decl is present (forward decl shouldn't have
             // duplicated it).
-            emitted.ShouldContain("unsafe struct Node");
+            emitted.ShouldContain("struct Node");
             emitted.ShouldContain("public int val");
-            emitted.ShouldContain("public Node* next");
+            emitted.ShouldContain("public unsafe Node* next");
         }
         finally { File.Delete(src); }
     }

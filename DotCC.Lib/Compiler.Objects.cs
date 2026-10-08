@@ -708,9 +708,9 @@ public static partial class Compiler
             line.StartsWith("    public static ", StringComparison.Ordinal) ? "    internal static " + line["    public static ".Length..] : line));
 
     /// <summary>A type record's declarations as <c>public</c>: every type the backend emits
-    /// starts a line with <c>unsafe struct</c> or <c>enum</c>, after any attributes.</summary>
+    /// starts a line with <c>struct</c> or <c>enum</c>, after any attributes.</summary>
     private static string PublicTypes(string typeText)
         => string.Join('\n', typeText.Split('\n').Select(line =>
-            line.StartsWith("unsafe struct ", StringComparison.Ordinal) || line.StartsWith("enum ", StringComparison.Ordinal)
+            line.StartsWith("struct ", StringComparison.Ordinal) || line.StartsWith("enum ", StringComparison.Ordinal)
                 ? "public " + line : line));
 }

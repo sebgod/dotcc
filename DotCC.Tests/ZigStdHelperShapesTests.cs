@@ -827,7 +827,7 @@ public sealed class ZigStdHelperShapesTests
         // Task #88 (std.bit_set.Array's shapes). `return extern struct` keeps the C layout; `null`/`undefined` are
         // variant names (the tag member escaped for C#); a `for … else return null` value loop returns from the function
         // on normal completion.
-        cs.ShouldContain("LayoutKind.Sequential)]\nunsafe struct Words__u64");
+        cs.ShouldContain("LayoutKind.Sequential)]\nstruct Words__u64");
         cs.ShouldContain("@null = 0,");
         cs.ShouldContain("goto __lv0_end;");
         // Two silent miscompiles: `~@as(u64, 0) >> 42` had sign-extended to all ones, and the labeled block's struct had
@@ -885,7 +885,7 @@ public sealed class ZigStdHelperShapesTests
         // Task #90 (std.crypto.sha2's shapes). `seed: Seed` (a `[4]u32` alias) is a comptime ARRAY argument read from a
         // const global; `rounds: comptime_int` is comptime without the keyword; `align(16)` fields parse; `inline for`
         // over a comptime array value binds each element as a literal; the `asm` sits in a prong whose condition folds false.
-        cs.ShouldContain("public fixed uint s[4];");
+        cs.ShouldContain("public unsafe fixed uint s[4];");
         cs.ShouldContain("stackalloc uint[]{ 3u, 5u, 7u, 11u };");
         cs.ShouldContain("Param p = new Param { a = 0UL, k = 1u };");
         cs.ShouldContain("_5_step(&m);");
@@ -1038,7 +1038,7 @@ public sealed class ZigStdHelperShapesTests
         // omitting a field is filled from the `.default_value_ptr` default (7), and a null default leaves none.
         cs.ShouldContain("new FieldStruct__u8_opt7 { b = 3, a = 7, c = 7 }");
         cs.ShouldContain("new FieldStruct__bool_optnull { a = true, b = false, c = true }");
-        cs.ShouldContain("unsafe struct Pair__u8_u16");
+        cs.ShouldContain("struct Pair__u8_u16");
         cs.ShouldContain("public ushort y;");
     }
 
@@ -1622,7 +1622,7 @@ public sealed class ZigStdHelperShapesTests
         // function along, so the alias stays live for the whole reification, not just the body walk; a value switch takes a
         // block prong that always returns (`error.Full => { return i; }`); and `(i * 37) % 101` over a `u16` is unsigned
         // `%`, whatever C#'s promotion makes of it. zig returns 118.
-        cs.ShouldContain("public Heap__u16_void_fnless* heap;");
+        cs.ShouldContain("public unsafe Heap__u16_void_fnless* heap;");
         cs.ShouldContain("Heap__u16_void_fnless_put(h, (ushort)(i * 37 % 101))");
         cs.ShouldContain("return i;");
     }
@@ -2069,8 +2069,8 @@ public sealed class ZigStdHelperShapesTests
         // Task #108 (std.MultiArrayList's `Slice` has `ptrs: [field_names.len][*]u8` over the instance's
         // `const field_names = …`): the instance's value consts register before its nested containers' bodies, so a nested
         // field's array extent can name one. zig returns 46.
-        cs.ShouldContain("public fixed ushort ptrs[3];");
-        cs.ShouldContain("public fixed byte bytes[4];");
+        cs.ShouldContain("public unsafe fixed ushort ptrs[3];");
+        cs.ShouldContain("public unsafe fixed byte bytes[4];");
     }
 
     [Fact]
@@ -3571,8 +3571,8 @@ public sealed class ZigStdHelperShapesTests
         // Task #108 (std.MultiArrayList's unannotated `const sizes = blk: { … break :blk .{ .bytes = …, … }; }`): zig
         // gives the literal an anonymous struct type of its fields; a runtime walk of its array field goes through
         // Unsafe.AsPointer, since a static's fixed buffer does not decay outside `fixed` (CS1666). zig returns 15.
-        cs.ShouldContain("unsafe struct Anon__0");
-        cs.ShouldContain("public fixed ulong bytes[2];");
+        cs.ShouldContain("struct Anon__0");
+        cs.ShouldContain("public unsafe fixed ulong bytes[2];");
         cs.ShouldContain("Unsafe.AsPointer(ref S__sizes__static.bytes[0])");
     }
 
@@ -3682,7 +3682,7 @@ public sealed class ZigStdHelperShapesTests
         // declared after both): the nested body registers on first demand, and the type const it names resolves on
         // demand too. zig returns 33.
         cs.ShouldContain("new Mal__Custom__u32_u16_0__Data { len = ");
-        cs.ShouldContain("unsafe struct Mal__Custom__u32_u16_1__Data");
+        cs.ShouldContain("struct Mal__Custom__u32_u16_1__Data");
     }
 
     [Fact]
@@ -4025,7 +4025,7 @@ public sealed class ZigStdHelperShapesTests
         // [Hasher.block_length]u8 }`); `@intCast` slice bounds lower at their `usize` result location; `p[lo..]` over a
         // many-item pointer is the pointer advanced by `lo`; `const t: [3]u8 = v.*;` copies through the pointer.
         // zig returns 42.
-        cs.ShouldContain("public fixed byte buf[4];");
+        cs.ShouldContain("public unsafe fixed byte buf[4];");
         cs.ShouldContain("byte* q = p + 2;");
         cs.ShouldContain("Slice<byte> tail = new Slice<byte>(bytes + (ulong)n, 5UL - (ulong)(ulong)n);");
         cs.ShouldContain("byte* t = stackalloc byte[3];");
@@ -4229,7 +4229,7 @@ public sealed class ZigStdHelperShapesTests
         // payload, `switch (ptr.size)` folds with its else-less `if … @compileError` prong, and
         // `@Pointer(.many, ptr.attrs, Element, null)` reifies the field type. zig returns 21.
         cs.ShouldContain("return new Rev____const_unsigned_char { ptr = slice.Ptr, index = slice.Len };");
-        cs.ShouldContain("public byte* ptr;");
+        cs.ShouldContain("public unsafe byte* ptr;");
     }
 
     [Fact]
@@ -4418,7 +4418,7 @@ public sealed class ZigStdHelperShapesTests
         // `@typeInfo(T).pointer.size` folds in a function body and in a reified struct's const; `*T` and `[*]T` lower to
         // one C pointer yet key distinct instances. zig returns 78.
         cs.ShouldContain("return (byte)(1 + 2 * 3 + 3 * 7 + kind__p_u16() + kind__p_u16_many() * 2);");
-        cs.ShouldContain("unsafe struct Kind__p_u8_many");
+        cs.ShouldContain("struct Kind__p_u8_many");
     }
 
     [Fact]
@@ -4506,7 +4506,7 @@ public sealed class ZigStdHelperShapesTests
         cs.ShouldContain("public ZigOptArray_byte_4 key;");
         cs.ShouldContain("ZigOptArray_ushort_3 local = null;");
         cs.ShouldContain("ushort* arr = local.Value;");
-        cs.ShouldContain("unsafe struct ZigOptArray_ushort_3\n{\n    public fixed ushort Buf[3];\n    public bool HasValue;");
+        cs.ShouldContain("struct ZigOptArray_ushort_3\n{\n    public unsafe fixed ushort Buf[3];\n    public bool HasValue;");
     }
 
     [Fact]
@@ -6266,7 +6266,7 @@ public sealed class ZigStdHelperShapesTests
             """);
         // Task #197: zig's `data: [0]u8` (the flexible-array idiom) had emitted `fixed byte data[0]`, which C# rejects
         // (CS1665). It has no storage, so it is left out and its literal init stores nothing. zig returns 42.
-        cs.ShouldContain("unsafe struct Header" + "\n{\n    public byte kind;\n    public byte len;\n}");
+        cs.ShouldContain("struct Header" + "\n{\n    public byte kind;\n    public byte len;\n}");
     }
 
     [Fact]
@@ -6287,7 +6287,7 @@ public sealed class ZigStdHelperShapesTests
         // Task #197 / GH #246: no storage of its own, its address is the byte after the fields before it (the layout
         // model's offset), and the struct keeps the model's size. zig returns 42.
         cs.ShouldContain("byte* p = (byte*)((byte*)&h + 1);");
-        cs.ShouldContain("LayoutKind.Sequential, Size = 1)]\nunsafe struct Header");
+        cs.ShouldContain("LayoutKind.Sequential, Size = 1)]\nstruct Header");
     }
 
     [Fact]

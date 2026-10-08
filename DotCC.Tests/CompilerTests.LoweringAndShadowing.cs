@@ -421,7 +421,7 @@ public sealed partial class CompilerTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("public static unsafe int g = 7;");
+            emitted.ShouldContain("public static int g = 7;");
         }
         finally { File.Delete(src); }
     }
@@ -657,7 +657,7 @@ public sealed partial class CompilerTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { a, b });
-            System.Text.RegularExpressions.Regex.Matches(emitted, @"unsafe struct P\b").Count
+            System.Text.RegularExpressions.Regex.Matches(emitted, @"struct P\b").Count
                 .ShouldBe(1);
         }
         finally { File.Delete(a); File.Delete(b); }

@@ -216,7 +216,7 @@ internal sealed partial class CSharpBackend
                     var count = elems.Count.ToString(System.Globalization.CultureInfo.InvariantCulture);
                     storage.Append($"    public static unsafe {fieldType} {g.Sym.TargetName} = {Stored(cg.ZeroedArrayText(pa.Element, count))};\n");
                     var at = nint ? $"({cg.Cs(g.Sym.Type)}){g.Sym.TargetName}" : g.Sym.TargetName;
-                    globals.Append($"    internal static readonly bool __fill_{g.Sym.TargetName} = {cg.ArrayFillText(pa, at)};\n");
+                    globals.Append($"    internal static readonly unsafe bool __fill_{g.Sym.TargetName} = {cg.ArrayFillText(pa, at)};\n");
                 }
                 else
                 {
@@ -232,13 +232,15 @@ internal sealed partial class CSharpBackend
             // initializer, twice) overflowed a 64 MB stack.
             if (g.Init is StructInit si && !g.Sym.IsThreadLocal && !nint)
             {
-                globals.Append($"    public static unsafe {fieldType} {g.Sym.TargetName};\n");
+                globals.Append($"    public static {UnsafeFor(g.Sym.Type)}{fieldType} {g.Sym.TargetName};\n");
                 cg.InPlaceStructInit(g.Sym.TargetName, fieldType, si, globals);
                 return;
             }
             if (g.Sym.IsThreadLocal) { globals.Append("    [ThreadStatic]\n"); }
             var init = initText is null ? "" : " = " + initText;
-            globals.Append($"    public static unsafe {fieldType} {g.Sym.TargetName}{init};\n");
+            // `unsafe` only on a field whose type or initializer needs it (`static int LIMIT = 5;` has none).
+            var modifier = nint || g.Init is { } gi && !cg.IsSafeExpr(gi) ? "unsafe " : UnsafeFor(g.Sym.Type);
+            globals.Append($"    public static {modifier}{fieldType} {g.Sym.TargetName}{init};\n");
         }
 
         // struct/union/enum type declarations → the top-level type-decls section.
@@ -284,7 +286,7 @@ internal sealed partial class CSharpBackend
         var definedTypes = new HashSet<string>(unit.Types.Select(t => t.Name).Concat(unit.Enums.Select(e => e.Name)), StringComparer.Ordinal);
         foreach (var tag in unit.DeclaredTags.Where(t => !definedTypes.Contains(t) && !unit.RuntimeTags.Contains(t)).Order(StringComparer.Ordinal))
         {
-            var text = $"unsafe struct {tag}\n{{\n}}\n\n";
+            var text = $"struct {tag}\n{{\n}}\n\n";
             structs.Append(text);
             records.Add(new LinkRecord(LinkRecordKind.OpaqueType, tag, false, text));
         }
@@ -336,7 +338,7 @@ internal sealed partial class CSharpBackend
             // Zig `packed struct` — byte-pack with no inter-field padding (V1: Pack=1, not bit-packed).
             sb.Append($"[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential, Pack = 1{size})]\n");
         }
-        sb.Append("unsafe struct ").Append(t.Name).Append("\n{\n");
+        sb.Append("struct ").Append(t.Name).Append("\n{\n");
         var bitUnitCounter = 0;
         for (var fi = 0; fi < t.Fields.Count; )
         {
@@ -376,19 +378,19 @@ internal sealed partial class CSharpBackend
                 var fid = DotCC.EmitHelpers.Id(f.Name);
                 if (IsFixedBufferType(Cs(flat)))
                 {
-                    sb.Append("    public fixed ").Append(Cs(flat)).Append(' ').Append(fid).Append('[').Append(count).Append("];\n");
+                    sb.Append("    public unsafe fixed ").Append(Cs(flat)).Append(' ').Append(fid).Append('[').Append(count).Append("];\n");
                 }
                 else
                 {
                     var wrap = $"__IA_{t.Name}_{fid}";
-                    wrappers.Append("[System.Runtime.CompilerServices.InlineArray(").Append(count).Append(")]\nunsafe struct ")
-                        .Append(wrap).Append("\n{\n    public ").Append(Cs(flat)).Append(" _e;\n}\n\n");
+                    wrappers.Append("[System.Runtime.CompilerServices.InlineArray(").Append(count).Append(")]\nstruct ")
+                        .Append(wrap).Append("\n{\n    public ").Append(UnsafeFor(flat)).Append(Cs(flat)).Append(" _e;\n}\n\n");
                     sb.Append("    public ").Append(wrap).Append(' ').Append(fid).Append(";\n");
                 }
                 fi++;
                 continue;
             }
-            sb.Append("    public ").Append(Cs(f.Type)).Append(' ').Append(DotCC.EmitHelpers.Id(f.Name)).Append(";\n");
+            sb.Append("    public ").Append(UnsafeFor(f.Type)).Append(Cs(f.Type)).Append(' ').Append(DotCC.EmitHelpers.Id(f.Name)).Append(";\n");
             fi++;
         }
         if (t.Layout == AggregateLayout.Packed && !t.IsUnion)
@@ -449,7 +451,7 @@ internal sealed partial class CSharpBackend
             var dst = IsFixedBufferType(elemCs) ? $"__v.{fid}[__i]" : $"(({elemCs}*)&__v.{fid})[__i]";
             body.Append($"        for (var __i = 0; __i < {fid}.Length; __i++) {{ {dst} = {src}; }}\n");
         }
-        return $"\n    public static {t.Name} {ArrayInitHelper}({t.Name} __v, {string.Join(", ", ps)})\n    {{\n{body}        return __v;\n    }}\n";
+        return $"\n    public static unsafe {t.Name} {ArrayInitHelper}({t.Name} __v, {string.Join(", ", ps)})\n    {{\n{body}        return __v;\n    }}\n";
     }
 
     /// <summary>Render a C enum as a real C# <c>enum Name : underlying { … }</c>.

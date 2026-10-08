@@ -360,9 +360,9 @@ public sealed class ZigFileStructTests
         // Task #194 (std.Deque's test-only `FuzzAllocator` field `*std.testing.Smith` had pulled std.Build, os.windows
         // and dwarf into the program, some of which cannot build): an imported module's aggregate is emitted when a
         // function or global names it, or an emitted aggregate's field does; a root aggregate always is. zig returns 42.
-        cs.ShouldContain("unsafe struct lib__Outer");
-        cs.ShouldContain("unsafe struct lib__Inner");
-        cs.ShouldContain("unsafe struct RootOnly");
+        cs.ShouldContain("struct lib__Outer");
+        cs.ShouldContain("struct lib__Inner");
+        cs.ShouldContain("struct RootOnly");
         cs.ShouldNotContain("lib__Unused");
     }
 }

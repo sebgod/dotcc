@@ -177,7 +177,7 @@ public sealed class RuntimeOwnedAggregateTests
         finally { File.Delete(path); }
         ir.Types.Single(t => t.Name == "tm").IsRuntimeOwned.ShouldBeFalse();
 
-        Regex.IsMatch(EmitC(source), @"(?m)^[a-z][a-z ]*\bstruct tm\b").ShouldBeTrue();
+        Regex.IsMatch(EmitC(source), @"(?m)^(?:[a-z]+ )*struct tm\b").ShouldBeTrue();
     }
 
     [Fact]

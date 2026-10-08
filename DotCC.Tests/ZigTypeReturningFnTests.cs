@@ -210,7 +210,7 @@ public sealed class ZigTypeReturningFnTests
             }
             pub fn main() u8 { const o: Outer(u8) = .{ .v = 40 }; return o.v + o.i.z; }
             """);
-        cs.ShouldContain("unsafe struct Outer__u8__Inner");
+        cs.ShouldContain("struct Outer__u8__Inner");
         cs.ShouldContain("public Outer__u8__Inner i;");
     }
 

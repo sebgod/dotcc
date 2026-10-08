@@ -1449,14 +1449,14 @@ public sealed class ZigFrontendTests
     [Fact]
     public void Lowers_struct_decl_field_access_and_anonymous_literal()
     {
-        // `const Point = struct { x: i32, y: i32 };` → a real C# `unsafe struct Point` with
+        // `const Point = struct { x: i32, y: i32 };` → a real C# `struct Point` with
         // typed fields (the SAME shared aggregate machinery the C frontend uses). A typed
         // `const p: Point = .{ .x = 40, .y = 2 };` is Zig's result-located literal → a C#
         // object initializer `new Point { x = 40, y = 2 }`; `p.x` reads the field by type.
         var cs = EmitZig(
             "const Point = struct { x: i32, y: i32 };\n" +
             "pub fn main() u8 { const p: Point = .{ .x = 40, .y = 2 }; return @as(u8, p.x + p.y); }\n");
-        cs.ShouldContain("unsafe struct Point");   // struct → C# struct (shared StructText)
+        cs.ShouldContain("struct Point");   // struct → C# struct (shared StructText)
         cs.ShouldContain("public int x;");          // i32 field
         cs.ShouldContain("new Point {");            // `.{…}` → object initializer
         cs.ShouldContain("x = 40");                 // designated field init
@@ -1481,7 +1481,7 @@ public sealed class ZigFrontendTests
             "    _ = n;\n" +
             "    return @intCast(p.x + @as(i32, @intFromEnum(k)));\n" +
             "}\n");
-        cs.ShouldContain("unsafe struct Point");   // pub struct still emits the struct
+        cs.ShouldContain("struct Point");   // pub struct still emits the struct
         cs.ShouldContain("enum Kind");             // pub enum → real C# enum
         cs.ShouldContain("Num");                   // pub union emitted
     }
@@ -1523,7 +1523,7 @@ public sealed class ZigFrontendTests
     public void Lowers_struct_field_access_through_a_pointer_with_arrow()
     {
         // Zig has no `->`: `p.x` on a `*Point` auto-derefs. The shared `Member` node carries
-        // an arrow flag, so a pointer base emits C#'s `p->x` (valid on an unsafe struct ptr).
+        // an arrow flag, so a pointer base emits C#'s `p->x` (valid on a struct ptr).
         var cs = EmitZig(
             "const Point = struct { x: i32, y: i32 };\n" +
             "fn getx(p: *Point) i32 { return p.x; }\n" +
@@ -1867,7 +1867,7 @@ public sealed class ZigFrontendTests
             "    return @intCast(p.b);\n" +
             "}\n");
         cs.ShouldContain("LayoutKind.Sequential)]");   // explicit C-ABI layout
-        cs.ShouldContain("unsafe struct P");
+        cs.ShouldContain("struct P");
         cs.ShouldNotContain("Pack = 1");               // extern is NOT packed
     }
 
@@ -1883,7 +1883,7 @@ public sealed class ZigFrontendTests
             "    return @intCast(@as(u32, p.a) + p.b + p.c + p.d);\n" +
             "}\n");
         cs.ShouldContain("LayoutKind.Sequential, Pack = 1)]");
-        cs.ShouldContain("unsafe struct P");
+        cs.ShouldContain("struct P");
     }
 
     [Fact]
@@ -1900,7 +1900,7 @@ public sealed class ZigFrontendTests
             "    return @intCast(a.small);\n" +
             "}\n");
         cs.ShouldContain("LayoutKind.Explicit)]");      // overlapping storage
-        cs.ShouldContain("unsafe struct Box");
+        cs.ShouldContain("struct Box");
         cs.ShouldContain("new Box { small = 10 }");     // ordinary struct construction
         cs.ShouldNotContain("__tag");                   // no discriminant
         cs.ShouldNotContain("Box_Payload");             // no nested payload union (it IS the union)
@@ -2999,8 +2999,8 @@ public sealed class ZigFrontendTests
             "const PI: f64 = 3.14;\n" +
             "const MAX = 100;\n" +
             "pub fn main() u8 { return 0; }\n");
-        cs.ShouldContain("public static unsafe double PI = 3.14");
-        cs.ShouldContain("public static unsafe int MAX = 100");
+        cs.ShouldContain("public static double PI = 3.14");
+        cs.ShouldContain("public static int MAX = 100");
     }
 
     [Fact]
@@ -3012,7 +3012,7 @@ public sealed class ZigFrontendTests
             "var counter: u8 = 0;\n" +
             "fn bump() void { counter += 1; }\n" +
             "pub fn main() u8 { bump(); return counter; }\n");
-        cs.ShouldContain("public static unsafe byte counter = 0");
+        cs.ShouldContain("public static byte counter = 0");
         cs.ShouldContain("counter +=");
     }
 
@@ -3026,7 +3026,7 @@ public sealed class ZigFrontendTests
             "const A: u8 = 20;\n" +
             "const B: u8 = A + 22;\n" +
             "pub fn main() u8 { return B; }\n");
-        cs.ShouldContain("public static unsafe byte A = 20");
+        cs.ShouldContain("public static byte A = 20");
         cs.ShouldContain("byte B = ");
         cs.ShouldContain("A + 22");
     }
@@ -5253,7 +5253,7 @@ public sealed class ZigFrontendTests
             "    fn make() B { return .{ .items = undefined, .len = 0 }; }\n" +
             "};\n" +
             "pub fn main() u8 { const b = B.make(); return @intCast(b.len + 42); }\n");
-        cs.ShouldContain("public fixed byte items[4];");   // the field is still inline storage
+        cs.ShouldContain("public unsafe fixed byte items[4];");   // the field is still inline storage
         cs.ShouldContain("new B { len = 0 }");             // …and is absent from the initializer
         // Checked on the user portion only: the spliced runtime may use `items` as a local.
         var runtimeAt = cs.IndexOf("// ---- Embedded DotCC.Libc runtime", StringComparison.Ordinal);

@@ -48,7 +48,7 @@ public sealed class ZigContainerScopeTests
                 return m.head.sum();
             }
             """);
-        cs.ShouldContain("unsafe struct Map__u16_u8__Entry");
+        cs.ShouldContain("struct Map__u16_u8__Entry");
         cs.ShouldContain("public ushort key;");
         cs.ShouldContain("byte Map__u16_u8__Entry_sum(Map__u16_u8__Entry e)");
         cs.ShouldContain("public Map__u16_u8__Entry head;");

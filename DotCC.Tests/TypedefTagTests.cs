@@ -39,7 +39,7 @@ public sealed class TypedefTagTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("unsafe struct State");
+            emitted.ShouldContain("struct State");
             emitted.ShouldContain("int peek(");
         }
         finally { File.Delete(src); }
@@ -60,7 +60,7 @@ public sealed class TypedefTagTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("unsafe struct Node");
+            emitted.ShouldContain("struct Node");
         }
         finally { File.Delete(src); }
     }

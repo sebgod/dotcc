@@ -62,13 +62,13 @@ public sealed class ManagedLibraryLinkTests : IDisposable
     {
         var (program, _) = Compiler.LinkAssembly(Objects(("a.c", LibA), ("b.c", LibB)), "mylib");
         program.ShouldContain("public static class DotCcLib_mylib_Program\n");
-        program.ShouldContain("public static unsafe class DotCcLib_mylib_Globals\n");
+        program.ShouldContain("public static class DotCcLib_mylib_Globals\n");
         program.ShouldContain("public static int add(int x)");
         program.ShouldContain("public static unsafe int* counter_addr()");
         Regex.IsMatch(program, @"internal static int bump__a_[0-9a-f]{6}\(int x\)").ShouldBeTrue();
-        program.ShouldContain("    public static unsafe int counter = 0;");
-        Regex.IsMatch(program, @"    internal static unsafe int hidden__b_[0-9a-f]{6} = 7;").ShouldBeTrue();
-        program.ShouldContain("public unsafe struct point\n");
+        program.ShouldContain("    public static int counter = 0;");
+        Regex.IsMatch(program, @"    internal static int hidden__b_[0-9a-f]{6} = 7;").ShouldBeTrue();
+        program.ShouldContain("public struct point\n");
         program.ShouldContain("public enum color : int\n");
     }
 
@@ -97,7 +97,7 @@ public sealed class ManagedLibraryLinkTests : IDisposable
         // The unit-local `bump` and `hidden` are not the library's to export.
         defs.ShouldBe(new[] { "add", "area", "counter", "counter_addr", "get_hidden" });
         // Types keep each object's own text, so a program's objects compare against it.
-        manifest.ShouldContain("//!!dotcc-obj type:point\nunsafe struct point\n");
+        manifest.ShouldContain("//!!dotcc-obj type:point\nstruct point\n");
         manifest.ShouldContain("//!!dotcc-obj type:color\nenum color : int\n");
     }
 
@@ -106,8 +106,8 @@ public sealed class ManagedLibraryLinkTests : IDisposable
     {
         var (program, manifest) = Compiler.LinkAssembly(
             Objects(("a.c", "struct opaque; int use(struct opaque *p) { return p != 0; }")), "mylib");
-        program.ShouldContain("public unsafe struct opaque\n");
-        manifest.ShouldContain("//!!dotcc-obj opaque:opaque\nunsafe struct opaque\n");
+        program.ShouldContain("public struct opaque\n");
+        manifest.ShouldContain("//!!dotcc-obj opaque:opaque\nstruct opaque\n");
     }
 
     [Fact]
@@ -115,7 +115,7 @@ public sealed class ManagedLibraryLinkTests : IDisposable
     {
         var (program, _) = Compiler.LinkAssembly(Objects(("a.c", LibA)), "python3.13");
         program.ShouldContain("public static class DotCcLib_python3_13_Program\n");
-        program.ShouldContain("public static unsafe class DotCcLib_python3_13_Globals\n");
+        program.ShouldContain("public static class DotCcLib_python3_13_Globals\n");
     }
 
     [Fact]
@@ -254,7 +254,7 @@ public sealed class ManagedLibraryLinkTests : IDisposable
         program.ShouldContain("using static DotCcLib_mylib_Globals;");
         program.ShouldContain("using static DotCcLib_mylib_Program;");
         // The library's own type, runtime and names: none of them a second time.
-        program.ShouldNotContain("unsafe struct point");
+        program.ShouldNotContain("struct point");
         program.ShouldNotContain("partial class Libc");
         program.ShouldNotContain("static unsafe int add(");
         program.ShouldContain("static unsafe int main()");

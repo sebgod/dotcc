@@ -40,7 +40,7 @@ public sealed class StaticStructInitTests
             // Lowered to a static field, mangled by function, built in place by a
             // helper that runs in initialization order; the body use rewrites to the
             // mangled name.
-            emitted.ShouldContain("public static unsafe P p__s0;");
+            emitted.ShouldContain("public static P p__s0;");
             emitted.ShouldContain("var __o = (P*)System.Runtime.CompilerServices.Unsafe.AsPointer(ref p__s0);\n        __o->x = 10;\n        __o->y = 20;\n");
             emitted.ShouldContain("internal static readonly bool p__s0__filled = p__s0__init();");
             emitted.ShouldContain("p__s0.x");
@@ -59,7 +59,7 @@ public sealed class StaticStructInitTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("public static unsafe P origin;");
+            emitted.ShouldContain("public static P origin;");
             emitted.ShouldContain("__o->x = 3;\n        __o->y = 4;\n");
         }
         finally { File.Delete(src); }
