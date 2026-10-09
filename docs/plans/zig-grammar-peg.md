@@ -1,6 +1,7 @@
 # zig-grammar-peg: control flow as expressions, the way zig's grammar has it
 
-**Status:** P0 done (this plan and the spike behind it, 2026-10-10). P1 next.
+**Status:** P0 done (this plan and the spike behind it, 2026-10-10). **P1a done** (the open/closed cascade and the
+`if` expression as an open primary; probe 422 to 433). P1b (`return` / `break` / `continue` as open primaries) next.
 
 ## Why
 
@@ -88,3 +89,14 @@ expression-statement path parses it as an `if` expression for free.
   costing.
 
 Each phase is one PR (P1 may be two: cascade plus `if`, then the jumps), merged before the next starts.
+
+**P1a as landed.** 49 rules, 10 symbols (#198 to #207: the eight open twins, `OpenPrimary`, `IfArm`). Every
+`if` arm is an `IfArm` (a value or a container `TypeArm`), so the type-arm record variants folded into `ifExpr` /
+`ifExprCapture` with their slots unchanged; `IfOperand`, `ConcatIf`, `cmpEqIf`/`cmpNeIf`, `comptimeIfExpr` and the
+`orelse`/`catch` + IfExpr RhsExpr and FieldValue rules are gone (their cases became ordinary nodes with an `IfExpr`
+operand: `concat` over an `if` keeps its distributing lowering, `comptime if` is `preComptime`). No conflicts; 11 new
+precedence decisions, each read: ten at statement start, where the statement form (a block, `return` arm, loop,
+labeled block or `switch` as an `if` body before `else`) wins as before, and one shifting `:` after an identifier
+into a labeled block at the end of an `if` arm, which is zig's reading (only `s[a.. if (c) b else n :0]`, an `if`
+ending in a bare name as a sentinel slice's end bound, parses differently). Parse-shape pins in `ZigGrammarTests`,
+oracle row `if_expression_as_operand`.
