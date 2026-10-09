@@ -116,6 +116,8 @@ internal sealed partial class ZigLowering
             // (the DeclMods arg is ignored). RhsExpr is one slot right of the Type (DeclMods between).
             case Zig.ConstDeclTypedMods d: return DeclOrComptime(d.Arg1, d.Arg3, d.Arg6);
             case Zig.VarDeclTypedMods d:   return DeclOf(d.Arg1, d.Arg3, d.Arg6);
+            case Zig.ConstDeclMods d:      return DeclOrComptime(d.Arg1, null, d.Arg4);  // const IDENT DeclMods = RhsExpr ;
+            case Zig.VarDeclMods d:        return DeclOf(d.Arg1, null, d.Arg4);
             // `const a, const b = e;` (Milestone G) — destructure a tuple value: single-eval the
             // RHS, then bind each name to its positional element. See LowerDestructure.
             case Zig.StmtDestructure sd: return LowerDestructure(sd);

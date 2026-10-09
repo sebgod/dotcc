@@ -156,6 +156,11 @@ internal sealed partial class ZigLowering
                 // A lazy module's top-level value const (`use_vectors_for_comparison` in mem.zig).
                 if (LowerLazyValueConst(name) is { } lazyConst) { return lazyConst; }
                 RaiseIfSkippedDecl(name);   // declared here, but the declaration did not parse
+                if (_externVars.Contains(name))
+                {
+                    throw new IrUnsupportedException(
+                        $"zig: `{name}` is an `extern var`, data a linked library defines; dotcc binds extern functions, not extern data");
+                }
                 // `unreachable` (a keyword; an identifier in this grammar) as a statement or a statement
                 // prong (`0 => unreachable,` in std.Io.Writer.print): zig's safe builds panic "reached
                 // unreachable code", and C23's `unreachable()` already lowers to that loud throw.
