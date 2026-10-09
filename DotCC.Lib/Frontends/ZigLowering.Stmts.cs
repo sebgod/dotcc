@@ -196,7 +196,10 @@ internal sealed partial class ZigLowering
             case Zig.StmtIfReturnElse f:           return LowerIfStmt(f.Arg2, f.Arg4, f.Arg6);
             case Zig.StmtIfCaptureReturnElse f:    return LowerIfCapture(f.Arg2, Tok(f.Arg5), f.Arg7, f.Arg9, null);
             case Zig.StmtIfCaptureReturnErrElse f: return LowerIfCapture(f.Arg2, Tok(f.Arg5), f.Arg7, f.Arg12, Tok(f.Arg10));
-            case Zig.ReturnArm r:                  return Hoisted(() => LowerReturn(r.Arg1));
+            // The jump body of a statement `if` / prong (`if (c) return v else …`, `=> if (x) |v| break`), zig-grammar-peg P1b.
+            case Zig.ReturnExpr or Zig.FbBreak or Zig.FbBreakLabel or Zig.FbBreakLabelValue
+              or Zig.FbContinue or Zig.FbContinueLabel or Zig.FbContinueLabelValue:
+                return LowerExitArm(stmt);
             case Zig.StmtIfAssignElse f:           return LowerIfStmt(f.Arg2, f.Arg4, f.Arg6);
             case Zig.AssignArm a:                  return LowerAssignOpStmt(a.Arg0, a.Arg1, a.Arg2);
             case Zig.StmtWhile w:       return new While(LowerExpr(w.Arg2), LowerStmt(w.Arg4));

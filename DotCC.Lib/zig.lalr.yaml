@@ -253,11 +253,9 @@ symbols:
                    #     cascade (CurlySuffix keeps bare `Type`), so an inline named struct stays a TYPE
                    #     position and can't collide with the value-position `const X = struct {…}`
                    #     (structDecl). Road-to-zig-std S9 — the `:`-in-307 residual.
-  - FallbackArm    # 166 a STATEMENT-shaped `catch`/`orelse` fallback — `break [:l [v]]`, `continue [:l]`,
-                   #     a `{ … }` block, or a `switch` (road-to-zig-std: ~1,000 std sites). Every form starts
-                   #     with a token outside FIRST(BoolOr), so it never competes with a value fallback.
-  - CaptureArm     # 167 the fallback after `catch |e|` — a FallbackArm, or `return [v]` (the no-capture
-                   #     `catch return` keeps its own productions, so `return` lives only here)
+  - FallbackArm    # 166 a STATEMENT-shaped `catch`/`orelse` fallback — a `{ … }` block, a `switch` or a labeled
+                   #     block (road-to-zig-std: ~1,000 std sites); the jumps are JumpExprs since zig-grammar-peg P1b
+  - CaptureArm     # 167 the fallback after `catch |e|`: a FallbackArm (a `return` there is a JumpExpr, P1b)
   - Arg            # 168 one call ARGUMENT: an Expr, or `{}` the void value (std passes it 108 times, the
                    #     `context: void` of std.sort). Kept out of Expr so `{` never competes with a Block.
   - PtrAlign       # 169 `align(E)` inside a pointer / slice type (`*align(4) const T`, `[]align(a) T`):
@@ -273,9 +271,7 @@ symbols:
                    #     No RhsExpr starts with `enum` / `struct`, so after `if ( Expr )` it is a clean shift.
   - TestBlock      # 173 a `test "name"/ident/(anon) { … }` block as a CONTAINER member (std.math.Order's
                    #     `test invert { … }` inside the enum body), parsed and DROPPED like the top-level form.
-  - ReturnArm      # 174 `return Expr` as the THEN arm of an `if` statement with an `else` (zig's then-arm is an
-                   #     expression, so no `;`): `if (c) return 1 else return 2;`, std.meta.eql's
-                   #     `if (b) |b_p| return eql(a_p, b_p) else |_| return false;`.
+  - ReturnArm      # 174 (retired by zig-grammar-peg P1b: those `if` statements take a JumpExpr then-arm)
   - FieldValue     # 175 the value of a named field init: an Expr, or the void value `{}` (`.{ .none = {} }`,
                    #     std.fmt.Parser.specifier's `return .{ .none = {} };`).
   - 'asm'          # 176 inline assembly, PARSED ONLY: std guards it behind comptime target checks (std.crypto.sha2's
@@ -296,7 +292,7 @@ symbols:
   - VoidElem       # 190 `{}`, zig's void value, as a positional list element (`[3]void{ {}, {}, {} }`, task #114)
   - ConcatIf       # 191 (retired by zig-grammar-peg P1: `a ++ if (c) x else y` is the ordinary `concat` with an IfExpr operand)
   - 'noinline'     # 192 `noinline fn`: an optimizer hint on a function (std.hash.XxHash3's `noinline fn hashLong`, task #177)
-  - JumpArm        # 193 a jump as an arm of a value `if`: `break [:l [v]]` / `continue [:l]` (GH #283)
+  - JumpArm        # 193 (retired by zig-grammar-peg P1b: a jump is a JumpExpr, an operand anywhere)
   - ContainerDeclaration # 194 a member every container body shares (a method, const, nested container, comptime or test block)
   - File         # 195 a whole source file: its declarations, possibly none
   - ContainerLayout # 196 `extern` / `packed` before an inline `struct`/`union` field type
@@ -311,6 +307,7 @@ symbols:
   - PrefixO      # 205 open prefix: prefix operators over an open primary
   - OpenPrimary  # 206 a primary that ends in an expression (`if … else E`), so it takes everything to its right
   - IfArm        # 207 an `if` expression's arm: a value (RhsExpr) or a container type (TypeArm)
+  - JumpExpr     # 208 `return [v]`, `break [:l [v]]`, `continue [:l [v]]` as an expression (zig-grammar-peg P1b)
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -555,16 +552,15 @@ productions:
       - { lhs: Stmt, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', Stmt, 'else', '|', IDENT, '|', Stmt], action: stmtIfCaptureErrElse }
       # A `return Expr` then-arm with no `;` of its own, ended by the `else` (the `;` ends the else arm).
       # After `return Expr`, `else` selects the arm and `;` the ordinary return statement: a 1-token split.
-      - { lhs: ReturnArm, rhs: ['return', Expr], action: returnArm }
-      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', ReturnArm, 'else', Stmt], action: stmtIfReturnElse }
+      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', JumpExpr, 'else', Stmt], action: stmtIfReturnElse }
       # An assignment then-arm with no `;` of its own, ended by the `else` (std.fmt.float.formatScientific's
       # `if (olength > 1) index += olength - 1 else index -= 1;`, task #96). It shares its whole prefix with the
       # assignment STATEMENT (`Expr op= RhsExpr ';'`), so the decision is the 1-token split after the value: `;`
       # ends the statement, `else` the arm. Both go through AssignOp, so the operator reduces the same way in each.
       - { lhs: AssignArm, rhs: [Expr, AssignOp, RhsExpr], action: assignArm }
       - { lhs: Stmt, rhs: ['if', '(', Expr, ')', AssignArm, 'else', Stmt], action: stmtIfAssignElse }
-      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', ReturnArm, 'else', Stmt], action: stmtIfCaptureReturnElse }
-      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', ReturnArm, 'else', '|', IDENT, '|', Stmt], action: stmtIfCaptureReturnErrElse }
+      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', JumpExpr, 'else', Stmt], action: stmtIfCaptureReturnElse }
+      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', JumpExpr, 'else', '|', IDENT, '|', Stmt], action: stmtIfCaptureReturnErrElse }
 
       # Payload-capturing `while` — mirrors the if-capture family, in the same rightmost/dangling-else
       # group (the `else` shift-reduce is resolved identically). `while (opt) |x| body` binds an
@@ -841,53 +837,34 @@ productions:
   # `a orelse b` / `a catch b` — zig's precedence: the BITWISE level, with `&` `^` `|` (`BitwiseOp <- & / ^ / | /
   # orelse / catch Payload?`), tighter than `==`, `and` and `or`, left-assoc. So `x orelse false or y` is
   # `(x orelse false) or y` and `opt orelse 0 == 3` is `(opt orelse 0) == 3`; these rules had sat BELOW `or`,
-  # which compiled both of those as a different program. The value RHS is BitShift, as `&`'s is. The
-  # control-flow forms below (`orelse return v`, `catch |e| …`, a jump or block arm) take the same Bitwise LEFT
-  # operand but stay OrElse-level results: their greedy right side (`return v` takes a whole expression, as in
-  # zig) then ends only where an expression ends. As Bitwise results, a comparison inside `return a == b` would
-  # have been followed by every operator that can follow a Bitwise, and the merged LALR states resolved
-  # `a == b & c` as `(a == b) & c`. After `x orelse` both kinds are shifts; the next token picks one.
-  # `a catch |e| b` (Milestone N, part 3) binds the error to `e` for the
-  # fallback `b` (after `'catch'`, a `'|'` lookahead selects the capture form — no value expression
-  # starts with `'|'`, so conflict-free). The CONTROL-FLOW fallback forms `orelse return [v]` /
-  # `catch return [v]` (Milestone N, part 6) make `return` usable as a noreturn RHS: after the
-  # `'orelse'`/`'catch'`, a `'return'` keyword lookahead selects them (it's not in FIRST(BoolOr)).
-  # Each has a value (`return v`) and a void (`return`) form; the value-vs-void split is the same
-  # lookahead S/R as the statement-level `return Expr;` / `return ;` (FOLLOW(OrElse) is disjoint from
-  # FIRST(BoolOr)) — conflict-free. The lowering (structural early-return) lives in ZigLowering, at a
-  # decl-initializer or expression-statement position.
+  # which compiled both of those as a different program. The value RHS is BitShift, as `&`'s is. A jump fallback
+  # (`orelse return v`) is the open twin BitwiseO's `orElse`, its right operand an open JumpExpr. Before the open
+  # cascade it had to be an OrElse-level result: as a plain Bitwise one, `return a == b` would have been followed by
+  # every operator that can follow a Bitwise, and the merged LALR states resolved `a == b & c` as `(a == b) & c`.
+  # BitwiseO is only ever the rightmost operand, so nothing at an outer level follows it (pinned in ZigGrammarTests).
+  # The statement-shaped arms (a block, a `switch`, a labeled block) stay OrElse-level until P3.
+  # `a catch |e| b` (Milestone N, part 3) binds the error to `e` for the fallback `b` (after `'catch'`, a `'|'`
+  # lookahead selects the capture form; no value expression starts with `'|'`). A control-flow fallback (`orelse return
+  # [v]`, `catch break`, `catch |e| return switch (e) {…}`) is the same `orElse` / `catchOp` / `catchCapture` with a
+  # noreturn right operand since zig-grammar-peg P1b made the jumps expressions; lowering recognizes it
+  # (IsControlFlowFallback). Only the statement-shaped arms that are not expressions yet (a block, a `switch`, a labeled
+  # block: P3) keep the FallbackArm forms below.
   - derivation: leftmost
     rules:
       - { lhs: Bitwise, rhs: [Bitwise, 'orelse', BitShift], action: orElse }
       - { lhs: Bitwise, rhs: [Bitwise, 'catch', BitShift],  action: catchOp }
       - { lhs: Bitwise, rhs: [Bitwise, 'catch', '|', IDENT, '|', BitShift], action: catchCapture }
-      - { lhs: OrElse, rhs: [Bitwise, 'orelse', 'return', BoolOr], action: orElseReturn }
-      - { lhs: OrElse, rhs: [Bitwise, 'catch', 'return', BoolOr],  action: catchReturn }
-      # STATEMENT-shaped fallbacks (road-to-zig-std — ~1,000 sites in the pinned std: `catch |err| switch
-      # (err) {…}` alone is 498, `catch {…}` 150, `orelse {…}` 105, `orelse break` 102). The fallback runs
-      # only on the error / none path: a `break`/`continue` (optionally labeled, a labeled break optionally
-      # carrying a value), a braced block, or a `switch` whose prongs yield the payload type or jump. Each
-      # arm opens with `break`/`continue`/`{`/`switch`/`return`, none in FIRST(BoolOr), so the arm-vs-value
-      # choice is one token of lookahead — the same split the `return` forms above already use.
+      # STATEMENT-shaped fallbacks (road-to-zig-std: `catch |err| switch (err) {…}` alone is 498 sites in the pinned std,
+      # `catch {…}` 150, `orelse {…}` 105): a braced block, a `switch` whose prongs yield the payload type or jump, or a
+      # labeled block. Each opens with `{` / `switch` / a label, none in FIRST(BoolOr), so it is one token of lookahead.
       - { lhs: OrElse, rhs: [Bitwise, 'orelse', FallbackArm],                  action: orElseArm }
       - { lhs: OrElse, rhs: [Bitwise, 'catch', FallbackArm],                   action: catchArm }
       - { lhs: OrElse, rhs: [Bitwise, 'catch', '|', IDENT, '|', CaptureArm],   action: catchCaptureArm }
-      # `catch |e| return if (e == error.Big) 7 else 8` (task #146): a value `if` as the returned value. `if` is not in
-      # FIRST(BoolOr), so one token after `return` picks it. The arms are BoolOr, not IfExpr's greedy RhsExpr: an RhsExpr
-      # arm would take a following `catch` into itself, and resolving that collapsed a shared state so that NO
-      # `x catch …` parsed any more. A `catch` / `orelse` inside an arm needs parentheses here.
-      - { lhs: CaptureArm,  rhs: ['return', 'if', '(', Expr, ')', BoolOr, 'else', BoolOr], action: fbReturnIf }
       - { lhs: OrElse, rhs: [BoolOr] }
 
-  # `rightmost` so a `:` after `break`/`continue` SHIFTS into the label (the dangling-else device):
-  # `:` is in FOLLOW(OrElse) only through a sentinel slice `s[a..b :0]`, where a bare `break` end
-  # operand is meaningless — so `x orelse break :outer` always means the label, exactly as in zig.
+  # The statement-shaped fallback arms. `rightmost` so the `:` after a labeled block's label shifts.
   - derivation: rightmost
     rules:
-      - { lhs: FallbackArm, rhs: ['break'],                     action: fbBreak }
-      - { lhs: FallbackArm, rhs: ['break', ':', IDENT, BoolOr], action: fbBreakLabelValue }
-      - { lhs: FallbackArm, rhs: ['continue'],                  action: fbContinue }
-      - { lhs: FallbackArm, rhs: ['continue', ':', IDENT, BoolOr], action: fbContinueLabelValue }
       - { lhs: FallbackArm, rhs: [Block],                       action: fbBlock }
       - { lhs: FallbackArm, rhs: [SwitchExpr],                  action: fbSwitch }
       # `arg_index orelse init: { const arg = self.next_arg; self.next_arg += 1; break :init arg; }`
@@ -895,34 +872,12 @@ productions:
       # shifts the `:` after the label, as for `break :l` above.
       - { lhs: FallbackArm, rhs: [LabeledBlock],                action: fbLabeled }
       - { lhs: CaptureArm,  rhs: [FallbackArm] }
-      # `catch |e| return v` — VALUE form only. A void `catch |e| return;` would leave `e` unused, which
-      # zig rejects, so it has no legitimate use; and with it the parser would face `return` vs `return
-      # BoolOr` on an IDENT lookahead that FOLLOW(OrElse) also contains, which resolved to the void form
-      # and misparsed `return e` as `return;` + a stray `e`. Value-only has no such choice.
-      - { lhs: CaptureArm,  rhs: ['return', BoolOr],            action: fbReturn }
-      # `catch |e| return switch (e) { … }` (task #80): the returned value is a switch expression, which is not in the
-      # operator cascade. After `return`, `switch` is not in FIRST(BoolOr), so one token of lookahead picks it.
-      - { lhs: CaptureArm,  rhs: ['return', SwitchExpr],        action: fbReturnSwitch }
-      # A jump as an arm of a value `if` (GH #283: `const y = if (x < 100) x else break;`, `total += if (x == 9) continue
-      # :outer else x;`). The records are FallbackArm's, which LowerFallbackArm lowers as the statements they spell. A
-      # break's value is a BoolOr, as FallbackArm's is: an arm can end an `orelse` fallback, and an Expr there would put
-      # `orelse` into the lookahead of the state every `x orelse …` shares after its left operand, where this group's
-      # precedence settles the conflict as a reduce (`f(a orelse continue)` stopped parsing). An `orelse` inside the value
-      # needs parentheses.
-      - { lhs: JumpArm, rhs: ['break'],                     action: fbBreak }
-      - { lhs: JumpArm, rhs: ['break', ':', IDENT, BoolOr], action: fbBreakLabelValue }
-      - { lhs: JumpArm, rhs: ['continue'],                  action: fbContinue }
-      # A labeled switch's continue with its new operand (GH #286: std.math.big.int's `… else continue :round .away`).
-      - { lhs: JumpArm, rhs: ['continue', ':', IDENT, BoolOr], action: fbContinueLabelValue }
-      # An `if` whose arms BOTH jump is noreturn, so after `orelse` / `catch` it is a statement-shaped fallback (std.Io.Dispatch's
-      # `… orelse if (concurrency) return error.ConcurrencyUnavailable else break :maybe_queue null;`). Only here, not in IfExpr:
-      # there `if (c) return v else …` is already IfExpr's, and the arm after `else` decides (`break` / `continue` / `return`
-      # start no RhsExpr), which a second `if (c) return v else JumpArm` in IfExpr would make a reduce/reduce conflict.
-      - { lhs: FallbackArm, rhs: ['if', '(', Expr, ')', JumpArm, 'else', JumpArm],           action: fbIfJumps }
-      - { lhs: FallbackArm, rhs: ['if', '(', Expr, ')', 'return', Expr, 'else', JumpArm],    action: fbIfReturnJump }
-      # The returned value after `else` is a BoolOr for the same reason; before `else` it is an Expr, the prefix it shares
-      # with IfExpr's `if (c) return v else …` (only `else` follows it, already in that lookahead).
-      - { lhs: FallbackArm, rhs: ['if', '(', Expr, ')', JumpArm, 'else', 'return', BoolOr],  action: fbIfJumpReturn }
+      # The jump arms (`orelse break`, `catch |e| return v`, an `if` whose arms both jump, a jump as a value `if`'s arm,
+      # GH #283 / #286) are JumpExprs since zig-grammar-peg P1b: see the jumps-as-expressions group at the end. What the
+      # copies here used to work around: a break's value had to be a BoolOr, because an Expr put `orelse` into the
+      # lookahead of the state every `x orelse …` shares (`f(a orelse continue)` stopped parsing), and a greedy RhsExpr arm
+      # after `catch |e| return if …` collapsed a shared state so that no `x catch …` parsed. The open cascade has neither
+      # problem; both stay pinned in ZigGrammarTests.
 
   # ===== value-position expressions =====
   # A value-position expression is an operator expression (Expr) or one of the control-flow forms below that are
@@ -981,17 +936,9 @@ productions:
   - derivation: none
     rules:
       - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', IfArm, 'else', IfArm], action: ifExpr }
-      # A value `if` whose THEN arm returns from the function (std.fmt.parse_float's FloatStream.first:
-      # `return if (self.hasLen(1)) return self.firstUnchecked() else null;`). `return` is not in FIRST(RhsExpr),
-      # so the arm is its own production rather than a `return` expression everywhere.
-      - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', 'return', Expr, 'else', IfArm], action: ifExprReturnThen }
-      # Its mirror, the ELSE arm returning (std.heap.MemoryPool.create's `… else if (growable) x else return
-      # error.OutOfMemory;`, task #200); `return` is not in FIRST(RhsExpr), so after `else` the split is one token.
-      - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', IfArm, 'else', 'return', Expr], action: ifExprElseReturn }
-      # The same with a `break` / `continue` arm (GH #283): `const y = if (x < 100) x else break;`. JumpArm starts with
-      # `break` / `continue`, neither in FIRST(RhsExpr), so either arm's split is one token, as for `return`.
-      - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', IfArm, 'else', JumpArm], action: ifExprElseJump }
-      - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', JumpArm, 'else', IfArm], action: ifExprThenJump }
+      # An arm may be a jump (zig-grammar-peg P1b): `return if (self.hasLen(1)) return self.firstUnchecked() else null;`
+      # (std.fmt.parse_float), `… else return error.OutOfMemory` (task #200), `if (x < 100) x else break` (GH #283) are this
+      # rule with a JumpExpr arm, which lowering hoists ahead of the statement.
       # An `if` choosing between two inline container TYPES (a type const's RHS, folded at lowering time).
       # One arm a type NAME, the other an inline container (std.Io.Terminal's `pub const WindowsApi = if (!is_windows)
       # noreturn else struct { … };`, task #191). After the arm's `}`, a `.` continues the closure idiom
@@ -1035,17 +982,15 @@ productions:
       - { lhs: LoopExpr, rhs: [IDENT, ':', 'for', '(', Expr, ')', '|', IDENT, '|', Block, 'else', RhsExpr], action: labeledForElseExpr }
       # `const mask = for (self.masks) |mask| { if (mask != 0) break mask; … } else return null;`
       # (std.bit_set.ArrayBitSet.findFirstSet): the else RETURNS from the function instead of yielding, so the
-      # loop's value comes from its `break`s alone. `return` is not in FIRST(RhsExpr): a clean shift after `else`.
-      - { lhs: LoopExpr, rhs: ['while', '(', Expr, ')', Block, 'else', ReturnArm],                 action: whileElseReturnExpr }
+      # loop's value comes from its `break`s alone. Since zig-grammar-peg P1b a `return` is an RhsExpr, so these are the
+      # forms above with a ReturnExpr else; the lowering keys on it.
       # A value `while` with an assignment continue-expression (std.bit_set.ArrayBitSet.eql:
       # `return while (i < num_masks) : (i += 1) { … break false; } else true;`). After `)`, a `:` or a `{`
       # decides between this and the plain value `while` in one token.
       - { lhs: LoopExpr, rhs: ['while', '(', Expr, ')', ':', '(', Expr, AssignOp, RhsExpr, ')', Block, 'else', RhsExpr], action: whileContAssignElseExpr }
-      - { lhs: LoopExpr, rhs: ['for', '(', Expr, ')', '|', IDENT, '|', Block, 'else', ReturnArm],  action: forElseReturnExpr }
       # The by-ref capture (`for (&self.masks) |*mask| { … break mask; } else return null;`, toggleFirstSet): the
       # break yields the element POINTER. After `|`, a `*` or an IDENT decides the capture form in one token.
       - { lhs: LoopExpr, rhs: ['for', '(', Expr, ')', '|', '*', IDENT, '|', Block, 'else', RhsExpr],    action: forRefElseExpr }
-      - { lhs: LoopExpr, rhs: ['for', '(', Expr, ')', '|', '*', IDENT, '|', Block, 'else', ReturnArm],  action: forRefElseReturnExpr }
       # The comptime-unrolled value loop (std.enums.tagName, task #131: `return inline for (field_names, field_values)
       # |f_name, f_value| { if (@intFromEnum(e) == f_value) break f_name; } else null;`), over one comptime list or several
       # in lockstep. `inline` is not in FIRST of any other RhsExpr form, so it decides the production in one token.
@@ -1598,7 +1543,7 @@ productions:
       # A capture `if` whose body RETURNS (std.Io.Writer.printInt's
       # `.signed => if (std.math.cast(isize, value)) |x| return printIntAny(w, x, …),`). `return` does not
       # start an Expr, so after the capture it is a 1-token split from prongIfCapture.
-      - { lhs: Prong, rhs: [CaseVals, '=>', 'if', '(', Expr, ')', '|', IDENT, '|', ReturnArm], action: prongIfCaptureReturn }
+      - { lhs: Prong, rhs: [CaseVals, '=>', 'if', '(', Expr, ')', '|', IDENT, '|', JumpExpr], action: prongIfCaptureReturn }
       # A loop STATEMENT as a prong body (std.Io.Writer.writeSplat's `else => for (0..splat) |_| { … },`).
       - { lhs: Prong, rhs: [CaseVals, '=>', LoopStmt], action: prongLoop }
       - { lhs: Prong, rhs: [CaseVals, '=>', '|', IDENT, ',', IDENT, '|', Block],             action: prongCaptureTag }
@@ -1824,25 +1769,6 @@ productions:
       - { lhs: FieldInit, rhs: [VoidElem], action: fieldInitPositional }
       - { lhs: VoidElem, rhs: ['{', '}'], action: voidValue }
 
-  # The VOID `orelse return` / `catch return` forms, LAST on purpose: LALR.CC resolves a shift/reduce
-  # conflict by group order (an earlier group wins) before the derivation rule ever applies. A struct
-  # field default (`f: T = expr`) may be followed straight by the next member, so an IDENT can follow an
-  # expression, and in the state after `orelse return` that made the void REDUCE outrank the IDENT shift:
-  # `x orelse return err` failed to parse at `err` while `x orelse return 0` worked (road-to-zig-std,
-  # hash_map's getOrPutContextAdapted). Lowest precedence here means the value form takes the IDENT.
-  - derivation: none
-    rules:
-      - { lhs: OrElse, rhs: [Bitwise, 'orelse', 'return'],         action: orElseReturnVoid }
-      - { lhs: OrElse, rhs: [Bitwise, 'catch', 'return'],          action: catchReturnVoid }
-      # The value-less labeled break, last for the same reason (GH #283): in the rightmost group with its value form, its
-      # reduce outranked the shift of a value starting with an IDENT, `comptime` or `fn`, so `x orelse break :blk d`
-      # failed at `d` while `x orelse break :blk 7` parsed. Here the value form takes it.
-      - { lhs: FallbackArm, rhs: ['break', ':', IDENT], action: fbBreakLabel }
-      - { lhs: JumpArm,     rhs: ['break', ':', IDENT], action: fbBreakLabel }
-      # And the value-less labeled continue, now that a labeled switch's continue takes an operand (GH #286).
-      - { lhs: FallbackArm, rhs: ['continue', ':', IDENT], action: fbContinueLabel }
-      - { lhs: JumpArm,     rhs: ['continue', ':', IDENT], action: fbContinueLabel }
-
   # Inline assembly (std.crypto.sha2's SHA-NI / ARMv8 paths). The template is a STRING (zig allows any comptime
   # string; std always writes a literal), so an Expr is never followed by `:` here, keeping the label invariant.
   - derivation: none
@@ -1918,6 +1844,26 @@ productions:
       - { lhs: OpenPrimary, rhs: [IfExpr] }
       - { lhs: IfArm, rhs: [RhsExpr] }
       - { lhs: IfArm, rhs: [TypeArm] }
+
+  # ===== jumps as expressions (zig-grammar-peg P1b) =====
+  # zig's `return Expr?`, `break :l Expr?` and `continue` are PrimaryExprs: an `orelse` / `catch` fallback, an `if` arm,
+  # anything. Open primaries, like the `if` above: the value takes everything to its right. The break / continue records
+  # are the fallback arms' (fb*), which LowerFallbackArm lowers as the statements they spell. RIGHTMOST so a `:` after
+  # `break` / `continue` shifts into the label (the dangling-else device). Where a statement or prong form shares a
+  # prefix (`return v;`, `=> return v,`, `if (c) return v else …`), that form's group is earlier and wins. LAST in the
+  # file on purpose: a shift is ranked by the group of the item it advances (often Primary's), so a value-less
+  # `return` / `break :l` reduce in an earlier group outranked shifting a value that starts with an IDENT (`x orelse
+  # return err` once failed at `err`, GH #283's `break :blk d` at `d`); here the reduce ranks lowest and the value shifts.
+  - derivation: rightmost
+    rules:
+      - { lhs: OpenPrimary, rhs: [JumpExpr] }
+      - { lhs: JumpExpr, rhs: ['return', RhsExpr?],            action: returnExpr }
+      - { lhs: JumpExpr, rhs: ['break'],                       action: fbBreak }
+      - { lhs: JumpExpr, rhs: ['break', ':', IDENT],           action: fbBreakLabel }
+      - { lhs: JumpExpr, rhs: ['break', ':', IDENT, RhsExpr],  action: fbBreakLabelValue }
+      - { lhs: JumpExpr, rhs: ['continue'],                    action: fbContinue }
+      - { lhs: JumpExpr, rhs: ['continue', ':', IDENT],        action: fbContinueLabel }
+      - { lhs: JumpExpr, rhs: ['continue', ':', IDENT, RhsExpr], action: fbContinueLabelValue }
 
 lexer:
   root:

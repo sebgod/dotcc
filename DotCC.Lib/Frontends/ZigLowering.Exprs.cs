@@ -204,6 +204,16 @@ internal sealed partial class ZigLowering
                 return new Paren(inner) { Type = inner.Type };
             }
 
+            // A value `if` with one arm that returns or jumps (`if (c) return v else w`, `x else break`): the jump hoists
+            // ahead of the statement, and the expression is the other arm's value.
+            case Zig.IfExpr ir when ir.Arg4.Content is Zig.ReturnExpr { Arg1: { } thenReturned }:
+                return LowerIfReturnThen(ir.Arg2, thenReturned, ir.Arg6, null);
+            case Zig.IfExpr er when er.Arg6.Content is Zig.ReturnExpr { Arg1: { } elseReturned }:
+                return LowerIfElseReturn(er.Arg2, er.Arg4, elseReturned, null);
+            case Zig.IfExpr tj when IsJumpArm(tj.Arg4):
+                return LowerIfEarlyJump(tj.Arg2, jumpOnTrue: true, tj.Arg4, tj.Arg6, null);
+            case Zig.IfExpr ej when IsJumpArm(ej.Arg6):
+                return LowerIfEarlyJump(ej.Arg2, jumpOnTrue: false, ej.Arg6, ej.Arg4, null);
             // if (cond) a else b  — the if-EXPRESSION, lowered to a ternary. Both
             // branches are RhsExpr; the backend renders the condition as a bool.
             case Zig.IfExpr e:
@@ -245,14 +255,6 @@ internal sealed partial class ZigLowering
                 }
                 return new CondExpr(concatCond, thenConcat, elseConcat) { Type = thenConcat.Type };
             }
-            case Zig.IfExprReturnThen ir:
-                return LowerIfReturnThen(ir.Arg2, ir.Arg5, ir.Arg7, null);
-            case Zig.IfExprElseReturn er:
-                return LowerIfElseReturn(er.Arg2, er.Arg4, er.Arg7, null);
-            case Zig.IfExprThenJump tj:
-                return LowerIfEarlyJump(tj.Arg2, jumpOnTrue: true, tj.Arg4, tj.Arg6, null);
-            case Zig.IfExprElseJump ej:
-                return LowerIfEarlyJump(ej.Arg2, jumpOnTrue: false, ej.Arg6, ej.Arg4, null);
             // Value-position captured `if` — `if (opt) |x| thenE else elseE` (S4a). The payload binds
             // `x` in the then-branch, so a pure ternary can't express it; it hoists (ANF) to a result
             // temp assigned by a real `if`. See LowerIfCaptureExpr.
@@ -856,6 +858,9 @@ internal sealed partial class ZigLowering
             // to pointers); the LHS is named twice there, so a non-trivial (side-effecting)
             // left operand is rejected rather than silently double-evaluated. `orelse return`
             // (a noreturn RHS) isn't expressible in the grammar yet — that's Milestone B2.
+            // A control-flow `orelse` / `catch` (its fallback is noreturn): see LowerControlFlowFallbackExpr.
+            case Zig.OrElse or Zig.CatchOp or Zig.CatchCapture when IsControlFlowFallback(expr, out _, out _, out _, out _):
+                return LowerControlFlowFallbackExpr(expr);
             case Zig.OrElse o:
             {
                 var impureBeforeLeft = _hoistImpureSeen;
@@ -960,26 +965,15 @@ internal sealed partial class ZigLowering
             // payload capture become buffer statements, and the construct evaluates to the payload temp.
             // The statement-shaped arms (road-to-zig-std) — `orelse break`, `catch |err| switch (err) {…}`,
             // `orelse { …; return; }` — take exactly the same hoist: a conditional arm, then the payload.
-            case Zig.CatchReturn or Zig.CatchReturnVoid or Zig.OrElseReturn or Zig.OrElseReturnVoid
-              or Zig.OrElseArm or Zig.CatchArm or Zig.CatchCaptureArm:
-            {
-                IsControlFlowFallback(expr, out var cfLhs, out var cfIsCatch, out var cfCap, out var cfArm);
-                var buf = RequireHoistable(cfIsCatch ? "catch (control-flow fallback)" : "orelse (control-flow fallback)");
-                var savedImpure = _hoistImpureSeen;
-                Symbol? anfSym = null;
-                var cfStmt = LowerControlFlowFallback(cfLhs, cfIsCatch, cfCap, cfArm, payload =>
-                {
-                    anfSym = _symbols.Declare(new Symbol { Name = "__anf" + _anfTempCounter++, Kind = SymKind.Var, Type = payload.Type });
-                    return new DeclStmt(new List<LocalDecl> { new(anfSym, payload) });
-                });
-                _hoistImpureSeen = savedImpure;   // the construct's internals are sequenced in the buffer
-                if (anfSym is not { } payloadSym)
-                {
-                    throw new IrUnsupportedException("internal: control-flow fallback did not bind a payload");
-                }
-                buf.Add(cfStmt);
-                return new VarRef(payloadSym) { Type = payloadSym.Type };
-            }
+            case Zig.OrElseArm or Zig.CatchArm or Zig.CatchCaptureArm:
+                return LowerControlFlowFallbackExpr(expr);
+            // A jump in a position no construct above gives it (`f(return 1)`, `x + break`): zig accepts it, as a noreturn
+            // operand, but nothing would run after it, so dotcc has no lowering for it.
+            case Zig.ReturnExpr or Zig.FbBreak or Zig.FbBreakLabel or Zig.FbBreakLabelValue
+              or Zig.FbContinue or Zig.FbContinueLabel or Zig.FbContinueLabelValue:
+                throw new IrUnsupportedException(
+                    "zig: a `return` / `break` / `continue` is lowered as an `orelse` / `catch` fallback, an `if` arm or a statement, "
+                    + "not as an operand here");
 
             // A bare `error.Foo` value (Milestone N): the error's stable code in the flat global
             // set, typed `CType.ErrorSet` (rendered `ushort`). This makes error values usable

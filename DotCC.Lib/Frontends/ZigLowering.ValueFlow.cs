@@ -41,8 +41,7 @@ internal sealed partial class ZigLowering
         // A value-position loop (`while/for … else`, Milestone Y part 2) ALWAYS needs the statement
         // lowering — a loop that yields via `break v` / an `else` value can't be a C# expression.
         Zig.WhileElseExpr or Zig.ForElseExpr or Zig.LabeledWhileElseExpr or Zig.LabeledForElseExpr
-            or Zig.WhileElseReturnExpr or Zig.ForElseReturnExpr or Zig.ForRefElseExpr or Zig.ForRefElseReturnExpr
-            or Zig.InlineForElseExpr or Zig.InlineForMultiElseExpr
+            or Zig.ForRefElseExpr or Zig.InlineForElseExpr or Zig.InlineForMultiElseExpr
             or Zig.WhileContAssignElseExpr => true,
         _ => false,
     };
@@ -80,8 +79,7 @@ internal sealed partial class ZigLowering
         Zig.ComptimeSwitchExpr c => LowerValueControlFlowStmt(c.Arg1, sink, consume),
         Zig.PreComptime { Arg1.Content: Zig.IfExpr } c => LowerValueControlFlowStmt(c.Arg1, sink, consume),
         Zig.WhileElseExpr or Zig.ForElseExpr or Zig.LabeledWhileElseExpr or Zig.LabeledForElseExpr
-            or Zig.WhileElseReturnExpr or Zig.ForElseReturnExpr or Zig.ForRefElseExpr or Zig.ForRefElseReturnExpr
-            or Zig.InlineForElseExpr or Zig.InlineForMultiElseExpr
+            or Zig.ForRefElseExpr or Zig.InlineForElseExpr or Zig.InlineForMultiElseExpr
             or Zig.WhileContAssignElseExpr
             => LowerLoopValue(rhs, sink, consume),
         _ => throw new IrUnsupportedException(
@@ -145,12 +143,9 @@ internal sealed partial class ZigLowering
             case Zig.ForElseExpr f:          condOrIter = f.Arg2; elemName = Tok(f.Arg5); blockItem = f.Arg7; elseItem = f.Arg9; break;
             case Zig.LabeledWhileElseExpr w: label = Tok(w.Arg0); condOrIter = w.Arg4; blockItem = w.Arg6; elseItem = w.Arg8; break;
             case Zig.LabeledForElseExpr f:   label = Tok(f.Arg0); condOrIter = f.Arg4; elemName = Tok(f.Arg7); blockItem = f.Arg9; elseItem = f.Arg11; break;
-            case Zig.WhileElseReturnExpr w:  condOrIter = w.Arg2; blockItem = w.Arg4; elseItem = w.Arg6; break;
             case Zig.WhileContAssignElseExpr w:
                 condOrIter = w.Arg2; contAssign = (w.Arg6, w.Arg7, w.Arg8); blockItem = w.Arg10; elseItem = w.Arg12; break;
-            case Zig.ForElseReturnExpr f:    condOrIter = f.Arg2; elemName = Tok(f.Arg5); blockItem = f.Arg7; elseItem = f.Arg9; break;
             case Zig.ForRefElseExpr f:       condOrIter = f.Arg2; elemName = Tok(f.Arg6); blockItem = f.Arg8; elseItem = f.Arg10; byRef = true; break;
-            case Zig.ForRefElseReturnExpr f: condOrIter = f.Arg2; elemName = Tok(f.Arg6); blockItem = f.Arg8; elseItem = f.Arg10; byRef = true; break;
             case Zig.InlineForElseExpr f:
                 condOrIter = f.Arg3; inlineFor = (f.Arg3, f.Arg6, false); blockItem = f.Arg8; elseItem = f.Arg10; break;
             case Zig.InlineForMultiElseExpr f:
@@ -185,7 +180,7 @@ internal sealed partial class ZigLowering
 
         // `… else return v`: normal completion RETURNS from the function, so the loop's value is its `break`s'
         // alone, and the code after the loop is reached only through the end label.
-        if (elseItem.Content is Zig.ReturnArm returnArm)
+        if (elseItem.Content is Zig.ReturnExpr { Arg1: { } returnedOnCompletion })
         {
             var breakType = target.ResultType
                 ?? throw new IrUnsupportedException("a value-position loop whose `else` returns must yield its value with `break v`");
@@ -194,7 +189,7 @@ internal sealed partial class ZigLowering
             {
                 new DeclStmt(new List<LocalDecl> { new(temp, new DefaultLit { Type = breakType }) }),
                 loop,
-                Hoisted(() => LowerReturn(returnArm.Arg1)),
+                Hoisted(() => LowerReturn(returnedOnCompletion)),
                 new Labeled(endLabel, new Block(new List<CStmt>())),
                 consume(temp),
             });

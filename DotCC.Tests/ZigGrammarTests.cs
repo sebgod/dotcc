@@ -129,6 +129,34 @@ public sealed class ZigGrammarTests
     }
 
     [Fact]
+    public void A_jump_is_an_expression_and_a_returned_value_is_greedy()
+    {
+        // zig-grammar-peg P1b: `return` / `break` / `continue` are PrimaryExprs. `x orelse return y orelse 2` returns
+        // `y orelse 2`, and the fallback is the ordinary `orelse` with a ReturnExpr operand.
+        var oe = FirstNode<Zig.OrElse>("fn f(x: ?u8, y: ?u8) u8 { return x orelse return y orelse 2; }");
+        oe.Arg2.Content.ShouldBeOfType<Zig.ReturnExpr>().Arg1.Content.ShouldBeOfType<Zig.OrElse>();
+        // A labeled break takes its label and value; a bare one is a value-less jump.
+        FirstNode<Zig.FbBreakLabelValue>("fn g(o: ?u8) u8 { const v = blk: { break :blk o orelse break :blk 3; }; return v; }")
+            .Arg3.Content.ShouldNotBeNull();
+        FirstNode<Zig.IfExpr>("fn h(o: ?u8, c: bool) void { while (true) { _ = o orelse if (c) break else continue; } }")
+            .Arg4.Content.ShouldBeOfType<Zig.FbBreak>();
+    }
+
+    [Fact]
+    public void The_shapes_the_old_jump_copies_broke_still_parse_right()
+    {
+        // `x orelse return a == b & c` returns `a == (b & c)` (& binds tighter than ==); with the jump as a plain Bitwise
+        // result the merged states once read it as `(a == b) & c`.
+        var ret = FirstNode<Zig.OrElse>("fn f(x: ?bool, a: u8, b: u8, c: u8) bool { return x orelse return a == b & c; }")
+            .Arg2.Content.ShouldBeOfType<Zig.ReturnExpr>();
+        ret.Arg1.Content.ShouldBeOfType<Zig.CmpEq>().Arg2.Content.ShouldBeOfType<Zig.BitAnd>();
+        // A jump fallback inside a call's argument (`f(a orelse continue)` once stopped parsing), and a top-level
+        // `f() catch return` statement.
+        TryParse("fn g(a: ?u8) void { while (true) { h(a orelse continue); } }").ShouldBeTrue();
+        TryParse("fn k() !void { e() catch return; }").ShouldBeTrue();
+    }
+
+    [Fact]
     public void An_if_expression_follows_orelse_and_comparison_operators()
     {
         // `x orelse if (c) a else b orelse d`: the else arm is `b orelse d` (zig's greedy reading).

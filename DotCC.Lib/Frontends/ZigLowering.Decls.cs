@@ -2042,6 +2042,15 @@ internal sealed partial class ZigLowering
             // value lowers at `sink`, so a result-located arm (`.member` / `.{…}` / a cast) resolves.
             // An if-EXPRESSION carries the sink into both arms, so `if (c) .a else .b` resolves each enum
             // literal against the result type; a comptime condition selects one arm, as LowerExpr's does.
+            // A value `if` with a returning / jumping arm at a typed sink (see LowerExpr's cases).
+            case Zig.IfExpr ir when sink is not null && ir.Arg4.Content is Zig.ReturnExpr { Arg1: { } thenReturned }:
+                return LowerIfReturnThen(ir.Arg2, thenReturned, ir.Arg6, sink);
+            case Zig.IfExpr er when sink is not null && er.Arg6.Content is Zig.ReturnExpr { Arg1: { } elseReturned }:
+                return LowerIfElseReturn(er.Arg2, er.Arg4, elseReturned, sink);
+            case Zig.IfExpr tj when sink is not null && IsJumpArm(tj.Arg4):
+                return LowerIfEarlyJump(tj.Arg2, jumpOnTrue: true, tj.Arg4, tj.Arg6, sink);
+            case Zig.IfExpr ej when sink is not null && IsJumpArm(ej.Arg6):
+                return LowerIfEarlyJump(ej.Arg2, jumpOnTrue: false, ej.Arg6, ej.Arg4, sink);
             case Zig.IfExpr ie when sink is not null:
             {
                 if (TryFoldComptimeCondition(ie.Arg2) is { } taken) { return LowerExprSink(taken ? ie.Arg4 : ie.Arg6, sink); }
@@ -2063,14 +2072,6 @@ internal sealed partial class ZigLowering
                 return new CondExpr(ifCond, then, otherwise) { Type = condType };
             }
             case Zig.SwitchExpr s:         return LowerSwitchExpr(s.Arg2, s.Arg5, sink);
-            case Zig.IfExprReturnThen ir when sink is not null:
-                return LowerIfReturnThen(ir.Arg2, ir.Arg5, ir.Arg7, sink);
-            case Zig.IfExprElseReturn er when sink is not null:
-                return LowerIfElseReturn(er.Arg2, er.Arg4, er.Arg7, sink);
-            case Zig.IfExprThenJump tj when sink is not null:
-                return LowerIfEarlyJump(tj.Arg2, jumpOnTrue: true, tj.Arg4, tj.Arg6, sink);
-            case Zig.IfExprElseJump ej when sink is not null:
-                return LowerIfEarlyJump(ej.Arg2, jumpOnTrue: false, ej.Arg6, ej.Arg4, sink);
             // `comptime switch` / `comptime if` in value position: the inner form, whose comptime-known
             // subject already selects one arm at lowering time.
             case Zig.ComptimeSwitchExpr c: return LowerExprSink(c.Arg1, sink);
