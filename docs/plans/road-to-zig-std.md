@@ -1246,14 +1246,16 @@ place a poison IS needed is the top-level tombstone, and that is what landed.
 
 ### S9 — surface-debt bricks (many S/M; parallel any time; wall-finder-ranked)
 
-**Current ranking (2026-10-10, after three worklist batches: 414 of 553 files parse-clean, 74.9%; it was 341 / 61.7%
+**Current ranking (2026-10-10, after four worklist batches: 422 of 553 files parse-clean, 76.3%; it was 341 / 61.7%
 on 2026-10-09 and 187 / 33.8% at the 2026-09-23 report).** Batch 1 took an empty file (25 files; the installed std
 ships its `test.zig` files as 0 bytes), `align(N)` on an untyped container-level `const`/`var` (20) and `pub extern`
 (13, which also brought `extern var`; extern data parses and is rejected by name only where it is read). Batch 2
 took the inline container field types: `extern struct {…}` / `extern union {…}` / `packed struct[(uN)] {…}` /
 `packed union {…}` / `enum(uN) {…}` as a field's type, and a named `const X = extern union {…};`. Batch 3 took a
-labeled block as a struct-literal field value, a field typed by a comptime `if`, `**T`, and an empty `enum {}`. The
-head of [`std-parse-probe.report.txt`](std-parse-probe.report.txt) now, each bucket read off the line it fails on:
+labeled block as a struct-literal field value, a field typed by a comptime `if`, `**T`, and an empty `enum {}`.
+Batch 4 took `union(enum(uN))`, `callconv` on an `extern fn` prototype, the `extern`/`packed` container prong
+types, and an empty `struct {}` as a type arm. The head of [`std-parse-probe.report.txt`](std-parse-probe.report.txt)
+is now almost entirely statement-level `if` shapes, each bucket read off the line it fails on:
 
 | Files | Construct (first-fail) | Example |
 |---|---|---|
@@ -1263,10 +1265,13 @@ head of [`std-parse-probe.report.txt`](std-parse-probe.report.txt) now, each buc
 | 4 | **an error-union `if` statement with an `else \|_\|` branch** | `if (x) \|file\| fileClose(…) else \|_\| {}` (`Io/Dispatch.zig`) |
 | 4 | **a struct literal typed by an inline `struct {…}`** | `struct { … }{ .keys = … }` (`debug/Dwarf.zig`) |
 | 4 | **`} else \|_\| {}`** after a block-bodied error-union `if` | (`crypto/ecdsa.zig`) |
-| 3 | **`union(enum(u8))`** (a tagged union with an explicit tag integer) | `pub const CallingConvention = union(enum(u8)) {` (`lang.zig`) |
-| 3 | **`callconv` on an `extern fn` prototype** | `) callconv(.winapi) ?HCERTSTORE;` (`os/windows/crypt32.zig`) |
-| 3 | **an `extern struct {…}` as a switch-prong type** | `.aarch64 => extern struct {` (`Io/fiber.zig`) |
-| 3 | **an empty `struct {}` as a comptime-`if` type arm** | `if (!is_windows) struct {} else struct {` (`Io/Threaded.zig`) |
+| 3 | an `else` after a nested `if` chain (to triage) | (`Thread.zig:76`) |
+| 3 | **a struct literal typed by an inline struct type** (`}{`) | (`compress/flate/token.zig`) |
+
+These are the shapes the grammar review flagged: zig's PEG treats `if`/`else` uniformly as an expression, while this
+grammar keeps separate statement, arm and value forms, so each new context needs its own rules. Taking them one by
+one is possible; restructuring the grammar the PEG's way (one `if` expression, its statement form a thin wrapper) is the
+alternative, and the bigger lever once these 3-to-5-file buckets are all that is left.
 
 The historical ranking below is kept for the record.
 
