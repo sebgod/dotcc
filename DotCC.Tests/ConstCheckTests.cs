@@ -144,6 +144,26 @@ public sealed class ConstCheckTests
     }
 
     [Fact]
+    public void a_host_can_send_the_warnings_to_its_own_writer_instead_of_stderr()
+    {
+        // Compiler.DiagnosticsWriter (the functional suite sets it, so a parallel compile's warning cannot land in a
+        // test capturing a program's stderr). The unit assembly is serialized, so setting the static here is safe.
+        var own = new StringWriter();
+        Compiler.DiagnosticsWriter = own;
+        try
+        {
+            var (_, stderr) = EmitWithStderr("""
+                static int sink(char *p) { return p[0]; }
+                int main(void) { const char *q = "x"; return sink(q); }
+                """);
+            own.ToString().ShouldContain("dotcc: warning:");
+            own.ToString().ShouldContain("discards 'const' qualifier");
+            stderr.ShouldBeEmpty();
+        }
+        finally { Compiler.DiagnosticsWriter = null; }
+    }
+
+    [Fact]
     public void passing_a_pointer_to_const_to_a_const_param_is_fine()
     {
         var (_, stderr) = EmitWithStderr("""

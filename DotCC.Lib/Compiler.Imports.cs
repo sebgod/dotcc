@@ -30,7 +30,7 @@ public static partial class Compiler
             {
                 // A varargs signature has no fixed function-pointer form (same reason
                 // -shared can't export one), so it can't be a GOT field — warn + skip.
-                Console.Error.WriteLine(
+                Diagnostics.WriteLine(
                     $"dotcc: warning: cannot import variadic function '{sym.Name}' (no fixed function-pointer signature) — skipped");
                 continue;
             }
@@ -38,7 +38,7 @@ public static partial class Compiler
             {
                 // A defined C global owns the name in the emitted program (C-shaped:
                 // the definition wins). Importing the same name would clash — skip it.
-                Console.Error.WriteLine(
+                Diagnostics.WriteLine(
                     $"dotcc: warning: import candidate '{sym.Name}' collides with a defined global — skipped (the definition wins)");
                 continue;
             }
@@ -46,7 +46,7 @@ public static partial class Compiler
         }
         foreach (var name in ir.ExternDataReferenced)
         {
-            Console.Error.WriteLine(
+            Diagnostics.WriteLine(
                 $"dotcc: warning: extern data import '{name}' is not supported (import mode binds functions only)");
         }
         return result;

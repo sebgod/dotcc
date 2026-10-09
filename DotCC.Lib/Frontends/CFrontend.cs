@@ -214,7 +214,7 @@ internal sealed class CFrontend : IFrontend
         }
         foreach (var w in irBuilder.Diagnostics.Where(d => d.Severity == Ir.Severity.Warning && !libraryFiles.Contains(d.File ?? "")))
         {
-            Console.Error.WriteLine("dotcc: warning: " + w);
+            Compiler.Diagnostics.WriteLine("dotcc: warning: " + w);
         }
         // Flush dialect-gate diagnostics: -pedantic-errors collects all into one
         // CompileException (collect-all, fail once); -pedantic warns and continues.
@@ -224,7 +224,7 @@ internal sealed class CFrontend : IFrontend
             {
                 throw new CompileException(string.Join("\n", gate.Diagnostics.Select(d => "error: " + d)));
             }
-            foreach (var d in gate.Diagnostics) { Console.Error.WriteLine("dotcc: warning: " + d); }
+            foreach (var d in gate.Diagnostics) { Compiler.Diagnostics.WriteLine("dotcc: warning: " + d); }
         }
         irBuilder.PublishImportAnalysis();
         irBuilder.Module.UsesPythonShim = includeResolver.IncludedBuiltins.Contains("Python.h")

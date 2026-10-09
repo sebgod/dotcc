@@ -128,7 +128,7 @@ public static partial class Compiler
         }
         foreach (var w in zigDiags.Where(d => d.Severity == Ir.Severity.Warning))
         {
-            Console.Error.WriteLine("dotcc: warning: " + w);
+            Diagnostics.WriteLine("dotcc: warning: " + w);
         }
         return ir;
     }
@@ -175,7 +175,7 @@ public static partial class Compiler
         var cg = Backends.CSharpBackend.Run(irBuilder, convGate);
         if (convGate is { HasAny: true })
         {
-            foreach (var d in convGate.Diagnostics) { Console.Error.WriteLine("dotcc: warning: " + d); }
+            foreach (var d in convGate.Diagnostics) { Diagnostics.WriteLine("dotcc: warning: " + d); }
         }
         // Import mode: bind prototypes that resolve against a native library rather
         // than the managed runtime. Dynamic (-l) → a GOT-style DotCcImports table bound
