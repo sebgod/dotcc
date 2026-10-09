@@ -135,9 +135,10 @@ internal sealed class CPreprocessor : C.IPreprocessor
         _embeds = embeds ?? new Dictionary<string, byte[]>(StringComparer.Ordinal);
         // Diagnostics sink. The analysis (first) pass of the two-pass emit runs
         // quiet so its #warning / #include-resolution messages don't print
-        // twice; the real emit pass uses stderr as usual. (A fatal #error still
+        // twice; the real emit pass uses Compiler.Diagnostics (stderr unless the host
+        // pointed it elsewhere). (A fatal #error still
         // throws in either pass — see OnError.)
-        _diag = quiet ? System.IO.TextWriter.Null : Console.Error;
+        _diag = quiet ? System.IO.TextWriter.Null : Compiler.Diagnostics;
         var symMap = new Dictionary<string, int>(StringComparer.Ordinal);
         foreach (var sym in C.Definition.SymbolNames)
         {

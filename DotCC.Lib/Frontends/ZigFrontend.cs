@@ -33,7 +33,7 @@ internal sealed class ZigFrontend : IFrontend
         }
         foreach (var w in ir.Diagnostics.Where(d => d.Severity == Severity.Warning))
         {
-            Console.Error.WriteLine("dotcc: warning: " + w);
+            Compiler.Diagnostics.WriteLine("dotcc: warning: " + w);
         }
         return ir;
     }
