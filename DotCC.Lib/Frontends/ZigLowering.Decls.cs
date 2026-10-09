@@ -660,7 +660,6 @@ internal sealed partial class ZigLowering
         var (subject, prongs) = switchItem.Content switch
         {
             Zig.SwitchExpr s => (s.Arg2, s.Arg5),
-            Zig.SwitchExprTrailing s => (s.Arg2, s.Arg5),
             _ => throw new IrUnsupportedException("zig: a switch type expected; got " + (switchItem.Content?.GetType().Name ?? "null")),
         };
         if (SelectComptimeProng(subject, prongs, out var payload) is not { Expr: { } typeItem } prong)
@@ -2046,7 +2045,6 @@ internal sealed partial class ZigLowering
                 return new CondExpr(ifCond, then, otherwise) { Type = condType };
             }
             case Zig.SwitchExpr s:         return LowerSwitchExpr(s.Arg2, s.Arg5, sink);
-            case Zig.SwitchExprTrailing s: return LowerSwitchExpr(s.Arg2, s.Arg5, sink);
             case Zig.IfExprReturnThen ir when sink is not null:
                 return LowerIfReturnThen(ir.Arg2, ir.Arg5, ir.Arg7, sink);
             case Zig.IfExprElseReturn er when sink is not null:

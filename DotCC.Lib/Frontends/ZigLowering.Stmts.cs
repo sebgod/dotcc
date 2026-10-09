@@ -212,8 +212,6 @@ internal sealed partial class ZigLowering
             case Zig.StmtIfElse f:      return LowerIfStmt(f.Arg2, f.Arg4, f.Arg6);
             case Zig.StmtComptimeIf f:     return LowerComptimeIfStmt(f.Arg3, f.Arg5, null);
             case Zig.StmtComptimeIfElse f: return LowerComptimeIfStmt(f.Arg3, f.Arg5, f.Arg7);
-            case Zig.StmtComptimeIfSemi f:     return LowerComptimeIfStmt(f.Arg3, f.Arg5, null);
-            case Zig.StmtComptimeIfElseSemi f: return LowerComptimeIfStmt(f.Arg3, f.Arg5, f.Arg7);
 
             // `if (opt) |x| then [else else]` — payload-capturing `if` (Milestone M). Binds the
             // optional's payload (value `?T` or niche pointer) — or, with `else |e|`, an
@@ -314,12 +312,9 @@ internal sealed partial class ZigLowering
             // comptime-value statements at lowering time, emit no runtime code.
             case Zig.ComptimeBlock cb:     return LowerComptimeBlock(cb.Arg1);
 
-            // `switch (subject) { prongs }` → the C IR Switch (subject=Arg2, prongs=Arg5 for both
-            // the plain and trailing-comma forms). A tagged-union subject takes the capture path.
+            // `switch (subject) { prongs ,? } ;?` → the C IR Switch (subject=Arg2, prongs=Arg5; the optional
+            // trailing comma and semicolon come after both). A tagged-union subject takes the capture path.
             case Zig.StmtSwitch s:         return LowerSwitchStmt(s.Arg2, s.Arg5);
-            case Zig.StmtSwitchTrailing s: return LowerSwitchStmt(s.Arg2, s.Arg5);
-            case Zig.StmtSwitchSemi s:         return LowerSwitchStmt(s.Arg2, s.Arg5);
-            case Zig.StmtSwitchTrailingSemi s: return LowerSwitchStmt(s.Arg2, s.Arg5);
 
             // `for (start..end) |i| body` → C `for (usize i = start; i < end; i++) body`. The
             // capture `i` is the usize loop index (its own scope so it doesn't leak); the end
@@ -347,7 +342,7 @@ internal sealed partial class ZigLowering
             case Zig.StmtForSlice ctf when _comptimeDepth > 0 && TryComptimeIterable(ctf.Arg2, out var ctList):
                 return UnrollComptimeFor(new[] { (ctList, Tok(ctf.Arg5)) }, ctf.Arg7);
             case Zig.StmtForMulti ctm when _comptimeDepth > 0 && FirstForObject(ctm.Arg2) is { } ctFirst && TryComptimeIterable(ctFirst, out _):
-                return UnrollComptimeMultiFor(ctm.Arg2, ctm.Arg5, ctm.Arg7);
+                return UnrollComptimeMultiFor(ctm.Arg2, ctm.Arg6, ctm.Arg8);
 
             // `for (s) |x| body` — iterate a slice's elements (x = a per-iteration copy).
             case Zig.StmtForSlice f:     // for '(' Expr ')' '|' IDENT '|' Stmt
@@ -358,17 +353,11 @@ internal sealed partial class ZigLowering
             // The MULTI-object `for (a, b, 0.., …) |x, *y, i, …|` (task #108, one production since the fixed pair / triple /
             // indexed shapes): `(s, N..)` walks the slice with its index; any other shape walks every object in lockstep. The
             // `inline for` over comptime member lists takes these before they get here (LowerInlineLoop).
-            case Zig.StmtForMulti f:      return LowerForMulti(f.Arg2, f.Arg5, f.Arg7);
-            case Zig.StmtForMultiTrail f: return LowerForMulti(f.Arg2, f.Arg6, f.Arg8);
+            case Zig.StmtForMulti f:      return LowerForMulti(f.Arg2, f.Arg6, f.Arg8);   // `,?` after the objects is Arg3
             // `for (…) |…| body else elsebody` (task #108): the else runs when the loop ends without a `break`.
             case Zig.StmtForSliceElse f:
                 return LowerForParallel(new[] { new ForObject(f.Arg2, false, null) }, new[] { (Tok(f.Arg5), false) }, f.Arg7, f.Arg9);
             case Zig.StmtForMultiElse f:
-            {
-                var (objects, captures) = DecomposeForMulti(f.Arg2, f.Arg5);
-                return LowerForParallel(objects, captures, f.Arg7, f.Arg9);
-            }
-            case Zig.StmtForMultiTrailElse f:
             {
                 var (objects, captures) = DecomposeForMulti(f.Arg2, f.Arg6);
                 return LowerForParallel(objects, captures, f.Arg8, f.Arg10);

@@ -316,9 +316,6 @@ internal sealed partial class ZigLowering
             case Zig.SwitchExpr se when TrySelectedTypeArm(se.Arg2, se.Arg5, out var armType):
                 type = armType;
                 return true;
-            case Zig.SwitchExprTrailing st when TrySelectedTypeArm(st.Arg2, st.Arg5, out var trailingArmType):
-                type = trailingArmType;
-                return true;
 
             // `@TypeOf(expr)` — the operand's synthesized type, unevaluated.
             case Zig.BuiltinCall b when Tok(b.Arg0) == "@TypeOf":
@@ -361,7 +358,7 @@ internal sealed partial class ZigLowering
             // `const Hasher = switch (@typeInfo(@TypeOf(hasher))) { .pointer => |ptr| ptr.child, else => @TypeOf(hasher) };`
             // (std.hash.autoHash): a switch over a comptime TAG whose selected prong is a type. A switch that
             // yields a value instead is left to the value path (the type evaluation declines, loudly or not).
-            case Zig.SwitchExpr or Zig.SwitchExprTrailing when TrySwitchTypeAlias(rhs, out var switched):
+            case Zig.SwitchExpr when TrySwitchTypeAlias(rhs, out var switched):
                 type = switched;
                 return true;
 
@@ -447,7 +444,6 @@ internal sealed partial class ZigLowering
         var (subject, prongs) = rhs.Content switch
         {
             Zig.SwitchExpr s => (s.Arg2, s.Arg5),
-            Zig.SwitchExprTrailing s => (s.Arg2, s.Arg5),
             _ => (null, null),
         };
         if (subject is null || prongs is null || !TryEvalComptimeTag(subject, out _, out _)) { return false; }
@@ -798,7 +794,7 @@ internal sealed partial class ZigLowering
         Zig.InlineStructTypeEmpty      => ReifyInlineStruct(type, null),
         // A type chosen by a comptime switch in any type position (a parameter's, as well as a field's): the selected
         // prong's type (task #73).
-        Zig.SwitchExpr or Zig.SwitchExprTrailing => LowerSwitchType(type),
+        Zig.SwitchExpr => LowerSwitchType(type),
         // `info.tag_type orelse @compileError("…")` (std.meta.Tag, task #142): an optional TYPE, else the fallback.
         Zig.OrElse optType => LowerOrElseType(optType.Arg0, optType.Arg2),
         // A `@compileError("…")` reached in a type position fires, as it does in a value position.
@@ -1343,12 +1339,11 @@ internal sealed partial class ZigLowering
                 return nested;
             case Zig.IfExpr ie when TryFoldComptimeCondition(ie.Arg2) is { } taken:
                 return TryComptimeTypePointer(taken ? ie.Arg4 : ie.Arg6);
-            case Zig.SwitchExpr or Zig.SwitchExprTrailing:
+            case Zig.SwitchExpr:
             {
                 var (subject, prongs) = expr.Content switch
                 {
                     Zig.SwitchExpr s => (s.Arg2, s.Arg5),
-                    Zig.SwitchExprTrailing s => (s.Arg2, s.Arg5),
                     _ => (expr, expr),
                 };
                 // Only a switch whose EVERY non-`unreachable` arm is a type pointer: an ordinary value switch must not be

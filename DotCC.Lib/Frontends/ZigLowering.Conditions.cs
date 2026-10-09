@@ -142,12 +142,11 @@ internal sealed partial class ZigLowering
         }
         // `switch (builtin.mode) { .Debug, .ReleaseSafe => true, … }`: a switch over a comptime tag folds to
         // the value of the prong it selects.
-        if (cur.Content is Zig.SwitchExpr or Zig.SwitchExprTrailing)
+        if (cur.Content is Zig.SwitchExpr)
         {
             var (subject, prongs) = cur.Content switch
             {
                 Zig.SwitchExpr s => (s.Arg2, s.Arg5),
-                Zig.SwitchExprTrailing s => (s.Arg2, s.Arg5),
                 _ => throw new System.InvalidOperationException(),
             };
             if (SelectComptimeProng(subject, prongs, out var chosenPayload) is not { Expr: { } chosen } chosenProng) { return null; }

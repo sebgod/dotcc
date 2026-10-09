@@ -266,7 +266,6 @@ internal sealed partial class ZigLowering
             // where the LHS type still flows in via LowerExprSink, or an inferred `const`). The
             // sink-carrying path is in LowerExprSink; here the arm types are inferred.
             case Zig.SwitchExpr s:         return LowerSwitchExpr(s.Arg2, s.Arg5, null);
-            case Zig.SwitchExprTrailing s: return LowerSwitchExpr(s.Arg2, s.Arg5, null);
             // `comptime switch` / `comptime if` in value position (see the LowerExprSink cases).
             case Zig.ComptimeSwitchExpr c: return LowerExpr(c.Arg1);
             case Zig.ComptimeLabeledBlock clb: return ComptimeLabeledBlockValue(clb.Arg1, null);

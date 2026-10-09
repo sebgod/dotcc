@@ -136,7 +136,7 @@ internal sealed partial class ZigLowering
                 // `const ptr = switch (@typeInfo(T)) { .pointer => |ptr| ptr, else => @compileError(…) };`
                 // (std.mem.ReverseIterator, task #147): a switch that yields the active @typeInfo payload binds it, where
                 // any other switch below is a type alias.
-                case Zig.ConstDecl switchedInfoDecl when switchedInfoDecl.Arg3.Content is Zig.SwitchExpr or Zig.SwitchExprTrailing
+                case Zig.ConstDecl switchedInfoDecl when switchedInfoDecl.Arg3.Content is Zig.SwitchExpr
                                                         && TryEvalTypeInfo(switchedInfoDecl.Arg3, out var switchedInfo):
                     _typeInfoBindings[Tok(switchedInfoDecl.Arg1)] = switchedInfo;
                     break;
@@ -182,15 +182,6 @@ internal sealed partial class ZigLowering
                 // continues after the switch.
                 case Zig.StmtSwitch sw:
                     if (WalkComptimeSwitchStmt(fnName, sw.Arg2, sw.Arg5, typeShadows) is { } rs1) { return rs1; }
-                    break;
-                case Zig.StmtSwitchTrailing sw:
-                    if (WalkComptimeSwitchStmt(fnName, sw.Arg2, sw.Arg5, typeShadows) is { } rs2) { return rs2; }
-                    break;
-                case Zig.StmtSwitchSemi sw:
-                    if (WalkComptimeSwitchStmt(fnName, sw.Arg2, sw.Arg5, typeShadows) is { } rs3) { return rs3; }
-                    break;
-                case Zig.StmtSwitchTrailingSemi sw:
-                    if (WalkComptimeSwitchStmt(fnName, sw.Arg2, sw.Arg5, typeShadows) is { } rs4) { return rs4; }
                     break;
                 // `@compileError("…");` REACHED — every arm that avoids it has already folded away, which is
                 // exactly zig's rule for it (std.meta.Elem ends with one after its switch).
@@ -393,7 +384,6 @@ internal sealed partial class ZigLowering
                 switch (cur.Content)
                 {
                     case Zig.SwitchExpr inner:         return WalkComptimeSwitchStmt(fnName, inner.Arg2, inner.Arg5, typeShadows);
-                    case Zig.SwitchExprTrailing inner: return WalkComptimeSwitchStmt(fnName, inner.Arg2, inner.Arg5, typeShadows);
                     case Zig.BuiltinCall ce when Tok(ce.Arg0) == "@compileError":
                         CompileErrorBuiltin(Flatten(ce.Arg2));
                         return null;
@@ -431,7 +421,7 @@ internal sealed partial class ZigLowering
     {
         var cur = rhs;
         while (cur.Content is Zig.Grouped g) { cur = g.Arg1; }
-        return cur.Content is Zig.IfExpr or Zig.IfExprCapture or Zig.SwitchExpr or Zig.SwitchExprTrailing
+        return cur.Content is Zig.IfExpr or Zig.IfExprCapture or Zig.SwitchExpr
             || TryTypeAliasRhs(rhs, out _);
     }
 
@@ -707,8 +697,6 @@ internal sealed partial class ZigLowering
             }
             case Zig.SwitchExpr se:
                 return LowerComptimeTypeSwitch(fnName, se.Arg2, se.Arg5);
-            case Zig.SwitchExprTrailing st:
-                return LowerComptimeTypeSwitch(fnName, st.Arg2, st.Arg5);
             case Zig.BuiltinCall b when Tok(b.Arg0) == "@compileError":
                 CompileErrorBuiltin(Flatten(b.Arg2));   // always throws — the arm was reached
                 return (CType.Void, null);

@@ -170,7 +170,6 @@ internal sealed partial class ZigLowering
         var (subject, prongsItem) = rhs.Content switch
         {
             Zig.SwitchExpr s => (s.Arg2, s.Arg5),
-            Zig.SwitchExprTrailing s => (s.Arg2, s.Arg5),
             _ => ((Item?)null, (Item?)null),
         };
         if (subject is null || prongsItem is null) { return false; }
@@ -218,12 +217,11 @@ internal sealed partial class ZigLowering
                                && owner.ResolveExportedDecl(Tok(f.Arg2)) is { } decl
                                && decl.Sym.Kind == SymKind.Func && decl.Owner.IsGenericTemplate(decl.Sym):
                 return decl;
-            case Zig.SwitchExpr or Zig.SwitchExprTrailing:
+            case Zig.SwitchExpr:
             {
                 var (subjectItem, prongsItem) = rhs.Content switch
                 {
                     Zig.SwitchExpr s => (s.Arg2, s.Arg5),
-                    Zig.SwitchExprTrailing s => (s.Arg2, s.Arg5),
                     _ => throw new System.InvalidOperationException(),
                 };
                 if (!LooksLikeFnAliasArms(prongsItem)) { return null; }

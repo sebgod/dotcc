@@ -33,7 +33,6 @@ internal sealed partial class ZigLowering
     {
         Zig.IfExpr e             => IsLabeledValue(e.Arg4) || IsLabeledValue(e.Arg6),
         Zig.SwitchExpr s         => SwitchExprNeedsStmt(s.Arg5, s.Arg2),
-        Zig.SwitchExprTrailing s => SwitchExprNeedsStmt(s.Arg5, s.Arg2),
         // `comptime switch` / `comptime if`: the inner form decides. The `comptime` asks zig to evaluate
         // it at compile time; dotcc's lowering already folds the arm whenever the subject is
         // comptime-known, and a runtime subject (which zig rejects here) keeps its runtime lowering.
@@ -77,7 +76,7 @@ internal sealed partial class ZigLowering
     /// value loop (part 2) to their builders.</summary>
     private CStmt LowerValueControlFlowStmt(Item rhs, CType? sink, Func<Symbol, CStmt> consume) => rhs.Content switch
     {
-        Zig.IfExpr or Zig.SwitchExpr or Zig.SwitchExprTrailing => LowerValueIfSwitch(rhs, sink, consume),
+        Zig.IfExpr or Zig.SwitchExpr => LowerValueIfSwitch(rhs, sink, consume),
         Zig.ComptimeSwitchExpr c => LowerValueControlFlowStmt(c.Arg1, sink, consume),
         Zig.ComptimeIfExpr c     => LowerValueControlFlowStmt(c.Arg1, sink, consume),
         Zig.WhileElseExpr or Zig.ForElseExpr or Zig.LabeledWhileElseExpr or Zig.LabeledForElseExpr
@@ -108,7 +107,6 @@ internal sealed partial class ZigLowering
                                    new Block(new List<CStmt> { FillValueTemp(e.Arg4, rt) }),
                                    new Block(new List<CStmt> { FillValueTemp(e.Arg6, rt) })),
             Zig.SwitchExpr s         => BuildValueSwitch(s.Arg2, s.Arg5, rt),
-            Zig.SwitchExprTrailing s => BuildValueSwitch(s.Arg2, s.Arg5, rt),
             _ => throw new IrUnsupportedException(
                 "internal: value if/switch on " + (rhs.Content?.GetType().Name ?? "null")),
         };
