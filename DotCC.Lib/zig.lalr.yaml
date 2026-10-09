@@ -298,12 +298,16 @@ symbols:
   - 'noinline'     # 192 `noinline fn`: an optimizer hint on a function (std.hash.XxHash3's `noinline fn hashLong`, task #177)
   - JumpArm        # 193 a jump as an arm of a value `if`: `break [:l [v]]` / `continue [:l]` (GH #283)
   - ContainerDeclaration # 194 a member every container body shares (a method, const, nested container, comptime or test block)
+  - File         # 195 a whole source file: its declarations, possibly none
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
   - derivation: none
     rules:
-      - { lhs: Root, rhs: [Decls] }
+      - { lhs: Root, rhs: [File] }
+      # A file with no declarations is an empty struct (std ships 0-byte `test.zig` stubs). The optional lives on
+      # File, not Root: LALR.CC seeds the start state with production 0 only, so a second Root alternative is dead.
+      - { lhs: File, rhs: [Decls?] }
 
   - derivation: leftmost
     rules:

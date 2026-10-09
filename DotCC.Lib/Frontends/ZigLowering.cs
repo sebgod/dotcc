@@ -2607,6 +2607,7 @@ internal sealed partial class ZigLowering
                 case Zig.ForObjsTwo t:  stack.Push(t.Arg2); stack.Push(t.Arg0); break;  // [ForObj, ',', ForObj]
                 case Zig.ForObjsCons c: stack.Push(c.Arg2); stack.Push(c.Arg0); break;  // [ForObjs, ',', ForObj]
                 case Zig.ForCapsCons c: stack.Push(c.Arg2); stack.Push(c.Arg0); break;  // [ForCaps, ',', ForCap]
+                case LALR.CC.Reduction { Children.Count: 0 }: break;  // an empty file (`File -> Decls?` with no declarations)
                 default: ordered.Add(n); break;
             }
         }

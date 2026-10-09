@@ -26,6 +26,15 @@ public sealed class ZigModuleGraphTests
     }
 
     [Fact]
+    public void An_empty_file_is_a_module_with_no_decls()
+    {
+        // std ships 0-byte `test.zig` stubs; importing one is an empty struct, not a parse error.
+        var module = new ZigModuleGraph().ParseSource("empty.zig", "");
+        module.Errors.ShouldBeEmpty();
+        module.Decls.ShouldBeEmpty();
+    }
+
+    [Fact]
     public void A_broken_decl_is_skipped_and_recorded_leaving_the_good_ones()
     {
         // The middle decl is invalid (a `fn` body must be a block `{ … }`, not a bare `return`), so it
