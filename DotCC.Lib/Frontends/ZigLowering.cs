@@ -2364,8 +2364,8 @@ internal sealed partial class ZigLowering
 
     /// <summary>Unwrap a top-level decl's optional visibility/linkage modifier — <c>pub</c>
     /// (<see cref="Zig.PubFn"/>/<see cref="Zig.PubVar"/>), <c>export</c> (<see cref="Zig.ExportFn"/>/
-    /// <see cref="Zig.ExportVar"/>), or <c>pub export</c> (<see cref="Zig.PubExportFn"/>/
-    /// <see cref="Zig.PubExportVar"/>) — to its inner declaration; an unmodified decl is returned
+    /// <see cref="Zig.ExportVar"/>, each with an optional <c>pub</c> in its first slot) — to its inner
+    /// declaration; an unmodified decl is returned
     /// unchanged. Both modifiers are a no-op in a single-file console program (every non-static
     /// function is already export-eligible under <c>-shared</c>; a data export under <c>-shared</c>
     /// is a documented V1 cut), so peeling lets all the existing FnDef / global / container handling
@@ -2566,15 +2566,11 @@ internal sealed partial class ZigLowering
     private static Item Unwrap(Item decl) => decl.Content switch
     {
         Zig.PubFn p         => p.Arg1,   // `pub FnDef`
-        Zig.InlineFn i      => MarkInline(i.Arg1),   // `inline FnDef` (an optimizer hint; lowers as a plain fn)
-        Zig.PubInlineFn pi  => MarkInline(pi.Arg2),  // `pub inline FnDef`
-        Zig.NoinlineFn n    => n.Arg1,   // `noinline FnDef` (an optimizer hint; lowers as a plain fn, task #177)
-        Zig.PubNoinlineFn pn => pn.Arg2, // `pub noinline FnDef`
-        Zig.ExportFn e      => e.Arg1,   // `export FnDef` (Milestone R)
-        Zig.PubExportFn pe  => pe.Arg2,  // `pub export FnDef` (Milestone R)
+        Zig.InlineFn i      => MarkInline(i.Arg2),   // `pub? inline FnDef` (an optimizer hint; lowers as a plain fn)
+        Zig.NoinlineFn n    => n.Arg2,   // `pub? noinline FnDef` (an optimizer hint; lowers as a plain fn, task #177)
+        Zig.ExportFn e      => e.Arg2,   // `pub? export FnDef` (Milestone R)
         Zig.PubVar p        => p.Arg1,   // `pub VarDecl` (exported/public data)
-        Zig.ExportVar e     => e.Arg1,   // `export VarDecl`
-        Zig.PubExportVar pe => pe.Arg2,  // `pub export VarDecl`
+        Zig.ExportVar e     => e.Arg2,   // `pub? export VarDecl`
         Zig.PubContainer p  => p.Arg1,   // `pub const P = struct/enum/union {…}` (public container)
         _ => decl,
     };

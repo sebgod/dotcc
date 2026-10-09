@@ -315,26 +315,24 @@ productions:
       - { lhs: Decl, rhs: ['pub', FnDef],  action: pubFn }
       # `inline fn` / `pub inline fn` (379 in std; `math.maxInt` is one). A hint to the optimizer that
       # lowers as an ordinary function. `inline` starts no other declaration, so it is a clean shift.
-      - { lhs: Decl, rhs: ['inline', FnDef],        action: inlineFn }
-      - { lhs: Decl, rhs: ['pub', 'inline', FnDef], action: pubInlineFn }
-      - { lhs: Decl, rhs: ['noinline', FnDef],        action: noinlineFn }
-      - { lhs: Decl, rhs: ['pub', 'noinline', FnDef], action: pubNoinlineFn }
+      # `pub` is optional (`X?`, expanded by LALR.CC into the with/without rules): the record keeps both
+      # slots, and Arg0 is null without `pub`.
+      - { lhs: Decl, rhs: [pub?, 'inline', FnDef],   action: inlineFn }
+      - { lhs: Decl, rhs: [pub?, 'noinline', FnDef], action: noinlineFn }
       - { lhs: Decl, rhs: [VarDecl] }
       - { lhs: Decl, rhs: ['pub', VarDecl], action: pubVar }
       # `export fn` / `pub export fn` (Milestone R, part 4) — force C-ABI external linkage. dotcc
       # lowers it as an ordinary (export-eligible under -shared) function; Unwrap peels the modifier
       # to the inner FnDef so all existing FnDef handling applies. After `export`, only `fn` (a FnDef)
       # follows; after `pub`, `export` vs `fn`/`const`/`var` is a disjoint 1-token shift — conflict-free.
-      - { lhs: Decl, rhs: ['export', FnDef],        action: exportFn }
-      - { lhs: Decl, rhs: ['pub', 'export', FnDef], action: pubExportFn }
+      - { lhs: Decl, rhs: [pub?, 'export', FnDef], action: exportFn }
       # `export const`/`export var` (and `pub export`) — EXPORTED DATA. Like `export fn`, Unwrap peels
       # the modifier to the inner VarDecl, so all existing global handling applies; the export/pub
       # modifier is a no-op in a console program (a `-shared` data export is a documented V1 cut).
       # After `export`, `const`/`var` (a VarDecl) vs `fn` (a FnDef) is a disjoint 1-token shift;
       # likewise after `pub export` — conflict-free. (`pub VarDecl` already exists above; its Unwrap
       # peeling ships with these, so a top-level `pub const`/`var` global now works too.)
-      - { lhs: Decl, rhs: ['export', VarDecl],        action: exportVar }
-      - { lhs: Decl, rhs: ['pub', 'export', VarDecl], action: pubExportVar }
+      - { lhs: Decl, rhs: [pub?, 'export', VarDecl], action: exportVar }
       # A container decl (struct/enum/union, incl. extern/packed — grouped under `ContainerDecl`
       # below) is a Decl, optionally `pub`-wrapped. `Decl -> ContainerDecl` is transparent (a bare
       # container passes through unchanged); `Decl -> pub ContainerDecl` adds the visibility modifier
