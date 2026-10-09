@@ -221,8 +221,7 @@ internal sealed partial class ZigLowering
     /// (<c>fn FieldIterator(comptime T: type) type</c>), not a runtime method.</summary>
     private static bool IsTypeReturningFnDef(Item fnDef) => fnDef.Content switch
     {
-        Zig.FnDef f => IsTypeKeyword(f.Arg6),
-        Zig.FnDefNoArgs f => IsTypeKeyword(f.Arg5),
+        Zig.FnDef { Arg6: null } f => IsTypeKeyword(f.Arg7),   // a `!T` return is never `type`
         _ => false,
     };
 
@@ -247,9 +246,6 @@ internal sealed partial class ZigLowering
     private static string MethodNameOf(Item fnDef) => Tok(fnDef.Content switch
     {
         Zig.FnDef f          => f.Arg1,
-        Zig.FnDefNoArgs f    => f.Arg1,
-        Zig.FnDefErr f       => f.Arg1,
-        Zig.FnDefNoArgsErr f => f.Arg1,
         _ => throw new IrUnsupportedException("zig method: " + (fnDef.Content?.GetType().Name ?? "null")),
     });
 
@@ -265,10 +261,7 @@ internal sealed partial class ZigLowering
         switch (fnDef.Content)
         {
             // The optional CallConv (Milestone R, part 5) shifts the return type + body one slot right.
-            case Zig.FnDef f:          nameTok = f.Arg1; paramsItem = f.Arg3; retType = f.Arg6; body = f.Arg7; errUnion = false; break;
-            case Zig.FnDefNoArgs f:    nameTok = f.Arg1; paramsItem = null;   retType = f.Arg5; body = f.Arg6; errUnion = false; break;
-            case Zig.FnDefErr f:       nameTok = f.Arg1; paramsItem = f.Arg3; retType = f.Arg7; body = f.Arg8; errUnion = true;  break;
-            case Zig.FnDefNoArgsErr f: nameTok = f.Arg1; paramsItem = null;   retType = f.Arg6; body = f.Arg7; errUnion = true;  break;
+            case Zig.FnDef f:          nameTok = f.Arg1; paramsItem = f.Arg3; retType = f.Arg7; body = f.Arg8; errUnion = f.Arg6 is not null; break;
             default: throw new IrUnsupportedException("zig method: " + (fnDef.Content?.GetType().Name ?? "null"));
         }
         var methodName = Tok(nameTok);

@@ -368,10 +368,8 @@ productions:
       # `extern fn` (routed to dotcc's Libc runtime by bare name); after `extern`, a `STRING` selects
       # the `"c"` forms vs the bare `fn` forms — disjoint, conflict-free. A `!T` error-union return is
       # still deferred.
-      - { lhs: Decl, rhs: ['extern', 'fn', IDENT, '(', Params, ')', Type, ';'], action: externFnProto }
-      - { lhs: Decl, rhs: ['extern', 'fn', IDENT, '(', ')', Type, ';'],         action: externFnProtoNoArgs }
-      - { lhs: Decl, rhs: ['extern', STRING, 'fn', IDENT, '(', Params, ')', Type, ';'], action: externCFnProto }
-      - { lhs: Decl, rhs: ['extern', STRING, 'fn', IDENT, '(', ')', Type, ';'],         action: externCFnProtoNoArgs }
+      - { lhs: Decl, rhs: ['extern', 'fn', IDENT, '(', Params?, ')', Type, ';'], action: externFnProto }
+      - { lhs: Decl, rhs: ['extern', STRING, 'fn', IDENT, '(', Params?, ')', Type, ';'], action: externCFnProto }
       # Container decls — Zig binds a struct/enum TYPE to a `const` name (types are
       # values). A struct/enum RHS isn't an `RhsExpr`, so these are distinct Decl forms,
       # NOT VarDecl: the `struct`/`enum` keyword right after `=` is a clean 1-token shift
@@ -418,10 +416,8 @@ productions:
       # Return type is an `AType` (road-to-zig-std S9) so a fn can return an inline named struct
       # `fn f() struct { a: u8 } { … }` (factory-returns-anon-struct, pervasive in std). `AType -> Type`
       # is transparent, so an ordinary return type is unchanged; the retType Arg index is unmoved.
-      - { lhs: FnDef, rhs: ['fn', IDENT, '(', Params, ')', CallConv, AType, Block],       action: fnDef }
-      - { lhs: FnDef, rhs: ['fn', IDENT, '(', ')', CallConv, AType, Block],               action: fnDefNoArgs }
-      - { lhs: FnDef, rhs: ['fn', IDENT, '(', Params, ')', CallConv, '!', AType, Block],  action: fnDefErr }
-      - { lhs: FnDef, rhs: ['fn', IDENT, '(', ')', CallConv, '!', AType, Block],          action: fnDefNoArgsErr }
+      # Params and the error-union `!` are optional: Arg3 / Arg6 are null without them (Arg7 return type, Arg8 body).
+      - { lhs: FnDef, rhs: ['fn', IDENT, '(', Params?, ')', CallConv, "!?", AType, Block], action: fnDef }
 
   # An optional `callconv(Expr)` between `)` and the return type (Milestone R, part 5). Epsilon when
   # absent — `callconv` ∉ FIRST(Type) ∪ {`!`}, so the reduce-ε vs shift-`callconv` decision after `)`
@@ -1290,7 +1286,7 @@ productions:
       # never appears at the top-level Decl position, so no parser state holds both items. Params are
       # `FnTypeParams` — an optionally-named list (`IDENT : Type` OR a bare `Type`), so BOTH the named
       # `fn (a: i32) i32` and the unnamed `fn (i32) i32` forms parse (real zig accepts both; the names
-      # are ignored). A leading-`!` return `fn (…) !T` (anyerror error union) mirrors the fnDefErr form.
+      # are ignored). A leading-`!` return `fn (…) !T` (anyerror error union) mirrors FnDef's optional `!`.
       # An optional `callconv(Expr)` sits between `)` and the return type — the SAME nullable CallConv
       # used by fnDef, conflict-free here for the identical reason (`callconv` ∉ FIRST(Type) ∪ {`!`}).
       # Unlike fnDef (which ignores it), a fn-POINTER type honors `callconv(.c)`/`(.C)`: the marker is
@@ -1298,10 +1294,8 @@ productions:
       # `delegate* unmanaged[Cdecl]<…>` instead of the managed `delegate*<…>` (std's `*const fn (…)
       # callconv(.c) void` C-ABI fn-ptr typedefs, e.g. std/c/darwin/dispatch.zig). Other conventions
       # stay managed (dotcc models only the cdecl-native form).
-      - { lhs: Type, rhs: ['fn', '(', FnTypeParams, ')', CallConv, Type],      action: tyFn }
-      - { lhs: Type, rhs: ['fn', '(', ')', CallConv, Type],                    action: tyFnNoArgs }
-      - { lhs: Type, rhs: ['fn', '(', FnTypeParams, ')', CallConv, '!', Type], action: tyFnErr }
-      - { lhs: Type, rhs: ['fn', '(', ')', CallConv, '!', Type],               action: tyFnNoArgsErr }
+      # Arg2 params, Arg5 the error-union `!` (both null when absent), Arg6 the return type.
+      - { lhs: Type, rhs: ['fn', '(', FnTypeParams?, ')', CallConv, "!?", Type], action: tyFn }
       # A fn type whose RETURN type is a comptime `switch` (std.Options' `elf_debug_info_search_paths: ?fn (…)
       # switch (@import("builtin").object_format) { … }`). `switch` is not in FIRST(Type), so after the
       # CallConv it is a 1-token shift. Parsed so the declaring container parses; lowering it is a named cut.
