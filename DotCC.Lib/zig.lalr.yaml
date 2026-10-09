@@ -1710,12 +1710,9 @@ productions:
     rules:
       - { lhs: Member, rhs: [FieldDecl, ','], action: memberField }
       - { lhs: Member, rhs: [FieldDecl],       action: memberFieldLast }
-      - { lhs: Member, rhs: [FnDef],           action: memberMethod }
-      - { lhs: Member, rhs: ['pub', FnDef],    action: memberPubMethod }
-      - { lhs: Member, rhs: ['inline', FnDef],        action: memberInlineMethod }
-      - { lhs: Member, rhs: ['pub', 'inline', FnDef], action: memberPubInlineMethod }
-      - { lhs: Member, rhs: ['noinline', FnDef],        action: memberNoinlineMethod }
-      - { lhs: Member, rhs: ['pub', 'noinline', FnDef], action: memberPubNoinlineMethod }
+      - { lhs: Member, rhs: [pub?, FnDef],           action: memberMethod }
+      - { lhs: Member, rhs: [pub?, 'inline', FnDef],        action: memberInlineMethod }
+      - { lhs: Member, rhs: [pub?, 'noinline', FnDef],        action: memberNoinlineMethod }
       # A container-level `comptime { … }` block (hash_map.zig's `comptime { assert(@sizeOf(Metadata) == 1); }`):
       # analysis-only, dropped like the top-level form (topComptime). `comptime` starts no other member.
       - { lhs: Member, rhs: ['comptime', Block],      action: memberComptime }
@@ -1732,8 +1729,7 @@ productions:
       # with `const`/`var`, disjoint from FieldDecl's leading IDENT and FnDef's `fn` — a clean
       # 1-token shift decision — and a VarDecl self-terminates with `;`, so `,` never enters
       # FOLLOW(Member). The `pub` form is symmetric with `pub FnDef` (export is a no-op today).
-      - { lhs: Member, rhs: [VarDecl],         action: memberConst }
-      - { lhs: Member, rhs: ['pub', VarDecl],  action: memberPubConst }
+      - { lhs: Member, rhs: [pub?, VarDecl],         action: memberConst }
       # A NESTED container decl (`const Inner = struct {…};` / `enum` / `union`, incl.
       # extern/packed) as a struct-body member (road-to-zig-std S9 — the top `:` parse bucket).
       # Reuses the file-level `Decl -> ContainerDecl` split verbatim: after `const IDENT =`, the
@@ -1744,8 +1740,7 @@ productions:
       # This is what lets a container hold its own nested named-field types — pervasive in std,
       # e.g. `union(enum){ …, pub const File = struct { source: LazyPath, … }; }`. Parse-only in
       # S9; a nested container that reaches lowering is a loud cut until the bind lands.
-      - { lhs: Member, rhs: [ContainerDecl],        action: memberContainer }
-      - { lhs: Member, rhs: ['pub', ContainerDecl], action: memberPubContainer }
+      - { lhs: Member, rhs: [pub?, ContainerDecl],        action: memberContainer }
 
   - derivation: none
     rules:
@@ -1789,20 +1784,15 @@ productions:
   - derivation: none
     rules:
       - { lhs: EnumMember, rhs: [EnumField, ','], action: enumMemberField }
-      - { lhs: EnumMember, rhs: [FnDef],           action: enumMemberMethod }
-      - { lhs: EnumMember, rhs: ['pub', FnDef],    action: enumMemberPubMethod }
-      - { lhs: EnumMember, rhs: ['inline', FnDef],        action: enumMemberInlineMethod }
-      - { lhs: EnumMember, rhs: ['pub', 'inline', FnDef], action: enumMemberPubInlineMethod }
-      - { lhs: EnumMember, rhs: ['noinline', FnDef],        action: enumMemberNoinlineMethod }
-      - { lhs: EnumMember, rhs: ['pub', 'noinline', FnDef], action: enumMemberPubNoinlineMethod }
+      - { lhs: EnumMember, rhs: [pub?, FnDef],           action: enumMemberMethod }
+      - { lhs: EnumMember, rhs: [pub?, 'inline', FnDef],        action: enumMemberInlineMethod }
+      - { lhs: EnumMember, rhs: [pub?, 'noinline', FnDef],        action: enumMemberNoinlineMethod }
       - { lhs: EnumMember, rhs: ['comptime', Block],      action: enumMemberComptime }
       - { lhs: EnumMember, rhs: [TestBlock],              action: enumMemberTest }
-      - { lhs: EnumMember, rhs: [VarDecl],         action: enumMemberConst }
-      - { lhs: EnumMember, rhs: ['pub', VarDecl],  action: enumMemberPubConst }
+      - { lhs: EnumMember, rhs: [pub?, VarDecl],         action: enumMemberConst }
       # Nested container decl inside an enum body (road-to-zig-std S9) — same const-led
       # ContainerDecl-vs-VarDecl split as the struct Member form above; conflict-free, parse-only.
-      - { lhs: EnumMember, rhs: [ContainerDecl],        action: enumMemberContainer }
-      - { lhs: EnumMember, rhs: ['pub', ContainerDecl], action: enumMemberPubContainer }
+      - { lhs: EnumMember, rhs: [pub?, ContainerDecl],        action: enumMemberContainer }
 
   - derivation: none
     rules:
@@ -1840,22 +1830,17 @@ productions:
     rules:
       - { lhs: UnionMember, rhs: [UnionVariant, ','], action: unionMemberVariant }
       - { lhs: UnionMember, rhs: [UnionVariant],       action: unionMemberVariantLast }
-      - { lhs: UnionMember, rhs: [FnDef],              action: unionMemberMethod }
-      - { lhs: UnionMember, rhs: ['pub', FnDef],       action: unionMemberPubMethod }
-      - { lhs: UnionMember, rhs: ['inline', FnDef],        action: unionMemberInlineMethod }
-      - { lhs: UnionMember, rhs: ['pub', 'inline', FnDef], action: unionMemberPubInlineMethod }
-      - { lhs: UnionMember, rhs: ['noinline', FnDef],        action: unionMemberNoinlineMethod }
-      - { lhs: UnionMember, rhs: ['pub', 'noinline', FnDef], action: unionMemberPubNoinlineMethod }
+      - { lhs: UnionMember, rhs: [pub?, FnDef],              action: unionMemberMethod }
+      - { lhs: UnionMember, rhs: [pub?, 'inline', FnDef],        action: unionMemberInlineMethod }
+      - { lhs: UnionMember, rhs: [pub?, 'noinline', FnDef],        action: unionMemberNoinlineMethod }
       - { lhs: UnionMember, rhs: ['comptime', Block],      action: unionMemberComptime }
       - { lhs: UnionMember, rhs: [TestBlock],              action: unionMemberTest }
-      - { lhs: UnionMember, rhs: [VarDecl],            action: unionMemberConst }
-      - { lhs: UnionMember, rhs: ['pub', VarDecl],     action: unionMemberPubConst }
+      - { lhs: UnionMember, rhs: [pub?, VarDecl],            action: unionMemberConst }
       # Nested container decl inside a union body (road-to-zig-std S9) — same const-led
       # ContainerDecl-vs-VarDecl split as the struct Member form above; conflict-free, parse-only.
       # (The example that names the top `:` bucket, std/Build/Step/Compile.zig, is exactly this:
       # a `union(enum)` whose members include `pub const File = struct { … };`.)
-      - { lhs: UnionMember, rhs: [ContainerDecl],        action: unionMemberContainer }
-      - { lhs: UnionMember, rhs: ['pub', ContainerDecl], action: unionMemberPubContainer }
+      - { lhs: UnionMember, rhs: [pub?, ContainerDecl],        action: unionMemberContainer }
 
   - derivation: none
     rules:

@@ -826,18 +826,13 @@ internal sealed partial class ZigLowering
             {
                 case Zig.MemberField mf:     fields.Add(mf.Arg0); break;       // FieldDecl ','  → StructField
                 case Zig.MemberFieldLast mf: fields.Add(mf.Arg0); break;       // FieldDecl       → StructField
-                case Zig.MemberMethod mm:    methods.Add(mm.Arg0); break;      // FnDef
-                case Zig.MemberPubMethod mm: methods.Add(mm.Arg1); break;      // 'pub' FnDef
-                case Zig.MemberInlineMethod mm:    methods.Add(MarkInline(mm.Arg1)); break; // 'inline' FnDef
-                case Zig.MemberPubInlineMethod mm: methods.Add(MarkInline(mm.Arg2)); break; // 'pub' 'inline' FnDef
-                case Zig.MemberNoinlineMethod mm:    methods.Add(mm.Arg1); break; // 'noinline' FnDef (an optimizer hint, task #177)
-                case Zig.MemberPubNoinlineMethod mm: methods.Add(mm.Arg2); break; // 'pub' 'noinline' FnDef
+                case Zig.MemberMethod mm:    methods.Add(mm.Arg1); break;      // pub? FnDef
+                case Zig.MemberInlineMethod mm:    methods.Add(MarkInline(mm.Arg2)); break; // pub? 'inline' FnDef
+                case Zig.MemberNoinlineMethod mm:    methods.Add(mm.Arg2); break; // pub? 'noinline' FnDef (an optimizer hint, task #177)
                 case Zig.MemberComptime: break;   // `comptime { … }`: analysis-only, dropped like the top-level form
                 case Zig.MemberTest: break;       // a `test` block: dropped, like the top-level form
-                case Zig.MemberConst mc:     consts.Add(mc.Arg0); break;       // VarDecl
-                case Zig.MemberPubConst mc:  consts.Add(mc.Arg1); break;       // 'pub' VarDecl
-                case Zig.MemberContainer cc:    containers.Add(cc.Arg0); break; // ContainerDecl
-                case Zig.MemberPubContainer cc: containers.Add(cc.Arg1); break; // 'pub' ContainerDecl
+                case Zig.MemberConst mc:     consts.Add(mc.Arg1); break;       // pub? VarDecl
+                case Zig.MemberContainer cc:    containers.Add(cc.Arg1); break; // pub? ContainerDecl
                 default: throw new IrUnsupportedException("zig container member: " + (m.Content?.GetType().Name ?? "null"));
             }
         }
@@ -859,19 +854,15 @@ internal sealed partial class ZigLowering
             {
                 case Zig.EnumMemberField mf:     fields.Add(mf.Arg0); break;   // EnumField ','
                 case Zig.EnumMemberFieldLast mf: fields.Add(mf.Arg0); break;   // EnumField
-                case Zig.EnumMemberMethod mm:    methods.Add(mm.Arg0); break;  // FnDef
-                case Zig.EnumMemberPubMethod mm: methods.Add(mm.Arg1); break;  // 'pub' FnDef
-                case Zig.EnumMemberInlineMethod mm:    methods.Add(MarkInline(mm.Arg1)); break;  // 'inline' FnDef
-                case Zig.EnumMemberPubInlineMethod mm: methods.Add(MarkInline(mm.Arg2)); break;  // 'pub' 'inline' FnDef
-                case Zig.EnumMemberNoinlineMethod mm:    methods.Add(mm.Arg1); break;  // 'noinline' FnDef (task #177)
-                case Zig.EnumMemberPubNoinlineMethod mm: methods.Add(mm.Arg2); break;  // 'pub' 'noinline' FnDef
+                case Zig.EnumMemberMethod mm:    methods.Add(mm.Arg1); break;  // pub? FnDef
+                case Zig.EnumMemberInlineMethod mm:    methods.Add(MarkInline(mm.Arg2)); break;  // pub? 'inline' FnDef
+                case Zig.EnumMemberNoinlineMethod mm:    methods.Add(mm.Arg2); break;  // pub? 'noinline' FnDef (task #177)
                 case Zig.EnumMemberComptime: break;   // `comptime { … }`: analysis-only, dropped
                 case Zig.EnumMemberTest: break;       // a `test` block (std.math.Order's `test invert`): dropped
-                case Zig.EnumMemberConst mc:     consts.Add(mc.Arg0); break;   // VarDecl
-                case Zig.EnumMemberPubConst mc:  consts.Add(mc.Arg1); break;   // 'pub' VarDecl
+                case Zig.EnumMemberConst mc:     consts.Add(mc.Arg1); break;   // pub? VarDecl
                 // A NESTED container (std.Target.Cpu.Arch's `pub const Family = enum {…}`): registered by pass 0
                 // under a parent-mangled name (NestedContainerItems), not here.
-                case Zig.EnumMemberContainer or Zig.EnumMemberPubContainer: break;
+                case Zig.EnumMemberContainer: break;
                 default: throw new IrUnsupportedException("zig enum member: " + (m.Content?.GetType().Name ?? "null"));
             }
         }
@@ -884,14 +875,12 @@ internal sealed partial class ZigLowering
     {
         IEnumerable<Item> FromEnum(Item members) => Flatten(members).Select(m => m.Content switch
         {
-            Zig.EnumMemberContainer c => c.Arg0,
-            Zig.EnumMemberPubContainer c => c.Arg1,
+            Zig.EnumMemberContainer c => c.Arg1,
             _ => null,
         }).OfType<Item>();
         IEnumerable<Item> FromUnion(Item members) => Flatten(members).Select(m => m.Content switch
         {
-            Zig.UnionMemberContainer c => c.Arg0,
-            Zig.UnionMemberPubContainer c => c.Arg1,
+            Zig.UnionMemberContainer c => c.Arg1,
             _ => null,
         }).OfType<Item>();
         return content switch
@@ -924,17 +913,13 @@ internal sealed partial class ZigLowering
             {
                 case Zig.UnionMemberVariant mv:     variants.Add(mv.Arg0); break;   // UnionVariant ','
                 case Zig.UnionMemberVariantLast mv: variants.Add(mv.Arg0); break;   // UnionVariant
-                case Zig.UnionMemberMethod mm:      methods.Add(mm.Arg0); break;    // FnDef
-                case Zig.UnionMemberPubMethod mm:   methods.Add(mm.Arg1); break;    // 'pub' FnDef
-                case Zig.UnionMemberInlineMethod mm:    methods.Add(MarkInline(mm.Arg1)); break;    // 'inline' FnDef
-                case Zig.UnionMemberPubInlineMethod mm: methods.Add(MarkInline(mm.Arg2)); break;    // 'pub' 'inline' FnDef
-                case Zig.UnionMemberNoinlineMethod mm:    methods.Add(mm.Arg1); break;    // 'noinline' FnDef (task #177)
-                case Zig.UnionMemberPubNoinlineMethod mm: methods.Add(mm.Arg2); break;    // 'pub' 'noinline' FnDef
+                case Zig.UnionMemberMethod mm:      methods.Add(mm.Arg1); break;    // pub? FnDef
+                case Zig.UnionMemberInlineMethod mm:    methods.Add(MarkInline(mm.Arg2)); break;    // pub? 'inline' FnDef
+                case Zig.UnionMemberNoinlineMethod mm:    methods.Add(mm.Arg2); break;    // pub? 'noinline' FnDef (task #177)
                 case Zig.UnionMemberComptime: break;   // `comptime { … }`: analysis-only, dropped
                 case Zig.UnionMemberTest: break;       // a `test` block: dropped
-                case Zig.UnionMemberConst mc:       consts.Add(mc.Arg0); break;     // VarDecl
-                case Zig.UnionMemberPubConst mc:    consts.Add(mc.Arg1); break;     // 'pub' VarDecl
-                case Zig.UnionMemberContainer or Zig.UnionMemberPubContainer: break;   // nested: see NestedContainerItems
+                case Zig.UnionMemberConst mc:       consts.Add(mc.Arg1); break;     // pub? VarDecl
+                case Zig.UnionMemberContainer: break;   // nested: see NestedContainerItems
                 default: throw new IrUnsupportedException("zig union member: " + (m.Content?.GetType().Name ?? "null"));
             }
         }
