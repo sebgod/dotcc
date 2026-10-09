@@ -464,7 +464,7 @@ internal sealed partial class ZigLowering
         or Zig.TySentSliceExpr or Zig.TySentSliceConstExpr or Zig.TySentSliceAlignExpr
         or Zig.TySentSliceConstAlignExpr or Zig.TySentPtrExpr or Zig.TySentPtrConstExpr
         or Zig.TyArray or Zig.TySentArray or Zig.ErrUnion or Zig.TyTuple
-        or Zig.TyFn or Zig.TyFnNoArgs or Zig.TyFnErr or Zig.TyFnNoArgsErr;
+        or Zig.TyFn;
 
     /// <summary>True when a struct MEMBER <c>const</c>'s RHS is a TYPE: a type former, a call to a
     /// type-returning generic, a type name, or an <c>if</c> whose then-arm is one of those
@@ -745,12 +745,10 @@ internal sealed partial class ZigLowering
         Zig.TyFnSwitchRet => throw new IrUnsupportedException(
             "a function type whose return type is a `switch` expression is not lowered yet (std.Options' "
             + "`elf_debug_info_search_paths`); fold the switch into a type alias first"),
-        Zig.TyFn f       => new CType.Func(LowerType(f.Arg5), LowerFnTypeParams(f.Arg2), Variadic: false) { IsNativeCallConv = IsCCallConv(f.Arg4) },
-        Zig.TyFnNoArgs f => new CType.Func(LowerType(f.Arg4), System.Array.Empty<CType>(), Variadic: false) { IsNativeCallConv = IsCCallConv(f.Arg3) },
-        // `!T`-returning fn-pointer types: the return is an error union `!T` (like fnDefErr). The
+        Zig.TyFn { Arg5: null } f => new CType.Func(LowerType(f.Arg6), LowerFnTypeParams(f.Arg2), Variadic: false) { IsNativeCallConv = IsCCallConv(f.Arg4) },
+        // `!T`-returning fn-pointer types: the return is an error union `!T` (like a FnDef with `!`). The
         // Func's Return carries the CType.ErrorUnion, so a bound fn-ptr's result is an ErrUnion<T>.
-        Zig.TyFnErr f       => new CType.Func(new CType.ErrorUnion(LowerType(f.Arg6)), LowerFnTypeParams(f.Arg2), Variadic: false) { IsNativeCallConv = IsCCallConv(f.Arg4) },
-        Zig.TyFnNoArgsErr f => new CType.Func(new CType.ErrorUnion(LowerType(f.Arg5)), System.Array.Empty<CType>(), Variadic: false) { IsNativeCallConv = IsCCallConv(f.Arg3) },
+        Zig.TyFn f          => new CType.Func(new CType.ErrorUnion(LowerType(f.Arg6)), LowerFnTypeParams(f.Arg2), Variadic: false) { IsNativeCallConv = IsCCallConv(f.Arg4) },   // `!T`
         // `@This()` — Zig's reflective self-type → the container currently being lowered, so
         // `self: @This()` / `self: *@This()` name the receiver without repeating the type name.
         // The `const Self = @This();` alias form (the common Zig idiom) is also supported — it

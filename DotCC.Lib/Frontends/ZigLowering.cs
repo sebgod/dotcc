@@ -259,10 +259,7 @@ internal sealed partial class ZigLowering
         if (!_moduleFnDecls.TryGetValue(name, out var d)) { return null; }
         var e = d.Content switch
         {
-            Zig.FnDef f          => DeclareFn(f.Arg1, f.Arg3, f.Arg6, f.Arg7),
-            Zig.FnDefNoArgs f    => DeclareFn(f.Arg1, null, f.Arg5, f.Arg6),
-            Zig.FnDefErr f       => DeclareFn(f.Arg1, f.Arg3, f.Arg7, f.Arg8, errUnion: true),
-            Zig.FnDefNoArgsErr f => DeclareFn(f.Arg1, null, f.Arg6, f.Arg7, errUnion: true),
+            Zig.FnDef f          => DeclareFn(f.Arg1, f.Arg3, f.Arg7, f.Arg8, errUnion: f.Arg6 is not null),
             _ => throw new IrUnsupportedException("zig root decl is not a function: " + (d.Content?.GetType().Name ?? "null")),
         };
         _rootEarlyFns[name] = e;
@@ -323,10 +320,7 @@ internal sealed partial class ZigLowering
         if (!_moduleFnDecls.TryGetValue(name, out var d)) { return null; }
         var e = d.Content switch
         {
-            Zig.FnDef f          => DeclareFn(f.Arg1, f.Arg3, f.Arg6, f.Arg7),
-            Zig.FnDefNoArgs f    => DeclareFn(f.Arg1, null, f.Arg5, f.Arg6),
-            Zig.FnDefErr f       => DeclareFn(f.Arg1, f.Arg3, f.Arg7, f.Arg8, errUnion: true),
-            Zig.FnDefNoArgsErr f => DeclareFn(f.Arg1, null, f.Arg6, f.Arg7, errUnion: true),
+            Zig.FnDef f          => DeclareFn(f.Arg1, f.Arg3, f.Arg7, f.Arg8, errUnion: f.Arg6 is not null),
             _ => throw new IrUnsupportedException("lazy module decl is not a function: " + (d.Content?.GetType().Name ?? "null")),
         };
         // Memoized only once declared, so a signature that failed to lower fails the same way at the next
@@ -1543,9 +1537,6 @@ internal sealed partial class ZigLowering
                 if (early.Content switch
                     {
                         Zig.FnDef f          => f.Arg1,
-                        Zig.FnDefNoArgs f    => f.Arg1,
-                        Zig.FnDefErr f       => f.Arg1,
-                        Zig.FnDefNoArgsErr f => f.Arg1,
                         _ => (Item?)null,
                     } is { } earlyName)
                 {
@@ -1691,9 +1682,6 @@ internal sealed partial class ZigLowering
                 Item? fnName = d.Content switch
                 {
                     Zig.FnDef f          => f.Arg1,
-                    Zig.FnDefNoArgs f    => f.Arg1,
-                    Zig.FnDefErr f       => f.Arg1,
-                    Zig.FnDefNoArgsErr f => f.Arg1,
                     _ => null,
                 };
                 if (fnName is not null) { _moduleFnDecls[Tok(fnName)] = d; continue; }
@@ -1758,16 +1746,11 @@ internal sealed partial class ZigLowering
             var d = Unwrap(decl);   // unwrap `pub`
             switch (d.Content)
             {
-                case Zig.ExternFnProto f:       DeclareExternFn(f.Arg2, f.Arg4, f.Arg6); break;  // extern fn IDENT ( Params ) Type ;
-                case Zig.ExternFnProtoNoArgs f: DeclareExternFn(f.Arg2, null, f.Arg5); break;     // extern fn IDENT ( ) Type ;
-                case Zig.ExternCFnProto f:       DeclareExternFn(f.Arg3, f.Arg5, f.Arg7); break;  // extern "c" fn IDENT ( Params ) Type ;
-                case Zig.ExternCFnProtoNoArgs f: DeclareExternFn(f.Arg3, null, f.Arg6); break;     // extern "c" fn IDENT ( ) Type ;
+                case Zig.ExternFnProto f:       DeclareExternFn(f.Arg2, f.Arg4, f.Arg6); break;  // extern fn IDENT ( Params? ) Type ;
+                case Zig.ExternCFnProto f:       DeclareExternFn(f.Arg3, f.Arg5, f.Arg7); break;  // extern "c" fn IDENT ( Params? ) Type ;
                 // The optional CallConv (Milestone R, part 5) sits between `)` and the return, so the
                 // return type + body are one slot further right than the pre-CallConv layout.
-                case Zig.FnDef f:          AddFnEntry(Export(f.Arg1, DeclaredEarlyOr(f.Arg1, () => DeclareFn(f.Arg1, f.Arg3, f.Arg6, f.Arg7)))); break;
-                case Zig.FnDefNoArgs f:    AddFnEntry(Export(f.Arg1, DeclaredEarlyOr(f.Arg1, () => DeclareFn(f.Arg1, null, f.Arg5, f.Arg6)))); break;
-                case Zig.FnDefErr f:       AddFnEntry(Export(f.Arg1, DeclaredEarlyOr(f.Arg1, () => DeclareFn(f.Arg1, f.Arg3, f.Arg7, f.Arg8, errUnion: true)))); break;   // `!T` return → ErrorUnion(T)
-                case Zig.FnDefNoArgsErr f: AddFnEntry(Export(f.Arg1, DeclaredEarlyOr(f.Arg1, () => DeclareFn(f.Arg1, null, f.Arg6, f.Arg7, errUnion: true)))); break;
+                case Zig.FnDef f:          AddFnEntry(Export(f.Arg1, DeclaredEarlyOr(f.Arg1, () => DeclareFn(f.Arg1, f.Arg3, f.Arg7, f.Arg8, errUnion: f.Arg6 is not null)))); break;   // `!T` return → ErrorUnion(T)
                 // Container decls were handled in pass 0 — skip here.
                 case Zig.StructDecl or Zig.ExternStructDecl or Zig.PackedStructDecl or Zig.PackedStructDeclBacked or Zig.EnumDecl or Zig.EnumDeclTyped or Zig.UnionDeclEnum or Zig.UnionDeclTagged or Zig.UnionDeclUntagged: break;
                 // A top-level `const`/`var` is either a comptime binding (an `@import`/allocator
@@ -2545,9 +2528,6 @@ internal sealed partial class ZigLowering
         var name = fnDef.Content switch
         {
             Zig.FnDef f => f.Arg1,
-            Zig.FnDefNoArgs f => f.Arg1,
-            Zig.FnDefErr f => f.Arg1,
-            Zig.FnDefNoArgsErr f => f.Arg1,
             _ => null,
         };
         if (name is not null) { InlineFnNameToks.AddOrUpdate(name, InlineMark); }
