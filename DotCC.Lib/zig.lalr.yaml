@@ -120,11 +120,11 @@ symbols:
   - '...'        # 77  variadic parameter pack (`fn(fixed, ...)`, extern fn only)
   - '[*c]'       # 78  C-pointer type prefix: `[*c]T` == C's `T*` (glued token)
   # --- optionals (Milestone B1; appended — never reorder) ---
-  - OrElse       # 79  `a orelse b` — lowest-precedence binary (Expr -> OrElse -> BoolOr)
+  - OrElse       # 79  now a pass-through (Expr -> OrElse -> BoolOr): `orelse`/`catch` are at the Bitwise level
   - 'orelse'     # 80  optional null-coalescing keyword
   - 'null'       # 81  the null literal (optional none / null pointer)
   # --- error unions (Milestone B2; appended — never reorder) ---
-  - 'catch'      # 82  `a catch b` — error-union handling (joins the OrElse level)
+  - 'catch'      # 82  `a catch b` — error-union handling (the Bitwise level, with `orelse`)
   - 'error'      # 83  `error.Foo` error-value literal keyword
   # --- control flow (Milestone C1; appended — never reorder) ---
   - 'break'      # 84  `break;` loop exit
@@ -853,8 +853,16 @@ productions:
     rules:
       - { lhs: Expr, rhs: [OrElse] }
 
-  # `a orelse b` / `a catch b` — lowest-precedence binary level (below `or`), left-assoc.
-  # The value RHS is BoolOr; `a catch |e| b` (Milestone N, part 3) binds the error to `e` for the
+  # `a orelse b` / `a catch b` — zig's precedence: the BITWISE level, with `&` `^` `|` (`BitwiseOp <- & / ^ / | /
+  # orelse / catch Payload?`), tighter than `==`, `and` and `or`, left-assoc. So `x orelse false or y` is
+  # `(x orelse false) or y` and `opt orelse 0 == 3` is `(opt orelse 0) == 3`; these rules had sat BELOW `or`,
+  # which compiled both of those as a different program. The value RHS is BitShift, as `&`'s is. The
+  # control-flow forms below (`orelse return v`, `catch |e| …`, a jump or block arm) take the same Bitwise LEFT
+  # operand but stay OrElse-level results: their greedy right side (`return v` takes a whole expression, as in
+  # zig) then ends only where an expression ends. As Bitwise results, a comparison inside `return a == b` would
+  # have been followed by every operator that can follow a Bitwise, and the merged LALR states resolved
+  # `a == b & c` as `(a == b) & c`. After `x orelse` both kinds are shifts; the next token picks one.
+  # `a catch |e| b` (Milestone N, part 3) binds the error to `e` for the
   # fallback `b` (after `'catch'`, a `'|'` lookahead selects the capture form — no value expression
   # starts with `'|'`, so conflict-free). The CONTROL-FLOW fallback forms `orelse return [v]` /
   # `catch return [v]` (Milestone N, part 6) make `return` usable as a noreturn RHS: after the
@@ -865,20 +873,20 @@ productions:
   # decl-initializer or expression-statement position.
   - derivation: leftmost
     rules:
-      - { lhs: OrElse, rhs: [OrElse, 'orelse', BoolOr], action: orElse }
-      - { lhs: OrElse, rhs: [OrElse, 'catch', BoolOr],  action: catchOp }
-      - { lhs: OrElse, rhs: [OrElse, 'catch', '|', IDENT, '|', BoolOr], action: catchCapture }
-      - { lhs: OrElse, rhs: [OrElse, 'orelse', 'return', BoolOr], action: orElseReturn }
-      - { lhs: OrElse, rhs: [OrElse, 'catch', 'return', BoolOr],  action: catchReturn }
+      - { lhs: Bitwise, rhs: [Bitwise, 'orelse', BitShift], action: orElse }
+      - { lhs: Bitwise, rhs: [Bitwise, 'catch', BitShift],  action: catchOp }
+      - { lhs: Bitwise, rhs: [Bitwise, 'catch', '|', IDENT, '|', BitShift], action: catchCapture }
+      - { lhs: OrElse, rhs: [Bitwise, 'orelse', 'return', BoolOr], action: orElseReturn }
+      - { lhs: OrElse, rhs: [Bitwise, 'catch', 'return', BoolOr],  action: catchReturn }
       # STATEMENT-shaped fallbacks (road-to-zig-std — ~1,000 sites in the pinned std: `catch |err| switch
       # (err) {…}` alone is 498, `catch {…}` 150, `orelse {…}` 105, `orelse break` 102). The fallback runs
       # only on the error / none path: a `break`/`continue` (optionally labeled, a labeled break optionally
       # carrying a value), a braced block, or a `switch` whose prongs yield the payload type or jump. Each
       # arm opens with `break`/`continue`/`{`/`switch`/`return`, none in FIRST(BoolOr), so the arm-vs-value
       # choice is one token of lookahead — the same split the `return` forms above already use.
-      - { lhs: OrElse, rhs: [OrElse, 'orelse', FallbackArm],                  action: orElseArm }
-      - { lhs: OrElse, rhs: [OrElse, 'catch', FallbackArm],                   action: catchArm }
-      - { lhs: OrElse, rhs: [OrElse, 'catch', '|', IDENT, '|', CaptureArm],   action: catchCaptureArm }
+      - { lhs: OrElse, rhs: [Bitwise, 'orelse', FallbackArm],                  action: orElseArm }
+      - { lhs: OrElse, rhs: [Bitwise, 'catch', FallbackArm],                   action: catchArm }
+      - { lhs: OrElse, rhs: [Bitwise, 'catch', '|', IDENT, '|', CaptureArm],   action: catchCaptureArm }
       # `catch |e| return if (e == error.Big) 7 else 8` (task #146): a value `if` as the returned value. `if` is not in
       # FIRST(BoolOr), so one token after `return` picks it. The arms are BoolOr, not IfExpr's greedy RhsExpr: an RhsExpr
       # arm would take a following `catch` into itself, and resolving that collapsed a shared state so that NO
@@ -1006,8 +1014,8 @@ productions:
       # `d orelse e`), and no operator is left over to apply to the `if`. After `OrElse 'orelse'`, an `if` lookahead
       # starts no BoolOr and no FallbackArm, so the shift is conflict-free. The records are the plain `orElse` /
       # `catchOp`, whose fallback is the IfExpr, as `x orelse (if (g) 5 else 6)` gives it through the grouping.
-      - { lhs: RhsExpr, rhs: [OrElse, 'orelse', IfExpr], action: orElse }
-      - { lhs: RhsExpr, rhs: [OrElse, 'catch', IfExpr],  action: catchOp }
+      - { lhs: RhsExpr, rhs: [Bitwise, 'orelse', IfExpr], action: orElse }
+      - { lhs: RhsExpr, rhs: [Bitwise, 'catch', IfExpr],  action: catchOp }
 
   - derivation: none
     rules:
@@ -1519,8 +1527,8 @@ productions:
       - { lhs: FieldValue, rhs: [SwitchExpr] }
       # `.async_limit = options.async_limit orelse if (cpu_count) |n| .limited(n - 1) else |_| .nothing` (GH #129):
       # the `orelse if` / `catch if` of RhsExpr, as a field value.
-      - { lhs: FieldValue, rhs: [OrElse, 'orelse', IfExpr], action: orElse }
-      - { lhs: FieldValue, rhs: [OrElse, 'catch', IfExpr],  action: catchOp }
+      - { lhs: FieldValue, rhs: [Bitwise, 'orelse', IfExpr], action: orElse }
+      - { lhs: FieldValue, rhs: [Bitwise, 'catch', IfExpr],  action: catchOp }
 
   # ===== switch prongs (Milestone C2) =====
   # LEFT-recursive prong list — the form that makes the optional trailing comma a clean
@@ -1864,8 +1872,8 @@ productions:
   # hash_map's getOrPutContextAdapted). Lowest precedence here means the value form takes the IDENT.
   - derivation: none
     rules:
-      - { lhs: OrElse, rhs: [OrElse, 'orelse', 'return'],         action: orElseReturnVoid }
-      - { lhs: OrElse, rhs: [OrElse, 'catch', 'return'],          action: catchReturnVoid }
+      - { lhs: OrElse, rhs: [Bitwise, 'orelse', 'return'],         action: orElseReturnVoid }
+      - { lhs: OrElse, rhs: [Bitwise, 'catch', 'return'],          action: catchReturnVoid }
       # The value-less labeled break, last for the same reason (GH #283): in the rightmost group with its value form, its
       # reduce outranked the shift of a value starting with an IDENT, `comptime` or `fn`, so `x orelse break :blk d`
       # failed at `d` while `x orelse break :blk 7` parsed. Here the value form takes it.

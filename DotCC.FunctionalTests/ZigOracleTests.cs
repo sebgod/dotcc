@@ -7199,6 +7199,41 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{d} {d} {d}\\n\", .{ field(6, 0).n, field(1, 4).n, field(1, 0).n });\n" +
             "}\n", 0,
             "7 1 2\n9 3 4\n9 11 20\n6 40 7 30\n10 51 61\n6 5 0" },
+        // `orelse` / `catch` bind with `&` `^` `|` (zig's BitwiseOp level): tighter than `or`, `and` and `==`, looser
+        // than `+`. They had sat below `or`, so `flag orelse true or true` compiled as `flag orelse (true or true)` and
+        // `opt orelse 0 == 7` as `opt orelse (0 == 7)`: a different program with no diagnostic.
+        new object[] { "orelse_catch_precedence",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "const E = error{Bad};\n" +
+            "\n" +
+            "fn parse(x: u8) E!u8 {\n" +
+            "    if (x == 0) return error.Bad;\n" +
+            "    return x;\n" +
+            "}\n" +
+            "\n" +
+            "fn maybe(x: u8) ?u8 {\n" +
+            "    return if (x > 5) x else null;\n" +
+            "}\n" +
+            "\n" +
+            "fn flag(b: bool) ?bool {\n" +
+            "    return if (b) false else null;\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() void {\n" +
+            "    // `orelse` / `catch` bind with `&` `^` `|`: tighter than `or`, `and` and `==`, looser than `+`.\n" +
+            "    const a = flag(true) orelse true or true;\n" +
+            "    const b = maybe(7) orelse 0 == 7;\n" +
+            "    const c = parse(3) catch 0 == 3;\n" +
+            "    const d = flag(true) orelse true and true;\n" +
+            "    const e = maybe(1) orelse 1 | 4;\n" +
+            "    const f = maybe(9) orelse 1 + 1;\n" +
+            "    const g = maybe(2) orelse 1 + 1;\n" +
+            "    const h = parse(0) catch 1 + 1 == 2;\n" +
+            "    std.debug.print(\"{} {} {} {} {}\\n\", .{ a, b, c, d, h });\n" +
+            "    std.debug.print(\"{d} {d} {d}\\n\", .{ e, f, g });\n" +
+            "}\n", 0,
+            "true true true false true\n5 9 2" },
         // Task #140: std.crypto.blake3's shapes: a late-declared struct const in a field extent, `@intCast` slice bounds,
         // open slices of a many-item pointer, and an array local copied through a pointer.
         new object[] { "blake3_shapes",
