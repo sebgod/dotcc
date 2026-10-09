@@ -1,7 +1,8 @@
 # zig-grammar-peg: control flow as expressions, the way zig's grammar has it
 
-**Status:** P0 done (this plan and the spike behind it, 2026-10-10). **P1a done** (the open/closed cascade and the
-`if` expression as an open primary; probe 422 to 433). P1b (`return` / `break` / `continue` as open primaries) next.
+**Status:** P0 done (this plan and the spike behind it, 2026-10-10). **P1 done**: P1a (the open/closed cascade and the
+`if` expression as an open primary; probe 422 to 433) and P1b (`return` / `break` / `continue` as open primaries; probe
+433 to 438). P2 (statement `if` as zig's IfStatement) next.
 
 ## Why
 
@@ -100,3 +101,18 @@ labeled block or `switch` as an `if` body before `else`) wins as before, and one
 into a labeled block at the end of an `if` arm, which is zig's reading (only `s[a.. if (c) b else n :0]`, an `if`
 ending in a bare name as a sentinel slice's end bound, parses differently). Parse-shape pins in `ZigGrammarTests`,
 oracle row `if_expression_as_operand`.
+
+**P1b as landed.** `JumpExpr` (#208): `return RhsExpr?` and the six `break` / `continue` spellings, in a final
+`rightmost` group (a `:` shifts into a label; a value-less jump's reduce ranks lowest, so a following value shifts, the
+GH #283 lesson). The break / continue records are the fallback arms' `fb*`, so `LowerFallbackArm` kept its cases; a
+control-flow fallback is now the ordinary `orElse` / `catchOp` / `catchCapture` with a noreturn right operand
+(`IsNoreturnArm`), and a value `if` with a jump arm is the ordinary `ifExpr`. Retired: `orElseReturn` / `catchReturn`
+(and the void forms), `JumpArm`, the FallbackArm and CaptureArm jump and `return` forms, `fbIf*`, the four `ifExpr`
+jump-arm variants, and `ReturnArm`. Keeping `ReturnArm` beside `JumpExpr` was tried first and failed: LALR merged
+the state after `return Expr` between a value loop's `else return v` (followed by `;`) and a statement `if`'s then-arm,
+so `if (c) return x;` reduced to ReturnArm and demanded `else` (127 unit failures). The statement `if` and prong forms
+take `JumpExpr` directly, and the value loops' `else return` forms fold into their `else RhsExpr` twins. Every new
+precedence decision was read: statement / prong forms keep today's parse where they share a prefix with the expression,
+the label `:` shifts, and a value shifts after a value-less jump. A jump as a plain operand (`f(return 1)`) parses and is
+rejected by name in lowering. Pins in `ZigGrammarTests` (including the `return a == b & c`, `f(a orelse continue)` and
+`f() catch return` regressions the old copies were shaped around); oracle row `jumps_as_expressions`.
