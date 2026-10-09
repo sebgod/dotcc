@@ -1246,19 +1246,18 @@ place a poison IS needed is the top-level tombstone, and that is what landed.
 
 ### S9 — surface-debt bricks (many S/M; parallel any time; wall-finder-ranked)
 
-**Current ranking (2026-10-09, after the first worklist batch: 386 of 553 files parse-clean, 69.8%; it was
-341 / 61.7% the same morning and 187 / 33.8% at the 2026-09-23 report).** The batch took the three biggest
-buckets: an empty file (25 files; the installed std ships its `test.zig` files as 0 bytes), `align(N)` on an
-untyped container-level `const`/`var` (20), and `pub extern` (13, which also brought `extern var`; extern data
-parses and is rejected by name only where it is read). The head of
+**Current ranking (2026-10-10, after two worklist batches: 399 of 553 files parse-clean, 72.2%; it was 341 / 61.7%
+on 2026-10-09 and 187 / 33.8% at the 2026-09-23 report).** Batch 1 took an empty file (25 files; the installed std
+ships its `test.zig` files as 0 bytes), `align(N)` on an untyped container-level `const`/`var` (20) and `pub extern`
+(13, which also brought `extern var`; extern data parses and is rejected by name only where it is read). Batch 2
+took the inline container field types: `extern struct {…}` / `extern union {…}` / `packed struct[(uN)] {…}` /
+`packed union {…}` / `enum(uN) {…}` as a field's type, and a named `const X = extern union {…};`. The head of
 [`std-parse-probe.report.txt`](std-parse-probe.report.txt) now, each bucket read off the line it fails on:
 
 | Files | Construct (first-fail) | Example |
 |---|---|---|
-| 9 | **`packed struct(uN)` as an inline field type** | `bits: packed struct(u8) {` (`Build/abi.zig`) |
-| 8 | **a labeled block as a struct-literal field value** | `.debug_stack_trace = blk: {` (`Build/Step.zig`) |
-| 8 | **`extern union` / `extern struct` as an inline field type** | `un: extern union {` (`c/freebsd.zig`) |
-| 6 | **`if` in a type slot** (field type) | `old_sig_io: if (have_sig_io) posix.Sigaction else void,` (`Io/Threaded.zig`) |
+| 9 | **a labeled block as a struct-literal field value** | `.debug_stack_trace = blk: {` (`Build/Step.zig`) |
+| 7 | **`if` in a type slot** (field type) | `old_sig_io: if (have_sig_io) posix.Sigaction else void,` (`Io/Threaded.zig`) |
 | 5 | **an else-less `if` as a switch-prong body** | `else => if (c) return error.InvalidCharacter,` (`crypto/codecs/base64_hex_ct.zig`) |
 | 5 | **a braceless `if` body followed by `else if`** | `std.mem.swap(…)` then `else if (index == 2) {` (`compress/zstd/Decompress.zig`) |
 | 4 | **`**T`** (the `**` token in a pointer-to-pointer type) | `*const fn (*const File, **File, …)` (`os/uefi/protocol/file.zig`) |
@@ -1267,8 +1266,8 @@ parses and is rejected by name only where it is read). The head of
 | 4 | **a struct literal typed by an inline `struct {…}`** | `struct { … }{ .keys = … }` (`debug/Dwarf.zig`) |
 | 4 | **`} else \|_\| {}`** after a block-bodied error-union `if` | (`crypto/ecdsa.zig`) |
 | 4 | **an empty `enum {}`** | `pub const Feature = enum {};` (`Target/generic.zig`) |
+| 3 | **`union(enum(u8))`** (a tagged union with an explicit tag integer) | `pub const CallingConvention = union(enum(u8)) {` (`lang.zig`) |
 | 3 | **`callconv` on an `extern fn` prototype** | `) callconv(.winapi) ?HCERTSTORE;` (`os/windows/crypt32.zig`) |
-| 3 | **`const X = extern union {`** (only `extern struct` is a container decl) | (`fmt.zig`) |
 
 The historical ranking below is kept for the record.
 

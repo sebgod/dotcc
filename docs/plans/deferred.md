@@ -223,8 +223,8 @@ CPU). Segment status: `docs/plans/road-to-zig-std.md`, "The target-identity segm
 ## Zig — the big open parse buckets (not cuts; just next)
 
 These are ranked live in [`std-parse-probe.report.txt`](std-parse-probe.report.txt) — the
-report *is* the worklist. Current head (2026-10-09, 386 of 553 files, 69.8% parse-clean, after the empty-file,
-untyped `align(N)` and `pub extern` bricks): `packed struct(uN)` as an inline field type (9), a labeled block as a
-field value (8), `extern union`/`extern struct` as an inline field type (8), `if` in a type slot (6).
+report *is* the worklist. Current head (2026-10-10, 399 of 553 files, 72.2% parse-clean, after two worklist
+batches): a labeled block as a field value (9), `if` in a type slot (7), an else-less `if` as a prong body (5), a
+braceless `if` body followed by `else if` (5).
 The 2026-08 head (file-is-a-struct fields, `)`-in-440, `(`-in-276, statement-position `if`/`switch`)
 is retired. See the S9 table in [`road-to-zig-std.md`](road-to-zig-std.md).
