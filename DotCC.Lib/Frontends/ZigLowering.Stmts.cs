@@ -25,7 +25,6 @@ internal sealed partial class ZigLowering
         var items = new List<Item>();
         switch (block.Content)
         {
-            case Zig.BlockEmpty: break;
             case Zig.Block b: items.AddRange(Flatten(b.Arg1)); break;
             default: throw new IrUnsupportedException("zig block: " + (block.Content?.GetType().Name ?? "null"));
         }
@@ -104,7 +103,6 @@ internal sealed partial class ZigLowering
             // pass 0; a local one is first seen here mid-pass-2) and emits NO runtime statement. A local
             // enum / union (task #111) registers the same way, fields only.
             case Zig.StructDecl s:       return LowerLocalStruct(Tok(s.Arg1), s.Arg5, AggregateLayout.Default);
-            case Zig.StructDeclEmpty s:  return LowerLocalStruct(Tok(s.Arg1), null,   AggregateLayout.Default);
             case Zig.ExternStructDecl s: return LowerLocalStruct(Tok(s.Arg1), s.Arg6, AggregateLayout.Sequential);
             case Zig.PackedStructDecl s: return LowerLocalStruct(Tok(s.Arg1), s.Arg6, AggregateLayout.Packed);
             case Zig.PackedStructDeclBacked s: return LowerLocalStruct(Tok(s.Arg1), s.Arg9, AggregateLayout.Packed);
@@ -364,8 +362,7 @@ internal sealed partial class ZigLowering
             }
 
             // A brace block in statement position (`Stmt -> Block`, pass-through).
-            case Zig.Block:
-            case Zig.BlockEmpty:        return LowerBlock(stmt);
+            case Zig.Block:             return LowerBlock(stmt);
 
             default: throw new IrUnsupportedException("zig statement: " + (stmt.Content?.GetType().Name ?? "null"));
         }

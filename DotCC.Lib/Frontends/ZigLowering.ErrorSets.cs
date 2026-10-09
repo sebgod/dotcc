@@ -80,11 +80,9 @@ internal sealed partial class ZigLowering
                 setName = Tok(id.Arg0);
                 members = declared;
                 return true;
-            case Zig.ErrorSet inlineSet:
+            case Zig.ErrorSet inlineSet:   // `error{}!T` (no members: never errors) too
                 foreach (var m in WalkErrSetMembers(inlineSet.Arg2)) { members.Add(m); }
                 return true;
-            case Zig.ErrorSetEmpty:
-                return true;                                     // `error{}!T` — never errors
             default:
                 return false;                                    // anyerror / an unknown set name
         }

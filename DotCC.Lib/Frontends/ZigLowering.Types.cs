@@ -129,12 +129,6 @@ internal sealed partial class ZigLowering
             _errorSetMembers[name] = members;   // Milestone X, part 3 — for the membership checks
             return true;
         }
-        if (rhs.Content is Zig.ErrorSetEmpty)
-        {
-            _errorSets.Add(name);
-            _errorSetMembers[name] = new HashSet<string>(System.StringComparer.Ordinal);  // `error{}` — no members
-            return true;
-        }
         // `const E = A || B || …;` — an error-set MERGE (road-to-zig-std). Zig's `||` unions error sets;
         // dotcc erases the set into the flat global code space, so a merge is just another (erased) set.
         // Register E as a known set name so `E!T` / an `IsTypeName(E)` check resolve, but leave it
@@ -549,6 +543,7 @@ internal sealed partial class ZigLowering
     /// into its member names, mirroring the grammar's one / trailing-comma / cons shapes.</summary>
     private static IEnumerable<string> WalkErrSetMembers(Item list)
     {
+        if (list is null) { yield break; }   // `error{}`: the optional member list is absent
         var cur = list;
         while (true)
         {
@@ -791,7 +786,6 @@ internal sealed partial class ZigLowering
         Zig.InlineEnumType iet         => ReifyInlineEnum(type, iet.Arg2),
         Zig.InlineUnionEnumType iut    => ReifyInlineUnion(type, iut.Arg5, tagged: true),
         Zig.InlineUnionType iuu        => ReifyInlineUnion(type, iuu.Arg2, tagged: false),
-        Zig.InlineStructTypeEmpty      => ReifyInlineStruct(type, null),
         // A type chosen by a comptime switch in any type position (a parameter's, as well as a field's): the selected
         // prong's type (task #73).
         Zig.SwitchExpr => LowerSwitchType(type),

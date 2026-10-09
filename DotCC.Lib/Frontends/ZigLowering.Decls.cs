@@ -1887,7 +1887,7 @@ internal sealed partial class ZigLowering
     private bool IsEmptyArrayLiteral(Item literal) => literal.Content switch
     {
         Zig.AnonStructInitEmpty => true,
-        Zig.TypedStructInitEmpty { Arg0.Content: Zig.TyArray ta } => ta.Arg1.Content switch
+        Zig.TypedStructInit { Arg2: null, Arg0.Content: Zig.TyArray ta } => ta.Arg1.Content switch
         {
             Zig.Ident id => Tok(id.Arg0) == "_",                       // `[_]T{}`: the extent is inferred, 0
             _ => _ir.ConstEval(LowerExpr(ta.Arg1)) is 0,               // `[0]T{}`

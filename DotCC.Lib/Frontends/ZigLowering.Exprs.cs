@@ -678,10 +678,8 @@ internal sealed partial class ZigLowering
 
             // Typed struct literal `Type{ .field = … }` (Zig's CurlySuffixExpr). The struct type
             // is named explicitly, so — unlike `.{…}` — it needs no sink and is valid anywhere.
-            case Zig.TypedStructInit t:       // CurlySuffix -> Type '{' FieldInits '}'
+            case Zig.TypedStructInit t:       // CurlySuffix -> Type '{' FieldInits? '}'
                 return LowerTypedStructInit(t.Arg0, Flatten(t.Arg2));
-            case Zig.TypedStructInitEmpty t:  // CurlySuffix -> Type '{' '}'
-                return LowerTypedStructInit(t.Arg0, []);
 
             // Postfix deref `p.*` and subscript `a[i]` → the C Unary(Deref)/Index IR.
             case Zig.Deref d:
@@ -1000,7 +998,6 @@ internal sealed partial class ZigLowering
             // `const E = error{…};` declaration (handled in TryComptimeConstBinding, emits nothing)
             // or an (ignored) set in an `E!T` return type.
             case Zig.ErrorSet:
-            case Zig.ErrorSetEmpty:
                 throw new IrUnsupportedException(
                     "zig `error{…}` set literal is only valid as a `const E = error{…};` declaration or an `E!T` return-type set");
 
