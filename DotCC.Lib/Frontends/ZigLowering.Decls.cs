@@ -818,17 +818,37 @@ internal sealed partial class ZigLowering
             {
                 case Zig.MemberField mf:     fields.Add(mf.Arg0); break;       // FieldDecl ','  → StructField
                 case Zig.MemberFieldLast mf: fields.Add(mf.Arg0); break;       // FieldDecl       → StructField
-                case Zig.MemberMethod mm:    methods.Add(mm.Arg1); break;      // pub? FnDef
-                case Zig.MemberInlineMethod mm:    methods.Add(MarkInline(mm.Arg2)); break; // pub? 'inline' FnDef
-                case Zig.MemberNoinlineMethod mm:    methods.Add(mm.Arg2); break; // pub? 'noinline' FnDef (an optimizer hint, task #177)
-                case Zig.MemberComptime: break;   // `comptime { … }`: analysis-only, dropped like the top-level form
-                case Zig.MemberTest: break;       // a `test` block: dropped, like the top-level form
-                case Zig.MemberConst mc:     consts.Add(mc.Arg1); break;       // pub? VarDecl
-                case Zig.MemberContainer cc:    containers.Add(cc.Arg1); break; // pub? ContainerDecl
-                default: throw new IrUnsupportedException("zig container member: " + (m.Content?.GetType().Name ?? "null"));
+                default:
+                    if (!AddContainerDeclaration(m, methods, consts, containers))
+                    {
+                        throw new IrUnsupportedException("zig container member: " + (m.Content?.GetType().Name ?? "null"));
+                    }
+                    break;
             }
         }
         return (fields, methods, consts, containers);
+    }
+
+    /// <summary>File one member every container body shares (zig's ContainerDeclaration, the grammar's symbol of the
+    /// same name): a method's <c>FnDef</c> into <paramref name="methods"/> (an <c>inline</c> one marked), a
+    /// <c>const</c>'s <c>VarDecl</c> into <paramref name="consts"/>, a nested container decl into
+    /// <paramref name="containers"/> when given (an enum or union body's are registered by pass 0 through
+    /// <see cref="NestedContainerItems"/> instead), and a <c>comptime</c> or <c>test</c> block, analysis-only, nowhere.
+    /// <c>pub</c> carries no meaning here. False when <paramref name="member"/> is not one, a field or a variant, which
+    /// the caller files itself.</summary>
+    private static bool AddContainerDeclaration(Item member, List<Item> methods, List<Item> consts, List<Item>? containers)
+    {
+        switch (member.Content)
+        {
+            case Zig.MemberMethod mm:         methods.Add(mm.Arg1); return true;              // pub? FnDef
+            case Zig.MemberInlineMethod mm:   methods.Add(MarkInline(mm.Arg2)); return true;  // pub? 'inline' FnDef
+            case Zig.MemberNoinlineMethod mm: methods.Add(mm.Arg2); return true;              // pub? 'noinline' FnDef (an optimizer hint, task #177)
+            case Zig.MemberComptime:          return true;   // `comptime { … }`: analysis-only, dropped like the top-level form
+            case Zig.MemberTest:              return true;   // a `test` block (std.math.Order's `test invert`): dropped
+            case Zig.MemberConst mc:          consts.Add(mc.Arg1); return true;               // pub? VarDecl
+            case Zig.MemberContainer cc:      containers?.Add(cc.Arg1); return true;          // pub? ContainerDecl
+            default:                          return false;
+        }
     }
 
     /// <summary>Split an enum body (<c>EnumFields</c> = a list of <c>EnumMember</c>) into its value
@@ -846,16 +866,14 @@ internal sealed partial class ZigLowering
             {
                 case Zig.EnumMemberField mf:     fields.Add(mf.Arg0); break;   // EnumField ','
                 case Zig.EnumMemberFieldLast mf: fields.Add(mf.Arg0); break;   // EnumField
-                case Zig.EnumMemberMethod mm:    methods.Add(mm.Arg1); break;  // pub? FnDef
-                case Zig.EnumMemberInlineMethod mm:    methods.Add(MarkInline(mm.Arg2)); break;  // pub? 'inline' FnDef
-                case Zig.EnumMemberNoinlineMethod mm:    methods.Add(mm.Arg2); break;  // pub? 'noinline' FnDef (task #177)
-                case Zig.EnumMemberComptime: break;   // `comptime { … }`: analysis-only, dropped
-                case Zig.EnumMemberTest: break;       // a `test` block (std.math.Order's `test invert`): dropped
-                case Zig.EnumMemberConst mc:     consts.Add(mc.Arg1); break;   // pub? VarDecl
-                // A NESTED container (std.Target.Cpu.Arch's `pub const Family = enum {…}`): registered by pass 0
-                // under a parent-mangled name (NestedContainerItems), not here.
-                case Zig.EnumMemberContainer: break;
-                default: throw new IrUnsupportedException("zig enum member: " + (m.Content?.GetType().Name ?? "null"));
+                // A NESTED container (std.Target.Cpu.Arch's `pub const Family = enum {…}`) is registered by pass 0
+                // under a parent-mangled name (NestedContainerItems), so none is collected here.
+                default:
+                    if (!AddContainerDeclaration(m, methods, consts, containers: null))
+                    {
+                        throw new IrUnsupportedException("zig enum member: " + (m.Content?.GetType().Name ?? "null"));
+                    }
+                    break;
             }
         }
         return (fields, methods, consts);
@@ -865,14 +883,10 @@ internal sealed partial class ZigLowering
     /// enum's (std.Target.Cpu.Arch nests `Family`) and a union's. Empty for a container with a body of none.</summary>
     private static IReadOnlyList<Item> NestedContainerItems(object? content)
     {
-        IEnumerable<Item> FromEnum(Item members) => Flatten(members).Select(m => m.Content switch
+        // An enum or union body's nested containers: its ContainerDeclaration members, shared with a struct's.
+        IEnumerable<Item> FromBody(Item members) => Flatten(members).Select(m => m.Content switch
         {
-            Zig.EnumMemberContainer c => c.Arg1,
-            _ => null,
-        }).OfType<Item>();
-        IEnumerable<Item> FromUnion(Item members) => Flatten(members).Select(m => m.Content switch
-        {
-            Zig.UnionMemberContainer c => c.Arg1,
+            Zig.MemberContainer c => c.Arg1,
             _ => null,
         }).OfType<Item>();
         return content switch
@@ -881,11 +895,11 @@ internal sealed partial class ZigLowering
             Zig.ExternStructDecl s => SplitMembers(s.Arg6).containers,
             Zig.PackedStructDecl s => SplitMembers(s.Arg6).containers,
             Zig.PackedStructDeclBacked s => SplitMembers(s.Arg9).containers,
-            Zig.EnumDecl e => FromEnum(e.Arg5).ToList(),
-            Zig.EnumDeclTyped e => FromEnum(e.Arg8).ToList(),
-            Zig.UnionDeclEnum u => FromUnion(u.Arg8).ToList(),
-            Zig.UnionDeclTagged u => FromUnion(u.Arg8).ToList(),
-            Zig.UnionDeclUntagged u => FromUnion(u.Arg5).ToList(),
+            Zig.EnumDecl e => FromBody(e.Arg5).ToList(),
+            Zig.EnumDeclTyped e => FromBody(e.Arg8).ToList(),
+            Zig.UnionDeclEnum u => FromBody(u.Arg8).ToList(),
+            Zig.UnionDeclTagged u => FromBody(u.Arg8).ToList(),
+            Zig.UnionDeclUntagged u => FromBody(u.Arg5).ToList(),
             _ => System.Array.Empty<Item>(),
         };
     }
@@ -905,14 +919,12 @@ internal sealed partial class ZigLowering
             {
                 case Zig.UnionMemberVariant mv:     variants.Add(mv.Arg0); break;   // UnionVariant ','
                 case Zig.UnionMemberVariantLast mv: variants.Add(mv.Arg0); break;   // UnionVariant
-                case Zig.UnionMemberMethod mm:      methods.Add(mm.Arg1); break;    // pub? FnDef
-                case Zig.UnionMemberInlineMethod mm:    methods.Add(MarkInline(mm.Arg2)); break;    // pub? 'inline' FnDef
-                case Zig.UnionMemberNoinlineMethod mm:    methods.Add(mm.Arg2); break;    // pub? 'noinline' FnDef (task #177)
-                case Zig.UnionMemberComptime: break;   // `comptime { … }`: analysis-only, dropped
-                case Zig.UnionMemberTest: break;       // a `test` block: dropped
-                case Zig.UnionMemberConst mc:       consts.Add(mc.Arg1); break;     // pub? VarDecl
-                case Zig.UnionMemberContainer: break;   // nested: see NestedContainerItems
-                default: throw new IrUnsupportedException("zig union member: " + (m.Content?.GetType().Name ?? "null"));
+                default:   // a nested container: see NestedContainerItems
+                    if (!AddContainerDeclaration(m, methods, consts, containers: null))
+                    {
+                        throw new IrUnsupportedException("zig union member: " + (m.Content?.GetType().Name ?? "null"));
+                    }
+                    break;
             }
         }
         return (variants, methods, consts);
