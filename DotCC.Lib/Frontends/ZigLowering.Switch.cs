@@ -826,7 +826,7 @@ internal sealed partial class ZigLowering
         // An all-value switch stays a runtime C# switch, unless a prong is a `@compileError` (std.math.floatMantissaBits'
         // `else => @compileError("unknown floating point type …")`): zig never analyses an unselected prong, so a
         // comptime-known subject must select before any other prong lowers.
-        if (prongs.All(p => p.Content is Zig.ProngExpr) && !prongs.Any(p => p.Content is Zig.ProngExpr { Arg2.Content: Zig.BuiltinCall cb }
+        if (prongs.All(p => p.Content is Zig.ProngExpr) && !prongs.Any(p => p.Content is Zig.ProngExpr { Arg2.Content: Zig.BuiltinCall { Arg2: not null } cb }
                                                                             && Tok(cb.Arg0) == "@compileError"))
         {
             return null;

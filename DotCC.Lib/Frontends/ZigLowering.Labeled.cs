@@ -99,7 +99,7 @@ internal sealed partial class ZigLowering
     {
         // `break sort.insertionContext(a, b, context);` in a plain `while (true)` (std.sort.pdq): a VOID break value is the
         // loop's own (void) result, so the call runs and the loop ends.
-        if (_loopValues.Count == 0 && valueItem.Content is Zig.CallArgs or Zig.CallNoArgs
+        if (_loopValues.Count == 0 && valueItem.Content is Zig.CallArgs
             && LowerExpr(valueItem) is { Type.Unqualified: CType.VoidType } voidCall)
         {
             return new Block(new List<CStmt> { new ExprStmt(voidCall), LowerUnlabeledBreak() });

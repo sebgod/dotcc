@@ -36,7 +36,7 @@ internal sealed partial class ZigLowering
             _typeAliases[name] = pointedType;
             return true;
         }
-        if (rhs.Content is Zig.BuiltinCall b && Tok(b.Arg0) == "@import")
+        if (rhs.Content is Zig.BuiltinCall { Arg2: not null } b && Tok(b.Arg0) == "@import")
         {
             var bargs = Flatten(b.Arg2);
             if (bargs.Count == 1 && bargs[0].Content is Zig.StrLit sl)
@@ -87,7 +87,7 @@ internal sealed partial class ZigLowering
         // Zig analyses a declaration only when something references it, so the tombstone is inert until
         // named: record the message, emit no decl, and raise at the REFERENCE (see RaiseIfPoisoned).
         // Firing here instead would make importing those modules impossible.
-        if (rhs.Content is Zig.BuiltinCall ce && Tok(ce.Arg0) == "@compileError")
+        if (rhs.Content is Zig.BuiltinCall { Arg2: not null } ce && Tok(ce.Arg0) == "@compileError")
         {
             var msgArgs = Flatten(ce.Arg2);
             _poisonedConsts[name] = msgArgs.Count == 1
@@ -105,7 +105,7 @@ internal sealed partial class ZigLowering
         // `.free(…)` lowers to a direct FBA bump over `&fba` (no vtable). A value use of `a` later
         // materializes `ZigAlloc.FbaAllocator(&fba)` (see the VarRef value path / MaterializeFba), so
         // this is an optimization, not a restriction — an escaping `a` still works, just indirectly.
-        if (rhs.Content is Zig.CallNoArgs { Arg0.Content: Zig.Field afld }
+        if (rhs.Content is Zig.CallArgs { Arg2: null, Arg0.Content: Zig.Field afld }
             && Tok(afld.Arg2) == "allocator"
             && afld.Arg0.Content is Zig.Ident fbaId
             && _symbols.Resolve(Tok(fbaId.Arg0)) is { } fbaSym
@@ -247,7 +247,7 @@ internal sealed partial class ZigLowering
         // `const H = @import("h.zig").H;` — rooted at an INLINE import (ResolveModulePath resolves one), in a
         // ROOT unit only: std.zig re-exports dozens of names that way (`pub const BufMap =
         // @import("buf_map.zig").BufMap;`), and a lazy module must not pull those modules in at prepare time.
-        Zig.BuiltinCall b => !_lazy && Tok(b.Arg0) == "@import",
+        Zig.BuiltinCall { Arg2: not null } b => !_lazy && Tok(b.Arg0) == "@import",
         _ => false,
     };
 
@@ -301,7 +301,7 @@ internal sealed partial class ZigLowering
             // `const Writer = @This();` names the innermost container, which at file scope is the file
             // itself when it has top-level fields (road-to-zig-std G3). A namespace-only file has no
             // type to name, so the binding falls through unchanged.
-            case Zig.BuiltinCallNoArgs tb when Tok(tb.Arg0) == "@This" && (_currentContainer ?? _fileContainer) is not null:
+            case Zig.BuiltinCall { Arg2: null } tb when Tok(tb.Arg0) == "@This" && (_currentContainer ?? _fileContainer) is not null:
                 type = CurrentContainerType();
                 return true;
 
@@ -312,20 +312,20 @@ internal sealed partial class ZigLowering
                 return true;
 
             // `@TypeOf(expr)` — the operand's synthesized type, unevaluated.
-            case Zig.BuiltinCall b when Tok(b.Arg0) == "@TypeOf":
+            case Zig.BuiltinCall { Arg2: not null } b when Tok(b.Arg0) == "@TypeOf":
                 type = TypeOfBuiltin(b.Arg2);
                 return true;
 
             // `const MaskInt = @Int(.unsigned, @bitSizeOf(T));` — a CONSTRUCTED type bound to a name
             // (road-to-zig-std S7). The width it was built with rides the binding through
             // SetDeclaredIntBits / DeclaredBitsOfTypeArg, so `@typeInfo(MaskInt).int.bits` answers.
-            case Zig.BuiltinCall rb when TryLowerReifyBuiltin(rb, out var reified):
+            case Zig.BuiltinCall { Arg2: not null } rb when TryLowerReifyBuiltin(rb, out var reified):
                 type = reified;
                 return true;
 
             // `const List = std.ArrayList(i32);` — a curated generic std type in value position; the
             // CallArgs resolves through LowerType exactly as in type position (wall-plan W0).
-            case Zig.CallArgs ca when TryResolveStdPath(ca.Arg0, out var gp) && StdGenericTypes.ContainsKey(gp):
+            case Zig.CallArgs { Arg2: not null } ca when TryResolveStdPath(ca.Arg0, out var gp) && StdGenericTypes.ContainsKey(gp):
                 type = LowerType(rhs);
                 return true;
 
@@ -333,7 +333,7 @@ internal sealed partial class ZigLowering
             // (wall-plan W4) bound to a name. Reifies the returned struct and records the alias. (At
             // top level this resolves in the pass-1.5 re-try, once the fn is declared — see
             // LowerTopLevelGlobals.)
-            case Zig.CallArgs or Zig.CallNoArgs when TryEvalTypeReturningCall(rhs, out var trt):
+            case Zig.CallArgs when TryEvalTypeReturningCall(rhs, out var trt):
                 type = trt;
                 return true;
 
@@ -754,29 +754,29 @@ internal sealed partial class ZigLowering
         // The `const Self = @This();` alias form (the common Zig idiom) is also supported — it
         // registers a container-scoped type alias (see RegisterContainerConsts / ResolveSelfAlias)
         // so `Self` resolves here through LowerTypeName.
-        Zig.BuiltinCallNoArgs b when Tok(b.Arg0) == "@This" => CurrentContainerType(),
+        Zig.BuiltinCall { Arg2: null } b when Tok(b.Arg0) == "@This" => CurrentContainerType(),
         // `@TypeOf(expr)` in TYPE position (wall-plan W1) — e.g. `var y: @TypeOf(x) = x;` or a
         // param/return annotation. The operand's synthesized type; unevaluated (see TypeOfBuiltin).
-        Zig.BuiltinCall b when Tok(b.Arg0) == "@TypeOf" => TypeOfBuiltin(b.Arg2),
+        Zig.BuiltinCall { Arg2: not null } b when Tok(b.Arg0) == "@TypeOf" => TypeOfBuiltin(b.Arg2),
         // A type-CONSTRUCTING builtin (road-to-zig-std S7): `@Int(.unsigned, @bitSizeOf(T))` builds an
         // integer type; the aggregate constructors of the same family are loud cuts. See
         // TryLowerReifyBuiltin — checked after @TypeOf/@This, which are their own cases above.
-        Zig.BuiltinCall rb when TryLowerReifyBuiltin(rb, out var reified) => reified,
+        Zig.BuiltinCall { Arg2: not null } rb when TryLowerReifyBuiltin(rb, out var reified) => reified,
         // A curated GENERIC std type in TYPE position (`std.ArrayList(T)`, wall-plan W0). A
         // call parses in type position via the ordinary Suffix chain (Type → ErrUnion →
         // Suffix → callArgs), so NO grammar change: resolve the callee's std path against
         // the StdGenericTypes registry and instantiate over the lowered element. A composed
         // form (`*std.ArrayList(T)`, `?std.ArrayList(T)`, a fn param/return) rides the
         // surrounding Type productions.
-        Zig.CallArgs ca when TryResolveStdPath(ca.Arg0, out var gp) && StdGenericTypes.TryGetValue(gp, out var makeGeneric)
+        Zig.CallArgs { Arg2: not null } ca when TryResolveStdPath(ca.Arg0, out var gp) && StdGenericTypes.TryGetValue(gp, out var makeGeneric)
             => makeGeneric(LowerSingleTypeArg(ca.Arg2, gp)),
         // A USER type-returning generic (wall-plan W4) in TYPE position — `Pair(i32)` / a no-arg
         // `Empty()`. Reifies (or reuses) the returned struct per resolved type argument. Checked after
         // the std generic (disjoint: a std generic has a dotted `std.…` Field callee, a user one a bare
         // identifier). A composed form (`*Pair(i32)`, `?Pair(i32)`, `[]Pair(i32)`) rides the surrounding
         // Type productions, exactly like the std generic.
-        Zig.CallArgs when TryEvalTypeReturningCall(type, out var userTy) => userTy,
-        Zig.CallNoArgs when TryEvalTypeReturningCall(type, out var userTyNoArg) => userTyNoArg,
+        Zig.CallArgs { Arg2: not null } when TryEvalTypeReturningCall(type, out var userTy) => userTy,
+        Zig.CallArgs { Arg2: null } when TryEvalTypeReturningCall(type, out var userTyNoArg) => userTyNoArg,
         // An INLINE named-field struct type (`fn f() struct { a: u8 }`, a field/param/var annotation —
         // road-to-zig-std S9, grammar #90) → a synthesized named struct type, reified once per source
         // site. See ReifyInlineStruct.
@@ -790,12 +790,12 @@ internal sealed partial class ZigLowering
         // `info.tag_type orelse @compileError("…")` (std.meta.Tag, task #142): an optional TYPE, else the fallback.
         Zig.OrElse optType => LowerOrElseType(optType.Arg0, optType.Arg2),
         // A `@compileError("…")` reached in a type position fires, as it does in a value position.
-        Zig.BuiltinCall { Arg0: var ceTok } when Tok(ceTok) == "@compileError" => throw new IrUnsupportedException(
+        Zig.BuiltinCall { Arg2: not null, Arg0: var ceTok } when Tok(ceTok) == "@compileError" => throw new IrUnsupportedException(
             "internal: `@compileError` in a type position did not fire: " + LowerExpr(type).GetType().Name),
         // A call in a type position that no case above could evaluate: name the callee and where it is
         // written, since "CallArgs" alone gave no way to find which of a std module's calls it was.
-        Zig.CallArgs uca => throw UnevaluatedTypeCall(uca.Arg0),
-        Zig.CallNoArgs ucn => throw UnevaluatedTypeCall(ucn.Arg0),
+        Zig.CallArgs { Arg2: not null } uca => throw UnevaluatedTypeCall(uca.Arg0),
+        Zig.CallArgs { Arg2: null } ucn => throw UnevaluatedTypeCall(ucn.Arg0),
         _ => throw new IrUnsupportedException("zig type: " + (type.Content?.GetType().Name ?? "null")),
     };
 
@@ -1279,7 +1279,7 @@ internal sealed partial class ZigLowering
         // `pub const Md5 = @import("crypto/md5.zig").Md5;` inside std.crypto's `hash` namespace: an INLINE import as the base,
         // reached only when that container type const is resolved on demand (so preparing crypto.zig never fans out).
         if ((f.Arg0.Content is Zig.Ident && (!_lazy || _currentFnName.Length > 0) && !TryResolveStdPath(dotted, out _)
-             || f.Arg0.Content is Zig.BuiltinCall { Arg0: var importTok } && Tok(importTok) == "@import"
+             || f.Arg0.Content is Zig.BuiltinCall { Arg2: not null, Arg0: var importTok } && Tok(importTok) == "@import"
                 && (!_lazy || _typeConstsInFlight.Count > 0))
             && ResolveModulePath(f.Arg0) is { Lowering: { } moduleLowering }
             && moduleLowering.ResolveExportedType(Tok(f.Arg2)) is { } moduleType)
@@ -1291,7 +1291,7 @@ internal sealed partial class ZigLowering
             Zig.Ident id when TryLookupContainerType(Tok(id.Arg0), out var ct) => ct,
             Zig.Field => TryResolveQualifiedNestedType(f.Arg0),
             // Through a type call: `Outer(u16, null).Managed`, `std.ArrayList(u8).Slice`-shaped.
-            Zig.CallArgs or Zig.CallNoArgs => TryEvalTypeReturningCall(f.Arg0, out var called) ? called : null,
+            Zig.CallArgs => TryEvalTypeReturningCall(f.Arg0, out var called) ? called : null,
             _ => null,
         };
         var baseName = baseType?.Unqualified switch

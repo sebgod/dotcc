@@ -1386,8 +1386,7 @@ productions:
       # toOwnedSliceSentinel). `:` follows no Expr anywhere else, so it is a 1-token shift decision.
       - { lhs: Suffix, rhs: [Suffix, '[', Expr, '..', Expr, ':', Expr, ']'], action: sliceRangeSentinel }
       - { lhs: Suffix, rhs: [Suffix, '[', Expr, '..', ':', Expr, ']'],       action: sliceOpenSentinel }
-      - { lhs: Suffix, rhs: [Suffix, '(', ArgList, ')'], action: callArgs }
-      - { lhs: Suffix, rhs: [Suffix, '(', ')'],          action: callNoArgs }
+      - { lhs: Suffix, rhs: [Suffix, '(', ArgList?, ')'], action: callArgs }   # Arg2 null: `f()`
       - { lhs: Suffix, rhs: [Primary] }
 
   - derivation: none
@@ -1405,8 +1404,7 @@ productions:
       # control-flow value out to a temp before the enclosing statement (the ANF pass); a plain
       # `( Expr )` stays a `Paren`.
       - { lhs: Primary, rhs: ['(', RhsExpr, ')'],   action: grouped }
-      - { lhs: Primary, rhs: [BUILTIN, '(', ArgList, ')'], action: builtinCall }
-      - { lhs: Primary, rhs: [BUILTIN, '(', ')'],           action: builtinCallNoArgs }
+      - { lhs: Primary, rhs: [BUILTIN, '(', ArgList?, ')'], action: builtinCall }   # Arg2 null: `@This()`
       - { lhs: Primary, rhs: ['null'],              action: nullLit }
       - { lhs: Primary, rhs: ['undefined'],         action: undefinedLit }
       # bool + char literals: `true`/`false` are bool values (like null/undefined); a char literal

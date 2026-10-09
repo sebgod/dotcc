@@ -190,12 +190,12 @@ internal sealed partial class ZigLowering
                 ExecuteComptimeStmt(FoldComptimeBlockCondition(i.Arg2) ? i.Arg4 : i.Arg6);
                 break;
             // `@compileError("…");` reached at comptime raises the author's message.
-            case Zig.StmtExpr { Arg0.Content: Zig.BuiltinCall ce } when Tok(ce.Arg0) == "@compileError":
+            case Zig.StmtExpr { Arg0.Content: Zig.BuiltinCall { Arg2: not null } ce } when Tok(ce.Arg0) == "@compileError":
                 LowerExpr(s.Content is Zig.StmtExpr se ? se.Arg0 : s);
                 break;
             // `assert(c);` / `std.debug.assert(c);`: checked when `c` folds; otherwise an analysis-only
             // assertion with nothing to run.
-            case Zig.StmtExpr { Arg0.Content: Zig.CallArgs { Arg0.Content: Zig.Ident or Zig.Field } ac }
+            case Zig.StmtExpr { Arg0.Content: Zig.CallArgs { Arg2: not null, Arg0.Content: Zig.Ident or Zig.Field } ac }
                 when CalleeLastName(ac.Arg0) == "assert" && Flatten(ac.Arg2) is { Count: 1 } assertArgs:
                 if (TryFoldComptimeCondition(assertArgs[0]) is false)
                 {
@@ -217,7 +217,7 @@ internal sealed partial class ZigLowering
     /// caller's environment is restored. Null when the call is not of that shape or the question does not fold.</summary>
     private bool? TryFoldComptimeBoolCall(Item call)
     {
-        if (call.Content is not Zig.CallArgs ca || _comptimeBoolCallDepth > 16) { return null; }
+        if (call.Content is not Zig.CallArgs { Arg2: not null } ca || _comptimeBoolCallDepth > 16) { return null; }
         (ZigLowering Owner, Symbol Sym)? target = ca.Arg0.Content switch
         {
             Zig.Ident id when (_symbols.Resolve(Tok(id.Arg0)) ?? (_lazy ? EnsureDeclLowered(Tok(id.Arg0)) : null)) is { } local

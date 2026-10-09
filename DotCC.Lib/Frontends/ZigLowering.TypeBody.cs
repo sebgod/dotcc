@@ -184,12 +184,12 @@ internal sealed partial class ZigLowering
                     break;
                 // `@compileError("…");` REACHED — every arm that avoids it has already folded away, which is
                 // exactly zig's rule for it (std.meta.Elem ends with one after its switch).
-                case Zig.StmtExpr { Arg0.Content: Zig.BuiltinCall ce } when Tok(ce.Arg0) == "@compileError":
+                case Zig.StmtExpr { Arg0.Content: Zig.BuiltinCall { Arg2: not null } ce } when Tok(ce.Arg0) == "@compileError":
                     CompileErrorBuiltin(Flatten(ce.Arg2));
                     break;
                 // `assert(from <= to);` (std.math.IntFittingRange): std.debug.assert over comptime operands is
                 // a compile-time check. A false one is zig's "reached unreachable" at analysis, so it is loud.
-                case Zig.StmtExpr { Arg0.Content: Zig.CallArgs call } when IsAssertCallee(call.Arg0)
+                case Zig.StmtExpr { Arg0.Content: Zig.CallArgs { Arg2: not null } call } when IsAssertCallee(call.Arg0)
                                                                           && Flatten(call.Arg2) is [var asserted]:
                     if (!FoldTypeBodyCondition(fnName, asserted))
                     {
@@ -212,11 +212,11 @@ internal sealed partial class ZigLowering
                     return new TypeBodyResult(true, est.Arg4, null, null, AggregateLayout.Sequential);
                 // `return @Struct(.auto, null, names, &@splat(Data), &@splat(.{ .default_value_ptr = p }));`
                 // (std.enums.EnumFieldStruct): a struct built from comptime field lists.
-                case Zig.StmtReturn { Arg1.Content: Zig.BuiltinCall rb } when Tok(rb.Arg0) == "@Struct":
+                case Zig.StmtReturn { Arg1.Content: Zig.BuiltinCall { Arg2: not null } rb } when Tok(rb.Arg0) == "@Struct":
                     return ReifyStructBuiltin(fnName, rb);
                 // `return @Enum(IntTag, .exhaustive, field_names, &std.simd.iota(IntTag, field_names.len));` (std.meta.FieldEnum,
                 // task #108): an enum built from comptime member lists.
-                case Zig.StmtReturn { Arg1.Content: Zig.BuiltinCall eb } when Tok(eb.Arg0) == "@Enum":
+                case Zig.StmtReturn { Arg1.Content: Zig.BuiltinCall { Arg2: not null } eb } when Tok(eb.Arg0) == "@Enum":
                     return ReifyEnumBuiltin(fnName, eb);
                 case Zig.StmtReturn r:
                 {
@@ -337,7 +337,7 @@ internal sealed partial class ZigLowering
         // `@setEvalBranchQuota(3 * fields_len * std.math.log2(@max(fields_len, 1)) + …)` only raises a FLOOR, and dotcc's
         // budget (IrModule.DefaultComptimeStepBudget) is already far above what a type body asks for; evaluating its
         // argument would instantiate std.math.log2 for nothing. `@compileLog` prints nothing in dotcc.
-        if (expr.Content is Zig.BuiltinCall { Arg0: var builtinTok } && Tok(builtinTok) is "@setEvalBranchQuota" or "@compileLog")
+        if (expr.Content is Zig.BuiltinCall { Arg2: not null, Arg0: var builtinTok } && Tok(builtinTok) is "@setEvalBranchQuota" or "@compileLog")
         {
             return;
         }
@@ -381,7 +381,7 @@ internal sealed partial class ZigLowering
                 switch (cur.Content)
                 {
                     case Zig.SwitchExpr inner:         return WalkComptimeSwitchStmt(fnName, inner.Arg2, inner.Arg5, typeShadows);
-                    case Zig.BuiltinCall ce when Tok(ce.Arg0) == "@compileError":
+                    case Zig.BuiltinCall { Arg2: not null } ce when Tok(ce.Arg0) == "@compileError":
                         CompileErrorBuiltin(Flatten(ce.Arg2));
                         return null;
                 }
@@ -393,7 +393,7 @@ internal sealed partial class ZigLowering
                 var taken = TryFoldComptimeCondition(guarded.Arg4) ?? TryFoldTypeIfCondition(guarded.Arg4)
                     ?? throw new IrUnsupportedException(
                         $"type-returning generic '{fnName}': an `if` prong in a type body needs a comptime condition");
-                if (taken && guarded.Arg6.Content is Zig.BuiltinCall { Arg0: var guardTok } guardCall && Tok(guardTok) == "@compileError")
+                if (taken && guarded.Arg6.Content is Zig.BuiltinCall { Arg2: not null, Arg0: var guardTok } guardCall && Tok(guardTok) == "@compileError")
                 {
                     CompileErrorBuiltin(Flatten(guardCall.Arg2));
                 }
@@ -694,7 +694,7 @@ internal sealed partial class ZigLowering
             }
             case Zig.SwitchExpr se:
                 return LowerComptimeTypeSwitch(fnName, se.Arg2, se.Arg5);
-            case Zig.BuiltinCall b when Tok(b.Arg0) == "@compileError":
+            case Zig.BuiltinCall { Arg2: not null } b when Tok(b.Arg0) == "@compileError":
                 CompileErrorBuiltin(Flatten(b.Arg2));   // always throws — the arm was reached
                 return (CType.Void, null);
             default:

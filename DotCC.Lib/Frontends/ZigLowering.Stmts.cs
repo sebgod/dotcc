@@ -130,27 +130,27 @@ internal sealed partial class ZigLowering
             // `@setEvalBranchQuota(n);` — a COMPTIME budget setter (road-to-zig-std S7). It is a
             // statement because zig types it `void`; it raises the interpreter's step budget and emits
             // nothing, so no `_ = …;` discard is left behind.
-            case Zig.StmtExpr { Arg0.Content: Zig.BuiltinCall q } when Tok(q.Arg0) == "@setEvalBranchQuota":
+            case Zig.StmtExpr { Arg0.Content: Zig.BuiltinCall { Arg2: not null } q } when Tok(q.Arg0) == "@setEvalBranchQuota":
                 SetEvalBranchQuota(Flatten(q.Arg2));
                 return new Seq(new List<CStmt>());
             // `@branchHint(.cold);` (hash_map's grow path, std's error paths): a layout hint to zig's optimizer
             // that must be a block's first statement; dotcc has nothing to emit for it.
-            case Zig.StmtExpr { Arg0.Content: Zig.BuiltinCall branchHint } when Tok(branchHint.Arg0) == "@branchHint":
+            case Zig.StmtExpr { Arg0.Content: Zig.BuiltinCall { Arg2: not null } branchHint } when Tok(branchHint.Arg0) == "@branchHint":
                 return new Seq(new List<CStmt>());
             // `@setRuntimeSafety(false);` (std.math.divCeil) / `@setFloatMode(.optimized);`: zig's per-scope safety and
             // float-mode switches. dotcc's C# is unchecked arithmetic with IEEE floats either way, so nothing to emit.
-            case Zig.StmtExpr { Arg0.Content: Zig.BuiltinCall scopeMode } when Tok(scopeMode.Arg0) is "@setRuntimeSafety" or "@setFloatMode":
+            case Zig.StmtExpr { Arg0.Content: Zig.BuiltinCall { Arg2: not null } scopeMode } when Tok(scopeMode.Arg0) is "@setRuntimeSafety" or "@setFloatMode":
                 return new Seq(new List<CStmt>());
             // `@disableInstrumentation();` / `@disableIntrinsics();` (std's panic and memcpy paths): hints to
             // zig's own codegen, with nothing for dotcc to emit.
-            case Zig.StmtExpr { Arg0.Content: Zig.BuiltinCallNoArgs hint }
+            case Zig.StmtExpr { Arg0.Content: Zig.BuiltinCall { Arg2: null } hint }
                 when Tok(hint.Arg0) is "@disableInstrumentation" or "@disableIntrinsics":
                 return new Seq(new List<CStmt>());
             // `comptime assert(c);` (std.math.cast's `comptime assert(@typeInfo(T) == .int);`): the assertion is
             // checked NOW. False is zig's compile error; true emits nothing. An `assert` returns void, which
             // the deferred comptime fold cannot splice, so it is never deferred. A condition that does not
             // fold here is taken on trust (a leniency: zig would evaluate it).
-            case Zig.StmtExpr { Arg0.Content: Zig.PreComptime { Arg1.Content: Zig.CallArgs ac } }
+            case Zig.StmtExpr { Arg0.Content: Zig.PreComptime { Arg1.Content: Zig.CallArgs { Arg2: not null } ac } }
                 when IsAssertCallee(ac.Arg0) && Flatten(ac.Arg2) is { Count: 1 } assertArgs:
             {
                 bool? holds = TryFoldComptimeCondition(assertArgs[0]);
@@ -506,7 +506,7 @@ internal sealed partial class ZigLowering
         var target = LowerExpr(targetItem);
         // A shift's count is not the target's type (std.math.gcd's `x >>= @intCast(xz)`, task #86): a cast builtin there takes
         // C#'s `int` shift count.
-        var value = op is BinOp.Shl or BinOp.Shr && valueItem.Content is Zig.BuiltinCall { Arg0: var shiftCast }
+        var value = op is BinOp.Shl or BinOp.Shr && valueItem.Content is Zig.BuiltinCall { Arg2: not null, Arg0: var shiftCast }
                     && Tok(shiftCast) is "@intCast" or "@truncate"
             ? LowerExprSink(valueItem, CType.Int)
             : LowerExprSink(valueItem, target.Type);
@@ -880,7 +880,7 @@ internal sealed partial class ZigLowering
             // `buffer.* = @bitCast(value)` with `buffer: *[N]u8` (std.mem.writeInt): the value's BYTES stored into the array
             // the pointer names. (It was once a store to the pointer itself, `buffer = BitCast<ulong, byte*>(value)`.)
             if (lhsItem.Content is Zig.Deref { Arg0: var arrayPtrItem }
-                && rhsItem.Content is Zig.BuiltinCall { Arg0: var bitCastTok } bitCast && Tok(bitCastTok) == "@bitCast"
+                && rhsItem.Content is Zig.BuiltinCall { Arg2: not null, Arg0: var bitCastTok } bitCast && Tok(bitCastTok) == "@bitCast"
                 && Flatten(bitCast.Arg2) is [var bitsItem])
             {
                 bool pointsAtArray;

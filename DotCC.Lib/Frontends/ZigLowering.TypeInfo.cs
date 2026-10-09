@@ -101,14 +101,14 @@ internal sealed partial class ZigLowering
         // A CONSTRUCTED `@Int(.unsigned, 21)` (road-to-zig-std S7) knows its width just as exactly as
         // the spelling `u21` does — it was built from it — so the constructor's own argument is the
         // answer. Read from the site's recorded width rather than re-evaluated (see _reifiedIntBits).
-        if (cur.Content is Zig.BuiltinCall { } bc && Tok(bc.Arg0) == "@Int"
+        if (cur.Content is Zig.BuiltinCall { Arg2: not null, } bc && Tok(bc.Arg0) == "@Int"
             && _reifiedIntBits.TryGetValue(bc.Arg2, out var reified))
         {
             return reified;
         }
         // A call to a type-returning generic (the W4 lift) — the width its body's returned type carried
         // (`fn U(comptime n: u16) type { return @Int(.unsigned, n); }` → `U(21)` is 21 bits).
-        if (cur.Content is Zig.CallArgs or Zig.CallNoArgs && _typeCallBits.TryGetValue(cur, out var called))
+        if (cur.Content is Zig.CallArgs && _typeCallBits.TryGetValue(cur, out var called))
         {
             return called;
         }
@@ -135,7 +135,7 @@ internal sealed partial class ZigLowering
         }
         // A vector's width is its LANE's (`@Vector(16, u32)`), so `@typeInfo(V).vector.child` passes it on to
         // `@typeInfo(C).int.bits` (std.math.rotr over a vector in std.crypto.blake3, task #148).
-        if (cur.Content is Zig.BuiltinCall { } vec && Tok(vec.Arg0) == "@Vector" && Flatten(vec.Arg2) is [_, var laneType])
+        if (cur.Content is Zig.BuiltinCall { Arg2: not null, } vec && Tok(vec.Arg0) == "@Vector" && Flatten(vec.Arg2) is [_, var laneType])
         {
             return DeclaredBitsOfTypeArg(laneType);
         }
@@ -150,7 +150,7 @@ internal sealed partial class ZigLowering
         if (cur.Content is Zig.TyOptional opt) { return DeclaredBitsOfTypeArg(opt.Arg1); }
         // `@TypeOf(x)`: the width the VALUE `x` carries (road-to-zig-std G3 — an `anytype` parameter's, a
         // typed local's, a `.len`'s), so `maxInt(@TypeOf(x))` in std.math.cast / sqrt has its answer.
-        if (cur.Content is Zig.BuiltinCall { } tof && Tok(tof.Arg0) == "@TypeOf" && Flatten(tof.Arg2) is { Count: 1 } tofArgs)
+        if (cur.Content is Zig.BuiltinCall { Arg2: not null, } tof && Tok(tof.Arg0) == "@TypeOf" && Flatten(tof.Arg2) is { Count: 1 } tofArgs)
         {
             if (tofArgs[0].Content is Zig.Ident aid && _anytypeSeedBits.TryGetValue(Tok(aid.Arg0), out var seeded)) { return seeded; }
             return DeclaredBitsOfValue(tofArgs[0]);
@@ -244,11 +244,11 @@ internal sealed partial class ZigLowering
         Zig.Ident id => _symbols.Resolve(Tok(id.Arg0)) is { } s && _valueBits.TryGetValue(s, out var b) ? b : null,
         Zig.Field f when Tok(f.Arg2) == "len" => 64,
         Zig.Index ix => DeclaredElemBitsOfValue(ix.Arg0),
-        Zig.BuiltinCall bc when Tok(bc.Arg0) == "@as" && Flatten(bc.Arg2) is { Count: 2 } asArgs => DeclaredBitsOfTypeArg(asArgs[0]),
-        Zig.BuiltinCall fb when Tok(fb.Arg0) == "@intFromBool" => 1,   // a `u1`
+        Zig.BuiltinCall { Arg2: not null } bc when Tok(bc.Arg0) == "@as" && Flatten(bc.Arg2) is { Count: 2 } asArgs => DeclaredBitsOfTypeArg(asArgs[0]),
+        Zig.BuiltinCall { Arg2: not null } fb when Tok(fb.Arg0) == "@intFromBool" => 1,   // a `u1`
         // `@clz` / `@ctz` / `@popCount` of an N-bit integer is a `std.math.Log2IntCeil(uN)`: the bits that hold N itself
         // (a `u3`'s count is a `u2`, a `u64`'s a `u7`), so `@clz(x) * 100` over a `u3` overflows as zig says (task #102).
-        Zig.BuiltinCall cb when Tok(cb.Arg0) is "@clz" or "@ctz" or "@popCount" && Flatten(cb.Arg2) is [var countArg]
+        Zig.BuiltinCall { Arg2: not null } cb when Tok(cb.Arg0) is "@clz" or "@ctz" or "@popCount" && Flatten(cb.Arg2) is [var countArg]
                                 && DeclaredBitsOfValue(countArg) is { } countBits and > 0
             => 64 - System.Numerics.BitOperations.LeadingZeroCount((ulong)countBits),
         // Arithmetic and bitwise operators take their operands' peer type (task #132, `{d}` of `x + 1` / `i * i`): equal
@@ -536,7 +536,7 @@ internal sealed partial class ZigLowering
                 info = bound;
                 return true;
 
-            case Zig.BuiltinCall b when Tok(b.Arg0) == "@typeInfo":
+            case Zig.BuiltinCall { Arg2: not null } b when Tok(b.Arg0) == "@typeInfo":
             {
                 var args = Flatten(b.Arg2);
                 if (args.Count != 1)
@@ -563,7 +563,7 @@ internal sealed partial class ZigLowering
                     info = switchedInfo;
                     return true;
                 }
-                if (yielded.Content is Zig.BuiltinCall { Arg0: var ceTok } && Tok(ceTok) == "@compileError") { LowerExpr(yielded); }
+                if (yielded.Content is Zig.BuiltinCall { Arg2: not null, Arg0: var ceTok } && Tok(ceTok) == "@compileError") { LowerExpr(yielded); }
                 return false;
             }
 
@@ -883,7 +883,7 @@ internal sealed partial class ZigLowering
         // A method of a comptime aggregate returning an enum (`builtin.cpu.arch.endian()`, read through a module-level alias
         // such as `native_endian`; std.hash.XxHash3's `swap` asks `native_endian == .big`, task #180): the interpreter runs the
         // method, and its value maps back to the member, so the question folds and the untaken arm is never lowered.
-        if (expr.Content is Zig.CallArgs or Zig.CallNoArgs && IsRootedAtComptimeAggregate(expr))
+        if (expr.Content is Zig.CallArgs && IsRootedAtComptimeAggregate(expr))
         {
             CExpr? called = null;
             try
@@ -1041,7 +1041,7 @@ internal sealed partial class ZigLowering
     private bool IsTypeInfoSentinelCall(Item expr)
     {
         while (expr.Content is Zig.Grouped g) { expr = g.Arg1; }
-        return expr.Content is Zig.CallNoArgs { Arg0.Content: Zig.Field { Arg2: var methodTok } receiver }
+        return expr.Content is Zig.CallArgs { Arg2: null, Arg0.Content: Zig.Field { Arg2: var methodTok } receiver }
             && Tok(methodTok) == "sentinel" && TryEvalTypeInfo(receiver.Arg0, out _);
     }
 
@@ -1052,7 +1052,7 @@ internal sealed partial class ZigLowering
     private bool TryTypeInfoSentinel(Item expr, out (bool HasValue, long Value, CType Inner) info)
     {
         info = default;
-        if (expr.Content is not Zig.CallNoArgs { Arg0.Content: Zig.Field { Arg2: var methodTok } receiver }
+        if (expr.Content is not Zig.CallArgs { Arg2: null, Arg0.Content: Zig.Field { Arg2: var methodTok } receiver }
             || Tok(methodTok) != "sentinel"
             || !TryEvalTypeInfo(receiver.Arg0, out var typeInfo) || typeInfo.Tag is not ("pointer" or "array"))
         {
@@ -1167,7 +1167,7 @@ internal sealed partial class ZigLowering
     {
         var subject = subjectItem;
         while (subject.Content is Zig.Grouped g) { subject = g.Arg1; }
-        var isType = subject.Content is Zig.BuiltinCall { Arg0: var tb } && Tok(tb) == "@TypeOf"
+        var isType = subject.Content is Zig.BuiltinCall { Arg2: not null, Arg0: var tb } && Tok(tb) == "@TypeOf"
                      || subject.Content is Zig.Ident ti && _typeAliases.ContainsKey(Tok(ti.Arg0)) && _symbols.Resolve(Tok(ti.Arg0)) is null;
         if (!isType || !TryTypeAliasRhs(subject, out _)) { return null; }
         ZigProng? elseProng = null;
