@@ -162,8 +162,6 @@ internal sealed partial class ZigLowering
             case Zig.Block b:
                 foreach (var st in Flatten(b.Arg1)) { ExecuteComptimeStmt(st); }
                 break;
-            case Zig.BlockEmpty:
-                break;
             case Zig.ComptimeVarDecl cv:
                 TrackComptimeVar(cv.Arg1);
                 break;
@@ -414,7 +412,7 @@ internal sealed partial class ZigLowering
     /// other arm is compile-time control flow over the enclosing unrolled code (<c>break</c> out of an
     /// <c>inline for</c>, a <c>return</c>) and lowers as the statement it is.</summary>
     private CStmt LowerComptimeArm(Item arm)
-        => arm.Content is Zig.Block or Zig.BlockEmpty or Zig.StmtAssign
+        => arm.Content is Zig.Block or Zig.StmtAssign
             ? LowerComptimeBlock(arm)
             : LowerStmt(arm);
 }

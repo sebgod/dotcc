@@ -121,7 +121,6 @@ internal sealed partial class ZigLowering
     private static IReadOnlyList<Item> BodyStatements(Item stmt) => stmt.Content switch
     {
         Zig.Block b => Flatten(b.Arg1),
-        Zig.BlockEmpty => System.Array.Empty<Item>(),
         _ => new[] { stmt },
     };
 
@@ -204,15 +203,13 @@ internal sealed partial class ZigLowering
                 case Zig.StmtAssign { Arg0.Content: Zig.Ident { } lhs, Arg2.Content: Zig.Ident } when Tok(lhs.Arg0) == "_":
                     break;
                 case Zig.ReturnStructType rst:
-                    return new TypeBodyResult(true, rst.Arg3, null, null);   // FieldDecls
+                    return new TypeBodyResult(true, rst.Arg3, null, null);   // FieldDecls, null for `return struct {};`
                 case Zig.ReturnPackedStructType pst:
                     return new TypeBodyResult(true, pst.Arg4, null, null, AggregateLayout.Packed);
                 case Zig.ReturnPackedStructTypeBacked pbt:
                     return new TypeBodyResult(true, pbt.Arg7, null, null, AggregateLayout.Packed);   // backing type Arg5
                 case Zig.ReturnExternStructType est:
                     return new TypeBodyResult(true, est.Arg4, null, null, AggregateLayout.Sequential);
-                case Zig.ReturnStructTypeEmpty:
-                    return new TypeBodyResult(true, null, null, null);       // `return struct {};` — zero fields
                 // `return @Struct(.auto, null, names, &@splat(Data), &@splat(.{ .default_value_ptr = p }));`
                 // (std.enums.EnumFieldStruct): a struct built from comptime field lists.
                 case Zig.StmtReturn { Arg1.Content: Zig.BuiltinCall rb } when Tok(rb.Arg0) == "@Struct":
@@ -241,7 +238,7 @@ internal sealed partial class ZigLowering
                 case Zig.StmtIfCaptureElse f:
                     if (WalkComptimeIfCapture(fnName, f.Arg2, Tok(f.Arg5), f.Arg7, f.Arg9, typeShadows) is { } r4) { return r4; }
                     break;
-                case Zig.Block or Zig.BlockEmpty:
+                case Zig.Block:
                     if (WalkTypeBody(fnName, BodyStatements(stmt), typeShadows) is { } r5) { return r5; }
                     break;
                 // `const Op = enum { uninitialized, initialized, … };` (std.crypto.keccak_p's State, task #161).

@@ -1769,7 +1769,7 @@ internal sealed partial class ZigLowering
                 case Zig.FnDefErr f:       AddFnEntry(Export(f.Arg1, DeclaredEarlyOr(f.Arg1, () => DeclareFn(f.Arg1, f.Arg3, f.Arg7, f.Arg8, errUnion: true)))); break;   // `!T` return → ErrorUnion(T)
                 case Zig.FnDefNoArgsErr f: AddFnEntry(Export(f.Arg1, DeclaredEarlyOr(f.Arg1, () => DeclareFn(f.Arg1, null, f.Arg6, f.Arg7, errUnion: true)))); break;
                 // Container decls were handled in pass 0 — skip here.
-                case Zig.StructDecl or Zig.StructDeclEmpty or Zig.ExternStructDecl or Zig.PackedStructDecl or Zig.PackedStructDeclBacked or Zig.EnumDecl or Zig.EnumDeclTyped or Zig.UnionDeclEnum or Zig.UnionDeclTagged or Zig.UnionDeclUntagged: break;
+                case Zig.StructDecl or Zig.ExternStructDecl or Zig.PackedStructDecl or Zig.PackedStructDeclBacked or Zig.EnumDecl or Zig.EnumDeclTyped or Zig.UnionDeclEnum or Zig.UnionDeclTagged or Zig.UnionDeclUntagged: break;
                 // A top-level `const`/`var` is either a comptime binding (an `@import`/allocator
                 // alias recorded in pass 0, which emits no decl) or a runtime global — both are
                 // resolved by the global pass below (LowerTopLevelGlobals), so skip them here.
@@ -2386,7 +2386,6 @@ internal sealed partial class ZigLowering
             switch (content)
             {
                 case Zig.StructDecl:        _containerTypes[name] = new CType.Named(name); break;
-                case Zig.StructDeclEmpty:   _containerTypes[name] = new CType.Named(name); break;
                 case Zig.ExternStructDecl:  _containerTypes[name] = new CType.Named(name); break;  // const IDENT = extern struct { … } ;
                 case Zig.PackedStructDecl:  _containerTypes[name] = new CType.Named(name); break;  // const IDENT = packed struct { … } ;
                 case Zig.PackedStructDeclBacked: _containerTypes[name] = new CType.Named(name); break;  // const IDENT = packed struct(T) { … } ;
@@ -2422,7 +2421,7 @@ internal sealed partial class ZigLowering
         {
             switch (content)
             {
-                case Zig.StructDecl s:      // const IDENT = struct { Members } ;
+                case Zig.StructDecl s:      // const IDENT = struct { Members? } ; (an empty body: Arg5 is null)
                 {
                     var (fields, allFns, consts, _) = SplitMembers(s.Arg5);
                     var fnDefs = DeclareTypeReturningMembers(name, allFns);
@@ -2431,7 +2430,6 @@ internal sealed partial class ZigLowering
                     foreach (var m in fnDefs) { methods.Add((name, m)); }
                     break;
                 }
-                case Zig.StructDeclEmpty: RegisterStruct(name, System.Array.Empty<Item>()); break;  // const IDENT = struct { } ;
                 case Zig.ExternStructDecl s:  // const IDENT = extern struct { Members } ;
                 {
                     var (fields, allFns, consts, _) = SplitMembers(s.Arg6);
@@ -2524,7 +2522,6 @@ internal sealed partial class ZigLowering
     private static string? ContainerDeclName(object? content) => content switch
     {
         Zig.StructDecl s        => Tok(s.Arg1),
-        Zig.StructDeclEmpty s   => Tok(s.Arg1),
         Zig.ExternStructDecl s  => Tok(s.Arg1),
         Zig.PackedStructDecl s  => Tok(s.Arg1),
         Zig.PackedStructDeclBacked s => Tok(s.Arg1),
@@ -2585,6 +2582,8 @@ internal sealed partial class ZigLowering
     /// four with no cross-contamination.</summary>
     internal static List<Item> Flatten(Item it)
     {
+        // An optional list the source left out (`{ }`, `struct { }`, `T{ }`: the slot is null) is the empty list.
+        if (it is null) { return []; }
         var stack = new Stack<Item>();
         stack.Push(it);
         var ordered = new List<Item>();
