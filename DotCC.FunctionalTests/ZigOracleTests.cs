@@ -7419,6 +7419,37 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{d} {d}\\n\", .{ @sizeOf(@typeInfo(Op).@\"union\".tag_type orelse void), @sizeOf(Ctx) });\n" +
             "}\n", 0,
             "4294967275 48\n1 16" },
+        // zig-grammar-peg P1: an `if` expression as an operand anywhere (zig's IfExpr is a PrimaryExpr), its else arm taking
+        // everything to its right: after `+`, `==`, `*`, `orelse`, `++`, and under `-` / `!`.
+        new object[] { "if_expression_as_operand",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "fn pick(c: bool, a: i32, b: i32) i32 {\n" +
+            "    return 1 + if (c) a else b + 4;\n" +
+            "}\n" +
+            "\n" +
+            "fn shape(c: bool, b: u32, d: u32, e: u32) u32 {\n" +
+            "    return if (c) 0 else b + d % e;\n" +
+            "}\n" +
+            "\n" +
+            "fn fallback(x: ?u8, y: ?u8, c: bool) u8 {\n" +
+            "    return x orelse if (c) 1 else y orelse 2;\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() void {\n" +
+            "    var c = true;\n" +
+            "    _ = &c;\n" +
+            "    const n: i32 = 7;\n" +
+            "    const eq = n == if (c) @as(i32, 7) else 8;\n" +
+            "    const neg = -if (c) n else 0;\n" +
+            "    const notc = !if (c) false else true;\n" +
+            "    const tag = \"id-\" ++ if (@sizeOf(usize) == 8) \"64\" else \"32\";\n" +
+            "    const m = 3 * if (c) n - 1 else n;\n" +
+            "    std.debug.print(\"{d} {d} {d}\\n\", .{ pick(true, 10, 20), pick(false, 10, 20), shape(false, 5, 9, 4) });\n" +
+            "    std.debug.print(\"{d} {d} {d}\\n\", .{ fallback(null, null, false), fallback(null, 6, false), fallback(9, null, true) });\n" +
+            "    std.debug.print(\"{} {d} {} {s} {d}\\n\", .{ eq, neg, notc, tag, m });\n" +
+            "}\n", 0,
+            "11 25 6\n2 6 9\ntrue -7 true id-64 18" },
         // Task #140: std.crypto.blake3's shapes: a late-declared struct const in a field extent, `@intCast` slice bounds,
         // open slices of a many-item pointer, and an array local copied through a pointer.
         new object[] { "blake3_shapes",

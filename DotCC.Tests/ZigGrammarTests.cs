@@ -79,17 +79,64 @@ public sealed class ZigGrammarTests
     [InlineData("fn h() void { + }")]                         // stray operator as a statement
     public void Rejects_invalid(string src) => TryParse(src).ShouldBeFalse();
 
+    /// <summary>Parse <paramref name="src"/> and return the first node (pre-order, left to right) whose record is a
+    /// <typeparamref name="T"/>. The records are generated with <c>Arg0..ArgN</c> item properties, read reflectively
+    /// here so a shape pin can name the node it is about without spelling the path to it.</summary>
+    private static T FirstNode<T>(string src) where T : class
+    {
+        var parser = Zig.BuildParser(Zig.IdentityVisitor.Instance);
+        using var lexer = BytesLexer.FromString(src, Zig.BuildLexer());
+        using var tokens = new SyncLATokenIterator(lexer);
+        var root = parser.ParseInput(tokens, debugger: null, trimReductions: true);
+        return Find<T>(root) ?? throw new ShouldAssertException($"no {typeof(T).Name} in the parse of: {src}");
+    }
+
+    private static T? Find<T>(Item? item) where T : class
+    {
+        if (item?.Content is null) { return null; }
+        if (item.Content is T hit) { return hit; }
+        foreach (var prop in item.Content.GetType().GetProperties())
+        {
+            if (prop.PropertyType == typeof(Item) && Find<T>((Item?)prop.GetValue(item.Content)) is { } found) { return found; }
+        }
+        return null;
+    }
+
     /// <summary>
-    /// Documented slice-2a limitation (NOT a faithful rejection — Zig accepts this):
-    /// an if-expression is only reachable in value position (init/return/assignment
-    /// RHS and recursively its branches), not as an arbitrary binary sub-operand. So
-    /// <c>1 + if (c) 2 else 3</c> currently fails to parse; in Zig it's legal (the
-    /// if-expr is the right operand, with <c>!ExprSuffix</c> stopping it being
-    /// extended). Lifting this — letting an if-expr be a parenthesized/sub-operand
-    /// expression — is slice 2b. This test pins the current boundary so we notice
-    /// when it moves.
+    /// zig-grammar-peg P1: an `if` expression is an operand anywhere (zig's IfExpr is a PrimaryExpr), and its else arm
+    /// takes everything to its right, as zig's greedy PEG choice does. These pin the parse SHAPE, so a conflict the table
+    /// builder settled the wrong way (the hazard the open/closed cascade exists to avoid) fails here, not silently.
     /// </summary>
     [Fact]
-    public void Slice2a_if_expr_not_yet_a_binary_suboperand() =>
-        TryParse("fn bad(c: bool) i32 { return 1 + if (c) 2 else 3; }").ShouldBeFalse();
+    public void An_if_expression_is_a_right_operand_and_its_else_arm_is_greedy()
+    {
+        // `1 + if (c) 2 else 3 + 4` is `1 + (if (c) 2 else (3 + 4))`.
+        var add = FirstNode<Zig.Add>("fn f(c: bool) i32 { return 1 + if (c) 2 else 3 + 4; }");
+        add.Arg0.Content.ShouldBeOfType<Zig.IntLit>();
+        var ie = add.Arg2.Content.ShouldBeOfType<Zig.IfExpr>();
+        ie.Arg6.Content.ShouldBeOfType<Zig.Add>();
+    }
+
+    [Fact]
+    public void Operator_precedence_holds_inside_an_if_arm()
+    {
+        // In the else arm, `b + d % e` is `b + (d % e)`: the arm's own cascade, not a precedence decision.
+        var ie = FirstNode<Zig.IfExpr>("fn f(c: bool, b: i32, d: i32, e: i32) i32 { return if (c) 0 else b + d % e; }");
+        var arm = ie.Arg6.Content.ShouldBeOfType<Zig.Add>();
+        arm.Arg2.Content.ShouldBeOfType<Zig.ModOp>();
+        // And outside any `if`, unchanged.
+        FirstNode<Zig.Add>("fn g(b: i32, d: i32, e: i32) i32 { return b + d % e; }").Arg2.Content.ShouldBeOfType<Zig.ModOp>();
+    }
+
+    [Fact]
+    public void An_if_expression_follows_orelse_and_comparison_operators()
+    {
+        // `x orelse if (c) a else b orelse d`: the else arm is `b orelse d` (zig's greedy reading).
+        var oe = FirstNode<Zig.OrElse>("fn f(x: ?u8, y: ?u8, c: bool) u8 { return x orelse if (c) 1 else y orelse 2; }");
+        oe.Arg2.Content.ShouldBeOfType<Zig.IfExpr>().Arg6.Content.ShouldBeOfType<Zig.OrElse>();
+        FirstNode<Zig.CmpEq>("fn g(a: u8, c: bool) bool { return a == if (c) 1 else 2; }").Arg2.Content.ShouldBeOfType<Zig.IfExpr>();
+        // A nested `if` as an else arm, and `++` over an `if`.
+        FirstNode<Zig.IfExpr>("fn h(a: bool, b: bool) u8 { return if (a) 1 else if (b) 2 else 3; }").Arg6.Content.ShouldBeOfType<Zig.IfExpr>();
+        FirstNode<Zig.Concat>("const s = \"ab\" ++ if (true) \"c\" else \"d\";").Arg2.Content.ShouldBeOfType<Zig.IfExpr>();
+    }
 }

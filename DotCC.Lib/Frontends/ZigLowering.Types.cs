@@ -366,17 +366,9 @@ internal sealed partial class ZigLowering
             // `const Api = if (is_windows) struct { … } else struct { … };` at a module or container's top level, and the
             // mixed `if (!is_windows) noreturn else struct { … }` (std.Io.Terminal's WindowsApi, task #191): the condition
             // folds, and a container arm reifies as the inline type it spells, as in an annotation.
-            case Zig.IfExprTypeArms ta when TryFoldTypeIfCondition(ta.Arg2) is { } takenTypeArm
-                                            && TryTypeArmType(takenTypeArm ? ta.Arg4 : ta.Arg6, out var armsType):
+            case Zig.IfExpr ta when HasTypeArm(ta) && TryFoldTypeIfCondition(ta.Arg2) is { } takenTypeArm
+                                    && TryTypeArmType(takenTypeArm ? ta.Arg4 : ta.Arg6, out var armsType):
                 type = armsType;
-                return true;
-            case Zig.IfExprValueTypeArm vt when TryFoldTypeIfCondition(vt.Arg2) is { } takenValueFirst
-                                                && TryTypeArmType(takenValueFirst ? vt.Arg4 : vt.Arg6, out var mixedType):
-                type = mixedType;
-                return true;
-            case Zig.IfExprTypeArmValue tv when TryFoldTypeIfCondition(tv.Arg2) is { } takenTypeFirst
-                                                && TryTypeArmType(takenTypeFirst ? tv.Arg4 : tv.Arg6, out var mixedType2):
-                type = mixedType2;
                 return true;
 
             // `pub const Size = Unmanaged.Size;` (std.HashMap) — a container's nested type or type const,
@@ -400,6 +392,14 @@ internal sealed partial class ZigLowering
                 return false;
         }
     }
+
+    /// <summary>True when an <c>if</c> arm is a container type spelled in place (<c>struct { … }</c> /
+    /// <c>enum { … }</c>, grammar <c>TypeArm</c>) rather than a value.</summary>
+    private static bool IsTypeArm(Item arm) => arm.Content is Zig.TypeArmEnum or Zig.TypeArmEnumTyped or Zig.TypeArmStruct;
+
+    /// <summary>True when either arm of an <c>if</c> expression is a <see cref="IsTypeArm">type arm</see>, so the
+    /// <c>if</c> chooses a type.</summary>
+    private static bool HasTypeArm(Zig.IfExpr e) => IsTypeArm(e.Arg4) || IsTypeArm(e.Arg6);
 
     /// <summary>The type one arm of a type-choosing <c>if</c> names (task #191): an inline <c>struct { … }</c> /
     /// <c>enum { … }</c> reified as the type it spells, or a type expression.</summary>
@@ -477,9 +477,10 @@ internal sealed partial class ZigLowering
         while (cur.Content is Zig.Grouped g) { cur = g.Arg1; }
         return cur.Content switch
         {
+            Zig.IfExpr ta when IsTypeArm(ta.Arg4) && IsTypeArm(ta.Arg6) => true,
+            Zig.IfExpr mixed when HasTypeArm(mixed) => TryTypeAliasRhs(cur, out _),
             Zig.IfExpr ie => IsTypeConstMember(ie.Arg4),
             Zig.IfExprCapture ic => IsTypeConstMember(ic.Arg7),
-            Zig.IfExprTypeArms => true,
             _ => IsTypeFormer(cur) || TryTypeAliasRhs(cur, out _),
         };
     }
@@ -800,9 +801,8 @@ internal sealed partial class ZigLowering
         Zig.SwitchExpr => LowerSwitchType(type),
         // A type chosen by a comptime `if` in an annotation (`old_sig_io: if (have_sig_io) posix.Sigaction else void,` in
         // std's Io/Threaded.zig): the same fold a `const T = if (…) A else B;` alias takes. A runtime condition has no type.
-        Zig.IfExpr or Zig.IfExprTypeArms or Zig.IfExprValueTypeArm or Zig.IfExprTypeArmValue
-            when TryTypeAliasRhs(type, out var ifType) => ifType,
-        Zig.IfExpr or Zig.IfExprTypeArms or Zig.IfExprValueTypeArm or Zig.IfExprTypeArmValue => throw new IrUnsupportedException(
+        Zig.IfExpr when TryTypeAliasRhs(type, out var ifType) => ifType,
+        Zig.IfExpr => throw new IrUnsupportedException(
             "zig: an `if` in a type position needs a condition dotcc can fold at compile time, and a type in the arm it takes"),
         // `info.tag_type orelse @compileError("…")` (std.meta.Tag, task #142): an optional TYPE, else the fallback.
         Zig.OrElse optType => LowerOrElseType(optType.Arg0, optType.Arg2),

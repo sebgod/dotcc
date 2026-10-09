@@ -142,7 +142,7 @@ internal sealed partial class ZigLowering
                 // `const Slice = if (alignment) |a| … else []T;` — a TYPE alias; `const bits = @typeInfo(T).int.bits;`
                 // — a comptime VALUE (std.math.Log2Int computes its result width from one). Which it is
                 // is decided by the RHS's shape (IsTypeBodyTypeRhs), before anything is lowered.
-                case Zig.ConstDecl sel when UnwrapGrouped(sel.Arg3).Content is Zig.IfExprTypeArms:
+                case Zig.ConstDecl sel when UnwrapGrouped(sel.Arg3).Content is Zig.IfExpr selIf && IsTypeArm(selIf.Arg4) && IsTypeArm(selIf.Arg6):
                     BindTypeBodySelectedType(fnName, Tok(sel.Arg1), sel.Arg3, typeShadows);
                     break;
                 case Zig.ConstDecl cd when IsTypeBodyTypeRhs(cd.Arg3):
@@ -488,7 +488,7 @@ internal sealed partial class ZigLowering
     private void BindTypeBodySelectedType(string fnName, string name, Item rhs,
         List<(string name, CType? prev, int? prevBits)> typeShadows)
     {
-        var arm = UnwrapGrouped(rhs).Content is Zig.IfExprTypeArms ta
+        var arm = UnwrapGrouped(rhs).Content is Zig.IfExpr ta
             ? (FoldTypeBodyCondition(fnName, ta.Arg2) ? ta.Arg4 : ta.Arg6)
             : throw new System.InvalidOperationException();
         if (arm.Content is Zig.TypeArmStruct s)
@@ -679,19 +679,14 @@ internal sealed partial class ZigLowering
                     _symbols.ExitScope();
                 }
             }
-            // `if (c) enum {…} else enum {…}`: the condition folds, and the chosen arm reifies as the inline
-            // type it spells (one type per source site, as in an annotation).
-            case Zig.IfExprTypeArms ta:
-            {
-                var arm = FoldTypeBodyCondition(fnName, ta.Arg2) ? ta.Arg4 : ta.Arg6;
-                return arm.Content switch
-                {
-                    Zig.TypeArmEnum e => (ReifyInlineEnum(arm, e.Arg2), null),
-                    Zig.TypeArmEnumTyped et => (ReifyInlineEnum(arm, et.Arg5, et.Arg2), null),
-                    Zig.TypeArmStruct s => (ReifyInlineStruct(arm, s.Arg2), null),
-                    _ => throw new IrUnsupportedException("zig type arm: " + (arm.Content?.GetType().Name ?? "null")),
-                };
-            }
+            // The arm an `if (c) enum {…} else enum {…}` took (the IfExpr case above folds the condition): it reifies as
+            // the inline type it spells (one type per source site, as in an annotation).
+            case Zig.TypeArmEnum e:
+                return (ReifyInlineEnum(cur, e.Arg2), null);
+            case Zig.TypeArmEnumTyped et:
+                return (ReifyInlineEnum(cur, et.Arg5, et.Arg2), null);
+            case Zig.TypeArmStruct s:
+                return (ReifyInlineStruct(cur, s.Arg2), null);
             case Zig.SwitchExpr se:
                 return LowerComptimeTypeSwitch(fnName, se.Arg2, se.Arg5);
             case Zig.BuiltinCall { Arg2: not null } b when Tok(b.Arg0) == "@compileError":

@@ -224,17 +224,10 @@ internal sealed partial class ZigLowering
                 }
                 return new CondExpr(ifCond, then, otherwise) { Type = then.Type };
             }
-            // `x != if (c) a else b` (the right operand of a comparison): the same ternary, arms at the operand level.
-            case Zig.IfOperand io:
-            {
-                if (TryFoldComptimeCondition(io.Arg2) is { } takenOperand) { return LowerExpr(takenOperand ? io.Arg4 : io.Arg6); }
-                var thenOperand = LowerExpr(io.Arg4);
-                return new CondExpr(LowerExpr(io.Arg2), thenOperand, LowerExpr(io.Arg6)) { Type = thenOperand.Type };
-            }
             // `a ++ if (c) x else y` as a whole right-hand side (std.fmt.bytesToHex's `"0123456789" ++ if (case == .upper)
             // "ABCDEF" else "abcdef"`, task #170): the concatenation distributes into the arms, each a compile-time `++`,
             // and the condition (a runtime one in bytesToHex) selects between the two results.
-            case Zig.ConcatIf ci when ci.Arg2.Content is Zig.ConcatIfOperand concatArms:
+            case Zig.Concat ci when ci.Arg2.Content is Zig.IfExpr concatArms:
             {
                 if (TryFoldComptimeCondition(concatArms.Arg2) is { } takenConcat)
                 {
@@ -274,7 +267,7 @@ internal sealed partial class ZigLowering
             // `comptime switch` / `comptime if` in value position (see the LowerExprSink cases).
             case Zig.ComptimeSwitchExpr c: return LowerExpr(c.Arg1);
             case Zig.ComptimeLabeledBlock clb: return ComptimeLabeledBlockValue(clb.Arg1, null);
-            case Zig.ComptimeIfExpr c:     return LowerExpr(c.Arg1);
+            case Zig.PreComptime { Arg1.Content: Zig.IfExpr } c: return LowerExpr(c.Arg1);
 
             // A labeled value-block in a pure-expression position (an if/switch-expression arm, a
             // binary sub-operand) — it produces a value via statements, which a C# expression can't
@@ -306,8 +299,6 @@ internal sealed partial class ZigLowering
             // comparison (non-associative in the grammar)
             case Zig.CmpEq a:   return Bin(BinOp.Eq, a.Arg0, a.Arg2);
             case Zig.CmpNe a:   return Bin(BinOp.Ne, a.Arg0, a.Arg2);
-            case Zig.CmpEqIf a: return Bin(BinOp.Eq, a.Arg0, a.Arg2);   // `x == if (c) a else b`
-            case Zig.CmpNeIf a: return Bin(BinOp.Ne, a.Arg0, a.Arg2);
             case Zig.CmpLt a:   return Bin(BinOp.Lt, a.Arg0, a.Arg2);
             case Zig.CmpGt a:   return Bin(BinOp.Gt, a.Arg0, a.Arg2);
             case Zig.CmpLe a:   return Bin(BinOp.Le, a.Arg0, a.Arg2);
