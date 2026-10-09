@@ -236,7 +236,7 @@ symbols:
   - FnTypeParam    # 158 one fn-pointer-type param — a bare `Type` (unnamed) or `IDENT : Type` (named)
   - ContainerDecl  # 159 a struct/enum/union container decl (groups the forms so `pub` wraps them all)
                    #     (→ [ThreadStatic]; twofer with C `_Thread_local`, completion milestone part 2)
-  - AssignOp       # 160 the assignment operator inside a `while (…) : (lhs op rhs)` continue-expression
+  - AssignOp       # 160 the assignment operator (`=`, `+=`, `+%=`, `+|=`, …) of every assignment form
   - 'test'         # 161 `test "name"/ident/(anon) { … }` block — parsed + DROPPED (analysis-only in std)
                    #     (`=` | any compound `+=`/…/wrap `+%=`/saturating `+|=`), so the continue clause
                    #     accepts the full Zig AssignExpr operator set — not just plain `=`.
@@ -533,25 +533,8 @@ productions:
       # An assignment then-arm with no `;` of its own, ended by the `else` (std.fmt.float.formatScientific's
       # `if (olength > 1) index += olength - 1 else index -= 1;`, task #96). It shares its whole prefix with the
       # assignment STATEMENT (`Expr op= RhsExpr ';'`), so the decision is the 1-token split after the value: `;`
-      # ends the statement, `else` the arm. Every operator is spelled out: a reduced AssignOp would have to be
-      # chosen before the value, where the statement form still shifts.
-      - { lhs: AssignArm, rhs: [Expr, '=', RhsExpr], action: assignArm }
-      - { lhs: AssignArm, rhs: [Expr, '+=', RhsExpr], action: assignArm }
-      - { lhs: AssignArm, rhs: [Expr, '-=', RhsExpr], action: assignArm }
-      - { lhs: AssignArm, rhs: [Expr, '*=', RhsExpr], action: assignArm }
-      - { lhs: AssignArm, rhs: [Expr, '/=', RhsExpr], action: assignArm }
-      - { lhs: AssignArm, rhs: [Expr, '%=', RhsExpr], action: assignArm }
-      - { lhs: AssignArm, rhs: [Expr, '<<=', RhsExpr], action: assignArm }
-      - { lhs: AssignArm, rhs: [Expr, '>>=', RhsExpr], action: assignArm }
-      - { lhs: AssignArm, rhs: [Expr, '&=', RhsExpr], action: assignArm }
-      - { lhs: AssignArm, rhs: [Expr, '|=', RhsExpr], action: assignArm }
-      - { lhs: AssignArm, rhs: [Expr, '^=', RhsExpr], action: assignArm }
-      - { lhs: AssignArm, rhs: [Expr, '+%=', RhsExpr], action: assignArm }
-      - { lhs: AssignArm, rhs: [Expr, '-%=', RhsExpr], action: assignArm }
-      - { lhs: AssignArm, rhs: [Expr, '*%=', RhsExpr], action: assignArm }
-      - { lhs: AssignArm, rhs: [Expr, '+|=', RhsExpr], action: assignArm }
-      - { lhs: AssignArm, rhs: [Expr, '-|=', RhsExpr], action: assignArm }
-      - { lhs: AssignArm, rhs: [Expr, '*|=', RhsExpr], action: assignArm }
+      # ends the statement, `else` the arm. Both go through AssignOp, so the operator reduces the same way in each.
+      - { lhs: AssignArm, rhs: [Expr, AssignOp, RhsExpr], action: assignArm }
       - { lhs: Stmt, rhs: ['if', '(', Expr, ')', AssignArm, 'else', Stmt], action: stmtIfAssignElse }
       - { lhs: Stmt, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', ReturnArm, 'else', Stmt], action: stmtIfCaptureReturnElse }
       - { lhs: Stmt, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', ReturnArm, 'else', '|', IDENT, '|', Stmt], action: stmtIfCaptureReturnErrElse }
@@ -619,13 +602,9 @@ productions:
       # A BLOCK continue expression, `while (c) : ({ a += 1; b += 1; }) body` (17 in std; hash_map's
       # iterators). `{` is outside FIRST(Expr), so after `: (` it is a 1-token shift decision.
       - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', ':', '(', Block, ')', Stmt],                   action: stmtWhileContBlock }
-      # The assignment operator inside a continue-expression. Every op the statement-level
-      # assignment family accepts (plain `=`, the compound `+=`…`^=`, the wrapping `+%=`…`*%=`,
-      # and the saturating `+|=`…`*|=`) reduces to `AssignOp` — so the continue clause covers
-      # the full Zig AssignExpr surface. Each form's lowering mirrors the matching Stmt case
-      # (see stmtAddAssign / stmtAddWrapAssign / stmtAddSatAssign) but yields the For-post CExpr.
-      # A lone op token reduces to AssignOp only inside `: (Expr . op RhsExpr)`, a distinct state
-      # from statement assignment (raw token), so no shift/reduce conflict.
+      # The assignment operator, zig's AssignOp: plain `=`, the compound `+=`…`^=`, the wrapping `+%=`…`*%=` and the
+      # saturating `+|=`…`*|=`. Every assignment form goes through it (a statement, an `if` arm, a prong body, a
+      # `while` continue clause), so the operator always reduces the same way and the lowering maps it in one place.
       - { lhs: AssignOp, rhs: ['='],   action: aopAssign }
       - { lhs: AssignOp, rhs: ['+='],  action: aopAdd }
       - { lhs: AssignOp, rhs: ['-='],  action: aopSub }
@@ -792,35 +771,13 @@ productions:
       # read positionally (`.ItemN`). The first binder is always followed by `,` (never `=`), so the
       # `,`-vs-`=`/`;`/`op=` lookahead selects the destructure cleanly against VarDecl/stmtAssign.
       - { lhs: Stmt, rhs: [DestructBind, ',', DestructBinds, '=', RhsExpr, ';'], action: stmtDestructure }
-      - { lhs: Stmt, rhs: [Expr, '=', RhsExpr, ';'],         action: stmtAssign }
-      # Compound assignment `x op= y` — one rule per operator, mirroring the binary-operator
-      # cascade. Each lowers to the shared `Assign` IR node with a non-null `CompoundOp`, which
-      # the C# backend renders as a NATIVE `target op= rhs` — so the lvalue is evaluated EXACTLY
-      # ONCE (correct binding for `a[i()] += 1` / `p.* += 1`), never the double-eval a `x = x + y`
-      # desugar would cause. After `Expr`, each operator token is a clean shift (distinct from the
-      # `=` of stmtAssign and the `;` of stmtExpr), so these are conflict-free with both.
-      - { lhs: Stmt, rhs: [Expr, '+=',  RhsExpr, ';'], action: stmtAddAssign }
-      - { lhs: Stmt, rhs: [Expr, '-=',  RhsExpr, ';'], action: stmtSubAssign }
-      - { lhs: Stmt, rhs: [Expr, '*=',  RhsExpr, ';'], action: stmtMulAssign }
-      - { lhs: Stmt, rhs: [Expr, '/=',  RhsExpr, ';'], action: stmtDivAssign }
-      - { lhs: Stmt, rhs: [Expr, '%=',  RhsExpr, ';'], action: stmtModAssign }
-      - { lhs: Stmt, rhs: [Expr, '<<=', RhsExpr, ';'], action: stmtShlAssign }
-      - { lhs: Stmt, rhs: [Expr, '>>=', RhsExpr, ';'], action: stmtShrAssign }
-      - { lhs: Stmt, rhs: [Expr, '&=',  RhsExpr, ';'], action: stmtBitAndAssign }
-      - { lhs: Stmt, rhs: [Expr, '|=',  RhsExpr, ';'], action: stmtBitOrAssign }
-      - { lhs: Stmt, rhs: [Expr, '^=',  RhsExpr, ';'], action: stmtBitXorAssign }
-      # Wrapping compound assignment `x op%= y` (Milestone P, part 1) — same shape as the plain
-      # forms. In dotcc's unchecked model a native C# `target op= rhs` already truncates back to the
-      # LHS width (= two's-complement wrap), so each lowers to the SAME `Assign`+`CompoundOp` node as
-      # `+=`/… — `+%=` and `+=` are observably identical (dotcc doesn't model Zig's safe-mode trap).
-      - { lhs: Stmt, rhs: [Expr, '+%=', RhsExpr, ';'], action: stmtAddWrapAssign }
-      - { lhs: Stmt, rhs: [Expr, '-%=', RhsExpr, ';'], action: stmtSubWrapAssign }
-      - { lhs: Stmt, rhs: [Expr, '*%=', RhsExpr, ';'], action: stmtMulWrapAssign }
-      # Saturating compound assignment `x op|= y` (Milestone P, part 2) — no native C# compound op,
-      # so lowering desugars to `target = ZigMath.Sat…(target, y)` (single-eval guard on the lvalue).
-      - { lhs: Stmt, rhs: [Expr, '+|=', RhsExpr, ';'], action: stmtAddSatAssign }
-      - { lhs: Stmt, rhs: [Expr, '-|=', RhsExpr, ';'], action: stmtSubSatAssign }
-      - { lhs: Stmt, rhs: [Expr, '*|=', RhsExpr, ';'], action: stmtMulSatAssign }
+      # Assignment `x op= y`, every operator (plain `=`, compound `+=`…`^=`, wrapping `+%=`…`*%=`, saturating
+      # `+|=`…`*|=`) through AssignOp, as zig's AssignExpr is: Arg1 is the operator's record (AopAssign, AopAdd, …).
+      # A compound one lowers to the shared Assign IR node with a non-null CompoundOp, which the C# backend renders as
+      # a NATIVE `target op= rhs` — so the lvalue is evaluated EXACTLY ONCE (`a[i()] += 1` / `p.* += 1`), never the
+      # double-eval a `x = x + y` desugar would cause; a wrapping one is the same node (a native op= already wraps in
+      # the unchecked context), a saturating one `x = ZigMath.Sat…(x, y)`. See LowerAssignOpStmt.
+      - { lhs: Stmt, rhs: [Expr, AssignOp, RhsExpr, ';'],     action: stmtAssign }
       - { lhs: Stmt, rhs: [Expr, ';'],                        action: stmtExpr }
       - { lhs: Stmt, rhs: [Block] }
 

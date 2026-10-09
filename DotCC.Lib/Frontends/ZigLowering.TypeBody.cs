@@ -200,7 +200,7 @@ internal sealed partial class ZigLowering
                 // `_ = alignment;` — zig's unused-parameter silencer, which a type body needs as much as any
                 // other (zig rejects an unused parameter). A bare NAME has nothing to evaluate; a discarded
                 // CALL would, so it stays the loud cut below.
-                case Zig.StmtAssign { Arg0.Content: Zig.Ident { } lhs, Arg2.Content: Zig.Ident } when Tok(lhs.Arg0) == "_":
+                case Zig.StmtAssign { Arg0.Content: Zig.Ident { } lhs, Arg1.Content: Zig.AopAssign, Arg2.Content: Zig.Ident } when Tok(lhs.Arg0) == "_":
                     break;
                 case Zig.ReturnStructType rst:
                     return new TypeBodyResult(true, rst.Arg3, null, null);   // FieldDecls, null for `return struct {};`
