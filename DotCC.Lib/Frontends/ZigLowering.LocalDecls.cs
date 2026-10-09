@@ -125,7 +125,7 @@ internal sealed partial class ZigLowering
         var extraSeeds = new List<ValueSeed>();
         switch (initExpr.Content)
         {
-            case Zig.IfExprTypeArms ta:
+            case Zig.IfExpr ta when IsTypeArm(ta.Arg4) && IsTypeArm(ta.Arg6):
                 arm = (TryFoldComptimeCondition(ta.Arg2) ?? (_ir.ConstEval(LowerExpr(ta.Arg2)) is { } cv ? cv != 0 : (bool?)null))
                       switch
                 {
@@ -134,7 +134,7 @@ internal sealed partial class ZigLowering
                     null => throw new IrUnsupportedException($"zig: `const {name} = if (…) struct {{…}} else …` needs a comptime condition"),
                 };
                 break;
-            case Zig.IfExprCaptureTypeArms ca:
+            case Zig.IfExprCapture ca when IsTypeArm(ca.Arg7) && IsTypeArm(ca.Arg9):
                 if (!TryComptimeOptionalCond(ca.Arg2, out var copt))
                 {
                     throw new IrUnsupportedException(
