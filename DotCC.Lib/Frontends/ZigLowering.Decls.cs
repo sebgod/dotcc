@@ -783,7 +783,7 @@ internal sealed partial class ZigLowering
                 Zig.EnumDeclTyped e     => RegisterEnumZig(mangled, e.Arg5, e.Arg8),
                 Zig.UnionDeclEnum u     => RegisterUnion(mangled, u.Arg8),
                 Zig.UnionDeclTagged u   => RegisterUnionTagged(mangled, Tok(u.Arg5), u.Arg8),
-                Zig.UnionDeclUntagged u => RegisterUnionUntagged(mangled, u.Arg5),
+                Zig.UnionDeclUntagged u => RegisterUnionUntagged(mangled, u.Arg6),
                 _ => throw new System.InvalidOperationException(),
             };
         }
@@ -899,7 +899,7 @@ internal sealed partial class ZigLowering
             Zig.EnumDeclTyped e => FromBody(e.Arg8).ToList(),
             Zig.UnionDeclEnum u => FromBody(u.Arg8).ToList(),
             Zig.UnionDeclTagged u => FromBody(u.Arg8).ToList(),
-            Zig.UnionDeclUntagged u => FromBody(u.Arg5).ToList(),
+            Zig.UnionDeclUntagged u => FromBody(u.Arg6).ToList(),
             _ => System.Array.Empty<Item>(),
         };
     }

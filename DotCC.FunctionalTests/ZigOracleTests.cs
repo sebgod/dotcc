@@ -7284,6 +7284,39 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{d} {d}\\n\", .{ arm(true, 100), arm(false, 5) });\n" +
             "}\n", 0,
             "255 44 255 6\n107 255 44\n0 44\n255 251" },
+        // Container fields typed by an inline `packed struct(u8) {…}`, `extern struct {…}`, `extern union {…}` and
+        // `packed struct {…}`, an `enum(u1) {…}` field, and a named `extern union` (std's os, c and elf files).
+        new object[] { "inline_layout_field_types",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "const Pun = extern union { word: u32, bytes: [4]u8 };\n" +
+            "\n" +
+            "const Reg = struct {\n" +
+            "    bits: packed struct(u8) { lo: u4, hi: u4 },\n" +
+            "    rec: extern struct { a: u16, b: u32 },\n" +
+            "    pun: extern union { word: u32, half: u16 },\n" +
+            "    flags: packed struct { ready: bool, err: bool, code: u6 },\n" +
+            "    kind: enum(u1) { int, bytes },\n" +
+            "};\n" +
+            "\n" +
+            "pub fn main() void {\n" +
+            "    var r: Reg = .{\n" +
+            "        .bits = .{ .lo = 3, .hi = 9 },\n" +
+            "        .rec = .{ .a = 7, .b = 40000 },\n" +
+            "        .pun = .{ .word = 0x00010002 },\n" +
+            "        .flags = .{ .ready = true, .err = false, .code = 33 },\n" +
+            "        .kind = .bytes,\n" +
+            "    };\n" +
+            "    r.bits.hi += 1;\n" +
+            "    r.rec.b += r.rec.a;\n" +
+            "    r.flags.code -= 1;\n" +
+            "    const p: Pun = .{ .word = 0x04030201 };\n" +
+            "    std.debug.print(\"{d} {d} {d} {d}\\n\", .{ r.bits.lo, r.bits.hi, r.rec.a, r.rec.b });\n" +
+            "    std.debug.print(\"{d} {} {} {d}\\n\", .{ r.pun.word, r.flags.ready, r.flags.err, r.flags.code });\n" +
+            "    std.debug.print(\"{d} {d} {d}\\n\", .{ @sizeOf(@TypeOf(r.bits)), @sizeOf(@TypeOf(r.rec)), @intFromEnum(r.kind) });\n" +
+            "    std.debug.print(\"{d} {d}\\n\", .{ p.bytes[0], p.bytes[3] });\n" +
+            "}\n", 0,
+            "3 10 7 40007\n65538 true false 32\n1 8 1\n1 4" },
         // Task #140: std.crypto.blake3's shapes: a late-declared struct const in a field extent, `@intCast` slice bounds,
         // open slices of a many-item pointer, and an array local copied through a pointer.
         new object[] { "blake3_shapes",

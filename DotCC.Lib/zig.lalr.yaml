@@ -299,6 +299,7 @@ symbols:
   - JumpArm        # 193 a jump as an arm of a value `if`: `break [:l [v]]` / `continue [:l]` (GH #283)
   - ContainerDeclaration # 194 a member every container body shares (a method, const, nested container, comptime or test block)
   - File         # 195 a whole source file: its declarations, possibly none
+  - ContainerLayout # 196 `extern` / `packed` before an inline `struct`/`union` field type
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -411,10 +412,11 @@ productions:
       # `{` → untagged) — disjoint, conflict-free. It lowers to the bare overlapping-payload struct
       # ([StructLayout(Explicit)], every variant at offset 0) WITHOUT the outer __tag/__payload, so it
       # is NOT a ZigUnionInfo; Zig's safe-mode active-field tracking / type-pun checks aren't modeled
-      # (same-field read/write is faithful — see ZIG-SUPPORT.md).
+      # (same-field read/write is faithful — see ZIG-SUPPORT.md). An `extern union` / `packed union` (a C union, std's
+      # elf.zig) is the same overlapping layout, so the untagged form takes an optional ContainerLayout.
       - { lhs: ContainerDecl, rhs: ['const', IDENT, '=', 'union', '(', 'enum', ')', '{', UnionVariants, '}', ';'], action: unionDeclEnum }
       - { lhs: ContainerDecl, rhs: ['const', IDENT, '=', 'union', '(', IDENT, ')', '{', UnionVariants, '}', ';'], action: unionDeclTagged }
-      - { lhs: ContainerDecl, rhs: ['const', IDENT, '=', 'union', '{', UnionVariants, '}', ';'],                  action: unionDeclUntagged }
+      - { lhs: ContainerDecl, rhs: ['const', IDENT, '=', ContainerLayout?, 'union', '{', UnionVariants, '}', ';'], action: unionDeclUntagged }
 
   # FnProto (subset): `fn name(params) RetType Block`. RetType may carry the
   # inferred-error-set leading `!` (`fn f() !void`), distinct from ErrUnion's
@@ -1299,10 +1301,23 @@ productions:
       # The enum twin: `comptime sign: enum { pos, neg }` (std's parseIntWithSign). Same annotation-only
       # slot, so the value-position `const E = enum {…}` (enumDecl) keeps no competitor.
       - { lhs: AType, rhs: ['enum', '{', EnumFields, '}'],   action: inlineEnumType }
+      # With an explicit tag type: `kind: enum(u1) { int, bytes },` (std's Build/abi.zig).
+      - { lhs: AType, rhs: ['enum', '(', Type, ')', '{', EnumFields, '}'], action: inlineEnumTypeTyped }
       # The union twins (task #104): `x: union(enum) { a: u8, b: u16 }` as a parameter / field / annotation type. The
       # same annotation-only slot, so the value-position `const U = union(enum) {…}` (unionDeclEnum) keeps no competitor.
       - { lhs: AType, rhs: ['union', '(', 'enum', ')', '{', UnionVariants, '}'], action: inlineUnionEnumType }
       - { lhs: AType, rhs: ['union', '{', UnionVariants, '}'],                   action: inlineUnionType }
+      # The layout twins (road-to-zig-std S9): a field typed `extern struct {…}` / `extern union {…}` (C-ABI records in
+      # std's os and c files) or `packed struct(u8) {…}` / `packed union {…}` (bit fields). Same annotation-only slot.
+      # ContainerLayout is `extern` or `packed`; a backing integer is allowed after either and only `packed` uses it.
+      - { lhs: AType, rhs: [ContainerLayout, 'struct', '{', FieldDecls?, '}'],                   action: inlineLayoutStructType }
+      - { lhs: AType, rhs: [ContainerLayout, 'struct', '(', Type, ')', '{', FieldDecls?, '}'],   action: inlineLayoutStructTypeBacked }
+      - { lhs: AType, rhs: [ContainerLayout, 'union', '{', UnionVariants, '}'],                  action: inlineLayoutUnionType }
+
+  - derivation: none
+    rules:
+      - { lhs: ContainerLayout, rhs: ['extern'], action: layoutExtern }
+      - { lhs: ContainerLayout, rhs: ['packed'], action: layoutPacked }
 
   - derivation: none
     rules:

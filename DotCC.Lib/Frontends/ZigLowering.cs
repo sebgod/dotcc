@@ -2443,7 +2443,7 @@ internal sealed partial class ZigLowering
                 }
                 case Zig.UnionDeclEnum u:   foreach (var m in RegisterUnion(name, u.Arg8)) { methods.Add((name, m)); } break;  // const IDENT = union(enum) { UnionMembers } ;
                 case Zig.UnionDeclTagged u: foreach (var m in RegisterUnionTagged(name, Tok(u.Arg5), u.Arg8)) { methods.Add((name, m)); } break;  // const IDENT = union(SomeEnum) { UnionMembers } ;
-                case Zig.UnionDeclUntagged u: foreach (var m in RegisterUnionUntagged(name, u.Arg5)) { methods.Add((name, m)); } break;  // const IDENT = union { UnionMembers } ;
+                case Zig.UnionDeclUntagged u: foreach (var m in RegisterUnionUntagged(name, u.Arg6)) { methods.Add((name, m)); } break;  // const IDENT = [extern|packed] union { UnionMembers } ;
             }
         }
     }
