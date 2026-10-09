@@ -782,8 +782,17 @@ internal sealed partial class ZigLowering
         // site. See ReifyInlineStruct.
         Zig.InlineStructType ist       => ReifyInlineStruct(type, ist.Arg2),
         Zig.InlineEnumType iet         => ReifyInlineEnum(type, iet.Arg2),
+        Zig.InlineEnumTypeTyped iett   => ReifyInlineEnum(type, iett.Arg5, iett.Arg2),
         Zig.InlineUnionEnumType iut    => ReifyInlineUnion(type, iut.Arg5, tagged: true),
         Zig.InlineUnionType iuu        => ReifyInlineUnion(type, iuu.Arg2, tagged: false),
+        // `extern struct {…}` / `packed struct {…}` as a field type: the same reified struct with the declared layout. A
+        // backing integer (`packed struct(u8)`) is only zig's check that the fields fill it; the layout does the packing.
+        Zig.InlineLayoutStructType ils => ReifyInlineStruct(type, ils.Arg3, LayoutOf(ils.Arg0)),
+        Zig.InlineLayoutStructTypeBacked { Arg0.Content: Zig.LayoutPacked } ilb => ReifyInlineStruct(type, ilb.Arg6, AggregateLayout.Packed),
+        Zig.InlineLayoutStructTypeBacked => throw new IrUnsupportedException(
+            "zig: only a `packed struct` takes a backing integer; `extern struct(T)` is not zig"),
+        // An `extern union` / `packed union` field type overlaps its variants at offset 0, like any untagged union.
+        Zig.InlineLayoutUnionType ilu  => ReifyInlineUnion(type, ilu.Arg3, tagged: false),
         // A type chosen by a comptime switch in any type position (a parameter's, as well as a field's): the selected
         // prong's type (task #73).
         Zig.SwitchExpr => LowerSwitchType(type),
@@ -809,7 +818,7 @@ internal sealed partial class ZigLowering
     /// against this type and <c>p.field</c> access resolve through the ordinary named-struct machinery.
     /// V1 is fields-only: a method / <c>const</c> / nested-container member is a loud cut (it needs a
     /// named container decl — symmetric with the W2 in-fn container and the W4 returned struct).</summary>
-    private CType ReifyInlineStruct(Item occurrence, Item? fieldDecls)
+    private CType ReifyInlineStruct(Item occurrence, Item? fieldDecls, AggregateLayout layout = AggregateLayout.Default)
     {
         if (_inlineStructNames.TryGetValue(occurrence, out var existing)) { return new CType.Named(existing); }
         var name = QualifyTypeName($"__AnonStruct{_inlineStructNames.Count}");   // the counter is per module
@@ -825,9 +834,15 @@ internal sealed partial class ZigLowering
                 "zig: an inline `struct {…}` type is fields-only (road-to-zig-std S9) — a method, `const`, or "
                 + "nested-container member needs a named container decl (`const T = struct { … };`)");
         }
-        RegisterStruct(name, fields);
+        RegisterStruct(name, fields, layout);
         return new CType.Named(name);
     }
+
+    /// <summary>The aggregate layout a <c>ContainerLayout</c> keyword names: <c>extern</c> is the C layout (fields in
+    /// declaration order), <c>packed</c> the bit-packed one.</summary>
+    private static AggregateLayout LayoutOf(Item containerLayout) => containerLayout.Content is Zig.LayoutPacked
+        ? AggregateLayout.Packed
+        : AggregateLayout.Sequential;
 
     /// <summary>The error for a call in a type position that is not a type-returning generic dotcc could
     /// evaluate, naming the callee's dotted spelling and its file and line.</summary>

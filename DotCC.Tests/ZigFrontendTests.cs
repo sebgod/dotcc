@@ -2015,6 +2015,29 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void An_inline_extern_or_packed_container_types_a_field()
+    {
+        // std's os and c files type fields with inline C records and bit fields. Each reifies an anonymous struct or
+        // union with the declared layout (oracle row `inline_layout_field_types` runs them against zig).
+        var cs = EmitZig(
+            "const Reg = struct {\n" +
+            "    bits: packed struct(u8) { lo: u4, hi: u4 },\n" +
+            "    rec: extern struct { a: u16, b: u32 },\n" +
+            "    pun: extern union { word: u32, half: u16 },\n" +
+            "};\n" +
+            "pub fn main() u8 {\n" +
+            "    const r: Reg = .{ .bits = .{ .lo = 1, .hi = 2 }, .rec = .{ .a = 3, .b = 4 }, .pun = .{ .half = 5 } };\n" +
+            "    return r.bits.hi + @as(u8, @intCast(r.rec.a)) + @as(u8, @intCast(r.pun.half));\n" +
+            "}\n");
+        cs.ShouldContain("__AnonStruct");
+        cs.ShouldContain("__AnonUnion");
+        Should.Throw<CompileException>(() => EmitZig(
+            "const S = struct { r: extern struct(u8) { a: u8 } };\n" +
+            "pub fn main() u8 { const s: S = .{ .r = .{ .a = 1 } }; return s.r.a; }\n"))
+            .Message.ShouldContain("backing integer");
+    }
+
+    [Fact]
     public void An_extern_var_parses_and_is_rejected_only_where_it_is_read()
     {
         // Extern DATA (`pub extern var _mh_execute_header: mach_hdr;` in std's c.zig) has no binding in dotcc. The
