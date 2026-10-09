@@ -1,0 +1,90 @@
+# zig-grammar-peg: control flow as expressions, the way zig's grammar has it
+
+**Status:** P0 done (this plan and the spike behind it, 2026-10-10). P1 next.
+
+## Why
+
+`zig.lalr.yaml` keeps control flow out of the operator cascade. `if`, `switch`, labeled blocks and loops are
+`RhsExpr` alternatives, never a `Primary`, and `return` / `break` / `continue` are statements. That made the
+grammar conflict-free early on, but every context zig allows them in needs its own copy:
+
+- the arm nonterminals `ReturnArm`, `AssignArm`, `JumpArm`, `FallbackArm`, `CaptureArm`, `TypeArm`, `ConcatIf`,
+  `IfOperand`, `ProngJump`;
+- a value `if` with a `return` / jump arm in each position (`ifExprReturnThen`, `ifExprElseJump`, `fbIfJumps`, …);
+- operator-specific patches: `boolOrSwitch`, `boolAndSwitch`, `addSwitch`, `switchCmp*`, `cmpEqIf`, `concatIf`, and
+  the `orelse if` / `catch if` RhsExpr rules;
+- statement `if` forms per arm shape (`stmtIfReturnElse`, `stmtIfAssignElse`, `stmtIfCaptureReturnErrElse`, …).
+
+After the 2026-10-09/10 worklist batches (probe 341 to 422 of 553), what is left at the head of the std parse
+probe is almost entirely more of these: an else-less `if` as a prong body, a braceless `if` body before
+`else if`, an `if` whose body is an `if`, `else |_|` on a statement `if`. Each would be one more copy.
+
+zig's PEG has none of this: `IfExpr`, `return Expr?`, `break :l Expr?`, `continue`, `comptime Expr`, `Block`,
+labeled loops and `CurlySuffixExpr` are all `PrimaryExpr`, so they are operands anywhere, and an open-ended one
+(`if … else E`, `return E`) takes everything to its right because PEG choice is greedy.
+
+## The LALR(1) design: an open/closed cascade
+
+A greedy trailing expression does not come free in LALR(1). The 2026-10-10 spike measured it.
+
+- **`Primary -> 'if' (Expr) Expr 'else' Expr` naively:** 15 unresolved conflicts, plus 231 decisions the table
+  builder settles silently by group precedence. Some of those are wrong. LALR.CC ranks the cascade's groups
+  loosest-first, so inside an `if` arm `a + b % c` would reduce as `(a + b) % c`. That is the hazard in the
+  "grammar precedence settles conflicts silently" memory, at scale.
+- **An open/closed split:** every cascade level `L` (BoolOr, BoolAnd, Compare, Bitwise, BitShift, Add, Mul,
+  Prefix) gets an open twin `LO`, whose rightmost operand is open: `AddO -> Add '+' MulO | MulO`. Open
+  primaries (`if … else E`, later `return E`, `break :l E`) are reached only through `PrefixO`, so an open
+  expression is always the rightmost operand. Nothing can follow it at an outer level, and no state has to
+  choose between extending the arm and closing it. Result: **0 conflicts, and 1 new precedence decision**.
+  That one was the old `IfExpr` arm forms competing for the same prefix, which P1 removes. The twins reuse
+  their closed twin's action, so the AST records and their lowering stay as they are: 47 rules, 9 symbols,
+  1556 states.
+
+Closed primaries that end in `}` (`switch`, a labeled block, a `{}` block, a container type) need no open
+twin; they become ordinary `Primary` alternatives.
+
+**Statement position** is the other half. zig's `Statement` tries `IfStatement` / `SwitchExpr` / loops before
+`AssignExpr ;`, so a statement-start `switch (x) {…}` is a statement even if `*p = 1;` follows. Here the
+statement forms stay their own productions: at statement start, LALR's states for the statement form and the
+expression form have different item cores, so their choice is local to that state and never merged into a
+value context. Where zig's statement accepts an expression body (`if (c) f() else g();`), the
+expression-statement path parses it as an `if` expression for free.
+
+## Verification for every phase
+
+1. No `GrammarConflictException`, and the `LALRCC_RESOLVED_DUMP` diff against `main` reviewed line by line. The
+   aim is no new precedence decisions at all; each one that remains is explained in the PR.
+2. Parse-shape pins for operator precedence inside and around the new forms (`a + b % c` in an arm,
+   `if (c) a else b + d` taking the `+ d`, `x orelse if …`), so a silent misparse fails a unit test.
+3. Unit suite, then the functional suite with the zig oracle (build `DotCC.FunctionalTests` first), and an
+   oracle row per phase checked by hand against zig.
+4. The std parse probe never drops (422 at P0).
+5. Lowering: a phase replaces records, so each removed record's lowering moves to the new one at the positions
+   it supported. A position it did not support stays a loud `IrUnsupportedException`.
+
+## Phases
+
+- **P1, value `if` and the jumps as open primaries.**
+  - The open/closed cascade.
+  - `OpenPrimary -> if (Expr) Payload? Expr else Payload? Expr`, with an arm that may also be a container type
+    (today's `TypeArm`).
+  - `return Expr?`, `break [:l] [Expr]`, `continue [:l] [Expr]` as open primaries.
+  - Removes `IfExpr`'s arm variants, `ConcatIf`, `IfOperand`, `JumpArm`, `ReturnArm`, the `orelse`/`catch`
+    `return` and `FallbackArm` jump forms, `fbReturnIf`, and the `RhsExpr` `orelse if` rules.
+  - Lowering: a jump in value position is noreturn. It lowers where it does today (an `orelse`/`catch`
+    fallback, an `if` arm in an initializer or statement) and is rejected elsewhere.
+- **P2, statement `if` as zig's `IfStatement`:** `if (c) |p| Block (else |e| Statement)?` and
+  `if (c) |p| AssignExpr (';' | else |e| Statement)`, with the capture forms folded through one optional
+  `Payload`. Removes the per-arm statement forms (`stmtIfReturnElse`, `stmtIfAssignElse`, `AssignArm`, …).
+  Should take the remaining `if` buckets in the probe head.
+- **P3, closed primaries:** `switch`, labeled blocks, `{}` and value loops become `Primary` alternatives
+  (`while … else E` is open). Removes `boolOrSwitch`, `addSwitch`, `switchCmp*`, `comptimeSwitchExpr`, most of
+  `RhsExpr` and `FallbackArm`, and the `FieldValue` copies.
+- **P4, payloads:** one optional `Payload` (`|x|`, `|*x|`, `|x, i|`) on `if`, `while`, `for`, `catch`, `else`,
+  folding the per-capture record twins.
+- **P5 (optional), container types as expressions:** `struct {…}` / `enum {…}` / `union {…}` as primaries,
+  with `const X = struct {…};` an ordinary `VarDecl`. This is the largest lowering change, since every
+  `*Decl` container record is read in many places. Do it only if P1 to P4 leave container copies that keep
+  costing.
+
+Each phase is one PR (P1 may be two: cascade plus `if`, then the jumps), merged before the next starts.
