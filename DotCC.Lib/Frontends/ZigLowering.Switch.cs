@@ -25,7 +25,6 @@ internal sealed partial class ZigLowering
         // where the statement holding a labeled value switch had taken it (GH #286).
         _ when _activeSwitchValueLabel is { } valueLabel && !IsUnreachableItem(e) => Hoisted(() => LowerLabeledBreak(valueLabel, e)),
         Zig.SwitchExpr s => LowerSwitchStmt(s.Arg2, s.Arg5),
-        Zig.SwitchExprTrailing s => LowerSwitchStmt(s.Arg2, s.Arg5),
         _ => Hoisted(() => new ExprStmt(LowerExpr(e))),
     };
     /// <summary>The label a labeled switch hands to its OWN switch statement (<see cref="LowerLabeledValue"/>), taken
@@ -117,7 +116,6 @@ internal sealed partial class ZigLowering
         var (subject, prongs) = p.Arg6.Content switch
         {
             Zig.SwitchExpr s => (s.Arg2, s.Arg5),
-            Zig.SwitchExprTrailing s => (s.Arg2, s.Arg5),
             _ => throw new IrUnsupportedException("zig `=> if (c) switch …` prong: " + (p.Arg6.Content?.GetType().Name ?? "null")),
         };
         if (TryFoldComptimeCondition(p.Arg4) is { } taken)

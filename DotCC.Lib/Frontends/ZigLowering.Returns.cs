@@ -483,7 +483,6 @@ internal sealed partial class ZigLowering
                 var (swSubject, swProngs) = voidSw switch
                 {
                     Zig.SwitchExpr se => (se.Arg2, se.Arg5),
-                    Zig.SwitchExprTrailing st => (st.Arg2, st.Arg5),
                     _ => throw new IrUnsupportedException("zig switch arm: " + (voidSw?.GetType().Name ?? "null")),
                 };
                 onFail.Add(LowerSwitchStmt(swSubject, swProngs));

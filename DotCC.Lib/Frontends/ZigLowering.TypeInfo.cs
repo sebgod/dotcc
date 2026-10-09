@@ -114,9 +114,9 @@ internal sealed partial class ZigLowering
         }
         // A switch over a TYPE (std.math.inf's `const RuntimeType = switch (Type) { else => Type, comptime_float => f128 };`):
         // the selected arm's width, so `@typeInfo(RuntimeType).float.bits` still answers.
-        if (cur.Content is Zig.SwitchExpr or Zig.SwitchExprTrailing)
+        if (cur.Content is Zig.SwitchExpr)
         {
-            var (switchSubject, switchProngs) = cur.Content is Zig.SwitchExpr se ? (se.Arg2, se.Arg5) : (((Zig.SwitchExprTrailing)cur.Content).Arg2, ((Zig.SwitchExprTrailing)cur.Content).Arg5);
+            var (switchSubject, switchProngs) = cur.Content is Zig.SwitchExpr se ? (se.Arg2, se.Arg5) : throw new System.InvalidOperationException();
             // Or over a comptime tag (std.math.log2's `switch (int_info.signedness) { .signed => @Int(…), .unsigned => T }`,
             // task #163).
             var typeProng = TrySelectTypeProng(switchSubject, switchProngs) ?? SelectComptimeProng(switchSubject, switchProngs, out _);
@@ -553,11 +553,9 @@ internal sealed partial class ZigLowering
             // `switch (@typeInfo(T)) { .pointer => |p| p, else => @compileError(…) }` (std.mem.ReverseIterator, task #147):
             // the selected prong yields its own capture, the active payload, which is the same folded record. A selected
             // `@compileError` prong fires as it lowers.
-            case Zig.SwitchExpr or Zig.SwitchExprTrailing:
+            case Zig.SwitchExpr:
             {
-                var (swSubject, swProngs) = expr.Content is Zig.SwitchExpr se
-                    ? (se.Arg2, se.Arg5)
-                    : (((Zig.SwitchExprTrailing)expr.Content).Arg2, ((Zig.SwitchExprTrailing)expr.Content).Arg5);
+                var (swSubject, swProngs) = expr.Content is Zig.SwitchExpr se ? (se.Arg2, se.Arg5) : throw new System.InvalidOperationException();
                 if (!TryEvalTypeInfo(swSubject, out var switchedInfo)) { return false; }
                 if (SelectComptimeProng(swSubject, swProngs, out _) is not { Expr: { } yielded } chosen) { return false; }
                 if (chosen.CaptureName is { } capture && yielded.Content is Zig.Ident { Arg0: var yieldedTok } && Tok(yieldedTok) == capture)

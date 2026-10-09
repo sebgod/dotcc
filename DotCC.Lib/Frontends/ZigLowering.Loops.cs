@@ -68,23 +68,17 @@ internal sealed partial class ZigLowering
             case Zig.StmtForSliceElse cfe when TryComptimeIterable(cfe.Arg2, out var cle):
                 return UnrollComptimeFor(new[] { (cle, Tok(cfe.Arg5)) }, cfe.Arg7, cfe.Arg9);
             case Zig.StmtForMultiElse cme when FirstForObject(cme.Arg2) is { } firstE0 && TryComptimeIterable(firstE0, out _):
-                return UnrollComptimeMultiFor(cme.Arg2, cme.Arg5, cme.Arg7, cme.Arg9);
-            case Zig.StmtForMultiTrailElse cte when FirstForObject(cte.Arg2) is { } firstE1 && TryComptimeIterable(firstE1, out _):
-                return UnrollComptimeMultiFor(cte.Arg2, cte.Arg6, cte.Arg8, cte.Arg10);
-            case Zig.StmtForMultiElse mme:      return UnrollMixedInlineFor(mme.Arg2, mme.Arg5, mme.Arg7, mme.Arg9);
-            case Zig.StmtForMultiTrailElse mte: return UnrollMixedInlineFor(mte.Arg2, mte.Arg6, mte.Arg8, mte.Arg10);
+                return UnrollComptimeMultiFor(cme.Arg2, cme.Arg6, cme.Arg8, cme.Arg10);
+            case Zig.StmtForMultiElse mme:      return UnrollMixedInlineFor(mme.Arg2, mme.Arg6, mme.Arg8, mme.Arg10);
 
             // `inline for (a, b, 0.., …) |x, y, i, …|` — comptime lists walked in lockstep (road-to-zig-std S6; any number
             // of them since task #108). Measured in the pinned std the pair `(field_names, field_types)` is the DOMINANT
             // member-list shape (17 uses); `(list, 0..)` binds the list's own indices. See UnrollComptimeMultiFor.
             case Zig.StmtForMulti cm when FirstForObject(cm.Arg2) is { } first0 && TryComptimeIterable(first0, out _):
-                return UnrollComptimeMultiFor(cm.Arg2, cm.Arg5, cm.Arg7);
-            case Zig.StmtForMultiTrail ct when FirstForObject(ct.Arg2) is { } first1 && TryComptimeIterable(first1, out _):
-                return UnrollComptimeMultiFor(ct.Arg2, ct.Arg6, ct.Arg8);
+                return UnrollComptimeMultiFor(cm.Arg2, cm.Arg6, cm.Arg8);
             // `inline for (s.ptrs, &ptrs, field_types) |in, *out, field_type|` (std.MultiArrayList.Slice.subslice, task
             // #108): fixed-length arrays in lockstep with comptime lists, led by an array. See UnrollMixedInlineFor.
-            case Zig.StmtForMulti mm:      return UnrollMixedInlineFor(mm.Arg2, mm.Arg5, mm.Arg7);
-            case Zig.StmtForMultiTrail mt: return UnrollMixedInlineFor(mt.Arg2, mt.Arg6, mt.Arg8);
+            case Zig.StmtForMulti mm:      return UnrollMixedInlineFor(mm.Arg2, mm.Arg6, mm.Arg8);
 
             // `inline for (cs) |c|` over a comptime STRING (std.fmt.parse_float's FloatStream.firstIsLower, a
             // `comptime cs: []const u8` seed): one copy per byte, the capture bound to that byte as a literal.
@@ -554,8 +548,8 @@ internal sealed partial class ZigLowering
         Zig.StmtWhile or Zig.StmtWhileElse or Zig.StmtWhileCont or Zig.StmtWhileContAssign or Zig.StmtWhileContBlock
         or Zig.StmtWhileCapture or Zig.StmtWhileCaptureElse or Zig.StmtWhileCaptureErrElse
         or Zig.StmtWhileCaptureCont or Zig.StmtWhileCaptureContAssign
-        or Zig.StmtForRange or Zig.StmtForSlice or Zig.StmtForSliceRef or Zig.StmtForMulti or Zig.StmtForMultiTrail
-        or Zig.StmtForSliceElse or Zig.StmtForMultiElse or Zig.StmtForMultiTrailElse;
+        or Zig.StmtForRange or Zig.StmtForSlice or Zig.StmtForSliceRef or Zig.StmtForMulti
+        or Zig.StmtForSliceElse or Zig.StmtForMultiElse;
     /// <summary>Lower a runtime loop with an unlabeled break target (<see cref="LoopBreakTarget"/>), so a
     /// <c>break</c> inside a <c>switch</c> in its body exits the loop, as in zig. The label is emitted
     /// after the loop only when such a break used it; otherwise the loop lowers exactly as before.</summary>

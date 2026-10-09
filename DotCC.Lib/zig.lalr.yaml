@@ -508,13 +508,11 @@ productions:
       # fold; the untaken arm is never lowered. In this rightmost group so `else` binds as for a plain
       # `if`. After `comptime`, `if` is disjoint from FIRST(VarDecl), FIRST(Block) and FIRST(Prefix) (an
       # `if` EXPRESSION lives only in RhsExpr), so the existing `comptime` forms keep their lookahead.
-      - { lhs: Stmt, rhs: ['comptime', 'if', '(', Expr, ')', Stmt],                 action: stmtComptimeIf }
-      - { lhs: Stmt, rhs: ['comptime', 'if', '(', Expr, ')', Stmt, 'else', Stmt],   action: stmtComptimeIfElse }
+      - { lhs: Stmt, rhs: ['comptime', 'if', '(', Expr, ')', Stmt, ";?"],                 action: stmtComptimeIf }
+      - { lhs: Stmt, rhs: ['comptime', 'if', '(', Expr, ')', Stmt, 'else', Stmt, ";?"],   action: stmtComptimeIfElse }
       # zig parses `comptime if …` as an EXPRESSION statement, so a block-bodied one takes a closing `;`
       # (`comptime if (c) {…} else {…};`). Both spellings are accepted: `;` cannot start a Stmt, so the
       # shift after the last arm is unambiguous.
-      - { lhs: Stmt, rhs: ['comptime', 'if', '(', Expr, ')', Stmt, ';'],               action: stmtComptimeIfSemi }
-      - { lhs: Stmt, rhs: ['comptime', 'if', '(', Expr, ')', Stmt, 'else', Stmt, ';'], action: stmtComptimeIfElseSemi }
       # Payload-capturing `if` (Milestone M): `if (opt) |x| then [else …]` binds an optional's
       # payload (or, in part 3, an error-union's success value) in the then-branch. After the
       # condition `')'`, a `'|'` lookahead selects the capture form — no Stmt begins with `'|'`
@@ -580,10 +578,9 @@ productions:
       # { return EnumTag; }`): the else runs when the loop ends without a `break`. In this dangling-else group, as the
       # while-capture else is, so a Stmt body followed by `else` shifts into it.
       - { lhs: LoopStmt, rhs: ['for', '(', Expr, ')', '|', IDENT, '|', Stmt, 'else', Stmt],           action: stmtForSliceElse }
-      - { lhs: LoopStmt, rhs: ['for', '(', ForObjs, ')', '|', ForCaps, '|', Stmt, 'else', Stmt],      action: stmtForMultiElse }
+      - { lhs: LoopStmt, rhs: ['for', '(', ForObjs, ",?", ')', '|', ForCaps, '|', Stmt, 'else', Stmt], action: stmtForMultiElse }
       # The same with a trailing comma after the objects (std.json.static's innerParse: `inline for (…, 0..,) |…| { … }
       # else { … }`, task #210).
-      - { lhs: LoopStmt, rhs: ['for', '(', ForObjs, ',', ')', '|', ForCaps, '|', Stmt, 'else', Stmt], action: stmtForMultiTrailElse }
       # The plain `while (c) body else elsebody` statement (std.bit_set.DynamicBitSetUnmanaged.findFirstSet, task #130:
       # `while (offset < self.bit_length) { if (mask[0] != 0) break; … } else return null;`), in this group for the same
       # dangling-else reason.
@@ -606,10 +603,7 @@ productions:
   # the switch takes the `;` (the dangling-else resolution).
   - derivation: rightmost
     rules:
-      - { lhs: Stmt, rhs: ['switch', '(', Expr, ')', '{', Prongs, '}'],      action: stmtSwitch }
-      - { lhs: Stmt, rhs: ['switch', '(', Expr, ')', '{', Prongs, ',', '}'], action: stmtSwitchTrailing }
-      - { lhs: Stmt, rhs: ['switch', '(', Expr, ')', '{', Prongs, '}', ';'],      action: stmtSwitchSemi }
-      - { lhs: Stmt, rhs: ['switch', '(', Expr, ')', '{', Prongs, ',', '}', ';'], action: stmtSwitchTrailingSemi }
+      - { lhs: Stmt, rhs: ['switch', '(', Expr, ')', '{', Prongs, ",?", '}', ";?"], action: stmtSwitch }
 
   - derivation: none
     rules:
@@ -709,8 +703,7 @@ productions:
       # replaced nine fixed shapes (pairs, triples, `(s, 0..)`, by-ref pairs) that std.MultiArrayList outgrew
       # (`for (a, &b, c) |x, *y, z|`, `for (a, b, 0..)`, four objects). After `for ( Expr`, `)` selects the single-object
       # forms, `..` the range form or a range object, and `,` this one; after `ForObjs ','`, `)` is the trailing comma.
-      - { lhs: LoopStmt, rhs: ['for', '(', ForObjs, ')', '|', ForCaps, '|', Stmt],      action: stmtForMulti }
-      - { lhs: LoopStmt, rhs: ['for', '(', ForObjs, ',', ')', '|', ForCaps, '|', Stmt], action: stmtForMultiTrail }
+      - { lhs: LoopStmt, rhs: ['for', '(', ForObjs, ",?", ')', '|', ForCaps, '|', Stmt], action: stmtForMulti }
       # `for (a, b) |x, y| body` — the PARALLEL form: two operands walked in lockstep, one capture
       # each (road-to-zig-std S6). Conflict-free against the indexed form above by the SAME 1-token
       # lookahead the block already relies on: after `for ( Expr ',' Expr`, `..` selects the indexed
@@ -1065,12 +1058,10 @@ productions:
       # `if (switch (delimiter_type) { .scalar => findScalarPos(…), … }) |delim_start| … else …`). `switch` is not
       # in FIRST(Expr), so after `if (` it is a clean shift; the record is the same.
       - { lhs: IfExpr, rhs: ['if', '(', SwitchExpr, ')', '|', IDENT, '|', RhsExpr, 'else', RhsExpr], action: ifExprCapture }
-      - { lhs: SwitchExpr, rhs: ['switch', '(', Expr, ')', '{', Prongs, '}'],      action: switchExpr }
+      - { lhs: SwitchExpr, rhs: ['switch', '(', Expr, ')', '{', Prongs, ",?", '}'], action: switchExpr }
       # `switch (if (from < 0) @max(…) else to) { … }` (std.math.IntFittingRange): a value `if` as the subject.
       # `if` is not in FIRST(Expr), so after `switch (` it is a clean shift; the record is the same.
-      - { lhs: SwitchExpr, rhs: ['switch', '(', IfExpr, ')', '{', Prongs, '}'],    action: switchExpr }
-      - { lhs: SwitchExpr, rhs: ['switch', '(', IfExpr, ')', '{', Prongs, ',', '}'], action: switchExprTrailing }
-      - { lhs: SwitchExpr, rhs: ['switch', '(', Expr, ')', '{', Prongs, ',', '}'], action: switchExprTrailing }
+      - { lhs: SwitchExpr, rhs: ['switch', '(', IfExpr, ')', '{', Prongs, ",?", '}'], action: switchExpr }
       - { lhs: LabeledBlock, rhs: [IDENT, ':', Block], action: labeledBlock }
       # A labeled SWITCH as a value (std.math.shl: `casted_shift_amt: switch (@typeInfo(T)) { .int => |info| { …
       # break :casted_shift_amt v; … }, … }`): the same value block, its body the switch. After `IDENT ':'`, a

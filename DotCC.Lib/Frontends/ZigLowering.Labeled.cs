@@ -35,7 +35,6 @@ internal sealed partial class ZigLowering
     {
         Zig.LabeledBlock lb => LowerLabeledValueBlock(Tok(lb.Arg0), lb.Arg2, sink, consume),
         Zig.LabeledSwitch { Arg2.Content: Zig.SwitchExpr sw } ls => LowerLabeledValueBody(Tok(ls.Arg0), () => LowerContinuableSwitchBody(Tok(ls.Arg0), sw.Arg2, sw.Arg5), sink, consume),
-        Zig.LabeledSwitch { Arg2.Content: Zig.SwitchExprTrailing st } ls => LowerLabeledValueBody(Tok(ls.Arg0), () => LowerContinuableSwitchBody(Tok(ls.Arg0), st.Arg2, st.Arg5), sink, consume),
         _ => throw new IrUnsupportedException("internal: not a labeled value: " + (labeled.Content?.GetType().Name ?? "null")),
     };
     /// <summary>A labeled switch's own body as a value (<see cref="LowerLabeledSwitchBody"/>), which a <c>continue
@@ -123,12 +122,9 @@ internal sealed partial class ZigLowering
         // `break :blk switch (d.digits[0]) { 5...9 => break, 0, 1 => 2, else => 1 }` (std.fmt.parse_float's convertSlow): a
         // switch whose prongs are not all values (a jump out of the loop here) cannot be a C# switch expression, so it is
         // the switch as a statement, its value prongs breaking to the same label, as a labeled switch's do.
-        if (valueItem.Content is Zig.SwitchExpr or Zig.SwitchExprTrailing
-            && (valueItem.Content is Zig.SwitchExpr bs ? bs.Arg5 : ((Zig.SwitchExprTrailing)valueItem.Content).Arg5) is var breakProngs
-            && Flatten(breakProngs).Any(p => p.Content is not Zig.ProngExpr))
+        if (valueItem.Content is Zig.SwitchExpr bs && Flatten(bs.Arg5).Any(p => p.Content is not Zig.ProngExpr))
         {
-            var breakSubject = valueItem.Content is Zig.SwitchExpr bss ? bss.Arg2 : ((Zig.SwitchExprTrailing)valueItem.Content).Arg2;
-            return LowerLabeledSwitchBody(label, breakSubject, breakProngs);
+            return LowerLabeledSwitchBody(label, bs.Arg2, bs.Arg5);
         }
         // A labeled value-position loop (`lbl: while/for … else`, Milestone Y part 2) — innermost-first.
         foreach (var lv in _loopValues)
@@ -213,11 +209,6 @@ internal sealed partial class ZigLowering
             {
                 _pendingSwitchContinueLabel = Tok(ls.Arg0);
                 return LowerSwitchStmt(sw.Arg2, sw.Arg5);
-            }),
-            Zig.LabeledSwitch { Arg2.Content: Zig.SwitchExprTrailing st } ls => (Tok(ls.Arg0), () =>
-            {
-                _pendingSwitchContinueLabel = Tok(ls.Arg0);
-                return LowerSwitchStmt(st.Arg2, st.Arg5);
             }),
             _ => throw new IrUnsupportedException("internal: not a labeled block: " + (labeled.Content?.GetType().Name ?? "null")),
         };
