@@ -24,6 +24,15 @@ public sealed class ZigParseProbeTests
     }
 
     [Fact]
+    public void Accepts_an_empty_file()
+    {
+        // A file with no declarations is an empty struct in zig. The installed std ships 25 such files
+        // (0-byte `test.zig` stubs), and the grammar rejected every one of them.
+        ZigParseProbe.TryParse("").Status.ShouldBe(ZigParseStatus.Ok);
+        ZigParseProbe.TryParse("// only a comment\n\n").Status.ShouldBe(ZigParseStatus.Ok);
+    }
+
+    [Fact]
     public void Accepts_a_test_block()
     {
         // A top-level `test` block used to be one of the biggest std parse gaps; road-to-zig-std S9

@@ -72,6 +72,17 @@ public sealed class ZigFileStructTests
     }
 
     [Fact]
+    public void An_empty_file_is_an_empty_module()
+    {
+        // A root with no declarations parses and lowers to nothing (zig: an empty struct). As an executable it
+        // then fails only for its missing `main`, as `zig build-exe` does, not for a parse error.
+        foreach (var source in new[] { "", "// nothing here\n" })
+        {
+            Should.Throw<CompileException>(() => EmitZigMulti(source)).Message.ShouldContain("no `main` function");
+        }
+    }
+
+    [Fact]
     public void A_module_alias_names_a_file_struct_type_and_navigates_like_its_import()
     {
         // `const Writer = std.Io.Writer;` / `const math = std.math;`: std reaches almost every other

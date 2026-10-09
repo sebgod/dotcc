@@ -953,6 +953,8 @@ internal sealed partial class ZigLowering
                 case Zig.ConstDeclTyped d: nameTok = d.Arg1; typeItem = d.Arg3; rhs = d.Arg5; isVar = false; break;  // const IDENT : Type = RhsExpr ;
                 case Zig.VarDecl d:        nameTok = d.Arg1; typeItem = null;   rhs = d.Arg3; isVar = true;  break;
                 case Zig.VarDeclTyped d:   nameTok = d.Arg1; typeItem = d.Arg3; rhs = d.Arg5; isVar = true;  break;
+                case Zig.ConstDeclMods d:  nameTok = d.Arg1; typeItem = null;   rhs = d.Arg4; isVar = false; break;  // const IDENT align(N) = RhsExpr ;
+                case Zig.VarDeclMods d:    nameTok = d.Arg1; typeItem = null;   rhs = d.Arg4; isVar = true;  break;
                 default: throw new IrUnsupportedException("zig container const: " + (c.Content?.GetType().Name ?? "null"));
             }
             var cname = Tok(nameTok);

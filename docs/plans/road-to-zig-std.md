@@ -1246,33 +1246,30 @@ place a poison IS needed is the top-level tombstone, and that is what landed.
 
 ### S9 — surface-debt bricks (many S/M; parallel any time; wall-finder-ranked)
 
-**Current ranking (2026-10-09 — 341 of 553 files parse-clean, 61.7%; up from 187 / 33.8% at the last
-committed report, 2026-09-23).** The head of [`std-parse-probe.report.txt`](std-parse-probe.report.txt), each
-bucket read off the line it fails on:
+**Current ranking (2026-10-09, after the first worklist batch: 386 of 553 files parse-clean, 69.8%; it was
+341 / 61.7% the same morning and 187 / 33.8% at the 2026-09-23 report).** The batch took the three biggest
+buckets: an empty file (25 files; the installed std ships its `test.zig` files as 0 bytes), `align(N)` on an
+untyped container-level `const`/`var` (20), and `pub extern` (13, which also brought `extern var`; extern data
+parses and is rejected by name only where it is read). The head of
+[`std-parse-probe.report.txt`](std-parse-probe.report.txt) now, each bucket read off the line it fails on:
 
 | Files | Construct (first-fail) | Example |
 |---|---|---|
-| 25 | an **empty file**: the installed std ships its `test.zig` files as 0 bytes, and the grammar needs at least one declaration | `std/fs/test.zig` |
-| 20 | **`align(N)` on a container-level `const`/`var`** | `const sbox_encrypt align(64) = generateSbox(false);` (`crypto/aes/soft.zig`) |
-| 13 | **`extern var`** (extern data at container level) | `pub extern var _mh_execute_header: mach_hdr;` (`c.zig`) |
 | 9 | **`packed struct(uN)` as an inline field type** | `bits: packed struct(u8) {` (`Build/abi.zig`) |
 | 8 | **a labeled block as a struct-literal field value** | `.debug_stack_trace = blk: {` (`Build/Step.zig`) |
+| 8 | **`extern union` / `extern struct` as an inline field type** | `un: extern union {` (`c/freebsd.zig`) |
 | 6 | **`if` in a type slot** (field type) | `old_sig_io: if (have_sig_io) posix.Sigaction else void,` (`Io/Threaded.zig`) |
 | 5 | **an else-less `if` as a switch-prong body** | `else => if (c) return error.InvalidCharacter,` (`crypto/codecs/base64_hex_ct.zig`) |
 | 5 | **a braceless `if` body followed by `else if`** | `std.mem.swap(…)` then `else if (index == 2) {` (`compress/zstd/Decompress.zig`) |
-| 5 | **`extern union` / `extern struct` as an inline field type** | `handler: extern union {` (`os/emscripten.zig`) |
 | 4 | **`**T`** (the `**` token in a pointer-to-pointer type) | `*const fn (*const File, **File, …)` (`os/uefi/protocol/file.zig`) |
 | 4 | **an `if` whose body is another `if`, as a statement ending `;`** | `if (opt) \|p\| if (p > 0) { … };` (`Io/Writer.zig`) |
 | 4 | **an error-union `if` statement with an `else \|_\|` branch** | `if (x) \|file\| fileClose(…) else \|_\| {}` (`Io/Dispatch.zig`) |
 | 4 | **a struct literal typed by an inline `struct {…}`** | `struct { … }{ .keys = … }` (`debug/Dwarf.zig`) |
 | 4 | **`} else \|_\| {}`** after a block-bodied error-union `if` | (`crypto/ecdsa.zig`) |
 | 4 | **an empty `enum {}`** | `pub const Feature = enum {};` (`Target/generic.zig`) |
-| 3 | an `else` after a nested `if` chain (to triage) | (`Thread.zig:76`) |
-| 3 | **a struct literal typed by an inline struct type** (`}{`) | (`compress/flate/token.zig`) |
-| 3 | **`while (… catch unreachable) \|x\|` as a value** | `const text_vmaddr = while (it.next() catch unreachable) \|load_cmd\| {` (`debug/SelfInfo/MachO.zig`) |
+| 3 | **`callconv` on an `extern fn` prototype** | `) callconv(.winapi) ?HCERTSTORE;` (`os/windows/crypt32.zig`) |
+| 3 | **`const X = extern union {`** (only `extern struct` is a container decl) | (`fmt.zig`) |
 
-The two biggest are cheap: the empty-file bucket is one grammar production (an empty file is a valid zig
-module, a struct with no members), and `align(N)` on a declaration already parses on fns and pointer types.
 The historical ranking below is kept for the record.
 
 **Measured ranking (first S0 run, 2026-07-07 — 5.8% baseline).** The parse

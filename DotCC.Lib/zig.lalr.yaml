@@ -298,12 +298,16 @@ symbols:
   - 'noinline'     # 192 `noinline fn`: an optimizer hint on a function (std.hash.XxHash3's `noinline fn hashLong`, task #177)
   - JumpArm        # 193 a jump as an arm of a value `if`: `break [:l [v]]` / `continue [:l]` (GH #283)
   - ContainerDeclaration # 194 a member every container body shares (a method, const, nested container, comptime or test block)
+  - File         # 195 a whole source file: its declarations, possibly none
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
   - derivation: none
     rules:
-      - { lhs: Root, rhs: [Decls] }
+      - { lhs: Root, rhs: [File] }
+      # A file with no declarations is an empty struct (std ships 0-byte `test.zig` stubs). The optional lives on
+      # File, not Root: LALR.CC seeds the start state with production 0 only, so a second Root alternative is dead.
+      - { lhs: File, rhs: [Decls?] }
 
   - derivation: leftmost
     rules:
@@ -368,9 +372,12 @@ productions:
       # library/calling-convention string (Milestone R, part 4) is accepted and lowered like a plain
       # `extern fn` (routed to dotcc's Libc runtime by bare name); after `extern`, a `STRING` selects
       # the `"c"` forms vs the bare `fn` forms — disjoint, conflict-free. A `!T` error-union return is
-      # still deferred.
-      - { lhs: Decl, rhs: ['extern', 'fn', IDENT, '(', Params?, ')', Type, ';'], action: externFnProto }
-      - { lhs: Decl, rhs: ['extern', STRING, 'fn', IDENT, '(', Params?, ')', Type, ';'], action: externCFnProto }
+      # still deferred. `pub` is optional (std's c.zig declares hundreds of `pub extern "c" fn`).
+      - { lhs: Decl, rhs: [pub?, 'extern', STRING?, 'fn', IDENT, '(', Params?, ')', Type, ';'], action: externFnProto }
+      # `extern var` (PEG: `KEYWORD_extern STRINGLITERALSINGLE? KEYWORD_threadlocal? GlobalVarDecl`): data a linked
+      # library defines, always typed and never initialized. After `extern STRING?`, `fn` versus `threadlocal`/`var`
+      # is one token. dotcc binds extern functions but not extern data, so lowering rejects a reference to one.
+      - { lhs: Decl, rhs: [pub?, 'extern', STRING?, threadlocal?, 'var', IDENT, ':', AType, ';'], action: externVar }
       # Container decls — Zig binds a struct/enum TYPE to a `const` name (types are
       # values). A struct/enum RHS isn't an `RhsExpr`, so these are distinct Decl forms,
       # NOT VarDecl: the `struct`/`enum` keyword right after `=` is a clean 1-token shift
@@ -475,9 +482,13 @@ productions:
       # IGNORED: lowered exactly like the unmodified typed decl (no-op on the managed target).
       - { lhs: VarDecl, rhs: ['const', IDENT, ':', AType, DeclMods, '=', RhsExpr, ';'], action: constDeclTypedMods }
       - { lhs: VarDecl, rhs: ['var',   IDENT, ':', AType, DeclMods, '=', RhsExpr, ';'], action: varDeclTypedMods }
+      # The same modifiers on an untyped const/var (`const sbox align(64) = generateSbox(false);`, std's
+      # crypto/aes/soft.zig). After IDENT, `align`/`linksection` versus `:`/`=` is one token.
+      - { lhs: VarDecl, rhs: ['const', IDENT, DeclMods, '=', RhsExpr, ';'], action: constDeclMods }
+      - { lhs: VarDecl, rhs: ['var',   IDENT, DeclMods, '=', RhsExpr, ';'], action: varDeclMods }
 
   # The `align(Expr)` / `linksection(Expr)` modifier(s) on a typed const/var (Milestone R, part 5),
-  # in Zig's order (align then linksection). Non-empty; the arg Exprs are never read.
+  # in Zig's order (align then linksection). Non-empty; the arg Exprs are never read. Also on an untyped one.
   - derivation: none
     rules:
       - { lhs: DeclMods, rhs: ['align', '(', Expr, ')'],                              action: declModAlign }

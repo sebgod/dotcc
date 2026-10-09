@@ -1985,6 +1985,50 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Accepts_align_on_an_untyped_const_or_var()
+    {
+        // std's crypto/aes/soft.zig: `const sbox_encrypt align(64) = generateSbox(false);`. The modifier is a
+        // no-op on the managed target, at container level, in a container and on a local.
+        var cs = EmitZig(
+            "const table align(64) = [_]u8{ 3, 4 };\n" +
+            "const Box = struct { const k align(8) = 5; };\n" +
+            "pub fn main() u8 {\n" +
+            "    var n align(16) = table[1];\n" +
+            "    n += Box.k;\n" +
+            "    const m align(4) = n * 2;\n" +
+            "    return m;\n" +
+            "}\n");
+        cs.ShouldContain("table");
+        cs.ShouldContain("n * 2");
+    }
+
+    [Fact]
+    public void Accepts_pub_on_an_extern_fn_prototype()
+    {
+        // std's c.zig declares its libc surface as `pub extern "c" fn …;` (543 of them).
+        var cs = EmitZig(
+            "pub extern \"c\" fn putchar(c: c_int) c_int;\n" +
+            "pub extern fn abs(x: c_int) c_int;\n" +
+            "pub fn main() u8 { _ = putchar(72); return @intCast(abs(-3)); }\n");
+        cs.ShouldContain("putchar(72)");
+        cs.ShouldContain("abs(-3)");
+    }
+
+    [Fact]
+    public void An_extern_var_parses_and_is_rejected_only_where_it_is_read()
+    {
+        // Extern DATA (`pub extern var _mh_execute_header: mach_hdr;` in std's c.zig) has no binding in dotcc. The
+        // declarations alone compile; a read names the construct instead of "unresolved identifier".
+        const string Decls =
+            "pub extern var counter: u32;\n" +
+            "extern \"c\" var environ: [*:null]?[*:0]u8;\n" +
+            "extern threadlocal var errno_value: c_int;\n";
+        EmitZig(Decls + "pub fn main() u8 { return 1; }\n").ShouldContain("return 1;");
+        Should.Throw<CompileException>(() => EmitZig(Decls + "pub fn main() u8 { return @intCast(counter); }\n"))
+            .Message.ShouldContain("`counter` is an `extern var`");
+    }
+
+    [Fact]
     public void Lowers_a_container_var_and_sibling_const_by_bare_name()
     {
         // Milestone R, part 6 — a container-level `var` is a namespaced mutable global (lowered to a

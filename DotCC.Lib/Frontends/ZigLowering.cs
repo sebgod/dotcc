@@ -57,6 +57,10 @@ internal sealed partial class ZigLowering
     /// LAZILY on first navigation/use (<see cref="ResolveImport"/>). Road-to-zig-std S1/S2.</summary>
     private readonly Dictionary<string, string> _importSpecs = new(System.StringComparer.Ordinal);
 
+    /// <summary>Names this module declares as <c>extern var</c> (data a linked library defines). dotcc binds
+    /// no extern data, so the declaration is inert and only a reference to one is rejected, by name.</summary>
+    private readonly HashSet<string> _externVars = new(System.StringComparer.Ordinal);
+
     /// <summary>Memo of a bound import name → the resolved+prepared <see cref="ZigModule"/> (populated by
     /// <see cref="ResolveImport"/> on first use), so <c>X.func(…)</c> / a <c>X.sub</c> navigation resolves
     /// the module without re-loading.</summary>
@@ -1692,6 +1696,7 @@ internal sealed partial class ZigLowering
                 {
                     Zig.ConstDecl c      => (Tok(c.Arg1), (Item?)null, c.Arg3),
                     Zig.ConstDeclTyped c => (Tok(c.Arg1), c.Arg3, c.Arg5),
+                    Zig.ConstDeclMods c  => (Tok(c.Arg1), null, c.Arg4),
                     _ => (null, null, null),
                 };
                 if (constName is not null && constRhs is not null
@@ -1746,8 +1751,8 @@ internal sealed partial class ZigLowering
             var d = Unwrap(decl);   // unwrap `pub`
             switch (d.Content)
             {
-                case Zig.ExternFnProto f:       DeclareExternFn(f.Arg2, f.Arg4, f.Arg6); break;  // extern fn IDENT ( Params? ) Type ;
-                case Zig.ExternCFnProto f:       DeclareExternFn(f.Arg3, f.Arg5, f.Arg7); break;  // extern "c" fn IDENT ( Params? ) Type ;
+                case Zig.ExternFnProto f: DeclareExternFn(f.Arg4, f.Arg6, f.Arg8); break;  // pub? extern STRING? fn IDENT ( Params? ) Type ;
+                case Zig.ExternVar v:     _externVars.Add(Tok(v.Arg5)); break;            // pub? extern STRING? threadlocal? var IDENT : Type ;
                 // The optional CallConv (Milestone R, part 5) sits between `)` and the return, so the
                 // return type + body are one slot further right than the pre-CallConv layout.
                 case Zig.FnDef f:          AddFnEntry(Export(f.Arg1, DeclaredEarlyOr(f.Arg1, () => DeclareFn(f.Arg1, f.Arg3, f.Arg7, f.Arg8, errUnion: f.Arg6 is not null)))); break;   // `!T` return → ErrorUnion(T)
@@ -1757,7 +1762,8 @@ internal sealed partial class ZigLowering
                 // alias recorded in pass 0, which emits no decl) or a runtime global — both are
                 // resolved by the global pass below (LowerTopLevelGlobals), so skip them here.
                 case Zig.ConstDecl or Zig.ConstDeclTyped or Zig.VarDecl or Zig.VarDeclTyped
-                  or Zig.ConstDeclTypedMods or Zig.VarDeclTypedMods or Zig.VarDeclThreadLocal: break;
+                  or Zig.ConstDeclTypedMods or Zig.VarDeclTypedMods or Zig.VarDeclThreadLocal
+                  or Zig.ConstDeclMods or Zig.VarDeclMods: break;
                 // A container-level `comptime {}` is analysis-only — always DROPPED (its side effects
                 // need the comptime engine, S4–S7). A `test` block is DROPPED in a normal build too
                 // (road-to-zig-std S9); but in TEST MODE (`dotcc zig test`) each `test "…" {}` is
@@ -1885,6 +1891,10 @@ internal sealed partial class ZigLowering
                 // ignored (no-op on the managed target); RhsExpr is one slot right of the Type.
                 case Zig.ConstDeclTypedMods d: LowerGlobal(d.Arg1, d.Arg3, d.Arg6, isConst: true); break;  // const IDENT : Type DeclMods = RhsExpr ;
                 case Zig.VarDeclTypedMods d:   LowerGlobal(d.Arg1, d.Arg3, d.Arg6); break;  // var IDENT : Type DeclMods = RhsExpr ;
+                case Zig.ConstDeclMods d when !IsComptimeBound(Tok(d.Arg1)):
+                    if (!TryComptimeConstBinding(Tok(d.Arg1), d.Arg4)) { LowerGlobal(d.Arg1, null, d.Arg4, isConst: true); }
+                    break;  // const IDENT DeclMods = RhsExpr ;
+                case Zig.VarDeclMods d:        LowerGlobal(d.Arg1, null, d.Arg4); break;  // var IDENT DeclMods = RhsExpr ;
                 // `threadlocal var x: T = 0;` — thread storage duration → [ThreadStatic] on the
                 // emitted field (the C `_Thread_local` twofer; same marker, same constraint).
                 case Zig.VarDeclThreadLocal d: LowerGlobal(d.Arg2, d.Arg4, d.Arg6, threadLocal: true); break;
@@ -2607,6 +2617,7 @@ internal sealed partial class ZigLowering
                 case Zig.ForObjsTwo t:  stack.Push(t.Arg2); stack.Push(t.Arg0); break;  // [ForObj, ',', ForObj]
                 case Zig.ForObjsCons c: stack.Push(c.Arg2); stack.Push(c.Arg0); break;  // [ForObjs, ',', ForObj]
                 case Zig.ForCapsCons c: stack.Push(c.Arg2); stack.Push(c.Arg0); break;  // [ForCaps, ',', ForCap]
+                case LALR.CC.Reduction { Children.Count: 0 }: break;  // an empty file (`File -> Decls?` with no declarations)
                 default: ordered.Add(n); break;
             }
         }
