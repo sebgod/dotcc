@@ -401,8 +401,9 @@ productions:
       # layout is the packed one either way; zig itself rejects fields that do not total the backing width, so the
       # backing type is parsed and not re-checked. `(` after `struct` is a clean shift, distinct from `{`.
       - { lhs: ContainerDecl, rhs: ['const', IDENT, '=', 'packed', 'struct', '(', Type, ')', '{', FieldDecls, '}', ';'], action: packedStructDeclBacked }
-      - { lhs: ContainerDecl, rhs: ['const', IDENT, '=', 'enum', '{', EnumFields, '}', ';'],             action: enumDecl }
-      - { lhs: ContainerDecl, rhs: ['const', IDENT, '=', 'enum', '(', Type, ')', '{', EnumFields, '}', ';'], action: enumDeclTyped }
+      # An enum with no members (`pub const Feature = enum {};`, std's Target/generic.zig) is legal zig.
+      - { lhs: ContainerDecl, rhs: ['const', IDENT, '=', 'enum', '{', EnumFields?, '}', ';'],             action: enumDecl }
+      - { lhs: ContainerDecl, rhs: ['const', IDENT, '=', 'enum', '(', Type, ')', '{', EnumFields?, '}', ';'], action: enumDeclTyped }
       # Tagged union (Milestone D3 + R): `const U = union(enum) { a: T, b, … };` (auto-inferred tag)
       # and `const U = union(SomeEnum) { … };` (Milestone R — an EXISTING named enum as the tag). The
       # token right after `union (` selects: the `enum` keyword → the auto form, any other IDENT → the
@@ -1012,10 +1013,10 @@ productions:
       # The captured form (std.mem.eqlBytes' `const Scan = if (std.simd.suggestVectorLength(u8)) |vec_size| struct {…}
       # else struct {…};`): after the capture, `struct` / `enum` starts a TypeArm, not a RhsExpr.
       - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', TypeArm, 'else', TypeArm], action: ifExprCaptureTypeArms }
-      - { lhs: TypeArm, rhs: ['enum', '{', EnumFields, '}'],   action: typeArmEnum }
+      - { lhs: TypeArm, rhs: ['enum', '{', EnumFields?, '}'],   action: typeArmEnum }
       # A tagged enum arm (std.Io.File's `Permissions = … orelse if (is_windows) enum(DWORD) { … } else …`, GH #282),
       # members and methods as a named `enum(T)` has. After `enum`, `(` versus `{` is one token.
-      - { lhs: TypeArm, rhs: ['enum', '(', Type, ')', '{', EnumFields, '}'], action: typeArmEnumTyped }
+      - { lhs: TypeArm, rhs: ['enum', '(', Type, ')', '{', EnumFields?, '}'], action: typeArmEnumTyped }
       - { lhs: TypeArm, rhs: ['struct', '{', FieldDecls, '}'], action: typeArmStruct }
       # Value-position captured `if` — `if (opt) |x| thenExpr else elseExpr` (S4a). The `|` after the
       # `)` cannot start a RhsExpr (it is only an infix bitwise-or), so this is conflict-free with the
@@ -1197,6 +1198,10 @@ productions:
       # token, so they never clash with the array `[Expr]` / slice `[]` forms.
       # (`[*:s]T` sentinel pointers are deferred to Milestone O part 3.)
       - { lhs: Type, rhs: ['*', 'const', Type],    action: tyPtrConst }
+      # `**T` / `**const T`, a pointer to a pointer (std's os/uefi: `**File`). The lexer reads `**` as one token (the
+      # array-repeat operator), so the type needs its own rules; in a type slot `**` starts no expression.
+      - { lhs: Type, rhs: ['**', Type],            action: tyPointerPointer }
+      - { lhs: Type, rhs: ['**', 'const', Type],   action: tyPointerPointerConst }
       - { lhs: Type, rhs: ['[*c]', Type],          action: tyCPtr }
       - { lhs: Type, rhs: ['[*c]', 'const', Type], action: tyCPtrConst }
       # `[*]T` / `[*]const T` — many-item pointers (Milestone O, part 2). Like `[*c]`,
@@ -1300,9 +1305,9 @@ productions:
       - { lhs: AType, rhs: ['struct', '{', FieldDecls?, '}'], action: inlineStructType }
       # The enum twin: `comptime sign: enum { pos, neg }` (std's parseIntWithSign). Same annotation-only
       # slot, so the value-position `const E = enum {…}` (enumDecl) keeps no competitor.
-      - { lhs: AType, rhs: ['enum', '{', EnumFields, '}'],   action: inlineEnumType }
+      - { lhs: AType, rhs: ['enum', '{', EnumFields?, '}'],   action: inlineEnumType }
       # With an explicit tag type: `kind: enum(u1) { int, bytes },` (std's Build/abi.zig).
-      - { lhs: AType, rhs: ['enum', '(', Type, ')', '{', EnumFields, '}'], action: inlineEnumTypeTyped }
+      - { lhs: AType, rhs: ['enum', '(', Type, ')', '{', EnumFields?, '}'], action: inlineEnumTypeTyped }
       # The union twins (task #104): `x: union(enum) { a: u8, b: u16 }` as a parameter / field / annotation type. The
       # same annotation-only slot, so the value-position `const U = union(enum) {…}` (unionDeclEnum) keeps no competitor.
       - { lhs: AType, rhs: ['union', '(', 'enum', ')', '{', UnionVariants, '}'], action: inlineUnionEnumType }
@@ -1475,7 +1480,7 @@ productions:
       # FIRST(Expr); `struct {…}` shares its prefix with the closure idiom `struct {…}.f`, which continues with
       # `.`, a token no Arg is followed by, so the choice after `}` is still one token.
       - { lhs: Arg, rhs: ['struct', '{', FieldDecls, '}'],                     action: inlineStructType }
-      - { lhs: Arg, rhs: ['enum', '{', EnumFields, '}'],                       action: inlineEnumType }
+      - { lhs: Arg, rhs: ['enum', '{', EnumFields?, '}'],                       action: inlineEnumType }
       - { lhs: Arg, rhs: ['union', '(', 'enum', ')', '{', UnionVariants, '}'], action: inlineUnionEnumType }
       - { lhs: Arg, rhs: ['union', '{', UnionVariants, '}'],                   action: inlineUnionType }
 
@@ -1496,7 +1501,7 @@ productions:
   - derivation: none
     rules:
       - { lhs: ProngType, rhs: ['struct', '{', FieldDecls, '}'],                     action: inlineStructType }
-      - { lhs: ProngType, rhs: ['enum', '{', EnumFields, '}'],                       action: inlineEnumType }
+      - { lhs: ProngType, rhs: ['enum', '{', EnumFields?, '}'],                       action: inlineEnumType }
       - { lhs: ProngType, rhs: ['union', '(', 'enum', ')', '{', UnionVariants, '}'], action: inlineUnionEnumType }
       - { lhs: ProngType, rhs: ['union', '{', UnionVariants, '}'],                   action: inlineUnionType }
 
@@ -1509,6 +1514,9 @@ productions:
       # `if` / `switch` are not in FIRST(Expr), so the field value stays conflict-free, as RhsExpr's are.
       - { lhs: FieldValue, rhs: [IfExpr] }
       - { lhs: FieldValue, rhs: [SwitchExpr] }
+      # A labeled value block (std's Build/Step.zig: `.debug_stack_trace = blk: { … break :blk v; },`). After IDENT, a
+      # `:` selects the block as it does for an RhsExpr; lowering hoists it ahead of the enclosing statement.
+      - { lhs: FieldValue, rhs: [LabeledBlock] }
       # `.async_limit = options.async_limit orelse if (cpu_count) |n| .limited(n - 1) else |_| .nothing` (GH #129):
       # the `orelse if` / `catch if` of RhsExpr, as a field value.
       - { lhs: FieldValue, rhs: [Bitwise, 'orelse', IfExpr], action: orElse }
@@ -1733,6 +1741,10 @@ productions:
       # `delimiter: switch (delimiter_type) { .sequence, .any => []const T, .scalar => T },`). `switch` is
       # not in FIRST(AType), so after `IDENT :` it is a 1-token shift.
       - { lhs: FieldDecl, rhs: [IDENT, ':', SwitchExpr], action: structFieldSwitch }
+      # Its `if` twin (std's Io/Threaded.zig: `old_sig_io: if (have_sig_io) posix.Sigaction else void,`): the condition
+      # must fold, as in a type alias. A field slot only: as a general AType (a return type, followed by `{`) an `if`
+      # would clash with a struct-literal arm.
+      - { lhs: FieldDecl, rhs: [IDENT, ':', IfExpr], action: structFieldIf }
 
   # Enum body as a MEMBER list (right-recursive over EnumMember, like struct's FieldDecls) — so
   # value members, methods (`fn`/`pub fn`), and consts (`const Self = @This();`) interleave. The

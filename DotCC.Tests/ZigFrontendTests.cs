@@ -2038,6 +2038,23 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void A_field_typed_by_a_comptime_if_takes_the_folded_arm()
+    {
+        // std's Io/Threaded.zig: `old_sig_io: if (have_sig_io) posix.Sigaction else void,`. The condition folds like a
+        // type alias's; a runtime condition has no type and is rejected by name.
+        var cs = EmitZig(
+            "const big = true;\n" +
+            "const S = struct { n: if (big) u64 else u8 };\n" +
+            "pub fn main() u8 { const s: S = .{ .n = 3 }; return @intCast(s.n); }\n");
+        cs.ShouldContain("ulong n");
+        Should.Throw<CompileException>(() => EmitZig(
+            "var flag = true;\n" +
+            "const S = struct { n: if (flag) u64 else u8 };\n" +
+            "pub fn main() u8 { const s: S = .{ .n = 3 }; return @intCast(s.n); }\n"))
+            .Message.ShouldContain("an `if` in a type position");
+    }
+
+    [Fact]
     public void An_extern_var_parses_and_is_rejected_only_where_it_is_read()
     {
         // Extern DATA (`pub extern var _mh_execute_header: mach_hdr;` in std's c.zig) has no binding in dotcc. The

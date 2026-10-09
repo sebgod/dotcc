@@ -592,6 +592,7 @@ internal sealed partial class ZigLowering
             {
                 Zig.StructField f => (Tok(f.Arg0), (Item?)null, false),
                 Zig.StructFieldSwitch f => (Tok(f.Arg0), null, false),
+                Zig.StructFieldIf f => (Tok(f.Arg0), null, false),
                 Zig.StructFieldDefault f => (Tok(f.Arg0), null, true),
                 Zig.StructFieldAligned f => (Tok(f.Arg0), f.Arg5, false),
                 Zig.StructFieldAlignedDefault f => (Tok(f.Arg0), f.Arg5, true),
@@ -622,6 +623,9 @@ internal sealed partial class ZigLowering
                     break;
                 case Zig.StructFieldSwitch f:    // FieldDecl -> IDENT ':' SwitchExpr (a comptime-selected type)
                     fields.Add(new StructField(Tok(f.Arg0), LowerSwitchType(f.Arg2)));
+                    break;
+                case Zig.StructFieldIf f:        // FieldDecl -> IDENT ':' IfExpr (a comptime-selected type)
+                    fields.Add(new StructField(Tok(f.Arg0), LowerType(f.Arg2)));
                     break;
                 case Zig.StructFieldDefault f:   // FieldDecl -> IDENT ':' Type '=' RhsExpr
                     var fname = Tok(f.Arg0);

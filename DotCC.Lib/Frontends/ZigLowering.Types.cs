@@ -456,7 +456,7 @@ internal sealed partial class ZigLowering
     /// tuple type, and their aligned / sentinel forms): a spelling that can only be a type, so a caller
     /// may classify it as one before lowering anything.</summary>
     private static bool IsTypeFormer(Item item) => item.Content
-        is Zig.TyPointer or Zig.TyPtrConst or Zig.TyCPtr or Zig.TyCPtrConst
+        is Zig.TyPointer or Zig.TyPtrConst or Zig.TyPointerPointer or Zig.TyPointerPointerConst or Zig.TyCPtr or Zig.TyCPtrConst
         or Zig.TyManyPtr or Zig.TyManyPtrConst or Zig.TySentPtr or Zig.TySentPtrConst
         or Zig.TyOptional or Zig.TySlice or Zig.TySliceConst or Zig.TySentSlice or Zig.TySentSliceConst
         or Zig.TyPointerAlign or Zig.TyPtrConstAlign or Zig.TyManyPtrAlign or Zig.TyManyPtrConstAlign
@@ -672,6 +672,8 @@ internal sealed partial class ZigLowering
             "zig: `volatile` qualifies a pointer's pointee (`*volatile T`, `[]volatile T`), not a type on its own"),
         Zig.TyPointer p    => PointerTo(LowerPointee(p.Arg1)),
         Zig.TyPtrConst p   => PointerTo(LowerPointee(p.Arg2).WithQuals(TypeQual.Const)),
+        Zig.TyPointerPointer pp      => PointerTo(PointerTo(LowerPointee(pp.Arg1))),                         // **T
+        Zig.TyPointerPointerConst pp => PointerTo(PointerTo(LowerPointee(pp.Arg2).WithQuals(TypeQual.Const))), // **const T
         Zig.TyCPtr p       => new CType.Pointer(LowerType(p.Arg1)),
         Zig.TyCPtrConst p  => new CType.Pointer(LowerType(p.Arg2).WithQuals(TypeQual.Const)),
         // `[*]T` / `[*]const T` many-item pointers (Milestone O, part 2) — like `[*c]`,
@@ -796,6 +798,12 @@ internal sealed partial class ZigLowering
         // A type chosen by a comptime switch in any type position (a parameter's, as well as a field's): the selected
         // prong's type (task #73).
         Zig.SwitchExpr => LowerSwitchType(type),
+        // A type chosen by a comptime `if` in an annotation (`old_sig_io: if (have_sig_io) posix.Sigaction else void,` in
+        // std's Io/Threaded.zig): the same fold a `const T = if (…) A else B;` alias takes. A runtime condition has no type.
+        Zig.IfExpr or Zig.IfExprTypeArms or Zig.IfExprValueTypeArm or Zig.IfExprTypeArmValue
+            when TryTypeAliasRhs(type, out var ifType) => ifType,
+        Zig.IfExpr or Zig.IfExprTypeArms or Zig.IfExprValueTypeArm or Zig.IfExprTypeArmValue => throw new IrUnsupportedException(
+            "zig: an `if` in a type position needs a condition dotcc can fold at compile time, and a type in the arm it takes"),
         // `info.tag_type orelse @compileError("…")` (std.meta.Tag, task #142): an optional TYPE, else the fallback.
         Zig.OrElse optType => LowerOrElseType(optType.Arg0, optType.Arg2),
         // A `@compileError("…")` reached in a type position fires, as it does in a value position.

@@ -7317,6 +7317,69 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{d} {d}\\n\", .{ p.bytes[0], p.bytes[3] });\n" +
             "}\n", 0,
             "3 10 7 40007\n65538 true false 32\n1 8 1\n1 4" },
+        // A labeled block as a struct-literal field value (std's Build/Step.zig: `.debug_stack_trace = blk: { ... }`), in a
+        // returned literal and a typed local; fields typed by a comptime `if` (std's Io/Threaded.zig), one of them void; `**T`
+        // and `**const T` parameters (std's os/uefi); and an empty `enum {}` (std's Target/generic.zig), only declared: zig gives it
+        // a zero-size u0 tag, which dotcc's C# enum does not model.
+        new object[] { "field_value_block_type_if_ptrptr",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "const wide = @sizeOf(usize) == 8;\n" +
+            "\n" +
+            "pub const Feature = enum {};\n" +
+            "\n" +
+            "fn bump(pp: **u32, by: u32) void {\n" +
+            "    pp.*.* += by;\n" +
+            "}\n" +
+            "\n" +
+            "fn peek(pp: **const u32) u32 {\n" +
+            "    return pp.*.*;\n" +
+            "}\n" +
+            "\n" +
+            "const Opts = struct {\n" +
+            "    count: u32,\n" +
+            "    extra: if (wide) u64 else u32,\n" +
+            "    unused: if (!wide) u8 else void,\n" +
+            "    label: u8,\n" +
+            "};\n" +
+            "\n" +
+            "fn make(n: u32) Opts {\n" +
+            "    return .{\n" +
+            "        .count = n,\n" +
+            "        .extra = blk: {\n" +
+            "            var acc: u64 = 0;\n" +
+            "            var i: u32 = 0;\n" +
+            "            while (i < n) : (i += 1) acc += i * i;\n" +
+            "            break :blk acc;\n" +
+            "        },\n" +
+            "        .unused = {},\n" +
+            "        .label = 'x',\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() void {\n" +
+            "    const o = make(5);\n" +
+            "    const p: Opts = .{\n" +
+            "        .count = 1,\n" +
+            "        .extra = 7,\n" +
+            "        .unused = {},\n" +
+            "        .label = lbl: {\n" +
+            "            if (o.count > 3) break :lbl 'y';\n" +
+            "            break :lbl 'n';\n" +
+            "        },\n" +
+            "    };\n" +
+            "    std.debug.print(\"{d} {d} {c} {c}\\n\", .{ o.count, o.extra, o.label, p.label });\n" +
+            "    std.debug.print(\"{d}\\n\", .{@sizeOf(@TypeOf(o.extra))});\n" +
+            "    var v: u32 = 40;\n" +
+            "    var pv = &v;\n" +
+            "    bump(&pv, 2);\n" +
+            "    const cv: u32 = 9;\n" +
+            "    var pc: *const u32 = &cv;\n" +
+            "    _ = &pv;\n" +
+            "    _ = &pc;\n" +
+            "    std.debug.print(\"{d} {d}\\n\", .{ v, peek(&pc) });\n" +
+            "}\n", 0,
+            "5 30 x y\n8\n42 9" },
         // Task #140: std.crypto.blake3's shapes: a late-declared struct const in a field extent, `@intCast` slice bounds,
         // open slices of a many-item pointer, and an array local copied through a pointer.
         new object[] { "blake3_shapes",
