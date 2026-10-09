@@ -38,7 +38,7 @@ internal sealed partial class ZigLowering
     /// other initializer, or when the call does not evaluate at compile time (then it is an ordinary runtime call).</summary>
     private bool TryBindTypeArgumentCallConst(Item nameTok, Item initExpr)
     {
-        if (initExpr.Content is not Zig.CallArgs call || Flatten(call.Arg2) is not { Count: > 0 } args
+        if (initExpr.Content is not Zig.CallArgs { Arg2: not null } call || Flatten(call.Arg2) is not { Count: > 0 } args
             || !args.All(a => TryTypeAliasRhs(a, out _)))
         {
             return false;
@@ -410,7 +410,7 @@ internal sealed partial class ZigLowering
             // (std.hash.XxHash3, task #176): the local gets its own storage and the operand's bytes are copied in, an
             // array from its storage, a scalar through an addressable temp. Both sizes must be known and equal, as zig requires.
             if (!sentinel && arr.Count is { } bitCount
-                && initExpr.Content is Zig.BuiltinCall { Arg0: var bitCastTok } bitCastCall && Tok(bitCastTok) == "@bitCast"
+                && initExpr.Content is Zig.BuiltinCall { Arg2: not null, Arg0: var bitCastTok } bitCastCall && Tok(bitCastTok) == "@bitCast"
                 && Flatten(bitCastCall.Arg2) is [var bitCastArg])
             {
                 var source = LowerExpr(bitCastArg);

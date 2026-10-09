@@ -116,12 +116,12 @@ internal sealed partial class ZigLowering
         // An INLINE import (`pub const block = @import("sort/block.zig").block;` in sort.zig): the spec is
         // registered under a synthetic import name, so it resolves (and memoizes) exactly as `const x =
         // @import("…");` does.
-        Zig.BuiltinCall b when Tok(b.Arg0) == "@import" && Flatten(b.Arg2) is { Count: 1 } ia
+        Zig.BuiltinCall { Arg2: not null } b when Tok(b.Arg0) == "@import" && Flatten(b.Arg2) is { Count: 1 } ia
                                && ia[0].Content is Zig.StrLit sl =>
             ResolveInlineImport(Tok(sl.Arg0).Trim('"')),
         // `@field(Target, @tagName(family))` (std.Target.Cpu.has's parameter type): a module member named by a
         // comptime string, on a module or on this file's own `@This()`.
-        Zig.BuiltinCall fb when Tok(fb.Arg0) == "@field" && Flatten(fb.Arg2) is { Count: 2 } fa
+        Zig.BuiltinCall { Arg2: not null } fb when Tok(fb.Arg0) == "@field" && Flatten(fb.Arg2) is { Count: 2 } fa
                                && ComptimeName(fa[1]) is { } member
                                && FieldBaseModule(fa[0]) is { } baseModule =>
             baseModule.ResolveNamedModule(member),
@@ -156,7 +156,7 @@ internal sealed partial class ZigLowering
     /// of a comptime enum value (a generic's <c>comptime family: Arch.Family</c> seed). Null otherwise.</summary>
     private string? ComptimeName(Item item)
     {
-        if (item.Content is Zig.BuiltinCall { Arg0: var tn } tb && Tok(tn) == "@tagName"
+        if (item.Content is Zig.BuiltinCall { Arg2: not null, Arg0: var tn } tb && Tok(tn) == "@tagName"
             && Flatten(tb.Arg2) is [{ Content: Zig.Ident { Arg0: var argTok } }]
             && _symbols.Resolve(Tok(argTok)) is { } seed && _comptimeVars.TryGetValue(seed, out var seedValue)
             && seedValue.Type.Unqualified is CType.Enum seedEnum
@@ -184,7 +184,7 @@ internal sealed partial class ZigLowering
     /// the file's own struct, so the name aliases this module (<c>mem.eql(…)</c> calls its own <c>eql</c>).</summary>
     private bool IsSelfModuleAlias(string name) =>
         _lazyValueConsts.TryGetValue(name, out var vc) && vc.typeItem is null
-        && vc.rhs.Content is Zig.BuiltinCallNoArgs { Arg0: var thisTok } && IsThisBuiltin(thisTok)
+        && vc.rhs.Content is Zig.BuiltinCall { Arg2: null, Arg0: var thisTok } && IsThisBuiltin(thisTok)
         && _symbols.Resolve(name) is null or { IsGlobal: true };
 
     /// <summary>The ROOT file's analogue of <see cref="IsSelfModuleAlias"/>: a top-level <c>const root = @This();</c>
@@ -192,7 +192,7 @@ internal sealed partial class ZigLowering
     private bool IsRootSelfAlias(string name) =>
         _rootSelfAliases.Contains(name) && _symbols.Resolve(name) is null or { IsGlobal: true };
 
-    /// <summary>Whether a <c>BuiltinCallNoArgs</c> name token is <c>@This</c>.</summary>
+    /// <summary>Whether a no-argument <c>BuiltinCall</c>'s name token is <c>@This</c>.</summary>
     private static bool IsThisBuiltin(Item tok) => Tok(tok) == "@This";
 
     /// <summary>The root file's top-level <c>const NAME = @This();</c> names (see <see cref="IsRootSelfAlias"/>).</summary>
@@ -1565,7 +1565,7 @@ internal sealed partial class ZigLowering
         {
             foreach (var d in decls.Select(Unwrap))
             {
-                if (d.Content is Zig.ConstDecl { Arg3.Content: Zig.BuiltinCallNoArgs self } c && IsThisBuiltin(self.Arg0))
+                if (d.Content is Zig.ConstDecl { Arg3.Content: Zig.BuiltinCall { Arg2: null } self } c && IsThisBuiltin(self.Arg0))
                 {
                     _rootSelfAliases.Add(Tok(c.Arg1));
                 }
@@ -1613,7 +1613,7 @@ internal sealed partial class ZigLowering
                     // is not evaluated at prepare: zig analyses a declaration only when it is referenced, and
                     // preparing std.hash must not run every CRC instantiation. It is a deferred type-alias
                     // candidate (TryDeferredTypeAlias) and, like any unclaimed const, a lazy value const.
-                    case Zig.ConstDecl d when _lazy && d.Arg3.Content is Zig.CallArgs or Zig.CallNoArgs:
+                    case Zig.ConstDecl d when _lazy && d.Arg3.Content is Zig.CallArgs:
                         _deferredTypeCalls[Tok(d.Arg1)] = d.Arg3;
                         break;
                     case Zig.ConstDecl d:      TryComptimeConstBinding(Tok(d.Arg1), d.Arg3); break;  // const IDENT = RhsExpr ;

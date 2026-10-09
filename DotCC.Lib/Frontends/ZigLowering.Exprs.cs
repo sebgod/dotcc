@@ -512,7 +512,7 @@ internal sealed partial class ZigLowering
                 }
                 // `Decimal(T).min_exponent` — a const of the struct a type-returning CALL names (std.fmt.parse_float's
                 // convertSlow): the call reifies (memoized), and the const lowers in the module that declares it.
-                if (fld.Arg0.Content is Zig.CallArgs or Zig.CallNoArgs
+                if (fld.Arg0.Content is Zig.CallArgs
                     && TryEvalTypeReturningCall(fld.Arg0, out var calledType) && ContainerTypeName(calledType) is { } calledContainer
                     && TryLowerContainerConstAnywhere(calledContainer, fieldName) is { } calledConst)
                 {
@@ -811,7 +811,7 @@ internal sealed partial class ZigLowering
             // `@ptrCast`, …) — they infer the target from the sink, which only LowerExprSink
             // carries; reached here (no sink) they error clearly. The sink-carrying forms (and
             // the sink-free `@as`/`@intFromEnum`/`@sizeOf`/`@alignCast`) share one lowering.
-            case Zig.BuiltinCall b: return LowerBuiltinCall(b, null);
+            case Zig.BuiltinCall { Arg2: not null } b: return LowerBuiltinCall(b, null);
             // `struct { fn f(…) … }.f` in value position: the closure idiom's method as a function value.
             case Zig.StructMemberExpr sme:
             {
@@ -832,13 +832,13 @@ internal sealed partial class ZigLowering
                 throw new IrUnsupportedException(
                     "zig inline assembly (`asm`) is out of scope: dotcc targets .NET, so a reached `asm` has no lowering "
                     + "(std guards its assembly paths behind comptime target checks, which fold away when dotcc's target lacks the feature)");
-            case Zig.BuiltinCallNoArgs nb when Tok(nb.Arg0) == "@inComptime":
+            case Zig.BuiltinCall { Arg2: null } nb when Tok(nb.Arg0) == "@inComptime":
                 return new LitBool(false) { Type = CType.Bool, InComptime = true };
             // `@returnAddress()`: the address an allocator records for its diagnostics (std's `rawAlloc(n, a, @returnAddress())`).
             // Managed code has no return address to give, and nothing dotcc lowers reads it, so it is 0.
-            case Zig.BuiltinCallNoArgs nb when Tok(nb.Arg0) == "@returnAddress":
+            case Zig.BuiltinCall { Arg2: null } nb when Tok(nb.Arg0) == "@returnAddress":
                 return new LitInt("0", 0) { Type = CType.ULong };
-            case Zig.BuiltinCallNoArgs nb:
+            case Zig.BuiltinCall { Arg2: null } nb:
                 throw new IrUnsupportedException($"zig builtin `{Tok(nb.Arg0)}()` in value position is not supported yet");
 
             // `null` — reuse the C null-pointer node (renders C# `null`, valid for BOTH a
@@ -1016,8 +1016,8 @@ internal sealed partial class ZigLowering
             case Zig.Repeat rp: return LowerRepeat(rp.Arg0, rp.Arg2);
 
             // call of a named function (bare-identifier callee).
-            case Zig.CallArgs c:   return LowerCall(c.Arg0, c.Arg2);
-            case Zig.CallNoArgs c: return LowerCall(c.Arg0, null);
+            case Zig.CallArgs { Arg2: not null } c:   return LowerCall(c.Arg0, c.Arg2);
+            case Zig.CallArgs { Arg2: null } c: return LowerCall(c.Arg0, null);
 
             default: throw new IrUnsupportedException("zig expression: " + (expr.Content?.GetType().Name ?? "null"));
         }
@@ -1181,7 +1181,7 @@ internal sealed partial class ZigLowering
         Zig.PreAddrOf a => EvalComptimeValue(a.Arg1) as LitStr,
         Zig.Concat c => TryFoldStringConcat(c.Arg0, c.Arg2),
         Zig.Repeat r => TryFoldStringRepeat(r.Arg0, r.Arg2),
-        Zig.BuiltinCall b => TryEvalTypeNameBuiltin(b),   // `@typeName(T)` → comptime string (else null)
+        Zig.BuiltinCall { Arg2: not null } b => TryEvalTypeNameBuiltin(b),   // `@typeName(T)` → comptime string (else null)
         // A byte-slice field of a comptime AGGREGATE the interpreter holds (std.Io.Writer.print's
         // `placeholder.specifier_arg`, a `const placeholder = comptime Placeholder.parse(…)`).
         Zig.Field => TryComptimeAggregateString(item),
@@ -1222,7 +1222,7 @@ internal sealed partial class ZigLowering
         while (e.Content is Zig.Grouped g) { e = g.Arg1; }
         if (TryFoldComptimeCondition(e) is { } folded) { return folded == value; }
         // A comptime call (`std.math.isPowerOfTwo(@bitSizeOf(T))`) settles through the interpreter; its lowering is discarded.
-        if (e.Content is Zig.CallArgs or Zig.CallNoArgs)
+        if (e.Content is Zig.CallArgs)
         {
             CExpr call;
             using (EnterThrowawayHoist()) { call = LowerExpr(e); }
@@ -1610,7 +1610,7 @@ internal sealed partial class ZigLowering
     /// <c>alphabet_chars[@truncate(bits &gt;&gt; 18 &amp; 0x3f)]</c>) lowers at that sink. Any other operand lowers as before, so
     /// its emitted shape does not change.</summary>
     private CExpr LowerUsizeOperand(Item operand) =>
-        operand.Content is Zig.BuiltinCall { Arg0: var bt } && Tok(bt) is "@intCast" or "@truncate" or "@bitCast" or "@enumFromInt" or "@intFromFloat"
+        operand.Content is Zig.BuiltinCall { Arg2: not null, Arg0: var bt } && Tok(bt) is "@intCast" or "@truncate" or "@bitCast" or "@enumFromInt" or "@intFromFloat"
             ? LowerExprSink(operand, CType.ULong)
             : LowerExpr(operand);
 
@@ -1763,7 +1763,7 @@ internal sealed partial class ZigLowering
         if (!_topLevelConstRhs.TryGetValue(name, out var rhs) || rhs.Content is not Zig.Field f) { return null; }
         CType? owner = f.Arg0.Content switch
         {
-            Zig.CallArgs or Zig.CallNoArgs => TryEvalTypeReturningCall(f.Arg0, out var called) ? called : null,
+            Zig.CallArgs => TryEvalTypeReturningCall(f.Arg0, out var called) ? called : null,
             Zig.Ident id => TryLookupContainerType(Tok(id.Arg0), out var named) ? named : null,
             Zig.Field => TryResolveQualifiedNestedType(f.Arg0),
             _ => null,
@@ -1856,7 +1856,7 @@ internal sealed partial class ZigLowering
         // A member call on the `std.ArrayList(T)` TYPE (`std.ArrayList(i32).init(alloc)`) is
         // the pre-0.15 MANAGED API, which no longer exists in the pinned zig — reject it by
         // name with the migration path (the generic std-path error would only say `std`).
-        if (fld.Arg0.Content is Zig.CallArgs mca && TryResolveStdPath(mca.Arg0, out var mlPath) && mlPath == "std.ArrayList")
+        if (fld.Arg0.Content is Zig.CallArgs { Arg2: not null } mca && TryResolveStdPath(mca.Arg0, out var mlPath) && mlPath == "std.ArrayList")
         {
             // Only `init` is the removed managed constructor. The unmanaged type has static functions of its own
             // (`std.ArrayList(u8).growCapacity(n)` in std.Io.Writer.Allocating, task #63): with a real std tree those are
@@ -1920,7 +1920,7 @@ internal sealed partial class ZigLowering
                  && TryLookupContainerType(Tok(typeRecv.Arg0), out var recvType) && ContainerTypeName(recvType) is not null)
             // So is one of a type a type-returning call builds (std.crypto.auth.siphash's `SipHash64(2, 4).create(&out,
             // msg, &key)`, task #159); the reification is memoized, and any other call base answers no.
-            && !(fld.Arg0.Content is Zig.CallArgs or Zig.CallNoArgs && TryEvalTypeReturningCall(fld.Arg0, out _))
+            && !(fld.Arg0.Content is Zig.CallArgs && TryEvalTypeReturningCall(fld.Arg0, out _))
             // And so is one of a type a dotted path names: a container's type const (std.crypto.auth.hmac's
             // `sha2.HmacSha256.create(&out, msg, key)`, with `pub const HmacSha256 = Hmac(…);`, task #168), a nested
             // container, or a type another module declares. Any other dotted base answers no.
@@ -1994,7 +1994,7 @@ internal sealed partial class ZigLowering
         // reifies it — memoized, so a repeat call reuses the one instance — and then the method resolves
         // exactly like (A). `TryEvalTypeReturningCall` returns false (no side effect) for any other call
         // base, so an ordinary `getBox().get()` still falls through to (B).
-        if (fld.Arg0.Content is Zig.CallArgs or Zig.CallNoArgs
+        if (fld.Arg0.Content is Zig.CallArgs
             && TryEvalTypeReturningCall(fld.Arg0, out var reifiedBase)
             && ContainerTypeName(reifiedBase) is { } reifiedName)
         {
@@ -2778,7 +2778,7 @@ internal sealed partial class ZigLowering
             }
             // A call whose return type spells its width (`std.mem.indexOfMax` returns a `usize`, task #167). A comptime-only
             // call folds to its value, which zig coerces by value, so it is not certain.
-            case Zig.CallArgs or Zig.CallNoArgs:
+            case Zig.CallArgs:
             {
                 CExpr called;
                 using (EnterThrowawayHoist()) { called = LowerExpr(it); }
@@ -2787,7 +2787,7 @@ internal sealed partial class ZigLowering
                     ? (rp.Signed, returnBits)
                     : null;
             }
-            case Zig.BuiltinCall b when Tok(b.Arg0) == "@as" && Flatten(b.Arg2) is [var asType, _]:
+            case Zig.BuiltinCall { Arg2: not null } b when Tok(b.Arg0) == "@as" && Flatten(b.Arg2) is [var asType, _]:
                 return RuntimeInt(LowerType(asType)) is { } asPrim ? (asPrim.Signed, DeclaredBitsOfTypeArg(asType) ?? asPrim.Bytes * 8) : null;
             default:
                 return null;
@@ -2855,7 +2855,7 @@ internal sealed partial class ZigLowering
             : op is BinOp.Eq or BinOp.Ne
             ? LowerComparisonOperands(l, r)
             // A shift amount is a result location (zig types it `Log2Int(T)`): `1 << @intCast(i)` infers a cast there.
-            : op is BinOp.Shl or BinOp.Shr && r.Content is Zig.BuiltinCall { Arg0: var shiftCast }
+            : op is BinOp.Shl or BinOp.Shr && r.Content is Zig.BuiltinCall { Arg2: not null, Arg0: var shiftCast }
                 && Tok(shiftCast) is "@intCast" or "@truncate"
                 ? (LowerExpr(l), LowerExprSink(r, CType.Int))
                 : (LowerExpr(l), LowerExpr(r));
@@ -2971,7 +2971,7 @@ internal sealed partial class ZigLowering
         {
             Zig.IntLit => true,
             Zig.Ident id => _symbols.Resolve(Tok(id.Arg0)) is { } sym && _comptimeIntLocals.Contains(sym),
-            Zig.CallArgs or Zig.CallNoArgs => lowered is LitInt or ComptimeFold,
+            Zig.CallArgs => lowered is LitInt or ComptimeFold,
             _ => false,
         };
     }
@@ -3019,7 +3019,7 @@ internal sealed partial class ZigLowering
                 continue;
             }
             // `@intFromBool` is a `u1` and a `@clz` / `@ctz` / `@popCount` count a `Log2IntCeil(T)`, whatever carrier they lower to.
-            var signed = peerPrim.Signed && !(peerItem.Content is Zig.BuiltinCall { Arg0: var peerTok }
+            var signed = peerPrim.Signed && !(peerItem.Content is Zig.BuiltinCall { Arg2: not null, Arg0: var peerTok }
                                               && Tok(peerTok) is "@intFromBool" or "@clz" or "@ctz" or "@popCount");
             var (min, max) = signed
                 ? (-(System.Int128.One << (peerBits - 1)), (System.Int128.One << (peerBits - 1)) - 1)

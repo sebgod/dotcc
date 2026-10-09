@@ -19,7 +19,7 @@ internal sealed partial class ZigLowering
         while (cond.Content is Zig.Grouped g) { cond = g.Arg1; }
         if (cond.Content is Zig.PreNot n) { cond = n.Arg1; }
         while (cond.Content is Zig.Grouped g2) { cond = g2.Arg1; }
-        return cond.Content is Zig.BuiltinCallNoArgs { Arg0: var tok } && Tok(tok) == "@inComptime";
+        return cond.Content is Zig.BuiltinCall { Arg2: null, Arg0: var tok } && Tok(tok) == "@inComptime";
     }
     /// <summary>An <c>and</c> whose left operand is a constant false, or an <c>or</c> whose left operand is a constant true:
     /// settled by that operand alone (the right one need not be comptime). Null otherwise.</summary>
@@ -112,7 +112,7 @@ internal sealed partial class ZigLowering
             return lo == false ? TryFoldComptimeCondition(disj.Arg2) : null;
         }
         // `@hasDecl(root, "std_options")` / `@hasField(T, "x")`: a membership question, always comptime.
-        if (cur.Content is Zig.BuiltinCall { Arg0: var memberTok } memberCall && Tok(memberTok) is "@hasDecl" or "@hasField")
+        if (cur.Content is Zig.BuiltinCall { Arg2: not null, Arg0: var memberTok } memberCall && Tok(memberTok) is "@hasDecl" or "@hasField")
         {
             try { return TryEvalMembershipBuiltin(memberCall)?.Value; }
             catch (IrUnsupportedException) { return null; }
@@ -166,7 +166,7 @@ internal sealed partial class ZigLowering
         }
         // The same question asked without `comptime` (`if (std.meta.hasUniqueRepresentation(Key))` in autoHash):
         // a function of TYPES only, with a single `return`, is pure, so its answer is the same at comptime.
-        if (cur.Content is Zig.CallArgs && TryFoldComptimeBoolCall(cur) is { } plainCalled)
+        if (cur.Content is Zig.CallArgs { Arg2: not null } && TryFoldComptimeBoolCall(cur) is { } plainCalled)
         {
             return plainCalled;
         }
@@ -262,7 +262,7 @@ internal sealed partial class ZigLowering
         Zig.ModOp a => IsPureNumericShape(a.Arg0) && IsPureNumericShape(a.Arg2),
         Zig.Shl a => IsPureNumericShape(a.Arg0) && IsPureNumericShape(a.Arg2),
         Zig.Shr a => IsPureNumericShape(a.Arg0) && IsPureNumericShape(a.Arg2),
-        Zig.BuiltinCall { Arg0: var bTok, Arg2: var bArgs } => Tok(bTok) is "@log2" or "@log10" or "@log" or "@sqrt" or "@exp"
+        Zig.BuiltinCall { Arg0: var bTok, Arg2: { } bArgs } => Tok(bTok) is "@log2" or "@log10" or "@log" or "@sqrt" or "@exp"
                 or "@floor" or "@ceil" or "@trunc" or "@typeInfo" or "@bitSizeOf" or "@sizeOf" or "@TypeOf"
             && Flatten(bArgs).All(IsPureNumericShape),
         _ => false,
@@ -332,8 +332,8 @@ internal sealed partial class ZigLowering
             {
                 case Zig.Grouped g: cur = g.Arg1; continue;
                 case Zig.Field f: cur = f.Arg0; continue;
-                case Zig.CallArgs ca: cur = ca.Arg0; continue;
-                case Zig.CallNoArgs cn: cur = cn.Arg0; continue;
+                case Zig.CallArgs { Arg2: not null } ca: cur = ca.Arg0; continue;
+                case Zig.CallArgs { Arg2: null } cn: cur = cn.Arg0; continue;
                 case Zig.Ident id:
                     return _symbols.Resolve(Tok(id.Arg0)) is { } sym && _ir.ComptimeGlobals.ContainsKey(sym)
                         // `builtin.cpu.arch.endian()` through `const builtin = @import("builtin");` (task #180): the compiler-provided

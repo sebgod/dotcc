@@ -52,7 +52,7 @@ internal sealed partial class ZigLowering
             or Zig.TySentPtr or Zig.TySentPtrConst or Zig.TySentPtrExpr or Zig.TySentPtrConstExpr => "many",
         Zig.TyCPtr or Zig.TyCPtrConst => "c",
         Zig.Ident id => _declaredPtrSize.GetValueOrDefault(Tok(id.Arg0)),
-        Zig.BuiltinCall tof when Tok(tof.Arg0) == "@TypeOf" && Flatten(tof.Arg2) is [var v] =>
+        Zig.BuiltinCall { Arg2: not null } tof when Tok(tof.Arg0) == "@TypeOf" && Flatten(tof.Arg2) is [var v] =>
             v.Content is Zig.Ident vid && _anytypeSeedPtrSize.TryGetValue(Tok(vid.Arg0), out var seeded) ? seeded : PointerSizeOfValue(v),
         _ => null,
     };
@@ -66,7 +66,7 @@ internal sealed partial class ZigLowering
         Zig.PreAddrOf or Zig.StrLit => "one",
         Zig.Ident id => _symbols.Resolve(Tok(id.Arg0)) is { } s ? _valuePtrSize.GetValueOrDefault(s) : null,
         Zig.Field f when Tok(f.Arg2) == "ptr" && ValueTypeForPointerSize(f.Arg0)?.Unqualified is CType.Slice or CType.Pointer { Pointee.Unqualified: CType.Slice } => "many",
-        Zig.BuiltinCall bc when Tok(bc.Arg0) == "@as" && Flatten(bc.Arg2) is [var asType, _] => PointerSizeOfTypeArg(asType),
+        Zig.BuiltinCall { Arg2: not null } bc when Tok(bc.Arg0) == "@as" && Flatten(bc.Arg2) is [var asType, _] => PointerSizeOfTypeArg(asType),
         _ => null,
     };
 

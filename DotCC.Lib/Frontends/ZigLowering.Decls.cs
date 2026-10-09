@@ -957,7 +957,7 @@ internal sealed partial class ZigLowering
 
             // `const Alias = @This();` — the self-type alias. `@This()` is a no-arg builtin; the
             // transparent expression productions collapse, so the RHS content is it directly.
-            if (typeItem is null && rhs.Content is Zig.BuiltinCallNoArgs b && Tok(b.Arg0) == "@This")
+            if (typeItem is null && rhs.Content is Zig.BuiltinCall { Arg2: null } b && Tok(b.Arg0) == "@This")
             {
                 if (!_selfAliases.TryGetValue(container, out var aliases))
                 {
@@ -1595,7 +1595,7 @@ internal sealed partial class ZigLowering
     /// <summary>True for an array field value that C#'s zero-init already is: <c>undefined</c> or <c>@splat(0)</c>.</summary>
     private static bool IsZeroArrayValue(Item valueItem)
         => valueItem.Content is Zig.UndefinedLit
-           || valueItem.Content is Zig.BuiltinCall { Arg0: var splatTok } splat && Tok(splatTok) == "@splat"
+           || valueItem.Content is Zig.BuiltinCall { Arg2: not null, Arg0: var splatTok } splat && Tok(splatTok) == "@splat"
               && Flatten(splat.Arg2) is [{ Content: Zig.IntLit { Arg0: var zeroTok } }] && Tok(zeroTok) == "0";
 
     /// <summary>Lower a struct field's declared default for a literal that omits the field. A reified struct's default
@@ -1626,7 +1626,7 @@ internal sealed partial class ZigLowering
         if (valueItem.Content is Zig.UndefinedLit) { return true; }
         // `@splat(0)` (std.Target.Cpu.Feature.Set's `empty = .{ .ints = @splat(0) }`): all zeros, which C#'s
         // zero-init of the buffer already is.
-        if (valueItem.Content is Zig.BuiltinCall { Arg0: var splatTok } splat && Tok(splatTok) == "@splat"
+        if (valueItem.Content is Zig.BuiltinCall { Arg2: not null, Arg0: var splatTok } splat && Tok(splatTok) == "@splat"
             && Flatten(splat.Arg2) is [{ Content: Zig.IntLit { Arg0: var zeroTok } }] && Tok(zeroTok) == "0")
         {
             return true;
@@ -1958,9 +1958,9 @@ internal sealed partial class ZigLowering
             // A DECL LITERAL (zig 0.14+) at a struct/union sink: `.fixed(buf)` IS `T.fixed(buf)`, and a
             // bare `.origin` IS `T.origin` — the member is looked up on the RESULT type, like an enum
             // literal's tag (road-to-zig-std G3 — `var w: Writer = .fixed(buf);` in `std.fmt.bufPrint`).
-            case Zig.CallArgs { Arg0.Content: Zig.EnumLit dcl } dca when DeclLiteralContainer(sink) is { } dcc:
+            case Zig.CallArgs { Arg2: not null, Arg0.Content: Zig.EnumLit dcl } dca when DeclLiteralContainer(sink) is { } dcc:
                 return LowerDeclLiteralCall(dcc, Tok(dcl.Arg1), Flatten(dca.Arg2));
-            case Zig.CallNoArgs { Arg0.Content: Zig.EnumLit dcl } when DeclLiteralContainer(sink) is { } dcc:
+            case Zig.CallArgs { Arg2: null, Arg0.Content: Zig.EnumLit dcl } when DeclLiteralContainer(sink) is { } dcc:
                 return LowerDeclLiteralCall(dcc, Tok(dcl.Arg1), []);
             case Zig.EnumLit dvl when DeclLiteralContainer(sink) is { } dvc:
                 return LowerDeclLiteralValue(dvc, Tok(dvl.Arg1));
@@ -1979,7 +1979,7 @@ internal sealed partial class ZigLowering
             // `try .initEmpty(a, n)` at a struct sink (std.bit_set.DynamicBitSet.initEmpty's `.unmanaged = try
             // .initEmpty(allocator, bit_length)`, task #130): zig looks a decl literal up through the error union its
             // `try` unwraps, so the call resolves on the sink and `try` unwraps what it returns.
-            case Zig.PreTry { Arg1.Content: Zig.CallArgs { Arg0.Content: Zig.EnumLit } or Zig.CallNoArgs { Arg0.Content: Zig.EnumLit } } tdl
+            case Zig.PreTry { Arg1.Content: Zig.CallArgs { Arg2: not null, Arg0.Content: Zig.EnumLit } or Zig.CallArgs { Arg2: null, Arg0.Content: Zig.EnumLit } } tdl
                 when DeclLiteralContainer(sink) is not null:
                 return LowerTry(LowerExprSink(tdl.Arg1, sink));
             // `.{ 1, 5, 9, 5 }` at a SIMD-vector sink: one lane per element (T5).
@@ -1999,7 +1999,7 @@ internal sealed partial class ZigLowering
             // A `@builtin(...)` at a typed sink — the result-location cast builtins
             // (`@intCast`/`@ptrCast`/…) infer their target from `sink`. Routed through the
             // shared lowering WITH the sink (vs LowerExpr's sink-free call).
-            case Zig.BuiltinCall b:
+            case Zig.BuiltinCall { Arg2: not null } b:
             {
                 var builtinValue = LowerBuiltinCall(b, sink);
                 // `@as(*const [1]u8, &c)` at a `[]const u8` parameter (std.Io.Writer.printAsciiChar): a pointer to an
@@ -3465,12 +3465,12 @@ internal sealed partial class ZigLowering
                 using (EnterThrowawayHoist()) { read = LowerExpr(it); }
                 return read.Type?.Unqualified is CType.Prim { Integer: true, IsComptimeInt: false } readType ? readType : null;
             }
-            case Zig.BuiltinCall b when Tok(b.Arg0) == "@as" && Flatten(b.Arg2) is [var asType, _]:
+            case Zig.BuiltinCall { Arg2: not null } b when Tok(b.Arg0) == "@as" && Flatten(b.Arg2) is [var asType, _]:
                 return LowerType(asType).Unqualified;
             // A call of a plain function has its declared return type (`score() + other()` over a `u16` and a `u8` is a
             // `u16`, not C#'s promoted `int`, task #111). A generic one's result depends on its arguments: null.
-            case Zig.CallArgs ca:   return CallReturnIntType(ca.Arg0);
-            case Zig.CallNoArgs cn: return CallReturnIntType(cn.Arg0);
+            case Zig.CallArgs { Arg2: not null } ca:   return CallReturnIntType(ca.Arg0);
+            case Zig.CallArgs { Arg2: null } cn: return CallReturnIntType(cn.Arg0);
             default: return null;
         }
     }

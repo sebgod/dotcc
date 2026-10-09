@@ -391,7 +391,7 @@ internal sealed partial class ZigLowering
             case Zig.Ident cid when _symbols.Resolve(Tok(cid.Arg0)) is { } constSym
                                     && _constStringLocals.TryGetValue(constSym, out var constText):
                 return constText;
-            case Zig.BuiltinCall tb when Tok(tb.Arg0) == "@tagName" && Flatten(tb.Arg2) is [var tagged]:
+            case Zig.BuiltinCall { Arg2: not null } tb when Tok(tb.Arg0) == "@tagName" && Flatten(tb.Arg2) is [var tagged]:
                 return TryComptimeTagName(tagged);
             // Guarded on the name NOT naming a real symbol, for the same reason every other
             // name-keyed comptime lookup here is: the map is function-flat.

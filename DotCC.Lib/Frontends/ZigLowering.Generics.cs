@@ -1122,12 +1122,12 @@ internal sealed partial class ZigLowering
                 var sym = argScope._symbols.Resolve(name) ?? (argScope._lazy ? argScope.EnsureDeclLowered(name) : null);
                 return sym is { Kind: SymKind.Func } && !argScope._genericFns.ContainsKey(sym) ? (argScope, sym) : null;
             }
-            case Zig.CallArgs or Zig.CallNoArgs:
+            case Zig.CallArgs:
             {
                 var (callee, args) = arg.Content switch
                 {
-                    Zig.CallArgs ca => (ca.Arg0, (IReadOnlyList<Item>)Flatten(ca.Arg2)),
-                    Zig.CallNoArgs cn => (cn.Arg0, (IReadOnlyList<Item>)System.Array.Empty<Item>()),
+                    Zig.CallArgs { Arg2: not null } ca => (ca.Arg0, (IReadOnlyList<Item>)Flatten(ca.Arg2)),
+                    Zig.CallArgs { Arg2: null } cn => (cn.Arg0, (IReadOnlyList<Item>)System.Array.Empty<Item>()),
                     _ => throw new System.InvalidOperationException(),
                 };
                 (ZigLowering owner, Symbol template)? target = callee.Content switch
@@ -1220,7 +1220,7 @@ internal sealed partial class ZigLowering
     {
         var cur = arg;
         while (cur.Content is Zig.Grouped g) { cur = g.Arg1; }
-        if (cur.Content is Zig.BuiltinCall { Arg0: var asTok } asCall && Tok(asTok) == "@as" && Flatten(asCall.Arg2) is [_, var asValue])
+        if (cur.Content is Zig.BuiltinCall { Arg2: not null, Arg0: var asTok } asCall && Tok(asTok) == "@as" && Flatten(asCall.Arg2) is [_, var asValue])
         {
             return IsComptimeNull(asValue);
         }
@@ -1321,7 +1321,7 @@ internal sealed partial class ZigLowering
 
     /// <summary>Recognize a call to a type-returning generic (wall-plan W4) — <c>Pair(i32)</c> in a
     /// type / type-alias position — and evaluate it to the reified <see cref="CType"/>. Handles both the
-    /// with-args (<see cref="Zig.CallArgs"/>) and no-args (<see cref="Zig.CallNoArgs"/>) call shapes; the
+    /// with-args (<see cref="Zig.CallArgs"/>) and no-args (<see cref="Zig.CallArgs"/>) call shapes; the
     /// callee must be a bare identifier bound to a symbol in <see cref="_typeReturningGenerics"/>.
     /// Returns false for any other node (a curated std generic, a runtime call, a non-call), so the
     /// caller falls through to its normal handling.</summary>
@@ -1332,8 +1332,8 @@ internal sealed partial class ZigLowering
         IReadOnlyList<Item> args;
         switch (maybeCall.Content)
         {
-            case Zig.CallArgs ca:   calleeItem = ca.Arg0; args = Flatten(ca.Arg2); break;
-            case Zig.CallNoArgs cn: calleeItem = cn.Arg0; args = System.Array.Empty<Item>(); break;
+            case Zig.CallArgs { Arg2: not null } ca:   calleeItem = ca.Arg0; args = Flatten(ca.Arg2); break;
+            case Zig.CallArgs { Arg2: null } cn: calleeItem = cn.Arg0; args = System.Array.Empty<Item>(); break;
             default: return false;
         }
         if (calleeItem.Content is Zig.Ident id
@@ -1455,7 +1455,7 @@ internal sealed partial class ZigLowering
     private CType? MemberBaseType(Item baseItem) => baseItem.Content switch
     {
         Zig.Ident id => TryLookupContainerType(Tok(id.Arg0), out var ct) ? ct : null,
-        Zig.CallArgs or Zig.CallNoArgs => TryEvalTypeReturningCall(baseItem, out var called) ? called : null,
+        Zig.CallArgs => TryEvalTypeReturningCall(baseItem, out var called) ? called : null,
         Zig.Field => TryResolveQualifiedNestedType(baseItem),
         _ => null,
     };

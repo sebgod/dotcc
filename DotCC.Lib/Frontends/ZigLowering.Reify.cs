@@ -465,7 +465,7 @@ internal sealed partial class ZigLowering
     private List<T> ReifiedList<T>(string fnName, Item arg, int count, string what, System.Func<Item, T> each)
     {
         var cur = StripAddrOf(arg);
-        if (cur.Content is Zig.BuiltinCall { Arg0: var splatTok } splat && Tok(splatTok) == "@splat" && Flatten(splat.Arg2) is [var one])
+        if (cur.Content is Zig.BuiltinCall { Arg2: not null, Arg0: var splatTok } splat && Tok(splatTok) == "@splat" && Flatten(splat.Arg2) is [var one])
         {
             var element = each(one);
             return Enumerable.Repeat(element, count).ToList();
@@ -554,7 +554,7 @@ internal sealed partial class ZigLowering
         if (cur.Content is not Zig.IfExprCapture ic || !IsComptimeNull(ic.Arg9)) { return false; }
         var target = ic.Arg7;
         while (target.Content is Zig.Grouped tg) { target = tg.Arg1; }
-        if (target.Content is Zig.BuiltinCall { Arg0: var castTok } cast && Tok(castTok) == "@ptrCast" && Flatten(cast.Arg2) is [var castArg])
+        if (target.Content is Zig.BuiltinCall { Arg2: not null, Arg0: var castTok } cast && Tok(castTok) == "@ptrCast" && Flatten(cast.Arg2) is [var castArg])
         {
             target = castArg;
         }
@@ -810,7 +810,7 @@ internal sealed partial class ZigLowering
                 return ComptimeMessageText(c.Arg0) is { } left && ComptimeMessageText(c.Arg2) is { } right
                     ? left + right
                     : null;
-            case Zig.BuiltinCall b when Tok(b.Arg0) == "@typeName":
+            case Zig.BuiltinCall { Arg2: not null } b when Tok(b.Arg0) == "@typeName":
             {
                 var nameArgs = Flatten(b.Arg2);
                 return nameArgs.Count == 1 ? DiagnosticTypeName(nameArgs[0]) : null;

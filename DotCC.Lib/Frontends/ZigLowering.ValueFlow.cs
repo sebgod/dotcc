@@ -63,10 +63,10 @@ internal sealed partial class ZigLowering
             // `.number => |v| v * 4` over a union: the capture binds a payload, which needs a statement. Over a
             // comptime `@typeInfo(T)` the capture is folded where the expression lowers, so it stays one.
             Zig.ProngCaptureExpr or Zig.ProngCaptureRefExpr or Zig.ProngCaptureTagExpr
-                => subjectItem.Content is not Zig.BuiltinCall { Arg0: var sb } || Tok(sb) != "@typeInfo",
+                => subjectItem.Content is not Zig.BuiltinCall { Arg2: not null, Arg0: var sb } || Tok(sb) != "@typeInfo",
             // `inline .a, .b => |x| …` (task #212) unrolls into one prong per listed value, which needs statements for the
             // same reason; over a comptime `@typeInfo(T)` the selected prong folds where the expression lowers.
-            Zig.InlineProng => subjectItem.Content is not Zig.BuiltinCall { Arg0: var ib } || Tok(ib) != "@typeInfo",
+            Zig.InlineProng => subjectItem.Content is not Zig.BuiltinCall { Arg2: not null, Arg0: var ib } || Tok(ib) != "@typeInfo",
             _ => false,
         });
     /// <summary>Lower a value-position control-flow form that needs statements to produce its value

@@ -36,7 +36,7 @@ internal sealed partial class ZigLowering
         // The same in a `!void` function (`return self.insertAssumeCapacity(i, item);`): run the void call, then
         // return success.
         if (_currentFnRet is CType.ErrorUnion { Payload: CType.VoidType } voidUnion
-            && valueItem.Content is Zig.CallArgs or Zig.CallNoArgs && IsVoidCall(valueItem))
+            && valueItem.Content is Zig.CallArgs && IsVoidCall(valueItem))
         {
             return new Seq(new List<CStmt> { new ExprStmt(LowerExpr(valueItem)), new Return(new ErrUnionOk(null) { Type = voidUnion }) });
         }
@@ -92,7 +92,7 @@ internal sealed partial class ZigLowering
             // takes the payload type; anything else keeps its own (a call may return the error union itself).
             // So does a result-location cast builtin (`return @intCast(total % 251);` in a `!u8` main).
             var v = valueItem.Content is Zig.AnonStructInit or Zig.AnonStructInitEmpty or Zig.EnumLit
-                    || valueItem.Content is Zig.BuiltinCall { Arg0: var castTok }
+                    || valueItem.Content is Zig.BuiltinCall { Arg2: not null, Arg0: var castTok }
                        && Tok(castTok) is "@intCast" or "@truncate" or "@ptrCast" or "@bitCast" or "@floatCast"
                           or "@intFromFloat" or "@floatFromInt" or "@enumFromInt" or "@alignCast"
                     // A value `if` at a slice payload (std.mem.join's `return if (zero) try allocator.dupe(…) else
@@ -328,7 +328,7 @@ internal sealed partial class ZigLowering
           or Zig.StmtBreakValue or Zig.StmtBreakLabelValue or Zig.StmtBreakLabel or Zig.StmtContinueLabel
           or Zig.StmtContinueLabelValue => true,
         Zig.StmtExpr { Arg0.Content: Zig.Ident u } when Tok(u.Arg0) == "unreachable" => true,   // an identifier in this grammar
-        Zig.StmtExpr { Arg0.Content: Zig.BuiltinCall bc } when Tok(bc.Arg0) is "@panic" or "@trap" => true,
+        Zig.StmtExpr { Arg0.Content: Zig.BuiltinCall { Arg2: not null } bc } when Tok(bc.Arg0) is "@panic" or "@trap" => true,
         _ => false,
     };
     /// <summary>Lower a control-flow <c>catch</c>/<c>orelse</c> fallback (Milestone N, part 6): <c>a

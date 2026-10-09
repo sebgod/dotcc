@@ -151,7 +151,7 @@ internal sealed partial class ZigLowering
     private (CExpr Left, CExpr Right)? TrySplatBesideVector(BinOp op, Item l, Item r)
     {
         static Item? SplatArg(Item it) =>
-            it.Content is Zig.BuiltinCall { Arg0: var tok } call && Tok(tok) == "@splat" && Flatten(call.Arg2) is [var one] ? one : null;
+            it.Content is Zig.BuiltinCall { Arg2: not null, Arg0: var tok } call && Tok(tok) == "@splat" && Flatten(call.Arg2) is [var one] ? one : null;
         if (op is not (BinOp.Shl or BinOp.Shr))
         {
             if (SplatArg(l) is not null || SplatArg(r) is not null)

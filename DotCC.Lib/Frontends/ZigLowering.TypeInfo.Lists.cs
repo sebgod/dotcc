@@ -336,7 +336,7 @@ internal sealed partial class ZigLowering
 
     /// <summary>The receiver and the <c>FieldType</c> argument of a <c>receiver.defaultValue(FieldType)</c> call, or null.</summary>
     private static (Zig.Field Callee, Item FieldType)? DefaultValueCall(Item call)
-        => call.Content is Zig.CallArgs { Arg0.Content: Zig.Field { Arg2: var methodTok } callee } dv
+        => call.Content is Zig.CallArgs { Arg2: not null, Arg0.Content: Zig.Field { Arg2: var methodTok } callee } dv
            && Tok(methodTok) == "defaultValue" && Flatten(dv.Arg2) is [var fieldTypeItem]
             ? (callee, fieldTypeItem)
             : null;

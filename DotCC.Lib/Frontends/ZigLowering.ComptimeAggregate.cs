@@ -75,7 +75,7 @@ internal sealed partial class ZigLowering
                 // A field the recorder has no domain for, but that does not make the literal a runtime one: an
                 // address (`.model = &std.Target.x86.cpu.x86_64_v3`) or a call (`.features = featureSet(…)`) in the
                 // typed synthetic `builtin.cpu`. It is left out; a read of it takes the ordinary path.
-                if (fi.Arg3.Content is Zig.PreAddrOf or Zig.CallArgs or Zig.CallNoArgs) { continue; }
+                if (fi.Arg3.Content is Zig.PreAddrOf or Zig.CallArgs) { continue; }
                 return null;
             }
             fields[fieldName] = field;
@@ -103,7 +103,7 @@ internal sealed partial class ZigLowering
         if (value.Content is Zig.Grouped g) { return ReadComptimeAggField(g.Arg1); }
         if (value.Content is Zig.EnumLit lit) { return new ZigAggField(Tok(lit.Arg1), null, null); }
         // `@as(std.Target.Cpu.Arch, .x86_64)`: the tag, typed (the synthetic builtin with a real std).
-        if (value.Content is Zig.BuiltinCall { } asCall && Tok(asCall.Arg0) == "@as" && Flatten(asCall.Arg2) is { Count: 2 } asArgs
+        if (value.Content is Zig.BuiltinCall { Arg2: not null, } asCall && Tok(asCall.Arg0) == "@as" && Flatten(asCall.Arg2) is { Count: 2 } asArgs
             && ReadComptimeAggField(asArgs[1]) is { Tag: { } typedTag })
         {
             return new ZigAggField(typedTag, null, null, asArgs[0], this);

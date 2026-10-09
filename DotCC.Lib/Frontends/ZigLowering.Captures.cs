@@ -210,15 +210,15 @@ internal sealed partial class ZigLowering
         // already have folded to its payload literal).
         var calleeAst = call.Content switch
         {
-            Zig.CallArgs ca => ca.Arg0,
-            Zig.CallNoArgs cn => cn.Arg0,
+            Zig.CallArgs { Arg2: not null } ca => ca.Arg0,
+            Zig.CallArgs { Arg2: null } cn => cn.Arg0,
             _ => null,
         };
         if (calleeAst is not null && DeclaredReturnIsOptionalComptimeInt(calleeAst)) { return true; }
         var callee = call.Content switch
         {
-            Zig.CallArgs ca => ca.Arg0,
-            Zig.CallNoArgs cn => cn.Arg0,
+            Zig.CallArgs { Arg2: not null } ca => ca.Arg0,
+            Zig.CallArgs { Arg2: null } cn => cn.Arg0,
             _ => null,
         };
         if (callee is null) { return false; }
@@ -254,7 +254,7 @@ internal sealed partial class ZigLowering
         // lowering its body on demand), so `x` is a comptime integer and the branch folds.
         // A call returning `?comptime_int` (`if (std.simd.suggestVectorLength(T)) |block_len|` in std.mem) is
         // comptime by its type, exactly as if it were spelled `comptime`.
-        var comptimeByType = cur.Content is Zig.CallArgs or Zig.CallNoArgs && ReturnsOptionalComptimeInt(cur);
+        var comptimeByType = cur.Content is Zig.CallArgs && ReturnsOptionalComptimeInt(cur);
         if (cur.Content is Zig.PreComptime || comptimeByType)
         {
             CExpr inner;
