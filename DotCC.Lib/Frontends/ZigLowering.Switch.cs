@@ -167,9 +167,9 @@ internal sealed partial class ZigLowering
     /// <summary>An assignment prong body: <c>v =&gt; lhs = rhs</c>, or a compound one (<c>0 =&gt; hits += 1</c>).</summary>
     private CStmt LowerProngAssign(Zig.ProngAssign pa) => LowerAssignProngBody(pa.Arg2, pa.Arg3, pa.Arg4);
     /// <summary>The assignment an assignment prong performs (<c>lhs = rhs</c>, or a compound <c>lhs += rhs</c>), shared by
-    /// the plain form and its capture twin (<c>.on =&gt; |v| total += v</c>, task #109).</summary>
-    private CStmt LowerAssignProngBody(Item lhs, Item opItem, Item rhs)
-        => CompoundOpOf(opItem) is { } op ? CompoundAssign(lhs, op, rhs) : LowerAssignStmt(lhs, rhs);
+    /// the plain form and its capture twin (<c>.on =&gt; |v| total += v</c>, task #109). A saturating operator had read
+    /// as a plain <c>=</c> here (<see cref="CompoundOpOf"/> has none), so <c>x +|= y</c> in a prong stored <c>y</c>.</summary>
+    private CStmt LowerAssignProngBody(Item lhs, Item opItem, Item rhs) => LowerAssignOpStmt(lhs, opItem, rhs);
     /// <summary>The binary operator of a compound continue-expression assignment (<c>i += 1</c>), or null
     /// for a plain <c>=</c>.</summary>
     private static BinOp? CompoundOpOf(Item opItem) => opItem.Content switch

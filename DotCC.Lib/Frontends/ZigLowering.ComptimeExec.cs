@@ -169,7 +169,7 @@ internal sealed partial class ZigLowering
                 // Inside a comptime block every declaration is a compile-time value.
                 TrackComptimeVar(s);
                 break;
-            case Zig.StmtAssign a:          // lhs = rhs
+            case Zig.StmtAssign { Arg1.Content: Zig.AopAssign } a:   // lhs = rhs (a compound one is the default's cut)
                 ExecuteComptimeAssign(a.Arg0, a.Arg2);
                 break;
             // A comptime `while (cond) : (cont) body` / `while (cond) body` — interpreted (the cont or
@@ -412,7 +412,7 @@ internal sealed partial class ZigLowering
     /// other arm is compile-time control flow over the enclosing unrolled code (<c>break</c> out of an
     /// <c>inline for</c>, a <c>return</c>) and lowers as the statement it is.</summary>
     private CStmt LowerComptimeArm(Item arm)
-        => arm.Content is Zig.Block or Zig.StmtAssign
+        => arm.Content is Zig.Block or Zig.StmtAssign { Arg1.Content: Zig.AopAssign }
             ? LowerComptimeBlock(arm)
             : LowerStmt(arm);
 }

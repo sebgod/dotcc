@@ -7234,6 +7234,56 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{d} {d} {d}\\n\", .{ e, f, g });\n" +
             "}\n", 0,
             "true true true false true\n5 9 2" },
+        // Every assignment form (a statement, an `if` arm, a switch prong with and without a capture, a `while` continue
+        // clause) with every operator family: plain, compound, wrapping and saturating. A saturating operator in a prong
+        // body had lowered as a plain `=` (`v +|= 200` stored 200, `v -|= 30` stored 30); all of them now share one
+        // AssignOp dispatch.
+        new object[] { "assign_ops_everywhere",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "const Mode = enum { add, sat, wrap };\n" +
+            "\n" +
+            "fn prong(mode: Mode, x: u8) u8 {\n" +
+            "    var v: u8 = x;\n" +
+            "    switch (mode) {\n" +
+            "        .add => v += 7,\n" +
+            "        .sat => v +|= 200,\n" +
+            "        .wrap => v +%= 200,\n" +
+            "    }\n" +
+            "    return v;\n" +
+            "}\n" +
+            "\n" +
+            "fn captured(o: ?u8, x: u8) u8 {\n" +
+            "    var v: u8 = x;\n" +
+            "    switch (o != null) {\n" +
+            "        true => v -|= o.?,\n" +
+            "        false => v *%= 3,\n" +
+            "    }\n" +
+            "    return v;\n" +
+            "}\n" +
+            "\n" +
+            "fn arm(c: bool, x: u8) u8 {\n" +
+            "    var v: u8 = x;\n" +
+            "    if (c) v +|= 250 else v -%= 10;\n" +
+            "    return v;\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() void {\n" +
+            "    var s: u8 = 100;\n" +
+            "    s +|= 200;\n" +
+            "    var w: u8 = 100;\n" +
+            "    w +%= 200;\n" +
+            "    var m: u8 = 20;\n" +
+            "    m *|= 20;\n" +
+            "    var i: u8 = 0;\n" +
+            "    var acc: u16 = 0;\n" +
+            "    while (i < 4) : (i +%= 1) acc += i;\n" +
+            "    std.debug.print(\"{d} {d} {d} {d}\\n\", .{ s, w, m, acc });\n" +
+            "    std.debug.print(\"{d} {d} {d}\\n\", .{ prong(.add, 100), prong(.sat, 100), prong(.wrap, 100) });\n" +
+            "    std.debug.print(\"{d} {d}\\n\", .{ captured(30, 10), captured(null, 100) });\n" +
+            "    std.debug.print(\"{d} {d}\\n\", .{ arm(true, 100), arm(false, 5) });\n" +
+            "}\n", 0,
+            "255 44 255 6\n107 255 44\n0 44\n255 251" },
         // Task #140: std.crypto.blake3's shapes: a late-declared struct const in a field extent, `@intCast` slice bounds,
         // open slices of a many-item pointer, and an array local copied through a pointer.
         new object[] { "blake3_shapes",

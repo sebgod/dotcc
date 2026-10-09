@@ -170,39 +170,10 @@ internal sealed partial class ZigLowering
             // bare expression statement, evaluated for its side effects.
             // A `catch`/`orelse` in the RHS (or a discarded `_ = f(a catch b())`) may hoist (ANF), so
             // lower the assignment under a hoist buffer.
+            // `x op= y`, every operator (see LowerAssignOpStmt).
             case Zig.StmtAssign a:
-                return LowerAssignStmt(a.Arg0, a.Arg2);
+                return LowerAssignOpStmt(a.Arg0, a.Arg1, a.Arg2);
 
-            // `x op= y` (compound assignment) → the shared Assign node with a non-null CompoundOp.
-            // Each operator maps to the SAME BinOp the matching Zig binary op uses (Add/Sub/…), so
-            // `+=` stays consistent with how Zig's `+` lowers — NOT C's promotion rules. The C#
-            // backend renders a native `target op= rhs`, evaluating the lvalue exactly once (correct
-            // binding for `a[i()] += 1` / `p.* += 1`). Zig has no `++`/`--`; `x += 1` is the idiom.
-            case Zig.StmtAddAssign a:    return CompoundAssign(a.Arg0, BinOp.Add, a.Arg2);
-            case Zig.StmtSubAssign a:    return CompoundAssign(a.Arg0, BinOp.Sub, a.Arg2);
-            case Zig.StmtMulAssign a:    return CompoundAssign(a.Arg0, BinOp.Mul, a.Arg2);
-            case Zig.StmtDivAssign a:    return CompoundAssign(a.Arg0, BinOp.Div, a.Arg2);
-            case Zig.StmtModAssign a:    return CompoundAssign(a.Arg0, BinOp.Mod, a.Arg2);
-            case Zig.StmtShlAssign a:    return CompoundAssign(a.Arg0, BinOp.Shl, a.Arg2);
-            case Zig.StmtShrAssign a:    return CompoundAssign(a.Arg0, BinOp.Shr, a.Arg2);
-            case Zig.StmtBitAndAssign a: return CompoundAssign(a.Arg0, BinOp.BitAnd, a.Arg2);
-            case Zig.StmtBitOrAssign a:  return CompoundAssign(a.Arg0, BinOp.BitOr, a.Arg2);
-            case Zig.StmtBitXorAssign a: return CompoundAssign(a.Arg0, BinOp.BitXor, a.Arg2);
-
-            // `x op%= y` (wrapping compound assignment, Milestone P) → the SAME CompoundAssign node as
-            // the plain form. A native C# `target op= rhs` already truncates the result back to the LHS
-            // width in the project's unchecked context — exactly two's-complement wrap — so `+%=` and
-            // `+=` lower identically (dotcc doesn't model Zig's plain-`+` safe-mode overflow trap).
-            case Zig.StmtAddWrapAssign a: return CompoundAssign(a.Arg0, BinOp.Add, a.Arg2);
-            case Zig.StmtSubWrapAssign a: return CompoundAssign(a.Arg0, BinOp.Sub, a.Arg2);
-            case Zig.StmtMulWrapAssign a: return CompoundAssign(a.Arg0, BinOp.Mul, a.Arg2);
-
-            // `x op|= y` (saturating compound assignment, Milestone P) → `x = ZigMath.Sat…(x, y)`.
-            // No native C# saturating compound op exists, so it desugars to a plain assignment of the
-            // clamping call (single-eval-guarded on the lvalue — see SatCompoundAssign).
-            case Zig.StmtAddSatAssign a: return SatCompoundAssign(a.Arg0, "SatAdd", a.Arg2);
-            case Zig.StmtSubSatAssign a: return SatCompoundAssign(a.Arg0, "SatSub", a.Arg2);
-            case Zig.StmtMulSatAssign a: return SatCompoundAssign(a.Arg0, "SatMul", a.Arg2);
 
             // if (cond) then [else else]  — `then`/`else`/`body` are themselves Stmts
             // (a single statement or a brace Block), which LowerStmt handles uniformly.
@@ -225,7 +196,7 @@ internal sealed partial class ZigLowering
             case Zig.StmtIfCaptureReturnErrElse f: return LowerIfCapture(f.Arg2, Tok(f.Arg5), f.Arg7, f.Arg12, Tok(f.Arg10));
             case Zig.ReturnArm r:                  return Hoisted(() => LowerReturn(r.Arg1));
             case Zig.StmtIfAssignElse f:           return LowerIfStmt(f.Arg2, f.Arg4, f.Arg6);
-            case Zig.AssignArm a:                  return LowerAssignArm(a);
+            case Zig.AssignArm a:                  return LowerAssignOpStmt(a.Arg0, a.Arg1, a.Arg2);
             case Zig.StmtWhile w:       return new While(LowerExpr(w.Arg2), LowerStmt(w.Arg4));
             // `while (c) body else elsebody` (task #130): the else runs when the condition ends the loop, not a `break`.
             case Zig.StmtWhileElse w:   return LowerWhileElseStmt(w.Arg2, w.Arg4, w.Arg6);
@@ -776,25 +747,19 @@ internal sealed partial class ZigLowering
         };
         return declared?.Unqualified is CType.Pointer { Pointee: var pointee } && pointee.Unqualified is CType.Array ? pointee : null;
     }
-    /// <summary>An assignment then-arm of an <c>if</c> with an <c>else</c> (<c>if (c) i += 1 else i -= 1;</c>, task #96): the
-    /// same lowering as the assignment statement its operator spells.</summary>
-    private CStmt LowerAssignArm(Zig.AssignArm arm) => Tok(arm.Arg1) switch
+    /// <summary>An assignment as a statement, whichever form spells it (a statement, an <c>if</c> arm, a switch prong body),
+    /// by its <c>AssignOp</c>: <c>=</c> a plain store (<c>_ = v</c> a discard, see <see cref="LowerAssignStmt"/>); a compound
+    /// or wrapping operator the shared Assign node with its <see cref="BinOp"/> as CompoundOp (a native C# <c>op=</c>, which
+    /// evaluates the lvalue once and already wraps in the unchecked context); a saturating one
+    /// <c>x = ZigMath.Sat…(x, y)</c>.</summary>
+    private CStmt LowerAssignOpStmt(Item lhs, Item opItem, Item rhs) => opItem.Content switch
     {
-        "=" => LowerAssignStmt(arm.Arg0, arm.Arg2),
-        "+=" or "+%=" => CompoundAssign(arm.Arg0, BinOp.Add, arm.Arg2),
-        "-=" or "-%=" => CompoundAssign(arm.Arg0, BinOp.Sub, arm.Arg2),
-        "*=" or "*%=" => CompoundAssign(arm.Arg0, BinOp.Mul, arm.Arg2),
-        "/=" => CompoundAssign(arm.Arg0, BinOp.Div, arm.Arg2),
-        "%=" => CompoundAssign(arm.Arg0, BinOp.Mod, arm.Arg2),
-        "<<=" => CompoundAssign(arm.Arg0, BinOp.Shl, arm.Arg2),
-        ">>=" => CompoundAssign(arm.Arg0, BinOp.Shr, arm.Arg2),
-        "&=" => CompoundAssign(arm.Arg0, BinOp.BitAnd, arm.Arg2),
-        "|=" => CompoundAssign(arm.Arg0, BinOp.BitOr, arm.Arg2),
-        "^=" => CompoundAssign(arm.Arg0, BinOp.BitXor, arm.Arg2),
-        "+|=" => SatCompoundAssign(arm.Arg0, "SatAdd", arm.Arg2),
-        "-|=" => SatCompoundAssign(arm.Arg0, "SatSub", arm.Arg2),
-        "*|=" => SatCompoundAssign(arm.Arg0, "SatMul", arm.Arg2),
-        var op => throw new IrUnsupportedException($"zig: assignment operator `{op}` in an if arm"),
+        Zig.AopAssign => LowerAssignStmt(lhs, rhs),
+        Zig.AopAddSat => SatCompoundAssign(lhs, "SatAdd", rhs),
+        Zig.AopSubSat => SatCompoundAssign(lhs, "SatSub", rhs),
+        Zig.AopMulSat => SatCompoundAssign(lhs, "SatMul", rhs),
+        _ when CompoundOpOf(opItem) is { } op => CompoundAssign(lhs, op, rhs),
+        _ => throw new IrUnsupportedException("zig: assignment operator " + (opItem.Content?.GetType().Name ?? "null")),
     };
     /// <summary>The locals declared with a type annotation (<c>var a: u8 = 0;</c>): their zig type is the spelled one, so
     /// a store into one is a certain integer sink (task #167). An inferred local's lowered type may be C's, not zig's.</summary>
