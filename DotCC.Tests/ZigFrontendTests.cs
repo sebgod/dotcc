@@ -2015,6 +2015,17 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Accepts_callconv_on_an_extern_fn_prototype()
+    {
+        // std's os/windows: `) callconv(.winapi) ?HCERTSTORE;`. Ignored on a prototype as on a definition; the return
+        // type is the slot after it.
+        var cs = EmitZig(
+            "extern \"c\" fn abs(x: c_int) callconv(.c) c_int;\n" +
+            "pub fn main() u8 { return @intCast(abs(-4)); }\n");
+        cs.ShouldContain("abs(-4)");
+    }
+
+    [Fact]
     public void An_inline_extern_or_packed_container_types_a_field()
     {
         // std's os and c files type fields with inline C records and bit fields. Each reifies an anonymous struct or

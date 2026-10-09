@@ -1751,7 +1751,7 @@ internal sealed partial class ZigLowering
             var d = Unwrap(decl);   // unwrap `pub`
             switch (d.Content)
             {
-                case Zig.ExternFnProto f: DeclareExternFn(f.Arg4, f.Arg6, f.Arg8); break;  // pub? extern STRING? fn IDENT ( Params? ) Type ;
+                case Zig.ExternFnProto f: DeclareExternFn(f.Arg4, f.Arg6, f.Arg9); break;  // pub? extern STRING? fn IDENT ( Params? ) CallConv Type ;
                 case Zig.ExternVar v:     _externVars.Add(Tok(v.Arg5)); break;            // pub? extern STRING? threadlocal? var IDENT : Type ;
                 // The optional CallConv (Milestone R, part 5) sits between `)` and the return, so the
                 // return type + body are one slot further right than the pre-CallConv layout.
@@ -2441,7 +2441,7 @@ internal sealed partial class ZigLowering
                     foreach (var m in fnDefs) { methods.Add((name, m)); }
                     break;
                 }
-                case Zig.UnionDeclEnum u:   foreach (var m in RegisterUnion(name, u.Arg8)) { methods.Add((name, m)); } break;  // const IDENT = union(enum) { UnionMembers } ;
+                case Zig.UnionDeclEnum u:   foreach (var m in RegisterUnion(name, u.Arg9, TagIntOf(u.Arg6))) { methods.Add((name, m)); } break;  // const IDENT = union(enum[(T)]) { UnionMembers } ;
                 case Zig.UnionDeclTagged u: foreach (var m in RegisterUnionTagged(name, Tok(u.Arg5), u.Arg8)) { methods.Add((name, m)); } break;  // const IDENT = union(SomeEnum) { UnionMembers } ;
                 case Zig.UnionDeclUntagged u: foreach (var m in RegisterUnionUntagged(name, u.Arg6)) { methods.Add((name, m)); } break;  // const IDENT = [extern|packed] union { UnionMembers } ;
             }

@@ -7380,6 +7380,45 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{d} {d}\\n\", .{ v, peek(&pc) });\n" +
             "}\n", 0,
             "5 30 x y\n8\n42 9" },
+        // A tagged union with a spelled tag integer `union(enum(u8))` (std's lang.zig; its tag is 1 byte, as in zig), `extern
+        // struct` prong types in a comptime switch over the target (std's Io/fiber.zig), and an empty `struct {}` as a
+        // comptime-`if` type arm (std's Io/Threaded.zig; its @sizeOf is 0 in zig and 1 in C#, so only constructed).
+        new object[] { "union_tag_int_and_layout_prongs",
+            "const std = @import(\"std\");\n" +
+            "const builtin = @import(\"builtin\");\n" +
+            "\n" +
+            "const Op = union(enum(u8)) {\n" +
+            "    add: u32,\n" +
+            "    neg,\n" +
+            "    scale: u16,\n" +
+            "};\n" +
+            "\n" +
+            "const Ctx = switch (builtin.cpu.arch) {\n" +
+            "    .x86_64, .aarch64 => extern struct { sp: u64, fp: u64 },\n" +
+            "    else => extern struct { sp: u32, fp: u32 },\n" +
+            "};\n" +
+            "\n" +
+            "const Extra = if (@sizeOf(usize) == 8) struct {} else struct { pad: u32 };\n" +
+            "\n" +
+            "fn apply(v: u32, op: Op) u32 {\n" +
+            "    return switch (op) {\n" +
+            "        .add => |n| v + n,\n" +
+            "        .neg => 0 -% v,\n" +
+            "        .scale => |k| v * k,\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() void {\n" +
+            "    const ops = [_]Op{ .{ .add = 5 }, .{ .scale = 3 }, .neg };\n" +
+            "    var v: u32 = 2;\n" +
+            "    for (ops) |op| v = apply(v, op);\n" +
+            "    const c: Ctx = .{ .sp = 16, .fp = 32 };\n" +
+            "    std.debug.print(\"{d} {d}\\n\", .{ v, c.sp + c.fp });\n" +
+            "    const extra: Extra = .{};\n" +
+            "    _ = extra;\n" +
+            "    std.debug.print(\"{d} {d}\\n\", .{ @sizeOf(@typeInfo(Op).@\"union\".tag_type orelse void), @sizeOf(Ctx) });\n" +
+            "}\n", 0,
+            "4294967275 48\n1 16" },
         // Task #140: std.crypto.blake3's shapes: a late-declared struct const in a field extent, `@intCast` slice bounds,
         // open slices of a many-item pointer, and an array local copied through a pointer.
         new object[] { "blake3_shapes",

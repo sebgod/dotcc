@@ -785,7 +785,7 @@ internal sealed partial class ZigLowering
             {
                 Zig.EnumDecl e          => RegisterEnumZig(mangled, null, e.Arg5),
                 Zig.EnumDeclTyped e     => RegisterEnumZig(mangled, e.Arg5, e.Arg8),
-                Zig.UnionDeclEnum u     => RegisterUnion(mangled, u.Arg8),
+                Zig.UnionDeclEnum u     => RegisterUnion(mangled, u.Arg9, TagIntOf(u.Arg6)),
                 Zig.UnionDeclTagged u   => RegisterUnionTagged(mangled, Tok(u.Arg5), u.Arg8),
                 Zig.UnionDeclUntagged u => RegisterUnionUntagged(mangled, u.Arg6),
                 _ => throw new System.InvalidOperationException(),
@@ -901,7 +901,7 @@ internal sealed partial class ZigLowering
             Zig.PackedStructDeclBacked s => SplitMembers(s.Arg9).containers,
             Zig.EnumDecl e => FromBody(e.Arg5).ToList(),
             Zig.EnumDeclTyped e => FromBody(e.Arg8).ToList(),
-            Zig.UnionDeclEnum u => FromBody(u.Arg8).ToList(),
+            Zig.UnionDeclEnum u => FromBody(u.Arg9).ToList(),
             Zig.UnionDeclTagged u => FromBody(u.Arg8).ToList(),
             Zig.UnionDeclUntagged u => FromBody(u.Arg6).ToList(),
             _ => System.Array.Empty<Item>(),
@@ -1004,6 +1004,10 @@ internal sealed partial class ZigLowering
     /// <summary>The containers whose consts <see cref="RegisterContainerConsts"/> has recorded, so a second call is a no-op.</summary>
     private readonly HashSet<string> _constsRegistered = new(System.StringComparer.Ordinal);
 
+    /// <summary>The integer type an <c>EnumTagInt</c> slot spells (<c>union(enum(u8))</c>), or null when the source left
+    /// it out.</summary>
+    private static Item? TagIntOf(Item? enumTagInt) => enumTagInt?.Content is Zig.EnumTagInt t ? t.Arg1 : null;
+
     /// <summary>Register a Zig <c>union(enum)</c> declaration as the faithful C tagged-union shape
     /// (see <see cref="ZigUnionInfo"/>): synthesize the tag enum <c>U_Tag</c> (a member per variant,
     /// value = its index) + per-member symbols (so <c>.variant</c> resolves to a tag constant); a
@@ -1014,14 +1018,17 @@ internal sealed partial class ZigLowering
     /// Variant payload types resolve through pass 0a, so a variant may name any container. Returns
     /// the body's method items (each a <c>FnDef</c>) for declaration in pass 1, and registers its
     /// consts (e.g. <c>const Self = @This();</c> → the outer struct type).</summary>
-    private List<Item> RegisterUnion(string name, Item variantsItem)
+    private List<Item> RegisterUnion(string name, Item variantsItem, Item? tagInt = null)
     {
         var (variantItems, methods, consts) = SplitUnionMembers(variantsItem);
         var variants = ParseUnionVariants(variantItems);
 
-        // Synthesize the tag enum `U_Tag` + its member symbols (variant name → tag constant = index).
+        // Synthesize the tag enum `U_Tag` + its member symbols (variant name → tag constant = index). Its integer is
+        // the spelled one (`union(enum(u8))`), else dotcc's default `int` (zig infers the smallest; see RegisterEnumZig).
         var tagName = name + TagSuffix;
-        var tagType = new CType.Enum(tagName, CType.Int);
+        var tagUnderlying = tagInt is not null ? LowerType(tagInt) : CType.Int;
+        if (tagInt is not null) { _enumsWithSpelledTag.Add(tagName); }
+        var tagType = new CType.Enum(tagName, tagUnderlying);
         var tagMembers = new List<EnumMember>();
         var tagSyms = new Dictionary<string, Symbol>(System.StringComparer.Ordinal);
         long idx = 0;
@@ -1031,7 +1038,7 @@ internal sealed partial class ZigLowering
             tagSyms[vname] = new Symbol { Name = vname, Kind = SymKind.EnumConst, Type = tagType, ConstValue = idx, IsGlobal = true };
             idx++;
         }
-        _ir.RegisterEnumType(tagName, CType.Int, tagMembers);
+        _ir.RegisterEnumType(tagName, tagUnderlying, tagMembers);
         _containerTypes[tagName] = tagType;
         _enumMembers[tagName] = tagSyms;
 

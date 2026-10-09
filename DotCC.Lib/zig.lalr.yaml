@@ -300,6 +300,7 @@ symbols:
   - ContainerDeclaration # 194 a member every container body shares (a method, const, nested container, comptime or test block)
   - File         # 195 a whole source file: its declarations, possibly none
   - ContainerLayout # 196 `extern` / `packed` before an inline `struct`/`union` field type
+  - EnumTagInt   # 197 `(T)` after `union(enum`: the tag enum's integer type (`union(enum(u8))`)
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -374,7 +375,8 @@ productions:
       # `extern fn` (routed to dotcc's Libc runtime by bare name); after `extern`, a `STRING` selects
       # the `"c"` forms vs the bare `fn` forms — disjoint, conflict-free. A `!T` error-union return is
       # still deferred. `pub` is optional (std's c.zig declares hundreds of `pub extern "c" fn`).
-      - { lhs: Decl, rhs: [pub?, 'extern', STRING?, 'fn', IDENT, '(', Params?, ')', Type, ';'], action: externFnProto }
+      # The optional CallConv sits where a definition's does (std's os/windows: `) callconv(.winapi) ?HCERTSTORE;`).
+      - { lhs: Decl, rhs: [pub?, 'extern', STRING?, 'fn', IDENT, '(', Params?, ')', CallConv, Type, ';'], action: externFnProto }
       # `extern var` (PEG: `KEYWORD_extern STRINGLITERALSINGLE? KEYWORD_threadlocal? GlobalVarDecl`): data a linked
       # library defines, always typed and never initialized. After `extern STRING?`, `fn` versus `threadlocal`/`var`
       # is one token. dotcc binds extern functions but not extern data, so lowering rejects a reference to one.
@@ -415,7 +417,8 @@ productions:
       # is NOT a ZigUnionInfo; Zig's safe-mode active-field tracking / type-pun checks aren't modeled
       # (same-field read/write is faithful — see ZIG-SUPPORT.md). An `extern union` / `packed union` (a C union, std's
       # elf.zig) is the same overlapping layout, so the untagged form takes an optional ContainerLayout.
-      - { lhs: ContainerDecl, rhs: ['const', IDENT, '=', 'union', '(', 'enum', ')', '{', UnionVariants, '}', ';'], action: unionDeclEnum }
+      # `union(enum(u8))` (std's lang.zig CallingConvention) spells the tag enum's integer type; EnumTagInt is optional.
+      - { lhs: ContainerDecl, rhs: ['const', IDENT, '=', 'union', '(', 'enum', EnumTagInt?, ')', '{', UnionVariants, '}', ';'], action: unionDeclEnum }
       - { lhs: ContainerDecl, rhs: ['const', IDENT, '=', 'union', '(', IDENT, ')', '{', UnionVariants, '}', ';'], action: unionDeclTagged }
       - { lhs: ContainerDecl, rhs: ['const', IDENT, '=', ContainerLayout?, 'union', '{', UnionVariants, '}', ';'], action: unionDeclUntagged }
 
@@ -1017,7 +1020,7 @@ productions:
       # A tagged enum arm (std.Io.File's `Permissions = … orelse if (is_windows) enum(DWORD) { … } else …`, GH #282),
       # members and methods as a named `enum(T)` has. After `enum`, `(` versus `{` is one token.
       - { lhs: TypeArm, rhs: ['enum', '(', Type, ')', '{', EnumFields?, '}'], action: typeArmEnumTyped }
-      - { lhs: TypeArm, rhs: ['struct', '{', FieldDecls, '}'], action: typeArmStruct }
+      - { lhs: TypeArm, rhs: ['struct', '{', FieldDecls?, '}'], action: typeArmStruct }
       # Value-position captured `if` — `if (opt) |x| thenExpr else elseExpr` (S4a). The `|` after the
       # `)` cannot start a RhsExpr (it is only an infix bitwise-or), so this is conflict-free with the
       # plain ifExpr above. `else` is mandatory (an expression yields a value on both paths). Mirrors
@@ -1323,6 +1326,7 @@ productions:
     rules:
       - { lhs: ContainerLayout, rhs: ['extern'], action: layoutExtern }
       - { lhs: ContainerLayout, rhs: ['packed'], action: layoutPacked }
+      - { lhs: EnumTagInt, rhs: ['(', Type, ')'], action: enumTagInt }
 
   - derivation: none
     rules:
@@ -1500,10 +1504,14 @@ productions:
 
   - derivation: none
     rules:
-      - { lhs: ProngType, rhs: ['struct', '{', FieldDecls, '}'],                     action: inlineStructType }
+      - { lhs: ProngType, rhs: ['struct', '{', FieldDecls?, '}'],                    action: inlineStructType }
       - { lhs: ProngType, rhs: ['enum', '{', EnumFields?, '}'],                       action: inlineEnumType }
       - { lhs: ProngType, rhs: ['union', '(', 'enum', ')', '{', UnionVariants, '}'], action: inlineUnionEnumType }
       - { lhs: ProngType, rhs: ['union', '{', UnionVariants, '}'],                   action: inlineUnionType }
+      # The layout forms (std's Io/fiber.zig: `.aarch64 => extern struct { … },`), as in a field's type.
+      - { lhs: ProngType, rhs: [ContainerLayout, 'struct', '{', FieldDecls?, '}'],                 action: inlineLayoutStructType }
+      - { lhs: ProngType, rhs: [ContainerLayout, 'struct', '(', Type, ')', '{', FieldDecls?, '}'], action: inlineLayoutStructTypeBacked }
+      - { lhs: ProngType, rhs: [ContainerLayout, 'union', '{', UnionVariants, '}'],                action: inlineLayoutUnionType }
 
   # A named field init's value: an Expr, or `{}` (void; `{` is not in FIRST(Expr), so conflict-free).
   - derivation: none
