@@ -478,6 +478,10 @@ productions:
       # FOLLOW(Params) and the paramsCons/paramsOne S/R stays clean. Grammar-accepted
       # anywhere a Param is, but lowering enforces last-position + extern-only.
       - { lhs: Param, rhs: ['...'], action: paramVariadic }
+      # An UNNAMED parameter (std's Build/abi.zig: `pub extern fn runner_futex_wait(*const u32, expected: u32) bool;`), which
+      # zig allows on an `extern fn` prototype only; lowering rejects it on a definition. After an IDENT, a `:` shifts the
+      # named form and a `,` / `)` reduces it as a type name, as in a function type's FnTypeParam.
+      - { lhs: Param, rhs: [Type], action: paramUnnamed }
 
   # const/var, optionally type-annotated. Reused at top level (Decl) and inside
   # blocks (Stmt).
@@ -798,6 +802,9 @@ productions:
       # (FIRST(Block), disjoint from FIRST(VarDecl) = {var,const} and FIRST(Prefix)) selects this —
       # conflict-free.
       - { lhs: Stmt, rhs: ['comptime', Block], action: comptimeBlock }
+      # `comptime for (…) |…| { … };` (std's crypto/codecs/asn1/Oid.zig): zig's `comptime Expr;`, so the `;` is required. The
+      # loop runs at compile time, as a comptime block's body would. After `comptime`, `for` / `while` selects this.
+      - { lhs: Stmt, rhs: ['comptime', LoopStmt, ';'], action: comptimeLoop }
       # Destructure binding (Milestone G + S) — `<binder>, <binder>… = e;` (≥2 binders, enforced by
       # the one-binder + DestructBinds shape). A binder is a fresh `const`/`var` (optionally typed
       # `: T`) OR an existing lvalue / `_` discard (Milestone S — the assign-to-existing form `a, b =
@@ -985,7 +992,7 @@ productions:
       # |f_name, f_value| { if (@intFromEnum(e) == f_value) break f_name; } else null;`), over one comptime list or several
       # in lockstep. `inline` is not in FIRST of any other RhsExpr form, so it decides the production in one token.
       - { lhs: LoopExpr, rhs: ['inline', 'for', '(', Expr, ')', '|', IDENT, '|', Block, 'else', RhsExpr],       action: inlineForElseExpr }
-      - { lhs: LoopExpr, rhs: ['inline', 'for', '(', ForObjs, ')', '|', ForCaps, '|', Block, 'else', RhsExpr], action: inlineForMultiElseExpr }
+      - { lhs: LoopExpr, rhs: ['inline', 'for', '(', ForObjs, ",?", ')', '|', ForCaps, '|', Block, 'else', RhsExpr], action: inlineForMultiElseExpr }
       # A range, multi-object or capture-`while` value loop (std's Io/Dispatch.zig: `const data = for (operation.data, 0..)
       # |buffer, data_index| { … } else break :result …;`, crypto/bcrypt.zig: `key_remainder -= for (0..amt) |i| { … } else 0;`,
       # heap/ArenaAllocator.zig: `const node: *Node = while (it) |node| { … } else { continue; };`). The `else` is an IfArm,
@@ -1509,6 +1516,8 @@ productions:
       - { lhs: Prong, rhs: [CaseVals, '=>', Expr, AssignOp, RhsExpr],    action: prongAssign }
       # Its capture twin (`.on => |v| total += v,`, task #109), split from prongCaptureExpr the same way.
       - { lhs: Prong, rhs: [CaseVals, '=>', '|', IDENT, '|', Expr, AssignOp, RhsExpr], action: prongCaptureAssign }
+      # The by-reference twin (std's http.zig: `.content_length => |*len| len.* -= written + w.end,`).
+      - { lhs: Prong, rhs: [CaseVals, '=>', '|', '*', IDENT, '|', Expr, AssignOp, RhsExpr], action: prongCaptureRefAssign }
       # A container TYPE as a prong's value (std.MultiArrayList's `const Elem = switch (@typeInfo(T)) { .@"struct" => T,
       # .@"union" => |u| struct { … }, … }`, task #108): the plain / capture expr prong actions over a ProngType, so every
       # consumer of those prongs sees a type item. The closure idiom `struct {…}.f` continues with `.`, which no Prong is

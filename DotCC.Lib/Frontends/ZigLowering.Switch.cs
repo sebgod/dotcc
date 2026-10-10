@@ -311,7 +311,7 @@ internal sealed partial class ZigLowering
             if (prongItem.Content is Zig.ProngCapture or Zig.ProngCaptureRef
                 or Zig.ProngCaptureExpr or Zig.ProngCaptureReturn or Zig.ProngCaptureReturnVoid
                 or Zig.ProngCaptureRefExpr or Zig.ProngCaptureRefReturn or Zig.ProngCaptureRefReturnVoid
-                or Zig.ProngCaptureJump or Zig.ProngCaptureAssign)
+                or Zig.ProngCaptureJump or Zig.ProngCaptureAssign or Zig.ProngCaptureRefAssign)
             {
                 throw new IrUnsupportedException(
                     "zig switch payload capture `|x|` is only valid on a tagged-union switch");
@@ -440,6 +440,10 @@ internal sealed partial class ZigLowering
     /// the top of that prong's block. The subject is hoisted to a temp first (unless it is already a
     /// simple variable) so each capture re-reads it without re-evaluating a side-effecting subject
     /// expression.</summary>
+    /// <summary>True for a prong whose payload capture is by reference (<c>|*x|</c>), directly or under <c>inline</c>.</summary>
+    private static bool IsRefCaptureProng(Item prong) => prong.Content is Zig.ProngCaptureRef or Zig.ProngCaptureRefExpr
+        or Zig.ProngCaptureRefReturn or Zig.ProngCaptureRefReturnVoid or Zig.ProngCaptureRefAssign
+        || prong.Content is Zig.InlineProng ip && IsRefCaptureProng(ip.Arg1);
     private CStmt LowerUnionSwitch(CExpr subject, Item prongsItem, ZigUnionInfo info, Func<Item, CStmt>? fillValue = null)
     {
         // A VALUE switch (`const n: u8 = switch (spec) { .none => 1, .number => |v| v * 4 };`) passes
@@ -453,6 +457,15 @@ internal sealed partial class ZigLowering
         if (subject is VarRef)
         {
             unionRef = subject;   // a bare variable — safe to re-reference per prong
+        }
+        else if (subject.IsLValue && !isPtr && Flatten(prongsItem).Any(IsRefCaptureProng))
+        {
+            // `switch (e.*) { .len => |*l| l.* -= n, … }` (std's http.zig): a by-reference capture points INTO the subject,
+            // so the switch reaches it through its address, evaluated once. A copy in a temp made the writes vanish.
+            var addr = AddressOfLValue(subject);
+            var ptmp = _symbols.Declare(new Symbol { Name = "__unp", Kind = SymKind.Var, Type = addr.Type });
+            pre.Add(new DeclStmt(new List<LocalDecl> { new(ptmp, addr) }));
+            unionRef = new Unary(UnOp.Deref, new VarRef(ptmp) { Type = addr.Type }) { Type = subject.Type, IsLValue = true };
         }
         else
         {
@@ -533,14 +546,16 @@ internal sealed partial class ZigLowering
             Item caseVals; string? captureName; bool captureByRef;
             Item? blockBody = null, exprBody = null, returnBody = null, jumpBody = null;
             Zig.ProngAssign? assignBody = null;
-            Zig.ProngCaptureAssign? captureAssignBody = null;
+            (Item Target, Item Op, Item Value)? captureAssign = null;
             var voidReturn = false;
             switch (prongItem.Content)
             {
                 case Zig.Prong p:                     caseVals = p.Arg0; captureName = null;        captureByRef = false; blockBody  = p.Arg2; break;
                 // `.off => total += 5` (task #109): the assignment prong the plain switch has (#64).
                 case Zig.ProngAssign p:               caseVals = p.Arg0; captureName = null;        captureByRef = false; assignBody = p;      break;
-                case Zig.ProngCaptureAssign p:        caseVals = p.Arg0; captureName = Tok(p.Arg3); captureByRef = false; captureAssignBody = p; break;
+                case Zig.ProngCaptureAssign p:        caseVals = p.Arg0; captureName = Tok(p.Arg3); captureByRef = false; captureAssign = (p.Arg5, p.Arg6, p.Arg7); break;
+                // `.content_length => |*len| len.* -= n,` (std's http.zig): the assignment writes through the payload pointer.
+                case Zig.ProngCaptureRefAssign p:     caseVals = p.Arg0; captureName = Tok(p.Arg4); captureByRef = true;  captureAssign = (p.Arg6, p.Arg7, p.Arg8); break;
                 case Zig.ProngCapture p:              caseVals = p.Arg0; captureName = Tok(p.Arg3); captureByRef = false; blockBody  = p.Arg5; break;
                 case Zig.ProngCaptureRef p:           caseVals = p.Arg0; captureName = Tok(p.Arg4); captureByRef = true;  blockBody  = p.Arg6; break;
                 case Zig.ProngCaptureExpr p:          caseVals = p.Arg0; captureName = Tok(p.Arg3); captureByRef = false; exprBody   = p.Arg5; break;
@@ -569,8 +584,8 @@ internal sealed partial class ZigLowering
                 : voidReturn             ? new List<CStmt> { LowerReturnVoid() }
                 : jumpBody is not null   ? new List<CStmt> { LowerProngJump(jumpBody) }
                 : assignBody is not null ? new List<CStmt> { LowerProngAssign(assignBody) }
-                : captureAssignBody is not null
-                    ? new List<CStmt> { LowerAssignProngBody(captureAssignBody.Arg5, captureAssignBody.Arg6, captureAssignBody.Arg7) }
+                : captureAssign is { } ca
+                    ? new List<CStmt> { LowerAssignProngBody(ca.Target, ca.Op, ca.Value) }
                 : throw new IrUnsupportedException("zig switch capture prong has no body");
 
             List<CStmt> body;

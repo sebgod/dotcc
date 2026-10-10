@@ -155,7 +155,7 @@ internal sealed partial class ZigLowering
             case Zig.InlineForElseExpr f:
                 condOrIter = f.Arg3; inlineFor = (f.Arg3, f.Arg6, false); blockItem = f.Arg8; elseItem = f.Arg10; break;
             case Zig.InlineForMultiElseExpr f:
-                condOrIter = f.Arg3; inlineFor = (f.Arg3, f.Arg6, true); blockItem = f.Arg8; elseItem = f.Arg10; break;
+                condOrIter = f.Arg3; inlineFor = (f.Arg3, f.Arg7, true); blockItem = f.Arg9; elseItem = f.Arg11; break;   // `,?` is Arg4
             case Zig.ForRangeElseExpr f:
                 condOrIter = f.Arg2; blockItem = f.Arg9; elseItem = f.Arg11;
                 statementLoop = () => LowerForParallel(new[] { new ForObject(f.Arg2, true, f.Arg4) }, new[] { (Tok(f.Arg7), false) }, f.Arg9);
