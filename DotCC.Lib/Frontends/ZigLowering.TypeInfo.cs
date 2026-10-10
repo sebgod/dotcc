@@ -982,8 +982,8 @@ internal sealed partial class ZigLowering
     /// shape the comptime fold needs in all three switch positions (statement, expression, and the
     /// value-temp filler) without each re-deriving it from the eight capture productions.</summary>
     private sealed record ZigProng(Item CaseVals, string? CaptureName, Item? Block, Item? Expr, Item? Return, bool ReturnsVoid,
-        Item? Jump = null, Zig.ProngAssign? Assign = null, string? Cut = null, Zig.ProngIfSwitch? IfSwitch = null,
-        Zig.ProngIfCaptureReturn? IfCaptureReturn = null, Item? Loop = null, Zig.ProngIfBlock? IfBlock = null, Zig.ProngIfExpr? IfExpr = null);
+        Item? Jump = null, Zig.ProngAssign? Assign = null, string? Cut = null, 
+        Zig.ProngIfCaptureReturn? IfCaptureReturn = null, Item? Loop = null);
 
     /// <summary>Decompose a prong into <see cref="ZigProng"/>. A by-reference capture
     /// (<c>|*x|</c>) is rejected: a comptime <c>@typeInfo</c> value has no storage to point at.</summary>
@@ -1011,13 +1011,8 @@ internal sealed partial class ZigLowering
         Zig.ProngCaptureTagReturn p  => new ZigProng(p.Arg0, Tok(p.Arg3),  null,   null,   p.Arg8, false),
         // A no-`else` capture `if` body: its case values are readable, so an unselected prong is fine; a
         // comptime-SELECTED one is a loud cut (see SelectComptimeProng).
-        Zig.ProngIfSwitch p          => new ZigProng(p.Arg0, null,         null,   null,   null,   false, IfSwitch: p),
-        Zig.ProngIfBlock p           => new ZigProng(p.Arg0, null,         null,   null,   null,   false, IfBlock: p),
-        Zig.ProngIfExpr p            => new ZigProng(p.Arg0, null,         null,   null,   null,   false, IfExpr: p),
         Zig.ProngIfCaptureReturn p   => new ZigProng(p.Arg0, null,         null,   null,   null,   false, IfCaptureReturn: p),
         Zig.ProngLoop p              => new ZigProng(p.Arg0, null,         null,   null,   null,   false, Loop: p.Arg2),
-        Zig.ProngIfCapture p         => new ZigProng(p.Arg0, null,         null,   null,   null,   false,
-            Cut: "zig switch prong `=> if (x) |v| …` with no `else` is not supported yet as a selected comptime prong"),
         // std.meta.FieldEnum's `.@"union" => |u| if (u.tag_type) |EnumTag| { … }` (task #108): it only has to parse while
         // another prong is selected.
         Zig.ProngCaptureIfCaptureBlock p => new ZigProng(p.Arg0, Tok(p.Arg3), null, null, null, false,

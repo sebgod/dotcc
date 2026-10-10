@@ -384,20 +384,22 @@ internal sealed partial class ZigLowering
                     case Zig.BuiltinCall { Arg2: not null } ce when Tok(ce.Arg0) == "@compileError":
                         CompileErrorBuiltin(Flatten(ce.Arg2));
                         return null;
+                    // `.one => if (@typeInfo(ptr.child) != .array) @compileError("…"),` (std.mem.ReverseIterator, task #147): the
+                    // condition folds, and only a taken `@compileError` has an effect. (An else-less `if` expression since
+                    // zig-grammar-peg P3a.)
+                    case Zig.IfExprNoElse guarded:
+                    {
+                        var taken = TryFoldComptimeCondition(guarded.Arg2) ?? TryFoldTypeIfCondition(guarded.Arg2)
+                            ?? throw new IrUnsupportedException(
+                                $"type-returning generic '{fnName}': an `if` prong in a type body needs a comptime condition");
+                        if (taken && guarded.Arg4.Content is Zig.BuiltinCall { Arg2: not null, Arg0: var guardTok } guardCall
+                            && Tok(guardTok) == "@compileError")
+                        {
+                            CompileErrorBuiltin(Flatten(guardCall.Arg2));
+                        }
+                        return null;
+                    }
                 }
-            }
-            // `.one => if (@typeInfo(ptr.child) != .array) @compileError("…"),` (std.mem.ReverseIterator, task #147): the
-            // condition folds, and only a taken `@compileError` has an effect.
-            if (prong.IfExpr is { } guarded)
-            {
-                var taken = TryFoldComptimeCondition(guarded.Arg4) ?? TryFoldTypeIfCondition(guarded.Arg4)
-                    ?? throw new IrUnsupportedException(
-                        $"type-returning generic '{fnName}': an `if` prong in a type body needs a comptime condition");
-                if (taken && guarded.Arg6.Content is Zig.BuiltinCall { Arg2: not null, Arg0: var guardTok } guardCall && Tok(guardTok) == "@compileError")
-                {
-                    CompileErrorBuiltin(Flatten(guardCall.Arg2));
-                }
-                return null;
             }
             throw new IrUnsupportedException(
                 $"type-returning generic '{fnName}': a `switch` statement prong in a type body must be a block, a "

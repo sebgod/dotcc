@@ -52,7 +52,7 @@ public sealed class ZigFormatEngineTests
                 return f(2, 3) + f(3, 4) + f(4, 9);
             }
             """);
-        cs.ShouldMatch(@"case 3:\s*if \(x > 1\)\s*\{\s*switch \(x\)");
+        cs.ShouldMatch(@"case 3:\s*if \(x > 1\)\s*\{?\s*switch \(x\)");   // braces optional: a lone switch statement body
         cs.ShouldMatch(@"byte v = __cap\.Value;\s*return v;");
         cs.ShouldContain("for (ulong _ = 0; _ < (ulong)x; _++)");
     }

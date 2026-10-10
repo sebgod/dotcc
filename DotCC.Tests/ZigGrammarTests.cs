@@ -151,6 +151,22 @@ public sealed class ZigGrammarTests
     }
 
     [Fact]
+    public void An_if_may_drop_its_else_and_take_block_arms()
+    {
+        // zig-grammar-peg P3a: zig's IfExpr has an optional `else`, and a block is a PrimaryExpr.
+        var both = FirstNode<Zig.IfExpr>("fn f(c: bool) void { switch (0) { 0 => if (c) { g(); } else { h(); }, else => {} } }");
+        both.Arg4.Content.ShouldBeOfType<Zig.Block>();
+        both.Arg6.Content.ShouldBeOfType<Zig.Block>();
+        FirstNode<Zig.IfExprNoElse>("fn f(c: bool) bool { switch (0) { 0 => if (c) return true, else => {} } return false; }")
+            .Arg4.Content.ShouldBeOfType<Zig.ReturnExpr>();
+        // The `;` after a block-armed `if` written as an expression statement is an empty statement.
+        TryParse("fn f(o: ?u8) void { if (o) |p| if (p > 0) { g(); }; }").ShouldBeTrue();
+        // A dangling `else` still binds to the nearest `if`.
+        FirstNode<Zig.IfExpr>("fn f(a: bool, b: bool) u8 { return if (a) if (b) 1 else 2 else 3; }")
+            .Arg4.Content.ShouldBeOfType<Zig.IfExpr>();
+    }
+
+    [Fact]
     public void The_shapes_the_old_jump_copies_broke_still_parse_right()
     {
         // `x orelse return a == b & c` returns `a == (b & c)` (& binds tighter than ==); with the jump as a plain Bitwise
