@@ -42,7 +42,7 @@ internal sealed partial class ZigLowering
         // lowering — a loop that yields via `break v` / an `else` value can't be a C# expression.
         Zig.WhileElseExpr or Zig.ForElseExpr or Zig.LabeledWhileElseExpr or Zig.LabeledForElseExpr
             or Zig.ForRefElseExpr or Zig.InlineForElseExpr or Zig.InlineForMultiElseExpr
-            or Zig.WhileContAssignElseExpr => true,
+            or Zig.WhileContAssignElseExpr or Zig.ForRangeElseExpr or Zig.ForMultiElseExpr or Zig.WhileCaptureElseExpr => true,
         _ => false,
     };
     /// <summary>True when any prong of a switch EXPRESSION needs statements to yield its value — a
@@ -80,7 +80,7 @@ internal sealed partial class ZigLowering
         Zig.PreComptime { Arg1.Content: Zig.IfExpr } c => LowerValueControlFlowStmt(c.Arg1, sink, consume),
         Zig.WhileElseExpr or Zig.ForElseExpr or Zig.LabeledWhileElseExpr or Zig.LabeledForElseExpr
             or Zig.ForRefElseExpr or Zig.InlineForElseExpr or Zig.InlineForMultiElseExpr
-            or Zig.WhileContAssignElseExpr
+            or Zig.WhileContAssignElseExpr or Zig.ForRangeElseExpr or Zig.ForMultiElseExpr or Zig.WhileCaptureElseExpr
             => LowerLoopValue(rhs, sink, consume),
         _ => throw new IrUnsupportedException(
             "internal: value control-flow statement on " + (rhs.Content?.GetType().Name ?? "null")),
@@ -126,8 +126,8 @@ internal sealed partial class ZigLowering
     /// and jumps to the end label, SKIPPING the <c>else</c> value — which is assigned only on natural
     /// completion (no break). The end label is emitted only if a <c>break</c> targeted it (an else-only
     /// loop never jumps there). The temp's type is the sink when known, else the first <c>break</c> /
-    /// the <c>else</c> value type. V1 cuts (deferred to the grammar): a for-RANGE / indexed / capture
-    /// value loop.</summary>
+    /// the <c>else</c> value type. An <c>else</c> that never completes (a jump, a <c>return</c>, a <c>{ … }</c> block)
+    /// runs as a statement, so the loop's value is its <c>break</c>s' alone.</summary>
     private CStmt LowerLoopValue(Item rhs, CType? sink, Func<Symbol, CStmt> consume)
     {
         string? label = null;
@@ -137,6 +137,9 @@ internal sealed partial class ZigLowering
         (Item Target, Item Op, Item Value)? contAssign = null;
         // `inline for` (task #131): the comptime lists and captures to unroll over, instead of a runtime loop.
         (Item Objs, Item Caps, bool Multi)? inlineFor = null;
+        // A range / multi-object `for` or a capture `while`: the statement loop's own lowering, built while the value target
+        // is active.
+        Func<CStmt>? statementLoop = null;
         switch (rhs.Content)
         {
             case Zig.WhileElseExpr w:        condOrIter = w.Arg2; blockItem = w.Arg4; elseItem = w.Arg6; break;
@@ -150,6 +153,18 @@ internal sealed partial class ZigLowering
                 condOrIter = f.Arg3; inlineFor = (f.Arg3, f.Arg6, false); blockItem = f.Arg8; elseItem = f.Arg10; break;
             case Zig.InlineForMultiElseExpr f:
                 condOrIter = f.Arg3; inlineFor = (f.Arg3, f.Arg6, true); blockItem = f.Arg8; elseItem = f.Arg10; break;
+            case Zig.ForRangeElseExpr f:
+                condOrIter = f.Arg2; blockItem = f.Arg9; elseItem = f.Arg11;
+                statementLoop = () => LowerForParallel(new[] { new ForObject(f.Arg2, true, f.Arg4) }, new[] { (Tok(f.Arg7), false) }, f.Arg9);
+                break;
+            case Zig.ForMultiElseExpr f:
+                condOrIter = f.Arg2; blockItem = f.Arg8; elseItem = f.Arg10;
+                statementLoop = () => LowerForMulti(f.Arg2, f.Arg6, f.Arg8);
+                break;
+            case Zig.WhileCaptureElseExpr w:
+                condOrIter = w.Arg2; blockItem = w.Arg7; elseItem = w.Arg9;
+                statementLoop = () => LowerWhileCapture(w.Arg2, Tok(w.Arg5), w.Arg7);
+                break;
             default: throw new IrUnsupportedException("internal: loop-value on " + (rhs.Content?.GetType().Name ?? "null"));
         }
 
@@ -163,7 +178,9 @@ internal sealed partial class ZigLowering
         _loopValues.Push(target);
         // An `inline for` unrolls over its comptime lists (a `break v` in any copy fills the temp and jumps to the end); a
         // `for` names its element capture; a `while` has none.
-        CStmt loop = inlineFor is { } unrolled
+        CStmt loop = statementLoop is { } buildLoop
+            ? buildLoop()
+            : inlineFor is { } unrolled
             ? unrolled.Multi
                 ? UnrollComptimeMultiFor(unrolled.Objs, unrolled.Caps, blockItem)
                 : TryComptimeIterable(unrolled.Objs, out var inlineList)
@@ -178,18 +195,18 @@ internal sealed partial class ZigLowering
                 : new While(LowerExpr(condOrIter), LowerBlock(blockItem));
         _loopValues.Pop();
 
-        // `… else return v`: normal completion RETURNS from the function, so the loop's value is its `break`s'
-        // alone, and the code after the loop is reached only through the end label.
-        if (elseItem.Content is Zig.ReturnExpr { Arg1: { } returnedOnCompletion })
+        // `… else return v` / `… else break :outer …` / `… else { continue; }`: normal completion leaves by a jump, so the
+        // loop's value is its `break`s' alone, and the code after the loop is reached only through the end label.
+        if (elseItem.Content is Zig.Block or Zig.VoidValue || IsNoreturnArm(elseItem))
         {
             var breakType = target.ResultType
-                ?? throw new IrUnsupportedException("a value-position loop whose `else` returns must yield its value with `break v`");
+                ?? throw new IrUnsupportedException("a value-position loop whose `else` never completes must yield its value with `break v`");
             temp.Type = breakType;
             return new Seq(new List<CStmt>
             {
                 new DeclStmt(new List<LocalDecl> { new(temp, new DefaultLit { Type = breakType }) }),
                 loop,
-                Hoisted(() => LowerReturn(returnedOnCompletion)),
+                LowerArmStmt(elseItem),
                 new Labeled(endLabel, new Block(new List<CStmt>())),
                 consume(temp),
             });

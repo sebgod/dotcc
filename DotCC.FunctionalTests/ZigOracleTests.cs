@@ -7767,6 +7767,53 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{} {}\\n\", .{ sum, p.x * p.y });\n" +
             "}\n", 0,
             "3 2 14 true\n50 -10" },
+        // Value loops over a range, several objects and a capture `while` (std's Io/Dispatch.zig, crypto/bcrypt.zig,
+        // heap/ArenaAllocator.zig), with an `else` that never completes (`return`, a `{ … }` block) or yields a value.
+        new object[] { "range_multi_capture_value_loops",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "const Node = struct { v: u32, next: ?*Node };\n" +
+            "\n" +
+            "fn firstNonEmpty(parts: []const []const u8) usize {\n" +
+            "    const idx = for (parts, 0..) |p, i| {\n" +
+            "        if (p.len > 0) break i;\n" +
+            "    } else return 99;\n" +
+            "    return idx;\n" +
+            "}\n" +
+            "\n" +
+            "fn sumTo(n: u32) u32 {\n" +
+            "    var total: u32 = 100;\n" +
+            "    total -= for (0..n) |i| {\n" +
+            "        if (i == 7) break @as(u32, 7);\n" +
+            "    } else 1;\n" +
+            "    return total;\n" +
+            "}\n" +
+            "\n" +
+            "fn findBig(head: ?*Node, limit: u32) u32 {\n" +
+            "    var it = head;\n" +
+            "    var skipped: u32 = 0;\n" +
+            "    while (true) {\n" +
+            "        const node: *Node = while (it) |node| {\n" +
+            "            it = node.next;\n" +
+            "            if (node.v > limit) break node;\n" +
+            "            skipped += 1;\n" +
+            "        } else {\n" +
+            "            return skipped * 1000;\n" +
+            "        };\n" +
+            "        return node.v + skipped;\n" +
+            "    }\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() void {\n" +
+            "    const parts = [_][]const u8{ \"\", \"\", \"ab\", \"c\" };\n" +
+            "    var c = Node{ .v = 9, .next = null };\n" +
+            "    var b = Node{ .v = 2, .next = &c };\n" +
+            "    var a = Node{ .v = 1, .next = &b };\n" +
+            "    std.debug.print(\"{} {}\\n\", .{ firstNonEmpty(&parts), firstNonEmpty(parts[0..2]) });\n" +
+            "    std.debug.print(\"{} {}\\n\", .{ sumTo(3), sumTo(10) });\n" +
+            "    std.debug.print(\"{} {}\\n\", .{ findBig(&a, 5), findBig(&a, 50) });\n" +
+            "}\n", 0,
+            "2 99\n99 93\n11 3000" },
         // Task #140: std.crypto.blake3's shapes: a late-declared struct const in a field extent, `@intCast` slice bounds,
         // open slices of a many-item pointer, and an array local copied through a pointer.
         new object[] { "blake3_shapes",
