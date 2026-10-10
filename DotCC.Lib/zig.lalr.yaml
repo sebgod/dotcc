@@ -1869,6 +1869,12 @@ productions:
       # the else-less `if`: an `else` after the Block shifts into whileElseExpr, and the statement `while` wins at
       # statement start.
       - { lhs: LoopExpr, rhs: ['while', '(', Expr, ')', Block], action: whileNoElseExpr }
+      # zig's IfTypeExpr: an `if` choosing a TYPE wherever a type goes, its arms types (no init list): `vec: []if (is_const)
+      # iovec_const else iovec` (std's Io/Dispatch.zig), `value: if (is_64) u64 else u32`, a return type `fn f(…) if (c) A else B
+      # { … }` (math.zig), `?if (c) *anyopaque else noreturn`, `enum(if (c) u32 else u8)`. LAST: where a value `if` can stand,
+      # the `else` after a type-shaped arm reduces into the IfExpr (the ordinary value `if`), so this form only parses where
+      # nothing but a type can.
+      - { lhs: Type, rhs: ['if', '(', Expr, ')', Type, 'else', Type], action: tyIf }
 
 lexer:
   root:

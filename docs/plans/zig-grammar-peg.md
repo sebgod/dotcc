@@ -7,7 +7,7 @@ the else-less `if` expression and block arms (probe 443 to 452). P3 first step d
 primary (probe 466 to 473); labeled blocks and value loops as primaries remain. P5 started: an inline
 `struct { … }` is a Type anywhere (probe 473 to 486). Range, multi-object and capture-`while` value loops
 (still RhsExpr forms, not primaries) took the probe to 491. P5 step 2: `enum` / `union` / layout containers are
-Types too (probe 500 to 506).
+Types too (probe 500 to 506). zig's IfTypeExpr, an `if` in a type position, took it to 510.
 
 ## Why
 
@@ -183,3 +183,10 @@ forms, and a jump taking a container as its value. The full functional run caugh
 parsed further and reached an inline enum whose registration throws, and its memo entry then made a second reference
 raise KeyNotFoundException; the entry is now dropped on failure. Still open in P5: the named declarations as ordinary
 `VarDecl`s.
+
+**IfTypeExpr as landed.** `Type -> 'if' '(' Expr ')' Type 'else' Type` (`tyIf`): its arms are types with no init list (zig's
+TypeExpr), so a return type's `{` stays the function body, which is what made the earlier `AType -> IfExpr` attempt clash.
+It sits in the last group. Where a value `if` can also stand (an expression reaches Type through CurlySuffix), the
+`else` after a type-shaped arm reduces into the value IfExpr instead, and that is the only new precedence decision. In a
+pure type position (after `?`, `[]`, a parameter's `:`, a return type) only this form exists. LowerType folds the
+condition; a signature over a comptime parameter lowers per instance.

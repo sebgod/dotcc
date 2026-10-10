@@ -7935,6 +7935,33 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{}\\n\", .{area(&.{ .circle = 2 })});\n" +
             "}\n", 0,
             "true true 7 25\n12" },
+        // zig's IfTypeExpr: an `if` choosing a type wherever a type goes (std's Io/Dispatch.zig `[]if (c) A else B`, math.zig's
+        // return type, Thread.zig's `enum(if …)`), including a signature whose types depend on a comptime parameter. A value `if`
+        // in the same file stays a value.
+        new object[] { "if_in_type_positions",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "const wide = true;\n" +
+            "\n" +
+            "const Rec = struct {\n" +
+            "    vals: []const if (wide) u32 else u8,\n" +
+            "    maybe: ?if (wide) u16 else u8 = null,\n" +
+            "};\n" +
+            "\n" +
+            "fn widen(comptime big: bool, x: if (big) u64 else u32) if (big) u64 else u32 {\n" +
+            "    return x * 2;\n" +
+            "}\n" +
+            "\n" +
+            "const Tag = enum(if (wide) u16 else u8) { a = 300, b };\n" +
+            "\n" +
+            "pub fn main() void {\n" +
+            "    const data = [_]u32{ 7, 9 };\n" +
+            "    const r = Rec{ .vals = &data, .maybe = 5 };\n" +
+            "    const v = if (wide) @as(u8, 1) else @as(u8, 2);\n" +
+            "    std.debug.print(\"{} {} {}\\n\", .{ r.vals[1], r.maybe.?, v });\n" +
+            "    std.debug.print(\"{} {} {}\\n\", .{ widen(true, 1 << 40), widen(false, 21), @intFromEnum(Tag.b) });\n" +
+            "}\n", 0,
+            "9 5 1\n2199023255552 42 301" },
         // Task #140: std.crypto.blake3's shapes: a late-declared struct const in a field extent, `@intCast` slice bounds,
         // open slices of a many-item pointer, and an array local copied through a pointer.
         new object[] { "blake3_shapes",
