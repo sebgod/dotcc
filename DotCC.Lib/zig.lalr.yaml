@@ -963,8 +963,7 @@ productions:
       # The value-position loops. A braced `Block` body (the value form runs statements and yields via
       # `break v`); the `else RhsExpr` clause supplies the value on normal completion. The `while`-else
       # and the most common `for (slice) |x|`-else forms, each optionally labeled (`lbl: … else …`,
-      # so `break :lbl v` targets it). V1 cuts (deferred): a for-RANGE / indexed `|x,i|` / capture-while
-      # value loop, and a brace-less value-loop body.
+      # so `break :lbl v` targets it). A brace-less value-loop body is a cut.
       - { lhs: LoopExpr, rhs: ['while', '(', Expr, ')', Block, 'else', RhsExpr],                          action: whileElseExpr }
       - { lhs: LoopExpr, rhs: ['for', '(', Expr, ')', '|', IDENT, '|', Block, 'else', RhsExpr],           action: forElseExpr }
       - { lhs: LoopExpr, rhs: [IDENT, ':', 'while', '(', Expr, ')', Block, 'else', RhsExpr],              action: labeledWhileElseExpr }
@@ -985,6 +984,14 @@ productions:
       # in lockstep. `inline` is not in FIRST of any other RhsExpr form, so it decides the production in one token.
       - { lhs: LoopExpr, rhs: ['inline', 'for', '(', Expr, ')', '|', IDENT, '|', Block, 'else', RhsExpr],       action: inlineForElseExpr }
       - { lhs: LoopExpr, rhs: ['inline', 'for', '(', ForObjs, ')', '|', ForCaps, '|', Block, 'else', RhsExpr], action: inlineForMultiElseExpr }
+      # A range, multi-object or capture-`while` value loop (std's Io/Dispatch.zig: `const data = for (operation.data, 0..)
+      # |buffer, data_index| { … } else break :result …;`, crypto/bcrypt.zig: `key_remainder -= for (0..amt) |i| { … } else 0;`,
+      # heap/ArenaAllocator.zig: `const node: *Node = while (it) |node| { … } else { continue; };`). The `else` is an IfArm,
+      # so a `{ … }` block (which never completes) or a jump stands there too. After `(`, the objects decide the `for`
+      # form as the statement loops do; after `)`, a `|` versus a `{` or `:` decides the `while` form.
+      - { lhs: LoopExpr, rhs: ['for', '(', Expr, '..', Expr, ')', '|', IDENT, '|', Block, 'else', IfArm],        action: forRangeElseExpr }
+      - { lhs: LoopExpr, rhs: ['for', '(', ForObjs, ",?", ')', '|', ForCaps, '|', Block, 'else', IfArm],       action: forMultiElseExpr }
+      - { lhs: LoopExpr, rhs: ['while', '(', Expr, ')', '|', IDENT, '|', Block, 'else', IfArm],                 action: whileCaptureElseExpr }
 
   - derivation: leftmost
     rules:

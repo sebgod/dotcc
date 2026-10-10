@@ -192,6 +192,18 @@ public sealed class ZigGrammarTests
     }
 
     [Fact]
+    public void Range_multi_object_and_capture_while_loops_are_values()
+    {
+        FirstNode<Zig.ForMultiElseExpr>("fn f(a: []const u8) usize { const i = for (a, 0..) |x, j| { if (x > 0) break j; } else 0; return i; }")
+            .Arg10.Content.ShouldBeOfType<Zig.IntLit>();
+        FirstNode<Zig.ForRangeElseExpr>("fn f(n: usize) void { k -= for (0..n) |i| { if (i > 2) break i; } else 0; }").ShouldNotBeNull();
+        FirstNode<Zig.WhileCaptureElseExpr>("fn f(it: ?*N) void { const n = while (it) |x| { break x; } else { return; }; _ = n; }")
+            .Arg9.Content.ShouldBeOfType<Zig.Block>();
+        // At statement start the statement loop keeps its `else`.
+        FirstNode<Zig.StmtForMultiElse>("fn f(a: []const u8) void { for (a, 0..) |x, j| { _ = x; _ = j; } else {} }").ShouldNotBeNull();
+    }
+
+    [Fact]
     public void Small_std_shapes_parse()
     {
         // `struct { … }{ … }`: a typed literal whose type is an inline struct; `const X = struct {…};` keeps its decl form.
