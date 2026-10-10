@@ -1527,18 +1527,14 @@ productions:
       # A capture `if` with NO `else` as a (void) prong body — auto_hash's `.optional => if (key) |k| hash(…),`.
       # Its body is a plain Expr ended by `,` / `}`, where an `else` would continue the if-EXPRESSION prong
       # (whose arms are RhsExprs): a 1-token split, with no dangling else to resolve.
-      - { lhs: Prong, rhs: [CaseVals, '=>', 'if', '(', Expr, ')', '|', IDENT, '|', Expr], action: prongIfCapture }
       # An else-less `if` whose body is a switch statement (std.Io.Writer.printValue's
       # `3 => if (fmt[0] == 'b' and …) switch (@typeInfo(T)) { … },`). Ended by `,` / `}` like the form above;
       # an if-EXPRESSION prong would continue with `else`, and its arms are not SwitchExprs, so no conflict.
-      - { lhs: Prong, rhs: [CaseVals, '=>', 'if', '(', Expr, ')', SwitchExpr], action: prongIfSwitch }
       # An else-less `if` whose body is a BLOCK (std.crypto.sha2's `.x86_64 => if (… comptime cpu.hasAll(…)) { … },`).
       # Ended by `,` / `}`; an if-EXPRESSION prong continues with `else`.
-      - { lhs: Prong, rhs: [CaseVals, '=>', 'if', '(', Expr, ')', Block], action: prongIfBlock }
       # An else-less `if` whose body is a plain expression (std.mem.ReverseIterator's `.one => if (@typeInfo(ptr.child)
       # != .array) @compileError("…"),`, task #141). Ended by `,` / `}` like the capture form; an if-EXPRESSION prong
       # continues with `else`, so the split is one token after the body.
-      - { lhs: Prong, rhs: [CaseVals, '=>', 'if', '(', Expr, ')', Expr], action: prongIfExpr }
       # A capture prong whose body is a capture-`if` statement (std.meta.FieldEnum's `.@"union" => |u| if (u.tag_type)
       # |EnumTag| { … }`, task #108). After the prong's `|x|`, `if` then `(` Expr `)` `|` distinguishes it from the
       # value-if RhsExpr only at the `{` of its Block, which no RhsExpr's then-arm starts with.
@@ -1847,6 +1843,9 @@ productions:
       - { lhs: OpenPrimary, rhs: [IfExpr] }
       - { lhs: IfArm, rhs: [RhsExpr] }
       - { lhs: IfArm, rhs: [TypeArm] }
+      # A non-empty `{ … }` block arm (zig-grammar-peg P3a; zig's Block is a PrimaryExpr): `.linux => if (c) { … } else { … },`
+      # (std's Thread.zig). Its record is the statement Block's. An empty `{}` arm stays the void value RhsExpr gives it.
+      - { lhs: IfArm, rhs: ['{', Stmts, '}'], action: block }
 
   # ===== jumps as expressions (zig-grammar-peg P1b) =====
   # zig's `return Expr?`, `break :l Expr?` and `continue` are PrimaryExprs: an `orelse` / `catch` fallback, an `if` arm,
@@ -1867,6 +1866,20 @@ productions:
       - { lhs: JumpExpr, rhs: ['continue'],                    action: fbContinue }
       - { lhs: JumpExpr, rhs: ['continue', ':', IDENT],        action: fbContinueLabel }
       - { lhs: JumpExpr, rhs: ['continue', ':', IDENT, RhsExpr], action: fbContinueLabelValue }
+
+  # ===== the else-less `if` expression (zig-grammar-peg P3a) =====
+  # zig's IfExpr has an optional `else`: `if (opt) |p| if (n > 0) { … };` (std's Io/Writer.zig), `=> |lib| if (c) return true,`
+  # (Build/Step/Compile.zig). Its value is void, so it is a statement in expression clothing; lowering takes it where a
+  # statement stands and rejects it as a value. LAST and RIGHTMOST: an `else` after the arm shifts into the full form (the
+  # dangling else binds to the nearest `if`), and where a statement form shares the prefix, the statement form wins.
+  - derivation: rightmost
+    rules:
+      - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', IfArm],                 action: ifExprNoElse }
+      - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', IfArm], action: ifExprCaptureNoElse }
+      # The `;` that closes an `if` written as an expression statement whose arm is a block (`if (opt) |p| if (n > 0) { … };`,
+      # std's Io/Writer.zig): the statement form takes the `if` and the block, so the `;` is an empty statement. zig only
+      # allows it in that position; accepting it anywhere changes no program's meaning.
+      - { lhs: Stmt, rhs: [';'], action: emptyStmt }
 
 lexer:
   root:

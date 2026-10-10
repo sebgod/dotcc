@@ -2,7 +2,8 @@
 
 **Status:** P0 done (this plan and the spike behind it, 2026-10-10). **P1 done**: P1a (the open/closed cascade and the
 `if` expression as an open primary; probe 422 to 433) and P1b (`return` / `break` / `continue` as open primaries; probe
-433 to 438). P2 started: the `else |err|` statement form without a then-capture (probe 438 to 443).
+433 to 438). P2 started: the `else |err|` statement form without a then-capture (probe 438 to 443). P3a done:
+the else-less `if` expression and block arms (probe 443 to 452).
 
 ## Why
 
@@ -126,3 +127,15 @@ arm (`.linux => if (c) { … } else { … },` in Thread.zig, `return if (opt) |v
 `if` as an expression (`if (opt) |p| if (n > 0) { … };` in Io/Writer.zig, `=> |lib| if (c) return true,` in
 Build/Step/Compile.zig). In zig a block is a PrimaryExpr and `if`'s `else` is optional; both come with P3's closed
 primaries.
+
+**P3a as landed.** zig's IfExpr has an optional `else`, and a block is a PrimaryExpr. `ifExprNoElse` /
+`ifExprCaptureNoElse` (in a final rightmost group, so an `else` shifts into the full form: the dangling else binds to
+the nearest `if`), and an `IfArm` may be a non-empty `{ … }` block (the statement Block's record; an empty `{}` stays
+the void value). An `if` whose arms are statements (`IsStatementIf`) has a meaning only where a statement stands, so
+`LowerStatementIf` takes it from an expression statement, a prong body (`LowerProngExprStmt`) and a tagged-union
+capture prong (`ProngValue`): a comptime condition keeps only the taken arm, otherwise a runtime `if`. The four
+else-less prong records (`prongIfExpr`, `prongIfCapture`, `prongIfSwitch`, `prongIfBlock`) retired into it. One more
+piece: `if (opt) |p| if (n > 0) { … };` takes the statement form for the `if` and its block, so the `;` is an empty
+statement (`emptyStmt`; zig allows the `;` only there, accepting it anywhere changes no meaning). The new precedence
+decisions are statement forms winning where they share a prefix (assignment operators, `Stmt -> Expr ;`, the Block
+over the block arm) and the `else` shift. Oracle row `statement_if_expressions`.

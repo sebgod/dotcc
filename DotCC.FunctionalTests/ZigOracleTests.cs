@@ -7546,6 +7546,67 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{d}\\n\", .{trace});\n" +
             "}\n", 0,
             "1 2 3 4\n458" },
+        // zig-grammar-peg P3a: an `if` whose arms are statements, as zig's optional-else IfExpr with block arms: a prong
+        // `=> if (c) { … } else { … },` (std's Thread.zig), an else-less prong `=> if (c) f(),`, a capture prong
+        // `=> |n| if (n == w) return true,` (Build/Step/Compile.zig), and `if (opt) |p| if (p > 2) { … };` (Io/Writer.zig).
+        new object[] { "statement_if_expressions",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "const Os = enum { linux, windows, other };\n" +
+            "\n" +
+            "const Item = union(enum) {\n" +
+            "    lib: u32,\n" +
+            "    file: u32,\n" +
+            "    none,\n" +
+            "};\n" +
+            "\n" +
+            "var trace: u32 = 0;\n" +
+            "\n" +
+            "fn bump(n: u32) void {\n" +
+            "    trace += n;\n" +
+            "}\n" +
+            "\n" +
+            "fn setName(os: Os, threads: bool) void {\n" +
+            "    switch (os) {\n" +
+            "        .linux => if (threads) {\n" +
+            "            trace += 1;\n" +
+            "        } else {\n" +
+            "            trace += 10;\n" +
+            "        },\n" +
+            "        .windows => if (threads) bump(100),\n" +
+            "        .other => {},\n" +
+            "    }\n" +
+            "}\n" +
+            "\n" +
+            "fn pad(opt: ?u32) void {\n" +
+            "    if (opt) |p| if (p > 2) {\n" +
+            "        trace += p * 1000;\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "fn has(items: [3]Item, want: u32) bool {\n" +
+            "    for (items) |it| {\n" +
+            "        switch (it) {\n" +
+            "            .lib => |n| if (n == want) return true,\n" +
+            "            .file => |n| if (n == want + 1) return true,\n" +
+            "            .none => {},\n" +
+            "        }\n" +
+            "    }\n" +
+            "    return false;\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() void {\n" +
+            "    setName(.linux, true);\n" +
+            "    setName(.linux, false);\n" +
+            "    setName(.windows, true);\n" +
+            "    setName(.windows, false);\n" +
+            "    pad(5);\n" +
+            "    pad(1);\n" +
+            "    pad(null);\n" +
+            "    const items = [3]Item{ .{ .lib = 4 }, .none, .{ .file = 8 } };\n" +
+            "    std.debug.print(\"{d} {} {} {}\\n\", .{ trace, has(items, 4), has(items, 7), has(items, 5) });\n" +
+            "}\n", 0,
+            "5111 true true false" },
         // Task #140: std.crypto.blake3's shapes: a late-declared struct const in a field extent, `@intCast` slice bounds,
         // open slices of a many-item pointer, and an array local copied through a pointer.
         new object[] { "blake3_shapes",

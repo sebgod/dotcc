@@ -165,6 +165,9 @@ internal sealed partial class ZigLowering
                 if (holds == false) { throw new IrUnsupportedException("zig: a `comptime assert(…)` failed (a compile error in zig)"); }
                 return new Seq(new List<CStmt>());
             }
+            // `if (opt) |p| if (n > 0) { … };` (std's Io/Writer.zig): an `if` expression standing as a statement (P3a).
+            case Zig.StmtExpr e when IsStatementIf(e.Arg0): return LowerStatementIf(e.Arg0);
+            case Zig.EmptyStmt:         return new Seq(new List<CStmt>());   // the `;` after a block-armed `if` expression statement
             case Zig.StmtExpr e:        return Hoisted(() => new ExprStmt(LowerExpr(e.Arg0)));
 
             // `x = value;`  → an assignment used as a statement. `_ = value;` is Zig's

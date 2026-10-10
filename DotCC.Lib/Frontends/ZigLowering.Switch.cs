@@ -24,6 +24,8 @@ internal sealed partial class ZigLowering
         // (`0 => a orelse return 9`, `… else continue :round .away`) runs in that prong, not ahead of the whole switch,
         // where the statement holding a labeled value switch had taken it (GH #286).
         _ when _activeSwitchValueLabel is { } valueLabel && !IsUnreachableItem(e) => Hoisted(() => LowerLabeledBreak(valueLabel, e)),
+        // `=> if (c) x,` / `=> if (c) { … } else { … },` (zig-grammar-peg P3a): an `if` whose arms are statements.
+        _ when IsStatementIf(e) => LowerStatementIf(e),
         Zig.SwitchExpr s => LowerSwitchStmt(s.Arg2, s.Arg5),
         _ => Hoisted(() => new ExprStmt(LowerExpr(e))),
     };
@@ -76,55 +78,53 @@ internal sealed partial class ZigLowering
         { ReturnsVoid: true } => LowerReturnVoid(),
         { Jump: { } j } => LowerProngJump(j),
         { Assign: { } pa } => LowerProngAssign(pa),
-        { IfSwitch: { } isw } => LowerProngIfSwitch(isw),
-        { IfBlock: { } ib } => LowerProngIfBlock(ib),
-        { IfExpr: { } ie } => LowerProngIfExpr(ie),
         { IfCaptureReturn: { } icr } => LowerIfCapture(icr.Arg4, Tok(icr.Arg7), icr.Arg9, null, null),
         { Loop: { } loop } => LowerStmt(loop),
         _ => new Seq(new List<CStmt>()),
     };
-    /// <summary>A <c>=&gt; if (c) { … }</c> prong body (std.crypto.sha2's <c>.x86_64 =&gt; if (… comptime
-    /// builtin.cpu.hasAll(.x86, &amp;.{ .sha, .avx2 })) { … asm … },</c>): a comptime-known condition keeps the block or
-    /// nothing, so a target path dotcc cannot take (inline assembly) is never lowered.</summary>
-    private CStmt LowerProngIfBlock(Zig.ProngIfBlock p)
+    /// <summary>True for an <c>if</c> expression whose arms are statements rather than values (zig-grammar-peg P3a): an
+    /// else-less one (zig's <c>else</c> is optional), or one with a non-empty <c>{ … }</c> block arm. Its value is void, so
+    /// it has a meaning only where a statement stands (an expression statement, a prong body).</summary>
+    private static bool IsStatementIf(Item e) => e.Content is Zig.IfExprNoElse or Zig.IfExprCaptureNoElse
+        || e.Content is Zig.IfExpr ie && (ie.Arg4.Content is Zig.Block || ie.Arg6.Content is Zig.Block);
+
+    /// <summary>Lower an <see cref="IsStatementIf">statement <c>if</c></see>. A condition that folds at compile time keeps
+    /// only the taken arm, so an untaken <c>@compileError</c> / switch / block is never analysed (what the retired
+    /// <c>=&gt; if (c) …</c> prong forms did); otherwise a runtime <c>if</c>.</summary>
+    private CStmt LowerStatementIf(Item e)
     {
-        // A condition the comptime questions settle, or one that lowers to a constant (`comptime builtin.cpu.hasAll(…)`
-        // folds while it lowers, and `builtin.zig_backend != .stage2_c` is an enum compare): only the taken block lowers.
-        if ((TryFoldComptimeCondition(p.Arg4) ?? TryFoldTypeIfCondition(p.Arg4)) is { } taken)
+        switch (e.Content)
         {
-            return taken ? LowerBlock(p.Arg6) : new Seq(new List<CStmt>());
+            case Zig.IfExprNoElse n:
+                if ((TryFoldComptimeCondition(n.Arg2) ?? TryFoldTypeIfCondition(n.Arg2)) is { } takenThen)
+                {
+                    return takenThen ? LowerArmStmt(n.Arg4) : new Seq(new List<CStmt>());
+                }
+                return new If(LowerExpr(n.Arg2), LowerArmStmt(n.Arg4), null);
+            case Zig.IfExprCaptureNoElse c:
+                return LowerIfCapture(c.Arg2, Tok(c.Arg5), c.Arg7, null, null);
+            case Zig.IfExpr ie:
+                if ((TryFoldComptimeCondition(ie.Arg2) ?? TryFoldTypeIfCondition(ie.Arg2)) is { } taken)
+                {
+                    return LowerArmStmt(taken ? ie.Arg4 : ie.Arg6);
+                }
+                return new If(LowerExpr(ie.Arg2), LowerArmStmt(ie.Arg4), LowerArmStmt(ie.Arg6));
+            default:
+                throw new IrUnsupportedException("internal: statement if " + (e.Content?.GetType().Name ?? "null"));
         }
-        var cond = LowerExpr(p.Arg4);
-        return new If(cond, LowerBlock(p.Arg6), null);
     }
-    /// <summary>A <c>=&gt; if (c) expr</c> prong body with no <c>else</c> (std.mem.ReverseIterator's <c>.one =&gt; if
-    /// (@typeInfo(ptr.child) != .array) @compileError("…"),</c>, task #141): a comptime-known condition keeps the expression
-    /// statement or nothing, so an untaken <c>@compileError</c> never fires; otherwise a runtime <c>if</c>.</summary>
-    private CStmt LowerProngIfExpr(Zig.ProngIfExpr p)
+
+    /// <summary>One arm of a <see cref="LowerStatementIf">statement <c>if</c></see>: a block, a jump, a nested statement
+    /// <c>if</c>, a <c>switch</c> statement, or an expression statement.</summary>
+    private CStmt LowerArmStmt(Item arm) => arm.Content switch
     {
-        if ((TryFoldComptimeCondition(p.Arg4) ?? TryFoldTypeIfCondition(p.Arg4)) is { } taken)
-        {
-            return taken ? LowerProngExprStmt(p.Arg6) : new Seq(new List<CStmt>());
-        }
-        var cond = LowerExpr(p.Arg4);
-        return new If(cond, LowerProngExprStmt(p.Arg6), null);
-    }
-    /// <summary>A <c>=&gt; if (c) switch (s) { … }</c> prong body: the switch statement under an else-less <c>if</c>.
-    /// A comptime-known condition keeps only the switch or nothing, so an untaken switch is never analysed.</summary>
-    private CStmt LowerProngIfSwitch(Zig.ProngIfSwitch p)
-    {
-        var (subject, prongs) = p.Arg6.Content switch
-        {
-            Zig.SwitchExpr s => (s.Arg2, s.Arg5),
-            _ => throw new IrUnsupportedException("zig `=> if (c) switch …` prong: " + (p.Arg6.Content?.GetType().Name ?? "null")),
-        };
-        if (TryFoldComptimeCondition(p.Arg4) is { } taken)
-        {
-            return taken ? LowerSwitchStmt(subject, prongs) : new Seq(new List<CStmt>());
-        }
-        var cond = LowerExpr(p.Arg4);
-        return new If(cond, new Block(new List<CStmt> { LowerSwitchStmt(subject, prongs) }), null);
-    }
+        Zig.Block => LowerBlock(arm),
+        Zig.VoidValue => new Seq(new List<CStmt>()),   // an empty `{}` arm
+        _ when IsNoreturnArm(arm) => LowerExitArm(arm),
+        _ when IsStatementIf(arm) => LowerStatementIf(arm),
+        Zig.SwitchExpr s => LowerSwitchStmt(s.Arg2, s.Arg5),
+        _ => Hoisted(() => new ExprStmt(LowerExpr(arm))),
+    };
     /// <summary>A copy of an unrolled body with its TRAILING jump removed, and which jump it was: a <c>break</c>
     /// (a plain one, or the goto the inline loop's break target lowers to under a switch), a
     /// <c>continue</c>, or none. Only the last statement is inspected, through nested blocks.</summary>
@@ -330,9 +330,6 @@ internal sealed partial class ZigLowering
                 case Zig.ProngReturnVoid pr: caseVals = pr.Arg0; body = new List<CStmt> { LowerReturnVoid() }; break;
                 case Zig.ProngJump pj:       caseVals = pj.Arg0; body = new List<CStmt> { LowerProngJump(pj.Arg2) }; break;
                 case Zig.ProngAssign pa:     caseVals = pa.Arg0; body = new List<CStmt> { LowerProngAssign(pa) }; break;
-                case Zig.ProngIfSwitch pis:  caseVals = pis.Arg0; body = new List<CStmt> { LowerProngIfSwitch(pis) }; break;
-                case Zig.ProngIfBlock pib:   caseVals = pib.Arg0; body = new List<CStmt> { LowerProngIfBlock(pib) }; break;
-                case Zig.ProngIfExpr pie:    caseVals = pie.Arg0; body = new List<CStmt> { LowerProngIfExpr(pie) }; break;
                 case Zig.ProngLoop plp:      caseVals = plp.Arg0; body = new List<CStmt> { LowerStmt(plp.Arg2) }; break;
                 case Zig.ProngIfCaptureReturn picr:
                     caseVals = picr.Arg0; body = new List<CStmt> { LowerIfCapture(picr.Arg4, Tok(picr.Arg7), picr.Arg9, null, null) }; break;
@@ -446,7 +443,9 @@ internal sealed partial class ZigLowering
     {
         // A VALUE switch (`const n: u8 = switch (spec) { .none => 1, .number => |v| v * 4 };`) passes
         // `fillValue`: each prong's value expression fills the result temp instead of being a statement.
-        CStmt ProngValue(Item valueItem) => fillValue is { } fill ? fill(valueItem) : new ExprStmt(LowerExpr(valueItem));
+        CStmt ProngValue(Item valueItem) => fillValue is { } fill ? fill(valueItem)
+            : IsStatementIf(valueItem) ? LowerStatementIf(valueItem)   // `.lib => |n| if (n == w) return true,` (P3a)
+            : new ExprStmt(LowerExpr(valueItem));
         var isPtr = subject.Type.Unqualified is CType.Pointer;
         var pre = new List<CStmt>();
         CExpr unionRef;
