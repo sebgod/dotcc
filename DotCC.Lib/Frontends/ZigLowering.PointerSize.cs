@@ -49,7 +49,8 @@ internal sealed partial class ZigLowering
         Zig.Grouped g => PointerSizeOfTypeArg(g.Arg1),
         Zig.TyPointer or Zig.TyPtrConst or Zig.TyPointerAlign or Zig.TyPtrConstAlign => "one",
         Zig.TyManyPtr or Zig.TyManyPtrConst or Zig.TyManyPtrAlign or Zig.TyManyPtrConstAlign
-            or Zig.TySentPtr or Zig.TySentPtrConst or Zig.TySentPtrExpr or Zig.TySentPtrConstExpr => "many",
+            or Zig.TySentPtr or Zig.TySentPtrConst or Zig.TySentPtrExpr or Zig.TySentPtrConstExpr
+            or Zig.TySentPtrAlign or Zig.TySentPtrConstAlign => "many",
         Zig.TyCPtr or Zig.TyCPtrConst => "c",
         Zig.Ident id => _declaredPtrSize.GetValueOrDefault(Tok(id.Arg0)),
         Zig.BuiltinCall { Arg2: not null } tof when Tok(tof.Arg0) == "@TypeOf" && Flatten(tof.Arg2) is [var v] =>
@@ -111,7 +112,8 @@ internal sealed partial class ZigLowering
             or Zig.TyPointer or Zig.TyPtrConst or Zig.TyPointerAlign or Zig.TyPtrConstAlign
             or Zig.TyManyPtr or Zig.TyManyPtrConst or Zig.TyManyPtrAlign or Zig.TyManyPtrConstAlign
             or Zig.TyCPtr or Zig.TyCPtrConst or Zig.TyArray => new ZigSentinel(false, null),
-        Zig.TySentSlice or Zig.TySentSliceConst or Zig.TySentPtr or Zig.TySentPtrConst => new ZigSentinel(true, 0),
+        Zig.TySentSlice or Zig.TySentSliceConst or Zig.TySentPtr or Zig.TySentPtrConst
+            or Zig.TySentPtrAlign or Zig.TySentPtrConstAlign => new ZigSentinel(true, 0),
         Zig.TySentSliceExpr s           => SpelledSentinel(s.Arg2),
         Zig.TySentSliceConstExpr s      => SpelledSentinel(s.Arg2),
         Zig.TySentSliceAlignExpr s      => SpelledSentinel(s.Arg2),

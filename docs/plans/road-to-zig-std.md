@@ -1246,23 +1246,26 @@ place a poison IS needed is the top-level tombstone, and that is what landed.
 
 ### S9 — surface-debt bricks (many S/M; parallel any time; wall-finder-ranked)
 
-**Current ranking (2026-10-10, after four worklist batches and zig-grammar-peg P1 to P3a: 452 of 553 files
-parse-clean, 81.7%; it was 341 / 61.7% on 2026-10-09 and 187 / 33.8% at the 2026-09-23 report).** Batch 1 took an
-empty file (25 files; the installed std ships its `test.zig` files as 0 bytes), `align(N)` on an untyped
-container-level `const`/`var` (20) and `pub extern` (13, which also brought `extern var`; extern data parses and is
-rejected by name only where it is read). Batch 2 took the inline container field types (`extern`/`packed` struct and
-union, `enum(uN)`) and a named `extern union`. Batch 3 took a labeled block as a struct-literal field value, a field
-typed by a comptime `if`, `**T` and an empty `enum {}`. Batch 4 took `union(enum(uN))`, `callconv` on an `extern fn`
-prototype, the `extern`/`packed` prong types and an empty `struct {}` type arm. Then
-[zig-grammar-peg](zig-grammar-peg.md) made `if`, `return`, `break` and `continue` operands anywhere (P1, 16 files),
-took `if (eu) S else |err| S` (P2, 5) and the else-less `if` expression with block arms (P3a, 9). The head of
-[`std-parse-probe.report.txt`](std-parse-probe.report.txt) now is a tail of 2-to-4-file buckets:
+**Current ranking (2026-10-10, after the worklist batches and zig-grammar-peg P1 to P3a: 466 of 553 files
+parse-clean, 84.3%; it was 341 / 61.7% on 2026-10-09 and 187 / 33.8% at the 2026-09-23 report).** The batches (#306
+to #309) took an empty file, `align(N)` on an untyped declaration, `pub extern` / `extern var`, the inline
+`extern`/`packed` container field types, `enum(uN)` fields, a named `extern union`, labeled-block field values,
+`if`-typed fields, `**T`, empty `enum {}` / `struct {}`, `union(enum(uN))`, extern `callconv` and layout prong types.
+[zig-grammar-peg](zig-grammar-peg.md) made `if`, `return`, `break` and `continue` operands anywhere (P1), took
+`if (eu) S else |err| S` (P2) and the else-less `if` expression with block arms (P3a). A small-shapes batch then took
+an inline `enum(u8)` call argument, `struct { … }{ … }`, a range `for … else`, a union variant typed by an `if`,
+`*allowzero T`, `[*:0]align(N) const T`, an `enum(u32)` prong type and an expression then-arm on a statement `if`. The
+head of [`std-parse-probe.report.txt`](std-parse-probe.report.txt) is a tail of 1-to-4-file buckets, most of them
+zig-grammar-peg P3's (a `switch` or loop as an operand):
 
 | Files | Construct (first-fail) | Example |
 |---|---|---|
-| 4 | **an inline `enum(u8) {…}` as a call argument** | `r.takeEnum(enum(u8) {` (`Io/Reader.zig`) |
-| 4 | **a struct literal typed by an inline `struct {…}`** (`}{`) | `struct { … }{ .keys = … }` (`debug/Dwarf.zig`, `compress/flate/token.zig`) |
-| 3 | **a range `for` with an `else`** | `for (0..max_bytes) \|_\| { … } else unreachable;` (`Io/Writer.zig`) |
+| 4 | **an inline struct as an array element type in a literal** | `[_]struct { … }{ … }` (`compress/flate/token.zig`) |
+| 2 | **a multi-object or range `for` as a value** | `const first_path_idx = for (paths, 0..) \|p, idx\| {` (`fs/path.zig`, `crypto/bcrypt.zig`) |
+| 2 | **a capture `while` as a value** | `const node: *Node = while (it) \|node\| {` (`heap/ArenaAllocator.zig`) |
+| 2 | **a `switch` as a positional tuple element** | `.{ switch (tok_slice[0]) { … } }` (`zig/Ast.zig`) |
+| 2 | **`catch` after a value-less labeled `break`** | `mod.unwind orelse break :unwind catch break :unwind` (`debug/SelfInfo/Elf.zig`) |
+| 2 | **an `extern fn` prototype inside a container** | `pub extern fn fuzzer_init(…) void;` (`Build/abi.zig`) |
 
 The historical ranking below is kept for the record.
 

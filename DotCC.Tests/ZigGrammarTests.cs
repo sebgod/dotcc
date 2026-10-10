@@ -167,6 +167,22 @@ public sealed class ZigGrammarTests
     }
 
     [Fact]
+    public void Small_std_shapes_parse()
+    {
+        // `struct { … }{ … }`: a typed literal whose type is an inline struct; `const X = struct {…};` keeps its decl form.
+        FirstNode<Zig.TypedStructInit>("fn f() u32 { const p = struct { x: u32 }{ .x = 3 }; return p.x; }")
+            .Arg0.Content.ShouldBeOfType<Zig.InlineStructType>();
+        TryParse("const P = struct { x: u32 };").ShouldBeTrue();
+        FirstNode<Zig.InlineEnumTypeTyped>("fn f() void { g(enum(u8) { a, b }, 1); }").ShouldNotBeNull();
+        FirstNode<Zig.StmtForRangeElse>("fn f(n: usize) void { for (0..n) |i| { _ = i; } else unreachable; }").ShouldNotBeNull();
+        FirstNode<Zig.TyPointerAlign>("const P = *allowzero anyopaque;").Arg1.Content.ShouldBeOfType<Zig.PtrAllowzero>();
+        FirstNode<Zig.TySentPtrConstAlign>("fn f(p: [*:0]align(1) const u16) void { _ = p; }").ShouldNotBeNull();
+        // An expression then-arm on a statement `if` with an `else`: a ThenExpr, not an expression statement.
+        FirstNode<Zig.StmtIfCaptureReturnErrElse>("fn f(x: E!u8) void { if (x) |s| g(s) else |_| {} }")
+            .Arg7.Content.ShouldBeOfType<Zig.ThenExpr>();
+    }
+
+    [Fact]
     public void The_shapes_the_old_jump_copies_broke_still_parse_right()
     {
         // `x orelse return a == b & c` returns `a == (b & c)` (& binds tighter than ==); with the jump as a plain Bitwise

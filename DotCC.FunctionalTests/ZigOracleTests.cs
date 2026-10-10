@@ -7607,6 +7607,92 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{d} {} {} {}\\n\", .{ trace, has(items, 4), has(items, 7), has(items, 5) });\n" +
             "}\n", 0,
             "5111 true true false" },
+        // Three small std shapes: an inline `enum(u8) { … }` as a call argument (std's Io/Reader.zig), a struct literal typed by
+        // an inline `struct { … }` (debug/Dwarf.zig), and a range `for … else` (Io/Writer.zig), with a `return` and a statement else.
+        new object[] { "small_std_shapes",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "fn tagOf(comptime E: type, v: u8) E {\n" +
+            "    return @enumFromInt(v);\n" +
+            "}\n" +
+            "\n" +
+            "fn firstOver(xs: []const u32, limit: u32) u32 {\n" +
+            "    for (0..xs.len) |i| {\n" +
+            "        if (xs[i] > limit) return @intCast(i);\n" +
+            "    } else return 99;\n" +
+            "}\n" +
+            "\n" +
+            "fn total(n: u32) u32 {\n" +
+            "    var t: u32 = 0;\n" +
+            "    for (0..n) |i| {\n" +
+            "        if (i == 7) break;\n" +
+            "        t += @intCast(i);\n" +
+            "    } else t += 1000;\n" +
+            "    return t;\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() void {\n" +
+            "    const e = tagOf(enum(u8) { red, green, blue }, 2);\n" +
+            "    const p = struct { x: u32, y: u32 }{ .x = 3, .y = 4 };\n" +
+            "    const xs = [_]u32{ 1, 5, 9 };\n" +
+            "    std.debug.print(\"{d} {d}\\n\", .{ @intFromEnum(e), p.x * 10 + p.y });\n" +
+            "    std.debug.print(\"{d} {d} {d} {d}\\n\", .{ firstOver(&xs, 4), firstOver(&xs, 20), total(4), total(10) });\n" +
+            "}\n", 0,
+            "2 34\n1 99 1006 21" },
+        // More small std shapes: a union variant typed by a comptime `if` (std's Progress.zig), `*allowzero T` (c/netbsd.zig),
+        // `[*:0]align(1) const T` (os/uefi), an `enum(u32) {…}` prong type (c.zig), and a call then-arm on a capture `if` statement
+        // (`if (x) |s| s.close() else …`, Io/net/HostName.zig).
+        new object[] { "small_std_shapes_2",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "const wide = @sizeOf(usize) == 8;\n" +
+            "\n" +
+            "const Mode = union(enum) {\n" +
+            "    off,\n" +
+            "    on: if (wide) u64 else u32,\n" +
+            "};\n" +
+            "\n" +
+            "const Os = enum { linux, mac };\n" +
+            "\n" +
+            "fn code(comptime os: Os) u32 {\n" +
+            "    const T = switch (os) {\n" +
+            "        .linux => enum(u32) { a = 7, b },\n" +
+            "        .mac => enum(u32) { a = 9, b },\n" +
+            "    };\n" +
+            "    return @intFromEnum(T.b);\n" +
+            "}\n" +
+            "\n" +
+            "var closed: u32 = 0;\n" +
+            "\n" +
+            "fn close(n: u32) void {\n" +
+            "    closed += n;\n" +
+            "}\n" +
+            "\n" +
+            "fn opt(n: u32) ?u32 {\n" +
+            "    return if (n > 0) n else null;\n" +
+            "}\n" +
+            "\n" +
+            "fn sumZ(p: [*:0]align(1) const u16) u32 {\n" +
+            "    var i: usize = 0;\n" +
+            "    var t: u32 = 0;\n" +
+            "    while (p[i] != 0) : (i += 1) t += p[i];\n" +
+            "    return t;\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() void {\n" +
+            "    const m: Mode = .{ .on = 5 };\n" +
+            "    const raw: *allowzero const u32 = &closed;\n" +
+            "    if (opt(3)) |n| close(n) else close(100);\n" +
+            "    if (opt(0)) |n| close(n) else close(100);\n" +
+            "    const z = [3:0]u16{ 1, 2, 3 };\n" +
+            "    const v: u64 = switch (m) {\n" +
+            "        .on => |x| x,\n" +
+            "        .off => 0,\n" +
+            "    };\n" +
+            "    std.debug.print(\"{d} {d} {d} {d}\\n\", .{ v, closed, raw.*, sumZ(&z) });\n" +
+            "    std.debug.print(\"{d}\\n\", .{code(.mac)});\n" +
+            "}\n", 0,
+            "5 103 103 6\n10" },
         // Task #140: std.crypto.blake3's shapes: a late-declared struct const in a field extent, `@intCast` slice bounds,
         // open slices of a many-item pointer, and an array local copied through a pointer.
         new object[] { "blake3_shapes",

@@ -308,6 +308,9 @@ symbols:
   - OpenPrimary  # 206 a primary that ends in an expression (`if … else E`), so it takes everything to its right
   - IfArm        # 207 an `if` expression's arm: a value (RhsExpr) or a container type (TypeArm)
   - JumpExpr     # 208 `return [v]`, `break [:l [v]]`, `continue [:l [v]]` as an expression (zig-grammar-peg P1b)
+  - InlineStructTy # 209 `struct { … }` as the type of a typed struct literal (`struct { … }{ .keys = … }`)
+  - 'allowzero'    # 210 the pointer attribute `*allowzero T` (a PtrAlign: like `align(N)`, no effect on the managed target)
+  - ThenExpr       # 211 an expression then-arm of a statement `if` with an `else` (zig's `IfPrefix AssignExpr else …`)
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -555,15 +558,19 @@ productions:
       - { lhs: Stmt, rhs: ['if', '(', Expr, ')', Stmt, 'else', '|', IDENT, '|', Stmt], action: stmtIfElseErr }
       # A `return Expr` then-arm with no `;` of its own, ended by the `else` (the `;` ends the else arm).
       # After `return Expr`, `else` selects the arm and `;` the ordinary return statement: a 1-token split.
-      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', JumpExpr, 'else', Stmt], action: stmtIfReturnElse }
+      # The then-arm is any expression with no `;` of its own (zig's `IfPrefix AssignExpr else Statement`): a jump, a call
+      # (`if (loser) |s| s.close(io) else |_| {}`, std's Io/net/HostName.zig). ThenExpr wraps it so lowering takes it as a
+      # statement; it is in this group, before RhsExpr's, so the statement form wins the `else` over the `if` expression.
+      - { lhs: ThenExpr, rhs: [Expr], action: thenExpr }
+      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', ThenExpr, 'else', Stmt], action: stmtIfReturnElse }
       # An assignment then-arm with no `;` of its own, ended by the `else` (std.fmt.float.formatScientific's
       # `if (olength > 1) index += olength - 1 else index -= 1;`, task #96). It shares its whole prefix with the
       # assignment STATEMENT (`Expr op= RhsExpr ';'`), so the decision is the 1-token split after the value: `;`
       # ends the statement, `else` the arm. Both go through AssignOp, so the operator reduces the same way in each.
       - { lhs: AssignArm, rhs: [Expr, AssignOp, RhsExpr], action: assignArm }
       - { lhs: Stmt, rhs: ['if', '(', Expr, ')', AssignArm, 'else', Stmt], action: stmtIfAssignElse }
-      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', JumpExpr, 'else', Stmt], action: stmtIfCaptureReturnElse }
-      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', JumpExpr, 'else', '|', IDENT, '|', Stmt], action: stmtIfCaptureReturnErrElse }
+      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', ThenExpr, 'else', Stmt], action: stmtIfCaptureReturnElse }
+      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', ThenExpr, 'else', '|', IDENT, '|', Stmt], action: stmtIfCaptureReturnErrElse }
 
       # Payload-capturing `while` — mirrors the if-capture family, in the same rightmost/dangling-else
       # group (the `else` shift-reduce is resolved identically). `while (opt) |x| body` binds an
@@ -582,6 +589,8 @@ productions:
       # { return EnumTag; }`): the else runs when the loop ends without a `break`. In this dangling-else group, as the
       # while-capture else is, so a Stmt body followed by `else` shifts into it.
       - { lhs: LoopStmt, rhs: ['for', '(', Expr, ')', '|', IDENT, '|', Stmt, 'else', Stmt],           action: stmtForSliceElse }
+      # The counted range with an `else` (std's Io/Writer.zig: `for (0..max_bytes) |_| { … } else unreachable;`).
+      - { lhs: LoopStmt, rhs: ['for', '(', Expr, '..', Expr, ')', '|', IDENT, '|', Stmt, 'else', Stmt], action: stmtForRangeElse }
       - { lhs: LoopStmt, rhs: ['for', '(', ForObjs, ",?", ')', '|', ForCaps, '|', Stmt, 'else', Stmt], action: stmtForMultiElse }
       # The same with a trailing comma after the objects (std.json.static's innerParse: `inline for (…, 0..,) |…| { … }
       # else { … }`, task #210).
@@ -1106,6 +1115,10 @@ productions:
     rules:
       - { lhs: CurlySuffix, rhs: [Type] }
       - { lhs: CurlySuffix, rhs: [Type, '{', FieldInits?, '}'], action: typedStructInit }
+      # A struct literal typed by an inline `struct { … }` (std's debug/Dwarf.zig: `std.sort.pdq(…, struct { … }{ .keys = … })`).
+      # After the struct's `}`, a `{` selects the literal and a `;` the container declaration that shares the prefix.
+      - { lhs: CurlySuffix, rhs: [InlineStructTy, '{', FieldInits?, '}'], action: typedStructInit }
+      - { lhs: InlineStructTy, rhs: ['struct', '{', FieldDecls?, '}'], action: inlineStructType }
 
   # Type-level prefix ops (right-assoc): `?T`, `*T`, `[]T`, `[N]T`. These sit at
   # operand position; `*`/`&`/`[` here are the SAME tokens as binary mul / bitwise-
@@ -1143,6 +1156,9 @@ productions:
       # pointer is a documented cut (use a manual scan loop).
       - { lhs: Type, rhs: ['[*:0]', Type],          action: tySentPtr }
       - { lhs: Type, rhs: ['[*:0]', 'const', Type], action: tySentPtrConst }
+      # With an alignment (std's os/uefi/device_path.zig: `[*:0]align(1) const u16`).
+      - { lhs: Type, rhs: ['[*:0]', PtrAlign, Type],          action: tySentPtrAlign }
+      - { lhs: Type, rhs: ['[*:0]', PtrAlign, 'const', Type], action: tySentPtrConstAlign }
       - { lhs: Type, rhs: ['[:0]', Type],           action: tySentSlice }
       - { lhs: Type, rhs: ['[:0]', 'const', Type],  action: tySentSliceConst }
       - { lhs: Type, rhs: ['[', ']', Type],       action: tySlice }
@@ -1386,6 +1402,9 @@ productions:
   - derivation: none
     rules:
       - { lhs: PtrAlign, rhs: ['align', '(', Expr, ')'], action: ptrAlign }
+      # `*allowzero anyopaque` (std's c/netbsd.zig): address 0 is allowed. Dotcc's pointers are raw, so it is a no-op attribute
+      # in the same slot as an alignment.
+      - { lhs: PtrAlign, rhs: ['allowzero'], action: ptrAllowzero }
 
   - derivation: none
     rules:
@@ -1405,6 +1424,8 @@ productions:
       # `.`, a token no Arg is followed by, so the choice after `}` is still one token.
       - { lhs: Arg, rhs: ['struct', '{', FieldDecls, '}'],                     action: inlineStructType }
       - { lhs: Arg, rhs: ['enum', '{', EnumFields?, '}'],                       action: inlineEnumType }
+      # With a tag type (std's Io/Reader.zig: `r.takeEnum(enum(u8) { … }, .little)`).
+      - { lhs: Arg, rhs: ['enum', '(', Type, ')', '{', EnumFields?, '}'],       action: inlineEnumTypeTyped }
       - { lhs: Arg, rhs: ['union', '(', 'enum', ')', '{', UnionVariants, '}'], action: inlineUnionEnumType }
       - { lhs: Arg, rhs: ['union', '{', UnionVariants, '}'],                   action: inlineUnionType }
 
@@ -1426,6 +1447,7 @@ productions:
     rules:
       - { lhs: ProngType, rhs: ['struct', '{', FieldDecls?, '}'],                    action: inlineStructType }
       - { lhs: ProngType, rhs: ['enum', '{', EnumFields?, '}'],                       action: inlineEnumType }
+      - { lhs: ProngType, rhs: ['enum', '(', Type, ')', '{', EnumFields?, '}'],       action: inlineEnumTypeTyped }
       - { lhs: ProngType, rhs: ['union', '(', 'enum', ')', '{', UnionVariants, '}'], action: inlineUnionEnumType }
       - { lhs: ProngType, rhs: ['union', '{', UnionVariants, '}'],                   action: inlineUnionType }
       # The layout forms (std's Io/fiber.zig: `.aarch64 => extern struct { … },`), as in a field's type.
@@ -1734,6 +1756,9 @@ productions:
   - derivation: none
     rules:
       - { lhs: UnionVariant, rhs: [IDENT, ':', AType], action: unionVariantPayload }
+      # A payload chosen by a comptime `if` (std's Progress.zig: `windows_api: if (is_windows) WindowsApi else noreturn,`): the
+      # same record, whose type lowers through LowerType's `if` fold.
+      - { lhs: UnionVariant, rhs: [IDENT, ':', IfExpr], action: unionVariantPayload }
       - { lhs: UnionVariant, rhs: [IDENT],             action: unionVariantVoid }
       # `undefined,` / `null,` (std.builtin.Type's void variants): zig's primitive VALUES, but plain names in a
       # container's field list. dotcc lexes them as keywords, so the variant admits them by name.
@@ -1920,6 +1945,7 @@ lexer:
     - { symbol: 'export',   match: 'export' }
     - { symbol: 'callconv', match: 'callconv' }
     - { symbol: 'align',    match: 'align' }
+    - { symbol: 'allowzero', match: 'allowzero' }
     - { symbol: 'asm',      match: 'asm' }
     - { symbol: 'volatile', match: 'volatile' }
     - { symbol: 'linksection', match: 'linksection' }
