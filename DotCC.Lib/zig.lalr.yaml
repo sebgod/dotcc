@@ -391,6 +391,9 @@ productions:
       # library defines, always typed and never initialized. After `extern STRING?`, `fn` versus `threadlocal`/`var`
       # is one token. dotcc binds extern functions but not extern data, so lowering rejects a reference to one.
       - { lhs: Decl, rhs: [pub?, 'extern', STRING?, threadlocal?, 'var', IDENT, ':', AType, ';'], action: externVar }
+      # An extern CONSTANT (std's os/plan9.zig: `pub extern const etext: anyopaque;`, a linker symbol). Rejected by name on
+      # read, as an extern var is.
+      - { lhs: Decl, rhs: [pub?, 'extern', STRING?, 'const', IDENT, ':', AType, ';'], action: externConst }
       # Container decls — Zig binds a struct/enum TYPE to a `const` name (types are
       # values). A struct/enum RHS isn't an `RhsExpr`, so these are distinct Decl forms,
       # NOT VarDecl: the `struct`/`enum` keyword right after `=` is a clean 1-token shift
@@ -604,6 +607,9 @@ productions:
       # `while (offset < self.bit_length) { if (mask[0] != 0) break; … } else return null;`), in this group for the same
       # dangling-else reason.
       - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', Stmt, 'else', Stmt],                         action: stmtWhileElse }
+      # The `while (c) : (i += 1)` form's twin (std's coff.zig: `while (i < n) : (i += 1) { … break; } else return null;`): the else runs when the
+      # condition ends the loop, not after a `break`.
+      - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', ':', '(', Expr, AssignOp, RhsExpr, ')', Stmt, 'else', Stmt], action: stmtWhileContAssignElse }
       # `while (opt) |x| : (cont) body` — capture-while WITH a continue-expression (runs after each
       # iteration AND on `continue`), lowered to the C `For` IR (post = cont) so `continue` runs the
       # cont — faithful to Zig, like the non-capture stmtWhileCont pair. After `'|' IDENT '|'`, a `':'`
@@ -969,10 +975,10 @@ productions:
       # `break v`); the `else RhsExpr` clause supplies the value on normal completion. The `while`-else
       # and the most common `for (slice) |x|`-else forms, each optionally labeled (`lbl: … else …`,
       # so `break :lbl v` targets it). A brace-less value-loop body is a cut.
-      - { lhs: LoopExpr, rhs: ['while', '(', Expr, ')', Block, 'else', RhsExpr],                          action: whileElseExpr }
-      - { lhs: LoopExpr, rhs: ['for', '(', Expr, ')', '|', IDENT, '|', Block, 'else', RhsExpr],           action: forElseExpr }
-      - { lhs: LoopExpr, rhs: [IDENT, ':', 'while', '(', Expr, ')', Block, 'else', RhsExpr],              action: labeledWhileElseExpr }
-      - { lhs: LoopExpr, rhs: [IDENT, ':', 'for', '(', Expr, ')', '|', IDENT, '|', Block, 'else', RhsExpr], action: labeledForElseExpr }
+      - { lhs: LoopExpr, rhs: ['while', '(', Expr, ')', Block, 'else', IfArm],                          action: whileElseExpr }
+      - { lhs: LoopExpr, rhs: ['for', '(', Expr, ')', '|', IDENT, '|', Block, 'else', IfArm],           action: forElseExpr }
+      - { lhs: LoopExpr, rhs: [IDENT, ':', 'while', '(', Expr, ')', Block, 'else', IfArm],              action: labeledWhileElseExpr }
+      - { lhs: LoopExpr, rhs: [IDENT, ':', 'for', '(', Expr, ')', '|', IDENT, '|', Block, 'else', IfArm], action: labeledForElseExpr }
       # `const mask = for (self.masks) |mask| { if (mask != 0) break mask; … } else return null;`
       # (std.bit_set.ArrayBitSet.findFirstSet): the else RETURNS from the function instead of yielding, so the
       # loop's value comes from its `break`s alone. Since zig-grammar-peg P1b a `return` is an RhsExpr, so these are the
@@ -980,15 +986,15 @@ productions:
       # A value `while` with an assignment continue-expression (std.bit_set.ArrayBitSet.eql:
       # `return while (i < num_masks) : (i += 1) { … break false; } else true;`). After `)`, a `:` or a `{`
       # decides between this and the plain value `while` in one token.
-      - { lhs: LoopExpr, rhs: ['while', '(', Expr, ')', ':', '(', Expr, AssignOp, RhsExpr, ')', Block, 'else', RhsExpr], action: whileContAssignElseExpr }
+      - { lhs: LoopExpr, rhs: ['while', '(', Expr, ')', ':', '(', Expr, AssignOp, RhsExpr, ')', Block, 'else', IfArm], action: whileContAssignElseExpr }
       # The by-ref capture (`for (&self.masks) |*mask| { … break mask; } else return null;`, toggleFirstSet): the
       # break yields the element POINTER. After `|`, a `*` or an IDENT decides the capture form in one token.
-      - { lhs: LoopExpr, rhs: ['for', '(', Expr, ')', '|', '*', IDENT, '|', Block, 'else', RhsExpr],    action: forRefElseExpr }
+      - { lhs: LoopExpr, rhs: ['for', '(', Expr, ')', '|', '*', IDENT, '|', Block, 'else', IfArm],    action: forRefElseExpr }
       # The comptime-unrolled value loop (std.enums.tagName, task #131: `return inline for (field_names, field_values)
       # |f_name, f_value| { if (@intFromEnum(e) == f_value) break f_name; } else null;`), over one comptime list or several
       # in lockstep. `inline` is not in FIRST of any other RhsExpr form, so it decides the production in one token.
-      - { lhs: LoopExpr, rhs: ['inline', 'for', '(', Expr, ')', '|', IDENT, '|', Block, 'else', RhsExpr],       action: inlineForElseExpr }
-      - { lhs: LoopExpr, rhs: ['inline', 'for', '(', ForObjs, ",?", ')', '|', ForCaps, '|', Block, 'else', RhsExpr], action: inlineForMultiElseExpr }
+      - { lhs: LoopExpr, rhs: ['inline', 'for', '(', Expr, ')', '|', IDENT, '|', Block, 'else', IfArm],       action: inlineForElseExpr }
+      - { lhs: LoopExpr, rhs: ['inline', 'for', '(', ForObjs, ",?", ')', '|', ForCaps, '|', Block, 'else', IfArm], action: inlineForMultiElseExpr }
       # A range, multi-object or capture-`while` value loop (std's Io/Dispatch.zig: `const data = for (operation.data, 0..)
       # |buffer, data_index| { … } else break :result …;`, crypto/bcrypt.zig: `key_remainder -= for (0..amt) |i| { … } else 0;`,
       # heap/ArenaAllocator.zig: `const node: *Node = while (it) |node| { … } else { continue; };`). The `else` is an IfArm,
@@ -1273,6 +1279,11 @@ productions:
       # A `comptime` parameter in a function TYPE (std.Options' `logFn: fn (comptime message_level: log.Level, …)
       # void`): parsed so the declaring container parses; lowering one is a named cut (a generic function type).
       - { lhs: FnTypeParam, rhs: ['comptime', IDENT, ':', Type], action: fnTypeParamComptime }
+      # The unnamed comptime form (std's sort.zig: `fn (comptime type, anytype, anytype, comptime anytype) void`) and a C
+      # variadic tail (os/uefi: `*const fn (handle: *?Handle, ...) callconv(cc) Status`). Both parse so the declaring container
+      # does; lowering either is a named cut.
+      - { lhs: FnTypeParam, rhs: ['comptime', Type],  action: fnTypeParamComptimeUnnamed }
+      - { lhs: FnTypeParam, rhs: ['...'],             action: fnTypeParamVariadic }
 
   # Postfix chain (left-assoc): field access, deref, optional-unwrap, index, call.
   - derivation: leftmost
@@ -1594,6 +1605,8 @@ productions:
       # An `extern fn` prototype as a container member (std's Build/abi.zig: `pub extern fn fuzzer_init(…) void;`), the
       # top-level `externFnProto`'s shape. Parsed and dropped: a call to one is an unresolved name, loudly.
       - { lhs: ContainerDeclaration, rhs: [pub?, 'extern', STRING?, 'fn', IDENT, '(', Params?, ')', CallConv, Type, ';'], action: memberExternFn }
+      # The `extern var` member twin (std's c.zig: `extern threadlocal var errno: c_int;` in a container), dropped the same way.
+      - { lhs: ContainerDeclaration, rhs: [pub?, 'extern', STRING?, threadlocal?, 'var', IDENT, ':', AType, ';'], action: memberExternVar }
       # A container-level `comptime { … }` block (hash_map.zig's `comptime { assert(@sizeOf(Metadata) == 1); }`):
       # analysis-only, dropped like the top-level form (topComptime). `comptime` starts no other member.
       - { lhs: ContainerDeclaration, rhs: ['comptime', Block],      action: memberComptime }

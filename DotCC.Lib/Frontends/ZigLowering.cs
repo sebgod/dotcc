@@ -1752,7 +1752,8 @@ internal sealed partial class ZigLowering
             switch (d.Content)
             {
                 case Zig.ExternFnProto f: DeclareExternFn(f.Arg4, f.Arg6, f.Arg9); break;  // pub? extern STRING? fn IDENT ( Params? ) CallConv Type ;
-                case Zig.ExternVar v:     _externVars.Add(Tok(v.Arg5)); break;            // pub? extern STRING? threadlocal? var IDENT : Type ;
+                case Zig.ExternVar v:     _externVars.Add(Tok(v.Arg5)); break;
+                case Zig.ExternConst c:   _externVars.Add(Tok(c.Arg4)); break;            // pub? extern STRING? const IDENT : Type ;            // pub? extern STRING? threadlocal? var IDENT : Type ;
                 // The optional CallConv (Milestone R, part 5) sits between `)` and the return, so the
                 // return type + body are one slot further right than the pre-CallConv layout.
                 case Zig.FnDef f:          AddFnEntry(Export(f.Arg1, DeclaredEarlyOr(f.Arg1, () => DeclareFn(f.Arg1, f.Arg3, f.Arg7, f.Arg8, errUnion: f.Arg6 is not null)))); break;   // `!T` return → ErrorUnion(T)

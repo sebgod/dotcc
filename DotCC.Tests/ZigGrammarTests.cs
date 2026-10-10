@@ -252,6 +252,18 @@ public sealed class ZigGrammarTests
     }
 
     [Fact]
+    public void Small_std_shapes_5_parse()
+    {
+        FirstNode<Zig.MemberExternVar>("const C = struct { extern threadlocal var errno: c_int; };").ShouldNotBeNull();
+        FirstNode<Zig.ExternConst>("pub extern const etext: anyopaque;").ShouldNotBeNull();
+        FirstNode<Zig.StmtWhileContAssignElse>("fn f(n: u32) ?u32 { var i: u32 = 0; while (i < n) : (i += 1) { break; } else return null; return i; }")
+            .ShouldNotBeNull();
+        FirstNode<Zig.ForElseExpr>("fn f(xs: []u8) u8 { return for (xs) |x| { break x; } else { return 0; }; }").Arg9.Content.ShouldBeOfType<Zig.Block>();
+        FirstNode<Zig.FnTypeParamVariadic>("const F = *const fn (h: *u8, ...) callconv(.c) u32;").ShouldNotBeNull();
+        FirstNode<Zig.FnTypeParamComptimeUnnamed>("const F = fn (comptime type, anytype) void;").ShouldNotBeNull();
+    }
+
+    [Fact]
     public void Small_std_shapes_parse()
     {
         // `struct { … }{ … }`: a typed literal whose type is an inline struct; `const X = struct {…};` keeps its decl form.
