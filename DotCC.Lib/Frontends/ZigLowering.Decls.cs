@@ -853,6 +853,7 @@ internal sealed partial class ZigLowering
             case Zig.MemberNoinlineMethod mm: methods.Add(mm.Arg2); return true;              // pub? 'noinline' FnDef (an optimizer hint, task #177)
             case Zig.MemberComptime:          return true;   // `comptime { … }`: analysis-only, dropped like the top-level form
             case Zig.MemberTest:              return true;   // a `test` block (std.math.Order's `test invert`): dropped
+            case Zig.MemberExternFn:          return true;   // an `extern fn` prototype (std's Build/abi.zig): a call to it is unresolved
             case Zig.MemberConst mc:          consts.Add(mc.Arg1); return true;               // pub? VarDecl
             case Zig.MemberContainer cc:      containers?.Add(cc.Arg1); return true;          // pub? ContainerDecl
             default:                          return false;

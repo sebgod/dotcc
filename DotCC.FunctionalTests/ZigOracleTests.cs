@@ -7814,6 +7814,60 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{} {}\\n\", .{ findBig(&a, 5), findBig(&a, 50) });\n" +
             "}\n", 0,
             "2 99\n99 93\n11 3000" },
+        // Small std shapes 3: an unlabeled `break v` in a prong and in an `if` arm (std's Io/Dispatch.zig, zig/Ast.zig), a value
+        // `while (true)` with no `else`, a `for (…) |*x| … else` statement (coff.zig) and an `extern fn` member (Build/abi.zig).
+        new object[] { "small_std_shapes_3",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "const Kind = enum { skip, take, stop };\n" +
+            "\n" +
+            "const Hooks = struct {\n" +
+            "    pub extern fn never_called(x: u32) void;\n" +
+            "    pub fn twice(x: u32) u32 {\n" +
+            "        return 2 * x;\n" +
+            "    }\n" +
+            "};\n" +
+            "\n" +
+            "fn firstTaken(kinds: []const Kind) usize {\n" +
+            "    const at: usize = for (kinds, 0..) |k, i| {\n" +
+            "        switch (k) {\n" +
+            "            .skip => continue,\n" +
+            "            else => break i,\n" +
+            "        }\n" +
+            "    } else kinds.len;\n" +
+            "    return at;\n" +
+            "}\n" +
+            "\n" +
+            "fn retryUntil(limit: u32) u32 {\n" +
+            "    var tries: u32 = 0;\n" +
+            "    const got: u32 = while (true) {\n" +
+            "        tries += 1;\n" +
+            "        switch (tries % 4) {\n" +
+            "            0 => break tries * 10,\n" +
+            "            else => if (tries > limit) break 0,\n" +
+            "        }\n" +
+            "    };\n" +
+            "    return got;\n" +
+            "}\n" +
+            "\n" +
+            "fn bump(xs: []u32, stop: u32) !void {\n" +
+            "    for (xs) |*x| {\n" +
+            "        if (x.* == stop) break;\n" +
+            "        x.* += 1;\n" +
+            "    } else return error.NotFound;\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() void {\n" +
+            "    const kinds = [_]Kind{ .skip, .skip, .take, .stop };\n" +
+            "    var xs = [_]u32{ 1, 2, 3 };\n" +
+            "    const missing = if (bump(&xs, 9)) |_| false else |_| true;\n" +
+            "    bump(&xs, 3) catch unreachable;\n" +
+            "    std.debug.print(\"{} {}\\n\", .{ firstTaken(&kinds), firstTaken(kinds[0..2]) });\n" +
+            "    std.debug.print(\"{} {}\\n\", .{ retryUntil(10), retryUntil(2) });\n" +
+            "    std.debug.print(\"{} {} {} {}\\n\", .{ missing, xs[0], xs[1], xs[2] });\n" +
+            "    std.debug.print(\"{}\\n\", .{Hooks.twice(21)});\n" +
+            "}\n", 0,
+            "2 2\n40 0\ntrue 3 3 4\n42" },
         // Task #140: std.crypto.blake3's shapes: a late-declared struct const in a field extent, `@intCast` slice bounds,
         // open slices of a many-item pointer, and an array local copied through a pointer.
         new object[] { "blake3_shapes",
