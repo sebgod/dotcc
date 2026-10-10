@@ -4,7 +4,8 @@
 `if` expression as an open primary; probe 422 to 433) and P1b (`return` / `break` / `continue` as open primaries; probe
 433 to 438). P2 started: the `else |err|` statement form without a then-capture (probe 438 to 443). P3a done:
 the else-less `if` expression and block arms (probe 443 to 452). P3 first step done: `switch` as a closed
-primary (probe 466 to 473); labeled blocks and value loops as primaries remain.
+primary (probe 466 to 473); labeled blocks and value loops as primaries remain. P5 started: an inline
+`struct { … }` is a Type anywhere (probe 473 to 486).
 
 ## Why
 
@@ -152,3 +153,14 @@ at statement start on tokens that begin the next statement (`*p = 1;` after a `s
 and kept out: a labeled block as a primary (`IDENT ':'` as an expression start met field declarations, and a container
 field `name: switch …` reduced as a labeled switch), and value loops as open primaries (a value `inline for` met the
 inline prong's case values, a real reduce/reduce conflict). Both need a narrower form.
+
+**P5, first step as landed.** `Type -> InlineStructTy`: an inline `struct { … }` is a Type like any other, so it
+nests (`[N]struct {…}`, `*struct {…}`, `?*const struct {…}`), types a literal (`[_]struct {…}{…}`, std's
+compress/flate/token.zig) and is an argument, prong value or `if` arm without a copy of its own. Retired: the AType,
+Arg, ProngType and TypeArm struct rules and the InlineStructTy CurlySuffix (all reached through Type now;
+`typeArmStruct` lowering reads InlineStructType). An `if`-typed field takes a default and shares the plain
+`structField` / `structFieldDefault` records (`structFieldIf` retired; LowerType folds the `if`). The only new
+precedence decisions are `const X = struct {…};` and `return struct {…};` keeping their declaration forms on `;`.
+The named declarations stay as they are; `enum` / `union` and the layout forms are the next candidates. Oracle row
+`inline_struct_types` also caught a lowering bug: a struct-array field initialized from a tuple copied 0 bytes,
+because a struct element's size is the C# compiler's to settle (`count * sizeof(T)` now).
