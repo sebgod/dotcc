@@ -683,9 +683,9 @@ internal sealed partial class ZigLowering
             }
             // The arm an `if (c) enum {…} else enum {…}` took (the IfExpr case above folds the condition): it reifies as
             // the inline type it spells (one type per source site, as in an annotation).
-            case Zig.TypeArmEnum e:
+            case Zig.InlineEnumType e:
                 return (ReifyInlineEnum(cur, e.Arg2), null);
-            case Zig.TypeArmEnumTyped et:
+            case Zig.InlineEnumTypeTyped et:
                 return (ReifyInlineEnum(cur, et.Arg5, et.Arg2), null);
             case Zig.InlineStructType s:
                 return (ReifyInlineStruct(cur, s.Arg2), null);

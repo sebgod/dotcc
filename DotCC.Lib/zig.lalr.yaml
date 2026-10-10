@@ -945,10 +945,6 @@ productions:
       # (`struct { … }.f`) and anything else ends the TypeArm, the same one-token split as the two-TypeArm form.
       # The captured form (std.mem.eqlBytes' `const Scan = if (std.simd.suggestVectorLength(u8)) |vec_size| struct {…}
       # else struct {…};`): after the capture, `struct` / `enum` starts a TypeArm, not a RhsExpr.
-      - { lhs: TypeArm, rhs: ['enum', '{', EnumFields?, '}'],   action: typeArmEnum }
-      # A tagged enum arm (std.Io.File's `Permissions = … orelse if (is_windows) enum(DWORD) { … } else …`, GH #282),
-      # members and methods as a named `enum(T)` has. After `enum`, `(` versus `{` is one token.
-      - { lhs: TypeArm, rhs: ['enum', '(', Type, ')', '{', EnumFields?, '}'], action: typeArmEnumTyped }
       # Value-position captured `if` — `if (opt) |x| thenExpr else elseExpr` (S4a). The `|` after the
       # `)` cannot start a RhsExpr (it is only an infix bitwise-or), so this is conflict-free with the
       # plain ifExpr above. `else` is mandatory (an expression yields a value on both paths). Mirrors
@@ -1187,6 +1183,18 @@ productions:
       # and is an argument or a prong value. After `{`, the first member's `:` splits it from the tuple form.
       - { lhs: Type, rhs: [InlineStructTy] }
       - { lhs: InlineStructTy, rhs: ['struct', '{', FieldDecls?, '}'], action: inlineStructType }
+      # The other inline containers are Types the same way (zig-grammar-peg P5): `?enum { colon, expr }` (std's
+      # zig/AstSmith.zig), `kind: enum(u1) { int, bytes }` (Build/abi.zig), `x: union(enum) { a: u8 }`, `@as(enum { x, y }, .y)`,
+      # a prong value or `if` arm, and the layout forms (`extern struct {…}` / `extern union {…}` C-ABI records, `packed
+      # struct(u8) {…}` / `packed union {…}` bit fields; a backing integer is allowed after either layout and only `packed` uses
+      # it). The named declarations (`const E = enum {…};`) keep their own forms on `;`.
+      - { lhs: Type, rhs: ['enum', '{', EnumFields?, '}'],   action: inlineEnumType }
+      - { lhs: Type, rhs: ['enum', '(', Type, ')', '{', EnumFields?, '}'], action: inlineEnumTypeTyped }
+      - { lhs: Type, rhs: ['union', '(', 'enum', ')', '{', UnionVariants, '}'], action: inlineUnionEnumType }
+      - { lhs: Type, rhs: ['union', '{', UnionVariants, '}'],                   action: inlineUnionType }
+      - { lhs: Type, rhs: [ContainerLayout, 'struct', '{', FieldDecls?, '}'],                   action: inlineLayoutStructType }
+      - { lhs: Type, rhs: [ContainerLayout, 'struct', '(', Type, ')', '{', FieldDecls?, '}'],   action: inlineLayoutStructTypeBacked }
+      - { lhs: Type, rhs: [ContainerLayout, 'union', '{', UnionVariants, '}'],                  action: inlineLayoutUnionType }
       # Function-pointer TYPE `fn (Params) RetType` (Milestone W, part 1a) — at a Type position
       # (a const/var annotation, a param/return type), lowered to a managed `delegate*<…>` (a bare
       # `CType.Func`); `*const fn (…) R` / `?*const fn (…) R` compose for free through the existing
@@ -1226,21 +1234,6 @@ productions:
   - derivation: none
     rules:
       - { lhs: AType, rhs: [Type] }
-      # The enum twin: `comptime sign: enum { pos, neg }` (std's parseIntWithSign). Same annotation-only
-      # slot, so the value-position `const E = enum {…}` (enumDecl) keeps no competitor.
-      - { lhs: AType, rhs: ['enum', '{', EnumFields?, '}'],   action: inlineEnumType }
-      # With an explicit tag type: `kind: enum(u1) { int, bytes },` (std's Build/abi.zig).
-      - { lhs: AType, rhs: ['enum', '(', Type, ')', '{', EnumFields?, '}'], action: inlineEnumTypeTyped }
-      # The union twins (task #104): `x: union(enum) { a: u8, b: u16 }` as a parameter / field / annotation type. The
-      # same annotation-only slot, so the value-position `const U = union(enum) {…}` (unionDeclEnum) keeps no competitor.
-      - { lhs: AType, rhs: ['union', '(', 'enum', ')', '{', UnionVariants, '}'], action: inlineUnionEnumType }
-      - { lhs: AType, rhs: ['union', '{', UnionVariants, '}'],                   action: inlineUnionType }
-      # The layout twins (road-to-zig-std S9): a field typed `extern struct {…}` / `extern union {…}` (C-ABI records in
-      # std's os and c files) or `packed struct(u8) {…}` / `packed union {…}` (bit fields). Same annotation-only slot.
-      # ContainerLayout is `extern` or `packed`; a backing integer is allowed after either and only `packed` uses it.
-      - { lhs: AType, rhs: [ContainerLayout, 'struct', '{', FieldDecls?, '}'],                   action: inlineLayoutStructType }
-      - { lhs: AType, rhs: [ContainerLayout, 'struct', '(', Type, ')', '{', FieldDecls?, '}'],   action: inlineLayoutStructTypeBacked }
-      - { lhs: AType, rhs: [ContainerLayout, 'union', '{', UnionVariants, '}'],                  action: inlineLayoutUnionType }
 
   - derivation: none
     rules:
@@ -1405,15 +1398,6 @@ productions:
       # task #178). `IDENT ':'` starts it where an Expr's IDENT would reduce to a Primary; no Primary is ever followed by
       # ':' (the invariant LabeledBlock already relies on as a RhsExpr), so the ':' lookahead decides.
       - { lhs: Arg, rhs: [LabeledBlock] }
-      # An inline container TYPE as an argument (`@as(struct { a: u8 }, .{ .a = 4 })`, `@as(enum { x, y }, .y)`,
-      # `@as(union(enum) { … }, …)`, task #110), reusing AType's inline actions. `enum` / `union` are not in
-      # FIRST(Expr); `struct {…}` shares its prefix with the closure idiom `struct {…}.f`, which continues with
-      # `.`, a token no Arg is followed by, so the choice after `}` is still one token.
-      - { lhs: Arg, rhs: ['enum', '{', EnumFields?, '}'],                       action: inlineEnumType }
-      # With a tag type (std's Io/Reader.zig: `r.takeEnum(enum(u8) { … }, .little)`).
-      - { lhs: Arg, rhs: ['enum', '(', Type, ')', '{', EnumFields?, '}'],       action: inlineEnumTypeTyped }
-      - { lhs: Arg, rhs: ['union', '(', 'enum', ')', '{', UnionVariants, '}'], action: inlineUnionEnumType }
-      - { lhs: Arg, rhs: ['union', '{', UnionVariants, '}'],                   action: inlineUnionType }
 
   - derivation: none
     rules:
@@ -1428,17 +1412,6 @@ productions:
       - { lhs: ForCaps, rhs: [ForCaps, ',', ForCap], action: forCapsCons }
       - { lhs: ForCap, rhs: [IDENT],                 action: forCapVal }
       - { lhs: ForCap, rhs: ['*', IDENT],            action: forCapRef }
-
-  - derivation: none
-    rules:
-      - { lhs: ProngType, rhs: ['enum', '{', EnumFields?, '}'],                       action: inlineEnumType }
-      - { lhs: ProngType, rhs: ['enum', '(', Type, ')', '{', EnumFields?, '}'],       action: inlineEnumTypeTyped }
-      - { lhs: ProngType, rhs: ['union', '(', 'enum', ')', '{', UnionVariants, '}'], action: inlineUnionEnumType }
-      - { lhs: ProngType, rhs: ['union', '{', UnionVariants, '}'],                   action: inlineUnionType }
-      # The layout forms (std's Io/fiber.zig: `.aarch64 => extern struct { … },`), as in a field's type.
-      - { lhs: ProngType, rhs: [ContainerLayout, 'struct', '{', FieldDecls?, '}'],                 action: inlineLayoutStructType }
-      - { lhs: ProngType, rhs: [ContainerLayout, 'struct', '(', Type, ')', '{', FieldDecls?, '}'], action: inlineLayoutStructTypeBacked }
-      - { lhs: ProngType, rhs: [ContainerLayout, 'union', '{', UnionVariants, '}'],                action: inlineLayoutUnionType }
 
   # A named field init's value: an Expr, or `{}` (void; `{` is not in FIRST(Expr), so conflict-free).
   - derivation: none
@@ -1518,12 +1491,6 @@ productions:
       - { lhs: Prong, rhs: [CaseVals, '=>', '|', IDENT, '|', Expr, AssignOp, RhsExpr], action: prongCaptureAssign }
       # The by-reference twin (std's http.zig: `.content_length => |*len| len.* -= written + w.end,`).
       - { lhs: Prong, rhs: [CaseVals, '=>', '|', '*', IDENT, '|', Expr, AssignOp, RhsExpr], action: prongCaptureRefAssign }
-      # A container TYPE as a prong's value (std.MultiArrayList's `const Elem = switch (@typeInfo(T)) { .@"struct" => T,
-      # .@"union" => |u| struct { … }, … }`, task #108): the plain / capture expr prong actions over a ProngType, so every
-      # consumer of those prongs sees a type item. The closure idiom `struct {…}.f` continues with `.`, which no Prong is
-      # followed by, so the choice after `}` is one token.
-      - { lhs: Prong, rhs: [CaseVals, '=>', ProngType],                  action: prongExpr }
-      - { lhs: Prong, rhs: [CaseVals, '=>', '|', IDENT, '|', ProngType], action: prongCaptureExpr }
       # A `comptime { … }` prong body (std.math.sqrt's `.comptime_int => comptime { … }`): after `comptime`,
       # a `{` starts no Prefix (the `comptime` value operator's operand), so this is a clean shift.
       - { lhs: Prong, rhs: [CaseVals, '=>', 'comptime', Block],          action: prongComptimeBlock }
@@ -1859,7 +1826,6 @@ productions:
       - { lhs: PrefixO, rhs: [OpenPrimary] }
       - { lhs: OpenPrimary, rhs: [IfExpr] }
       - { lhs: IfArm, rhs: [RhsExpr] }
-      - { lhs: IfArm, rhs: [TypeArm] }
       # A non-empty `{ … }` block arm (zig-grammar-peg P3a; zig's Block is a PrimaryExpr): `.linux => if (c) { … } else { … },`
       # (std's Thread.zig). Its record is the statement Block's. An empty `{}` arm stays the void value RhsExpr gives it.
       - { lhs: IfArm, rhs: ['{', Stmts, '}'], action: block }
