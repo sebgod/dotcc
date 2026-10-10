@@ -143,6 +143,14 @@ public sealed class ZigGrammarTests
     }
 
     [Fact]
+    public void A_statement_if_takes_an_error_capture_without_a_then_capture()
+    {
+        // zig-grammar-peg P2 (std's Io/Dir.zig): the success value is discarded, the error bound.
+        var s = FirstNode<Zig.StmtIfElseErr>("fn f() void { if (g()) { return; } else |err| switch (err) { else => {} } }");
+        s.Arg4.Content.ShouldBeOfType<Zig.Block>();
+    }
+
+    [Fact]
     public void The_shapes_the_old_jump_copies_broke_still_parse_right()
     {
         // `x orelse return a == b & c` returns `a == (b & c)` (& binds tighter than ==); with the jump as a plain Bitwise

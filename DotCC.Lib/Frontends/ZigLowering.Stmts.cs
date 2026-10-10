@@ -192,6 +192,7 @@ internal sealed partial class ZigLowering
             case Zig.StmtIfCaptureRef f:     return LowerIfCapture(f.Arg2, Tok(f.Arg6), f.Arg8, null, null, byRef: true);
             case Zig.StmtIfCaptureRefElse f: return LowerIfCapture(f.Arg2, Tok(f.Arg6), f.Arg8, f.Arg10, null, byRef: true);
             case Zig.StmtIfCaptureErrElse f: return LowerIfCapture(f.Arg2, Tok(f.Arg5), f.Arg7, f.Arg12, Tok(f.Arg10));
+            case Zig.StmtIfElseErr f:        return LowerIfCapture(f.Arg2, "_", f.Arg4, f.Arg9, Tok(f.Arg7));   // if (eu) S else |e| S
             // `if (c) return x else …;` — a `return Expr` then-arm (ReturnArm), otherwise the same `if`.
             case Zig.StmtIfReturnElse f:           return LowerIfStmt(f.Arg2, f.Arg4, f.Arg6);
             case Zig.StmtIfCaptureReturnElse f:    return LowerIfCapture(f.Arg2, Tok(f.Arg5), f.Arg7, f.Arg9, null);

@@ -7509,6 +7509,43 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{d} {d} {d}\\n\", .{ scan(), pick(true, 4), pick(false, 4) });\n" +
             "}\n", 0,
             "1000 10 6\n7 8 4\n24 8 5" },
+        // zig-grammar-peg P2: an error-union `if` statement with an `else |err|` capture but no then-capture (std's Io/Dir.zig),
+        // and `if (c) f() else g();` with call arms (an `if` expression statement since P1a).
+        new object[] { "if_else_error_capture_statement",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "const E = error{ Missing, Denied };\n" +
+            "\n" +
+            "var trace: u32 = 0;\n" +
+            "\n" +
+            "fn touch(x: u32) E!void {\n" +
+            "    if (x == 0) return error.Missing;\n" +
+            "    if (x > 9) return error.Denied;\n" +
+            "    trace += x;\n" +
+            "}\n" +
+            "\n" +
+            "fn mark(v: u32) void {\n" +
+            "    trace = trace * 10 + v;\n" +
+            "}\n" +
+            "\n" +
+            "fn tryTouch(x: u32) u32 {\n" +
+            "    if (touch(x)) {\n" +
+            "        return 1;\n" +
+            "    } else |err| switch (err) {\n" +
+            "        error.Missing => return 2,\n" +
+            "        error.Denied => return 3,\n" +
+            "    }\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() void {\n" +
+            "    std.debug.print(\"{d} {d} {d} {d}\\n\", .{ tryTouch(4), tryTouch(0), tryTouch(12), trace });\n" +
+            "    var c = true;\n" +
+            "    _ = &c;\n" +
+            "    if (c) mark(5) else mark(6);\n" +
+            "    if (!c) mark(7) else mark(8);\n" +
+            "    std.debug.print(\"{d}\\n\", .{trace});\n" +
+            "}\n", 0,
+            "1 2 3 4\n458" },
         // Task #140: std.crypto.blake3's shapes: a late-declared struct const in a field extent, `@intCast` slice bounds,
         // open slices of a many-item pointer, and an array local copied through a pointer.
         new object[] { "blake3_shapes",

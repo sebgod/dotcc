@@ -2,7 +2,7 @@
 
 **Status:** P0 done (this plan and the spike behind it, 2026-10-10). **P1 done**: P1a (the open/closed cascade and the
 `if` expression as an open primary; probe 422 to 433) and P1b (`return` / `break` / `continue` as open primaries; probe
-433 to 438). P2 (statement `if` as zig's IfStatement) next.
+433 to 438). P2 started: the `else |err|` statement form without a then-capture (probe 438 to 443).
 
 ## Why
 
@@ -116,3 +116,13 @@ precedence decision was read: statement / prong forms keep today's parse where t
 the label `:` shifts, and a value shifts after a value-less jump. A jump as a plain operand (`f(return 1)`) parses and is
 rejected by name in lowering. Pins in `ZigGrammarTests` (including the `return a == b & c`, `f(a orelse continue)` and
 `f() catch return` regressions the old copies were shaped around); oracle row `jumps_as_expressions`.
+
+**P2, first step.** `if (eu) Stmt else |err| Stmt` (std's Io/Dir.zig): an error-union `if` statement whose success
+value is discarded (`stmtIfElseErr`, lowered as `LowerIfCapture` with the `_` capture). `if (c) f() else g();` already
+works since P1a (an `if` expression statement with call arms). The captures stay inline tokens here: a `Payload`
+nonterminal in the statement `if` alone would conflict with the expression `if` and the prong forms that share its
+prefix, so it goes into all three at once in P4. **What is left at the probe head needs P3**: a `{ … }` block as an `if`
+arm (`.linux => if (c) { … } else { … },` in Thread.zig, `return if (opt) |v| { … }` in Build.zig) and an else-less
+`if` as an expression (`if (opt) |p| if (n > 0) { … };` in Io/Writer.zig, `=> |lib| if (c) return true,` in
+Build/Step/Compile.zig). In zig a block is a PrimaryExpr and `if`'s `else` is optional; both come with P3's closed
+primaries.

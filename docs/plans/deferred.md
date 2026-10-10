@@ -223,8 +223,7 @@ CPU). Segment status: `docs/plans/road-to-zig-std.md`, "The target-identity segm
 ## Zig — the big open parse buckets (not cuts; just next)
 
 These are ranked live in [`std-parse-probe.report.txt`](std-parse-probe.report.txt) — the
-report *is* the worklist. Current head (2026-10-10, 438 of 553 files, 79.2% parse-clean, after four worklist
-batches and zig-grammar-peg P1): statement `if` shapes (`else |err|` with no then-capture, an else-less `if` with a
-`return` body as a prong, an `if` body that is an `if`), 3 to 5 files each; they are zig-grammar-peg P2.
+report *is* the worklist. Current head (2026-10-10, 443 of 553 files, 80.1% parse-clean): 3-to-4-file `if` shapes
+that need zig-grammar-peg P3 (a `{ … }` block as an `if` arm, an else-less `if` expression), and inline-struct literals.
 The 2026-08 head (file-is-a-struct fields, `)`-in-440, `(`-in-276, statement-position `if`/`switch`)
 is retired. See the S9 table in [`road-to-zig-std.md`](road-to-zig-std.md).
