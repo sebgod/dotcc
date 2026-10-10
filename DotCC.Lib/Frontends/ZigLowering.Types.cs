@@ -463,7 +463,7 @@ internal sealed partial class ZigLowering
         or Zig.TySliceAlign or Zig.TySliceConstAlign
         or Zig.TySentSliceExpr or Zig.TySentSliceConstExpr or Zig.TySentSliceAlignExpr
         or Zig.TySentSliceConstAlignExpr or Zig.TySentPtrExpr or Zig.TySentPtrConstExpr
-        or Zig.TyArray or Zig.TySentArray or Zig.ErrUnion or Zig.TyTuple
+        or Zig.TyArray or Zig.TySentArray or Zig.ErrUnion or Zig.TyTuple or Zig.TyIf
         or Zig.TyFn;
 
     /// <summary>True when a struct MEMBER <c>const</c>'s RHS is a TYPE: a type former, a call to a
@@ -686,6 +686,10 @@ internal sealed partial class ZigLowering
         // guarantee, a documented leniency). A `?T` over a value type lowers to C#
         // Nullable<T> via CType.Optional, so `null`/`.?`/`orelse` map to C#'s built-ins.
         Zig.TyOptional opt => LowerOptional(opt.Arg1),
+        // zig's IfTypeExpr (`value: if (is_64) u64 else u32`): the condition is comptime, so one arm is the type.
+        Zig.TyIf ti => TryFoldComptimeCondition(ti.Arg2) is { } takenArm
+            ? LowerType(takenArm ? ti.Arg4 : ti.Arg6)
+            : throw new IrUnsupportedException("zig type: an `if` in a type position needs a condition known at compile time"),
         // `E!T` error-union type → CType.ErrorUnion(T). V1 erases the error SET (Arg0, the
         // Suffix naming the set), so `anyerror!T` and a named `E!T` lower identically — the
         // payload is what the backend renders (`ErrUnion<T>`). See [[CType.ErrorUnion]].

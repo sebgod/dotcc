@@ -192,6 +192,17 @@ public sealed class ZigGrammarTests
     }
 
     [Fact]
+    public void An_if_in_a_type_position_is_an_if_type()
+    {
+        FirstNode<Zig.TySlice>("const T = struct { v: []if (c) u32 else u8 };").Arg2.Content.ShouldBeOfType<Zig.TyIf>();
+        FirstNode<Zig.TyOptional>("const T = struct { m: ?if (c) *u8 else noreturn };").Arg1.Content.ShouldBeOfType<Zig.TyIf>();
+        FirstNode<Zig.FnDef>("fn f(x: if (c) u64 else u32) if (c) u64 else u32 { return x; }").ShouldNotBeNull();
+        FirstNode<Zig.EnumDeclTyped>("const E = enum(if (c) u16 else u8) { a, b };").Arg5.Content.ShouldBeOfType<Zig.TyIf>();
+        // Where a value can stand, the same spelling is the value `if`.
+        FirstNode<Zig.IfExpr>("fn f() void { const v = if (c) a else b; _ = v; }").ShouldNotBeNull();
+    }
+
+    [Fact]
     public void Inline_enums_and_unions_are_types_anywhere()
     {
         FirstNode<Zig.TyOptional>("const T = struct { m: ?enum { a, b } = null };").Arg1.Content.ShouldBeOfType<Zig.InlineEnumType>();
