@@ -5,7 +5,8 @@
 433 to 438). P2 started: the `else |err|` statement form without a then-capture (probe 438 to 443). P3a done:
 the else-less `if` expression and block arms (probe 443 to 452). P3 first step done: `switch` as a closed
 primary (probe 466 to 473); labeled blocks and value loops as primaries remain. P5 started: an inline
-`struct { … }` is a Type anywhere (probe 473 to 486).
+`struct { … }` is a Type anywhere (probe 473 to 486). Range, multi-object and capture-`while` value loops
+(still RhsExpr forms, not primaries) took the probe to 491.
 
 ## Why
 
@@ -164,3 +165,10 @@ precedence decisions are `const X = struct {…};` and `return struct {…};` ke
 The named declarations stay as they are; `enum` / `union` and the layout forms are the next candidates. Oracle row
 `inline_struct_types` also caught a lowering bug: a struct-array field initialized from a tuple copied 0 bytes,
 because a struct element's size is the C# compiler's to settle (`count * sizeof(T)` now).
+
+**Value loops, widened (not yet primaries).** The value `for` over a range or several objects and the capture `while`
+are LoopExpr forms (`forRangeElseExpr`, `forMultiElseExpr`, `whileCaptureElseExpr`) whose `else` is an IfArm, so a jump
+or a `{ … }` block stands there. Lowering builds the statement loop under the loop-value target, and an `else` that
+never completes runs as a statement. The new precedence decisions are only the statement loop keeping `{…} else` at
+statement start, the same as the older value loops. Making loops primaries is still blocked on the `inline for`
+reduce/reduce conflict with inline-prong case values.
