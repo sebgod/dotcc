@@ -550,6 +550,9 @@ productions:
       # then-Stmt's `else`, a `|` lookahead selects this error-capture form over the plain
       # `… else Stmt` above (no Stmt begins with `|`) — conflict-free, same rightmost group.
       - { lhs: Stmt, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', Stmt, 'else', '|', IDENT, '|', Stmt], action: stmtIfCaptureErrElse }
+      # The error capture without a then-capture (zig-grammar-peg P2; std's Io/Dir.zig: `if (dir.symLink(…)) { return; } else
+      # |err| switch (err) {…}`): an error-union condition whose success value is discarded. After `else`, a `|` selects it.
+      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', Stmt, 'else', '|', IDENT, '|', Stmt], action: stmtIfElseErr }
       # A `return Expr` then-arm with no `;` of its own, ended by the `else` (the `;` ends the else arm).
       # After `return Expr`, `else` selects the arm and `;` the ordinary return statement: a 1-token split.
       - { lhs: Stmt, rhs: ['if', '(', Expr, ')', JumpExpr, 'else', Stmt], action: stmtIfReturnElse }
