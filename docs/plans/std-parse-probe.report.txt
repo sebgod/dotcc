@@ -1,5 +1,5 @@
 # dotcc Zig-std parse-probe (road-to-zig-std.md S0)
-generated: 2026-10-10T09:10:44Z (UTC)
+generated: 2026-10-10T09:44:28Z (UTC)
 std dir : C:/Users/SebastianGodelet/AppData/Local/Programs/Zig/lib\std  (found via DOTCC_ZIG_LIB_DIR=<lib>/std)
 grammar : DotCC.Lib/zig.lalr.yaml
 files   : 553
@@ -95,3 +95,40 @@ count  signature
     1  parse: parse error: unexpected '|=' (id=125) in state 314
        e.g. std/Io/Threaded.zig
        msg: parse error at line 624, column 26 (byte offset 23840): unexpected '|=' (id=125) in state 314; expected one of: 'Type' (id=10), 'Add' (id=17), 'Mul' (id=18), 'Prefix' (id=19), 'ErrUnion' (id=20), 'Suffix' (id=21), 'Primary' (id=22), 'fn' (id=24), 'return' (id=28), 'if' (id=29), 'try' (id=34), '(' (id=35), '[' (id=39), '&' (id=51), '-' (id=57), '*' (id=58), '!' (id=61), '~' (id=62), '?' (id=63), '.' (id=64), 'IDENT' (id=67), 'INTEGER' (id=68), 'FLOAT' (id=69), 'STRING' (id=70), 'BUILTIN' (id=71), 'IfExpr' (id=75), 'extern' (id=76), '[*c]' (id=78), 'null' (id=81), 'error' (id=83), 'break' (id=84), 'continue' (id=85), 'switch' (id=86), 'struct' (id=93), 'enum' (id=94), 'CurlySuffix' (id=101), 'union' (id=103), 'undefined' (id=106), 'true' (id=114), 'false' (id=115), 'CHAR' (id=116), 'SwitchExpr' (id=127), '[*]' (id=131), '[:0]' (id=132), '[*:0]' (id=133), '-%' (id=135), 'packed' (id=146), 'comptime' (id=153), '**' (id=164), 'asm' (id=176), 'volatile' (id=177), 'AsmExpr' (id=179), 'ContainerLayout' (id=196), 'AddO' (id=203), 'MulO' (id=204), 'PrefixO' (id=205), 'OpenPrimary' (id=206), 'JumpExpr' (id=208), 'InlineStructTy' (id=209)
+
+## Failing files
+std/Build.zig
+std/Build/Configuration.zig
+std/Io/Threaded.zig
+std/Io/Uring.zig
+std/Progress.zig
+std/Thread.zig
+std/c/darwin.zig
+std/c/darwin/dispatch.zig
+std/compress/flate/Compress.zig
+std/compress/xz/Decompress.zig
+std/crypto/tls/Client.zig
+std/debug.zig
+std/debug/SelfInfo/Elf.zig
+std/debug/SelfInfo/MachO.zig
+std/debug/SelfInfo/Windows.zig
+std/debug/cpu_context.zig
+std/gpu.zig
+std/heap/SafeAllocator.zig
+std/macho.zig
+std/mem.zig
+std/meta.zig
+std/os/windows.zig
+std/pie.zig
+std/posix.zig
+std/start.zig
+std/testing/Smith.zig
+std/zig/Ast/Render.zig
+std/zig/AstGen.zig
+std/zig/TokenSmith.zig
+std/zig/WindowsSdk.zig
+std/zig/Zir.zig
+std/zig/llvm/BitcodeReader.zig
+std/zig/system/linux.zig
+std/zon/Serializer.zig
+std/zon/parse.zig
