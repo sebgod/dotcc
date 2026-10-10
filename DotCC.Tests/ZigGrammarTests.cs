@@ -167,6 +167,17 @@ public sealed class ZigGrammarTests
     }
 
     [Fact]
+    public void A_switch_is_an_operand_anywhere()
+    {
+        // zig-grammar-peg P3: `3 * switch (k) {…} + 1` is `(3 * switch …) + 1` (a closed primary), and a statement-start
+        // `switch` is still the statement.
+        var add = FirstNode<Zig.Add>("fn f(k: u8) u32 { return 3 * switch (k) { else => 1 } + 1; }");
+        add.Arg0.Content.ShouldBeOfType<Zig.Mul>().Arg2.Content.ShouldBeOfType<Zig.SwitchExpr>();
+        FirstNode<Zig.CmpLt>("fn g(x: i32) bool { return switch (x) { else => x } < 0; }").Arg0.Content.ShouldBeOfType<Zig.SwitchExpr>();
+        TryParse("fn h(x: u8) void { switch (x) { else => {} } *p = 1; }").ShouldBeTrue();
+    }
+
+    [Fact]
     public void Small_std_shapes_parse()
     {
         // `struct { … }{ … }`: a typed literal whose type is an inline struct; `const X = struct {…};` keeps its decl form.

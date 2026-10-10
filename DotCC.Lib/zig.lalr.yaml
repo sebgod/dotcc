@@ -878,7 +878,6 @@ productions:
   - derivation: rightmost
     rules:
       - { lhs: FallbackArm, rhs: [Block],                       action: fbBlock }
-      - { lhs: FallbackArm, rhs: [SwitchExpr],                  action: fbSwitch }
       # `arg_index orelse init: { const arg = self.next_arg; self.next_arg += 1; break :init arg; }`
       # (std.fmt.ArgState.nextArg): a labeled VALUE block runs only on the none / error path. `rightmost`
       # shifts the `:` after the label, as for `break :l` above.
@@ -902,28 +901,8 @@ productions:
       # `x = {};` / `return {};` / `const v = {};` — the void value at a right-hand side (58 in std). Only
       # RhsExpr reaches it, never a statement start, so it cannot be mistaken for an empty Block.
       - { lhs: RhsExpr, rhs: ['{', '}'], action: voidValue }
-      # `switch` as a VALUE (Milestone L) — same structural trick as IfExpr: a RhsExpr
-      # alternative, NOT a Primary, so it never starts an Expr-cascade sub-operand and never
-      # clashes with the statement-level `switch` (which is reached only at Stmt position; a
-      # SwitchExpr only after `=` / `return` / an init). `switch` isn't in the cascade's first
-      # set, so the alternative is conflict-free. Reuses the same `Prongs`, whose bodies may now
-      # be a bare value Expr (`v => e`) — a switch expression's prongs YIELD a value.
-      - { lhs: RhsExpr, rhs: [SwitchExpr] }
-      # A value switch as the LEFT operand of a comparison (std.math.signbit, task #187:
-      # `return switch (@typeInfo(@TypeOf(x))) { … } < 0;`). Only at a RhsExpr start, where the switch is already a
-      # value: after the `}`, a comparison operator shifts and anything in FOLLOW(RhsExpr) reduces, so it is
-      # conflict-free, and a statement-level `switch` (reached only at Stmt position) is untouched.
-      - { lhs: RhsExpr, rhs: [SwitchExpr, '<', Bitwise],  action: switchCmpLt }
-      - { lhs: RhsExpr, rhs: [SwitchExpr, '>', Bitwise],  action: switchCmpGt }
-      - { lhs: RhsExpr, rhs: [SwitchExpr, '<=', Bitwise], action: switchCmpLe }
-      - { lhs: RhsExpr, rhs: [SwitchExpr, '>=', Bitwise], action: switchCmpGe }
-      - { lhs: RhsExpr, rhs: [SwitchExpr, '==', Bitwise], action: switchCmpEq }
-      - { lhs: RhsExpr, rhs: [SwitchExpr, '!=', Bitwise], action: switchCmpNe }
-      # `comptime switch (…) {…}` / `comptime if (…) a else b` in value position (road-to-zig-std G3:
-      # std.Io.Writer.print's `const arg_pos = comptime switch (placeholder.arg) {…}`; 12 in std). The
-      # `comptime` Prefix operator reaches only the Expr cascade, which neither form is in; after
-      # `comptime`, a `switch` / `if` lookahead starts no Prefix, so these are conflict-free.
-      - { lhs: RhsExpr, rhs: ['comptime', SwitchExpr], action: comptimeSwitchExpr }
+      # A value `switch` is a Primary since zig-grammar-peg P3 (an operand anywhere, `comptime switch` is preComptime),
+      # so it needs no RhsExpr copy; its prongs YIELD a value (`v => e`).
       # `const first = comptime first: { …; break :first a ++ b ++ c; };` (std.unicode's utf8ValidateSliceImpl, task #82):
       # a labeled block run at compile time. After `comptime IDENT`, the `:` lookahead selects the label, as for a bare
       # labeled block (a Primary is never followed by `:`).
@@ -974,7 +953,6 @@ productions:
       # The condition may be a `switch` expression (std.mem.SplitIterator.next's
       # `if (switch (delimiter_type) { .scalar => findScalarPos(…), … }) |delim_start| … else …`). `switch` is not
       # in FIRST(Expr), so after `if (` it is a clean shift; the record is the same.
-      - { lhs: IfExpr, rhs: ['if', '(', SwitchExpr, ')', '|', IDENT, '|', IfArm, 'else', IfArm], action: ifExprCapture }
       - { lhs: SwitchExpr, rhs: ['switch', '(', Expr, ')', '{', Prongs, ",?", '}'], action: switchExpr }
       # `switch (if (from < 0) @max(…) else to) { … }` (std.math.IntFittingRange): a value `if` as the subject.
       # `if` is not in FIRST(Expr), so after `switch (` it is a clean shift; the record is the same.
@@ -1012,16 +990,11 @@ productions:
   - derivation: leftmost
     rules:
       - { lhs: BoolOr, rhs: [BoolOr, 'or', BoolAnd], action: boolOr }
-      # A `switch` as the RIGHT operand of `or` / `and` (std.meta.hasUniqueRepresentation:
-      # `!ptr.attrs.@"allowzero" and switch (ptr.size) { … }`). No Compare starts with `switch`, so after
-      # the operator it is a clean shift; the value switch stays out of the rest of the operator cascade.
-      - { lhs: BoolOr, rhs: [BoolOr, 'or', SwitchExpr], action: boolOrSwitch }
       - { lhs: BoolOr, rhs: [BoolAnd] }
 
   - derivation: leftmost
     rules:
       - { lhs: BoolAnd, rhs: [BoolAnd, 'and', Compare], action: boolAnd }
-      - { lhs: BoolAnd, rhs: [BoolAnd, 'and', SwitchExpr], action: boolAndSwitch }
       - { lhs: BoolAnd, rhs: [Compare] }
 
   # Compare is non-associative (PEG: `BitwiseExpr (CompareOp BitwiseExpr)?`) — no
@@ -1053,9 +1026,6 @@ productions:
     rules:
       - { lhs: Add, rhs: [Add, '+', Mul], action: add }
       - { lhs: Add, rhs: [Add, '-', Mul], action: sub }
-      # `x + switch (…) {…}` (std.math.IntFittingRange's width): after the operator, `switch` can only open a
-      # value switch, a clean shift, exactly as `and switch` above.
-      - { lhs: Add, rhs: [Add, '+', SwitchExpr], action: addSwitch }
       # Array/string CONCAT `a ++ b` (Zig's PLUS2 — an Add-level, left-assoc binary op). Parses today;
       # lowering (comptime array/string concat) is deferred (loud cut) — the goal here is parse coverage
       # (std's `@compileError("…" ++ @tagName(x))` and similar comptime string building).
@@ -1220,10 +1190,8 @@ productions:
       # stay managed (dotcc models only the cdecl-native form).
       # Arg2 params, Arg5 the error-union `!` (both null when absent), Arg6 the return type.
       - { lhs: Type, rhs: ['fn', '(', FnTypeParams?, ')', CallConv, "!?", Type], action: tyFn }
-      # A fn type whose RETURN type is a comptime `switch` (std.Options' `elf_debug_info_search_paths: ?fn (…)
-      # switch (@import("builtin").object_format) { … }`). `switch` is not in FIRST(Type), so after the
-      # CallConv it is a 1-token shift. Parsed so the declaring container parses; lowering it is a named cut.
-      - { lhs: Type, rhs: ['fn', '(', FnTypeParams, ')', CallConv, SwitchExpr], action: tyFnSwitchRet }
+      # A fn type whose RETURN type is a comptime `switch` (std.Options' `elf_debug_info_search_paths`) is this rule since
+      # zig-grammar-peg P3: a `switch` is a Primary, so a Type, and LowerType lowers the return type.
       - { lhs: Type, rhs: [ErrUnion] }
 
   # ANNOTATION type (road-to-zig-std S9 — the `:`-in-307 residual). An `AType` is a plain `Type`
@@ -1330,6 +1298,11 @@ productions:
   - derivation: none
     rules:
       - { lhs: Primary, rhs: [IDENT],               action: ident }
+      # zig-grammar-peg P3: a `switch` is a PrimaryExpr, as in zig: `x + switch (…) {…}`, `a or switch …`, `switch (…) {…} < 0`,
+      # `comptime switch`, an argument, a field value, a tuple element, a field or fn-return TYPE. It ends in `}`, so it is
+      # CLOSED (an operator after it applies to it). At statement start the statement `switch` shares the prefix, and its
+      # group is earlier, so the statement form wins there, as before.
+      - { lhs: Primary, rhs: [SwitchExpr] }
       - { lhs: Primary, rhs: [INTEGER],             action: intLit }
       - { lhs: Primary, rhs: [FLOAT],               action: floatLit }
       - { lhs: Primary, rhs: [STRING],              action: strLit }
@@ -1412,7 +1385,6 @@ productions:
       - { lhs: Arg, rhs: ['{', '}'], action: voidArg }
       # A switch EXPRESSION as an argument (std.math.log2's `math.log2_int(switch (s) { … }, x)`),
       # transparent like the Expr arm. `switch` is not in FIRST(Expr), so it is a shift decision too.
-      - { lhs: Arg, rhs: [SwitchExpr] }
       # And an if-EXPRESSION (std.Io.Writer.printValue's `w.writeAll(if (i < n) ", " else " }")`).
       # And a labeled value-block (std.hash.XxHash3.final's `acc.digest(len, last_block: { … break :last_block p; })`,
       # task #178). `IDENT ':'` starts it where an Expr's IDENT would reduce to a Primary; no Primary is ever followed by
@@ -1462,7 +1434,6 @@ productions:
       - { lhs: FieldValue, rhs: ['{', '}'], action: voidValue }
       # A value `switch`: not in FIRST(Expr) yet (zig-grammar-peg P3), so the field value stays conflict-free, as
       # RhsExpr's is. A value `if` is an Expr (P1).
-      - { lhs: FieldValue, rhs: [SwitchExpr] }
       # A labeled value block (std's Build/Step.zig: `.debug_stack_trace = blk: { … break :blk v; },`). After IDENT, a
       # `:` selects the block as it does for an RhsExpr; lowering hoists it ahead of the enclosing statement.
       - { lhs: FieldValue, rhs: [LabeledBlock] }
@@ -1678,11 +1649,9 @@ productions:
       # (it is never in FOLLOW(AType) inside a field list otherwise).
       - { lhs: FieldDecl, rhs: [IDENT, ':', AType, 'align', '(', Expr, ')'],                  action: structFieldAligned }
       - { lhs: FieldDecl, rhs: [IDENT, ':', AType, 'align', '(', Expr, ')', '=', RhsExpr], action: structFieldAlignedDefault }
-      # A field whose TYPE is a comptime `switch` (std.mem.SplitIterator's
-      # `delimiter: switch (delimiter_type) { .sequence, .any => []const T, .scalar => T },`). `switch` is
-      # not in FIRST(AType), so after `IDENT :` it is a 1-token shift.
-      - { lhs: FieldDecl, rhs: [IDENT, ':', SwitchExpr], action: structFieldSwitch }
-      # Its `if` twin (std's Io/Threaded.zig: `old_sig_io: if (have_sig_io) posix.Sigaction else void,`): the condition
+      # A field whose TYPE is a comptime `switch` (std.mem.SplitIterator's `delimiter: switch (delimiter_type) { … },`) is
+      # the plain field rule since zig-grammar-peg P3 (a `switch` is a Primary, so a Type). A comptime `if`
+      # (std's Io/Threaded.zig: `old_sig_io: if (have_sig_io) posix.Sigaction else void,`) needs its own rule: the condition
       # must fold, as in a type alias. A field slot only: as a general AType (a return type, followed by `{`) an `if`
       # would clash with a struct-literal arm.
       - { lhs: FieldDecl, rhs: [IDENT, ':', IfExpr], action: structFieldIf }

@@ -36,7 +36,7 @@ internal sealed partial class ZigLowering
         // `comptime switch` / `comptime if`: the inner form decides. The `comptime` asks zig to evaluate
         // it at compile time; dotcc's lowering already folds the arm whenever the subject is
         // comptime-known, and a runtime subject (which zig rejects here) keeps its runtime lowering.
-        Zig.ComptimeSwitchExpr c => IsValueControlFlowStmt(c.Arg1),
+        Zig.PreComptime { Arg1.Content: Zig.SwitchExpr } c => IsValueControlFlowStmt(c.Arg1),
         Zig.PreComptime { Arg1.Content: Zig.IfExpr } c => IsValueControlFlowStmt(c.Arg1),
         // A value-position loop (`while/for … else`, Milestone Y part 2) ALWAYS needs the statement
         // lowering — a loop that yields via `break v` / an `else` value can't be a C# expression.
@@ -76,7 +76,7 @@ internal sealed partial class ZigLowering
     private CStmt LowerValueControlFlowStmt(Item rhs, CType? sink, Func<Symbol, CStmt> consume) => rhs.Content switch
     {
         Zig.IfExpr or Zig.SwitchExpr => LowerValueIfSwitch(rhs, sink, consume),
-        Zig.ComptimeSwitchExpr c => LowerValueControlFlowStmt(c.Arg1, sink, consume),
+        Zig.PreComptime { Arg1.Content: Zig.SwitchExpr } c => LowerValueControlFlowStmt(c.Arg1, sink, consume),
         Zig.PreComptime { Arg1.Content: Zig.IfExpr } c => LowerValueControlFlowStmt(c.Arg1, sink, consume),
         Zig.WhileElseExpr or Zig.ForElseExpr or Zig.LabeledWhileElseExpr or Zig.LabeledForElseExpr
             or Zig.ForRefElseExpr or Zig.InlineForElseExpr or Zig.InlineForMultiElseExpr

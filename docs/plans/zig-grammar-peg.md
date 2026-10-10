@@ -3,7 +3,8 @@
 **Status:** P0 done (this plan and the spike behind it, 2026-10-10). **P1 done**: P1a (the open/closed cascade and the
 `if` expression as an open primary; probe 422 to 433) and P1b (`return` / `break` / `continue` as open primaries; probe
 433 to 438). P2 started: the `else |err|` statement form without a then-capture (probe 438 to 443). P3a done:
-the else-less `if` expression and block arms (probe 443 to 452).
+the else-less `if` expression and block arms (probe 443 to 452). P3 first step done: `switch` as a closed
+primary (probe 466 to 473); labeled blocks and value loops as primaries remain.
 
 ## Why
 
@@ -139,3 +140,15 @@ piece: `if (opt) |p| if (n > 0) { … };` takes the statement form for the `if` 
 statement (`emptyStmt`; zig allows the `;` only there, accepting it anywhere changes no meaning). The new precedence
 decisions are statement forms winning where they share a prefix (assignment operators, `Stmt -> Expr ;`, the Block
 over the block arm) and the `else` shift. Oracle row `statement_if_expressions`.
+
+**P3, first step as landed.** `Primary -> SwitchExpr`: a `switch` ends in `}`, so it is a CLOSED primary, an operand
+anywhere (`3 * switch … + 1`, `a or switch …`, `switch … < 0`, a tuple element, a field or fn-return type). Retired:
+`boolOrSwitch`, `boolAndSwitch`, `addSwitch`, the six `switchCmp*`, `comptimeSwitchExpr` (now `preComptime` over a
+SwitchExpr), `fbSwitch` (a `switch` fallback is the ordinary `orElse` / `catchOp` / `catchCapture`, which
+IsControlFlowFallback still treats as a statement-shaped fallback), `structFieldSwitch` and `tyFnSwitchRet` (a
+type position already derives a Primary, so they had become ambiguous; the fn-type cut is gone with it), and the
+RhsExpr / Arg / FieldValue / `if (switch …)` copies. The new precedence decisions are the statement `switch` winning
+at statement start on tokens that begin the next statement (`*p = 1;` after a `switch` statement). Two things tried
+and kept out: a labeled block as a primary (`IDENT ':'` as an expression start met field declarations, and a container
+field `name: switch …` reduced as a labeled switch), and value loops as open primaries (a value `inline for` met the
+inline prong's case values, a real reduce/reduce conflict). Both need a narrower form.

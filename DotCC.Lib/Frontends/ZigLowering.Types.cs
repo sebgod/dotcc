@@ -747,9 +747,6 @@ internal sealed partial class ZigLowering
         // the return type is one slot further right than the pre-CallConv layout. `callconv(.c)` /
         // `(.C)` honors the C ABI via IsNativeCallConv (→ `delegate* unmanaged[Cdecl]`); every other
         // convention (and the absent/epsilon case) stays managed. See IsCCallConv.
-        Zig.TyFnSwitchRet => throw new IrUnsupportedException(
-            "a function type whose return type is a `switch` expression is not lowered yet (std.Options' "
-            + "`elf_debug_info_search_paths`); fold the switch into a type alias first"),
         Zig.TyFn { Arg5: null } f => new CType.Func(LowerType(f.Arg6), LowerFnTypeParams(f.Arg2), Variadic: false) { IsNativeCallConv = IsCCallConv(f.Arg4) },
         // `!T`-returning fn-pointer types: the return is an error union `!T` (like a FnDef with `!`). The
         // Func's Return carries the CType.ErrorUnion, so a bound fn-ptr's result is an ErrUnion<T>.

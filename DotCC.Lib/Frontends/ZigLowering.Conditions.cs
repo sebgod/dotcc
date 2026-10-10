@@ -93,18 +93,6 @@ internal sealed partial class ZigLowering
             if (la == false) { return false; }
             return la == true ? TryFoldComptimeCondition(conj.Arg2) : null;
         }
-        if (cur.Content is Zig.BoolAndSwitch conjSw)
-        {
-            return TryFoldComptimeCondition(conjSw.Arg0) is { } lsw && TryFoldComptimeCondition(conjSw.Arg2) is { } rsw
-                ? lsw && rsw
-                : null;
-        }
-        if (cur.Content is Zig.BoolOrSwitch disjSw)
-        {
-            return TryFoldComptimeCondition(disjSw.Arg0) is { } losw && TryFoldComptimeCondition(disjSw.Arg2) is { } rosw
-                ? losw || rosw
-                : null;
-        }
         if (cur.Content is Zig.BoolOr disj)
         {
             var lo = TryFoldComptimeCondition(disj.Arg0);

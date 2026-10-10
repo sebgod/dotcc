@@ -267,7 +267,7 @@ internal sealed partial class ZigLowering
             // sink-carrying path is in LowerExprSink; here the arm types are inferred.
             case Zig.SwitchExpr s:         return LowerSwitchExpr(s.Arg2, s.Arg5, null);
             // `comptime switch` / `comptime if` in value position (see the LowerExprSink cases).
-            case Zig.ComptimeSwitchExpr c: return LowerExpr(c.Arg1);
+            case Zig.PreComptime { Arg1.Content: Zig.SwitchExpr } c: return LowerExpr(c.Arg1);
             case Zig.ComptimeLabeledBlock clb: return ComptimeLabeledBlockValue(clb.Arg1, null);
             case Zig.PreComptime { Arg1.Content: Zig.IfExpr } c: return LowerExpr(c.Arg1);
 
@@ -285,7 +285,6 @@ internal sealed partial class ZigLowering
 
             // arithmetic
             case Zig.Add a:     return Bin(BinOp.Add, a.Arg0, a.Arg2);
-            case Zig.AddSwitch a: return Bin(BinOp.Add, a.Arg0, a.Arg2);   // `x + switch (…) {…}`
             case Zig.Sub a:     return Bin(BinOp.Sub, a.Arg0, a.Arg2);
             case Zig.Mul a:     return Bin(BinOp.Mul, a.Arg0, a.Arg2);
             // wrapping arithmetic (Milestone P) — two's-complement wrap at the operand width
@@ -306,17 +305,9 @@ internal sealed partial class ZigLowering
             case Zig.CmpLe a:   return Bin(BinOp.Le, a.Arg0, a.Arg2);
             case Zig.CmpGe a:   return Bin(BinOp.Ge, a.Arg0, a.Arg2);
             // A value switch as the left operand (std.math.signbit's `switch (@typeInfo(T)) { … } < 0`, task #187).
-            case Zig.SwitchCmpLt a: return Bin(BinOp.Lt, a.Arg0, a.Arg2);
-            case Zig.SwitchCmpGt a: return Bin(BinOp.Gt, a.Arg0, a.Arg2);
-            case Zig.SwitchCmpLe a: return Bin(BinOp.Le, a.Arg0, a.Arg2);
-            case Zig.SwitchCmpGe a: return Bin(BinOp.Ge, a.Arg0, a.Arg2);
-            case Zig.SwitchCmpEq a: return Bin(BinOp.Eq, a.Arg0, a.Arg2);
-            case Zig.SwitchCmpNe a: return Bin(BinOp.Ne, a.Arg0, a.Arg2);
             // boolean (short-circuit)
             case Zig.BoolOr a:  return ShortCircuit(BinOp.LogOr, a.Arg0, a.Arg2);
             case Zig.BoolAnd a: return ShortCircuit(BinOp.LogAnd, a.Arg0, a.Arg2);
-            case Zig.BoolOrSwitch a:  return ShortCircuit(BinOp.LogOr, a.Arg0, a.Arg2);    // `a or switch (…) {…}`
-            case Zig.BoolAndSwitch a: return ShortCircuit(BinOp.LogAnd, a.Arg0, a.Arg2);   // `a and switch (…) {…}`
             // bitwise / shift
             case Zig.BitAnd a:  return Bin(BinOp.BitAnd, a.Arg0, a.Arg2);
             case Zig.BitXor a:  return Bin(BinOp.BitXor, a.Arg0, a.Arg2);

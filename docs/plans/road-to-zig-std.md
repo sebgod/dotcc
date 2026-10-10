@@ -1254,7 +1254,8 @@ to #309) took an empty file, `align(N)` on an untyped declaration, `pub extern` 
 [zig-grammar-peg](zig-grammar-peg.md) made `if`, `return`, `break` and `continue` operands anywhere (P1), took
 `if (eu) S else |err| S` (P2) and the else-less `if` expression with block arms (P3a). A small-shapes batch then took
 an inline `enum(u8)` call argument, `struct { … }{ … }`, a range `for … else`, a union variant typed by an `if`,
-`*allowzero T`, `[*:0]align(N) const T`, an `enum(u32)` prong type and an expression then-arm on a statement `if`. The
+`*allowzero T`, `[*:0]align(N) const T`, an `enum(u32)` prong type and an expression then-arm on a statement `if`, and P3 made a
+`switch` an operand anywhere. The
 head of [`std-parse-probe.report.txt`](std-parse-probe.report.txt) is a tail of 1-to-4-file buckets, most of them
 zig-grammar-peg P3's (a `switch` or loop as an operand):
 
@@ -1263,7 +1264,6 @@ zig-grammar-peg P3's (a `switch` or loop as an operand):
 | 4 | **an inline struct as an array element type in a literal** | `[_]struct { … }{ … }` (`compress/flate/token.zig`) |
 | 2 | **a multi-object or range `for` as a value** | `const first_path_idx = for (paths, 0..) \|p, idx\| {` (`fs/path.zig`, `crypto/bcrypt.zig`) |
 | 2 | **a capture `while` as a value** | `const node: *Node = while (it) \|node\| {` (`heap/ArenaAllocator.zig`) |
-| 2 | **a `switch` as a positional tuple element** | `.{ switch (tok_slice[0]) { … } }` (`zig/Ast.zig`) |
 | 2 | **`catch` after a value-less labeled `break`** | `mod.unwind orelse break :unwind catch break :unwind` (`debug/SelfInfo/Elf.zig`) |
 | 2 | **an `extern fn` prototype inside a container** | `pub extern fn fuzzer_init(…) void;` (`Build/abi.zig`) |
 
