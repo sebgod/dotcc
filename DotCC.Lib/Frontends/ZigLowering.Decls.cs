@@ -860,7 +860,8 @@ internal sealed partial class ZigLowering
             case Zig.MemberComptime:          return true;   // `comptime { … }`: analysis-only, dropped like the top-level form
             case Zig.MemberTest:              return true;   // a `test` block (std.math.Order's `test invert`): dropped
             case Zig.MemberExternFn:          return true;
-            case Zig.MemberExternVar:         return true;   // an `extern var` member (std's c.zig `errno`): a read of it is unresolved   // an `extern fn` prototype (std's Build/abi.zig): a call to it is unresolved
+            case Zig.MemberExternVar:         return true;
+            case Zig.MemberExternConst:       return true;   // `pub extern const etext: anyopaque;` (std's os/plan9.zig), the same   // an `extern var` member (std's c.zig `errno`): a read of it is unresolved   // an `extern fn` prototype (std's Build/abi.zig): a call to it is unresolved
             case Zig.MemberConst mc:          consts.Add(mc.Arg1); return true;               // pub? VarDecl
             case Zig.MemberContainer cc:      containers?.Add(cc.Arg1); return true;          // pub? ContainerDecl
             default:                          return false;

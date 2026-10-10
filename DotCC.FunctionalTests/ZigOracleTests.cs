@@ -7994,6 +7994,45 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{} {}\\n\", .{ firstEven(&xs), firstEven(xs[0..2]) });\n" +
             "}\n", 0,
             "2 77\n9 999" },
+        // Small std shapes 6: a capture `while` with a block continue (std's heap/ArenaAllocator.zig; `continue` runs the block), an
+        // empty `switch (err) {}` over an empty error set (unicode.zig, `unreachable`) and an empty `packed struct {}` (meta.zig).
+        new object[] { "small_std_shapes_6",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "const Node = struct { v: u32, next: ?*Node };\n" +
+            "\n" +
+            "const Empty = packed struct {};\n" +
+            "\n" +
+            "const NoErrors = error{};\n" +
+            "\n" +
+            "fn alwaysFive() NoErrors!u32 {\n" +
+            "    return 5;\n" +
+            "}\n" +
+            "\n" +
+            "fn sumSkippingTwos(head: ?*Node) u32 {\n" +
+            "    var it = head;\n" +
+            "    var total: u32 = 0;\n" +
+            "    var steps: u32 = 0;\n" +
+            "    while (it) |node| : ({\n" +
+            "        it = node.next;\n" +
+            "        steps += 1;\n" +
+            "    }) {\n" +
+            "        if (node.v == 2) continue;\n" +
+            "        total += node.v;\n" +
+            "    }\n" +
+            "    return total * 10 + steps;\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() void {\n" +
+            "    var c = Node{ .v = 4, .next = null };\n" +
+            "    var b = Node{ .v = 2, .next = &c };\n" +
+            "    var a = Node{ .v = 1, .next = &b };\n" +
+            "    const five = alwaysFive() catch |err| switch (err) {};\n" +
+            "    const e: Empty = .{};\n" +
+            "    _ = e;\n" +
+            "    std.debug.print(\"{} {}\\n\", .{ sumSkippingTwos(&a), five });\n" +
+            "}\n", 0,
+            "53 5" },
         // Task #140: std.crypto.blake3's shapes: a late-declared struct const in a field extent, `@intCast` slice bounds,
         // open slices of a many-item pointer, and an array local copied through a pointer.
         new object[] { "blake3_shapes",

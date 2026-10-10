@@ -305,7 +305,7 @@ internal sealed partial class ZigLowering
 
     /// <summary>True for an expression that never yields a value: a jump, a <c>return</c>, or an <c>if</c> both of whose
     /// arms are one. As an <c>orelse</c> / <c>catch</c> fallback it makes the construct a control-flow fallback.</summary>
-    private static bool IsNoreturnArm(Item arm) => IsJumpArm(arm) || arm.Content is Zig.ReturnExpr
+    private static bool IsNoreturnArm(Item arm) => IsJumpArm(arm) || arm.Content is Zig.ReturnExpr or Zig.SwitchExprEmpty
         || arm.Content is Zig.IfExpr ie && IsNoreturnArm(ie.Arg4) && IsNoreturnArm(ie.Arg6);
 
     /// <summary>One arm of a noreturn <c>if</c> fallback: a <c>return</c> lowers under its own hoist buffer (its value
@@ -341,6 +341,7 @@ internal sealed partial class ZigLowering
         Zig.FbContinueLabel c => LowerLabeledLoopJump(Tok(c.Arg2), isContinue: true),
         Zig.FbContinueLabelValue c => LowerSwitchContinue(Tok(c.Arg2), c.Arg3),
         Zig.FbBlock b        => LowerStmt(b.Arg0),
+        Zig.SwitchExprEmpty  => new ExprStmt(UnreachableCall()),   // `catch |err| switch (err) {}`: an empty error set
         Zig.IfExpr j when IsNoreturnArm(j.Arg4) && IsNoreturnArm(j.Arg6) => LowerIfExits(j.Arg2, () => LowerExitArm(j.Arg4), () => LowerExitArm(j.Arg6)),
         _ => throw new IrUnsupportedException("internal: fallback arm " + (arm.Content?.GetType().Name ?? "null")),
     };

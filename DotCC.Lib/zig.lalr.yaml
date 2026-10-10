@@ -410,8 +410,8 @@ productions:
       # bit-backing-integer model only when fields are byte-multiples summing to an ABI size;
       # sub-byte bit-packed fields stay a cut (see ZIG-SUPPORT.md). Empty `extern/packed struct {}`
       # is not accepted (a useless zero-size aggregate — a documented cut).
-      - { lhs: ContainerDecl, rhs: ['const', IDENT, '=', 'extern', 'struct', '{', FieldDecls, '}', ';'], action: externStructDecl }
-      - { lhs: ContainerDecl, rhs: ['const', IDENT, '=', 'packed', 'struct', '{', FieldDecls, '}', ';'], action: packedStructDecl }
+      - { lhs: ContainerDecl, rhs: ['const', IDENT, '=', 'extern', 'struct', '{', FieldDecls?, '}', ';'], action: externStructDecl }
+      - { lhs: ContainerDecl, rhs: ['const', IDENT, '=', 'packed', 'struct', '{', FieldDecls?, '}', ';'], action: packedStructDecl }
       # `packed struct(u32) { … }` names its BACKING integer (480 in std: std.bit_set's Integer, os flag words). The
       # layout is the packed one either way; zig itself rejects fields that do not total the backing width, so the
       # backing type is parsed and not re-checked. `(` after `struct` is a clean shift, distinct from `{`.
@@ -618,6 +618,7 @@ productions:
       # combination is not modeled — rare.)
       - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', '|', IDENT, '|', ':', '(', Expr, AssignOp, RhsExpr, ')', Stmt], action: stmtWhileCaptureContAssign }
       - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', '|', IDENT, '|', ':', '(', Expr, ')', Stmt],                    action: stmtWhileCaptureCont }
+      - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', '|', IDENT, '|', ':', '(', Block, ')', Stmt],                   action: stmtWhileCaptureContBlock }
 
   # `switch (x) { prong, … }` as a STATEMENT. Each prong is `CaseVals => Block`; Zig switch has NO
   # fall-through, so the lowering appends a `break` to each section. The trailing-comma forms differ only
@@ -963,7 +964,9 @@ productions:
       # The condition may be a `switch` expression (std.mem.SplitIterator.next's
       # `if (switch (delimiter_type) { .scalar => findScalarPos(…), … }) |delim_start| … else …`). `switch` is not
       # in FIRST(Expr), so after `if (` it is a clean shift; the record is the same.
+      # No prongs at all (std's unicode.zig: `catch |err| switch (err) {}` over an empty error set): nothing can reach it.
       - { lhs: SwitchExpr, rhs: ['switch', '(', Expr, ')', '{', Prongs, ",?", '}'], action: switchExpr }
+      - { lhs: SwitchExpr, rhs: ['switch', '(', Expr, ')', '{', '}'], action: switchExprEmpty }
       # `switch (if (from < 0) @max(…) else to) { … }` (std.math.IntFittingRange): a value `if` as the subject.
       # `if` is not in FIRST(Expr), so after `switch (` it is a clean shift; the record is the same.
       - { lhs: LabeledBlock, rhs: [IDENT, ':', Block], action: labeledBlock }
@@ -1607,6 +1610,7 @@ productions:
       - { lhs: ContainerDeclaration, rhs: [pub?, 'extern', STRING?, 'fn', IDENT, '(', Params?, ')', CallConv, Type, ';'], action: memberExternFn }
       # The `extern var` member twin (std's c.zig: `extern threadlocal var errno: c_int;` in a container), dropped the same way.
       - { lhs: ContainerDeclaration, rhs: [pub?, 'extern', STRING?, threadlocal?, 'var', IDENT, ':', AType, ';'], action: memberExternVar }
+      - { lhs: ContainerDeclaration, rhs: [pub?, 'extern', STRING?, 'const', IDENT, ':', AType, ';'], action: memberExternConst }
       # A container-level `comptime { … }` block (hash_map.zig's `comptime { assert(@sizeOf(Metadata) == 1); }`):
       # analysis-only, dropped like the top-level form (topComptime). `comptime` starts no other member.
       - { lhs: ContainerDeclaration, rhs: ['comptime', Block],      action: memberComptime }
