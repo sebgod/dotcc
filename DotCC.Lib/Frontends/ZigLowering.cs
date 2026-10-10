@@ -2338,12 +2338,11 @@ internal sealed partial class ZigLowering
         foreach (var (field, fieldArray, arrayValue) in arrays)
         {
             var elems = arrayValue.Elems.Select(e => _ir.SpliceComptimeValue(e) ?? throw Unspliceable()).ToList();
-            var bytes = (long)elems.Count * fieldArray.Element.SizeOf;
             pre.Add(new ExprStmt(new Call("memcpy", new List<CExpr>
             {
                 new Member(new VarRef(temp) { Type = type, IsLValue = true }, field, false) { Type = fieldArray, IsLValue = true },
                 new PinnedArray(fieldArray.Element, elems, null) { Type = new CType.Pointer(fieldArray.Element) },
-                new LitInt(bytes.ToString(CultureInfo.InvariantCulture), bytes) { Type = CType.Int },
+                ElementBytes(fieldArray.Element, elems.Count),
             }) { Type = new CType.Pointer(CType.Void) }));
         }
         return (type, InitFunctionCall(initName, pre, new VarRef(temp) { Type = type }));

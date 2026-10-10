@@ -178,6 +178,20 @@ public sealed class ZigGrammarTests
     }
 
     [Fact]
+    public void An_inline_struct_is_a_type_anywhere()
+    {
+        // `struct { … }` is a Type, so it nests under `[N]` / `*` / `?`, types an array literal, and is an argument.
+        FirstNode<Zig.TyArray>("const T = struct { rows: [2]struct { a: u8 } };").Arg3.Content.ShouldBeOfType<Zig.InlineStructType>();
+        FirstNode<Zig.StructFieldDefault>("const T = struct { link: if (c) void else [3]struct { v: u8 } = undefined };")
+            .Arg2.Content.ShouldBeOfType<Zig.IfExpr>();
+        TryParse("const T = struct { head: ?*const struct { n: u32 } = null };").ShouldBeTrue();
+        TryParse("fn f() void { for ([_]struct { k: u8 }{ .{ .k = 1 } }) |e| { _ = e; } }").ShouldBeTrue();
+        FirstNode<Zig.BuiltinCall>("fn f() void { _ = @as(struct { x: i32 }, .{ .x = 1 }); }").ShouldNotBeNull();
+        // The named declaration keeps its own form.
+        FirstNode<Zig.StructDecl>("const P = struct { x: u32 };").ShouldNotBeNull();
+    }
+
+    [Fact]
     public void Small_std_shapes_parse()
     {
         // `struct { … }{ … }`: a typed literal whose type is an inline struct; `const X = struct {…};` keeps its decl form.
