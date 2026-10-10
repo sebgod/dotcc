@@ -83,6 +83,7 @@ public sealed class StdParseProbeTests
 
         var ok = 0;
         var buckets = new Dictionary<string, Bucket>(StringComparer.Ordinal);
+        var failingFiles = new List<string>();
         foreach (var file in files)
         {
             string source;
@@ -100,9 +101,10 @@ public sealed class StdParseProbeTests
             }
             bucket.Count++;
             bucket.Example ??= Relative(stdDir, file);
+            failingFiles.Add(Relative(stdDir, file));
         }
 
-        var report = BuildReport(stdDir, how, files.Count, ok, buckets);
+        var report = BuildReport(stdDir, how, files.Count, ok, buckets, failingFiles);
 
         var outPath = Environment.GetEnvironmentVariable(OutEnv);
         if (string.IsNullOrWhiteSpace(outPath))
@@ -168,7 +170,7 @@ public sealed class StdParseProbeTests
     }
 
     private static string BuildReport(
-        string stdDir, string how, int total, int ok, Dictionary<string, Bucket> buckets)
+        string stdDir, string how, int total, int ok, Dictionary<string, Bucket> buckets, List<string> failingFiles)
     {
         var failing = total - ok;
         var pct = total == 0 ? 0.0 : 100.0 * ok / total;
@@ -197,6 +199,11 @@ public sealed class StdParseProbeTests
             // the bucket key drops — invaluable when picking the next brick.
             sb.Append($"       msg: {b.ExampleMessage}\n");
         }
+        // Every failing file, sorted: a grammar change can fix some files and break others while the count still rises,
+        // and the buckets show one example each. In the committed report, a `git diff` of this list shows both.
+        sb.Append('\n');
+        sb.Append("## Failing files\n");
+        foreach (var f in failingFiles.OrderBy(f => f, StringComparer.Ordinal)) { sb.Append($"std/{f}\n"); }
         return sb.ToString();
     }
 

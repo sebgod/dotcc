@@ -190,3 +190,12 @@ It sits in the last group. Where a value `if` can also stand (an expression reac
 `else` after a type-shaped arm reduces into the value IfExpr instead, and that is the only new precedence decision. In a
 pure type position (after `?`, `[]`, a parameter's `:`, a return type) only this form exists. LowerType folds the
 condition; a signature over a comptime parameter lowers per instance.
+
+**A labeled block as an operand: tried and reverted (2026-10-10).** `Prefix -> LabeledBlock` (retiring `fbLabeled`,
+`comptimeLabeledBlock` and the RhsExpr / Arg / FieldValue copies) built conflict-free and passed the unit and functional
+suites, but the probe fell from 518 to 506. After any expression that ends in an identifier, a `:` now shifted into
+`IDENT : Block`, so `buf[0..len :0]` and `[N:0]T` stopped parsing. zig's PEG backtracks out of a failed block label;
+LALR(1) cannot. (`Primary -> LabeledBlock` is worse: Type reaches Primary, so a container field `name: switch (…) {…}`
+becomes a labeled switch.) The dump diff hid it, because the `:` decision's text was already listed and the dump is
+deduplicated. That is why the probe report now lists every failing file. A real fix needs the lexer to see a block
+label (`IDENT : {` / `IDENT : switch`) as one token, which LALR.CC's lexer cannot express without lookahead today.
