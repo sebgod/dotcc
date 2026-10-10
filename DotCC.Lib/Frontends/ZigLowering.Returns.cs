@@ -262,16 +262,55 @@ internal sealed partial class ZigLowering
         arm = it;
         switch (it.Content)
         {
-            case Zig.OrElseReturn r:     lhs = r.Arg0; isCatch = false; return true;
-            case Zig.OrElseReturnVoid r: lhs = r.Arg0; isCatch = false; return true;
-            case Zig.CatchReturn r:      lhs = r.Arg0; isCatch = true;  return true;
-            case Zig.CatchReturnVoid r:  lhs = r.Arg0; isCatch = true;  return true;
+            // `a orelse return [v]`, `a catch break`, `a catch |e| return v`, `a orelse if (c) break else return`: an ordinary
+            // orelse / catch whose fallback is noreturn (zig-grammar-peg P1b made the jumps expressions).
+            case Zig.OrElse o when IsNoreturnArm(o.Arg2):        lhs = o.Arg0; isCatch = false; arm = o.Arg2; return true;
+            case Zig.CatchOp c when IsNoreturnArm(c.Arg2):       lhs = c.Arg0; isCatch = true;  arm = c.Arg2; return true;
+            case Zig.CatchCapture c when IsNoreturnArm(c.Arg5):  lhs = c.Arg0; isCatch = true;  arm = c.Arg5; capture = Tok(c.Arg3); return true;
             case Zig.OrElseArm o:        lhs = o.Arg0; isCatch = false; arm = o.Arg2; return true;
             case Zig.CatchArm c:         lhs = c.Arg0; isCatch = true;  arm = c.Arg2; return true;
             case Zig.CatchCaptureArm c:  lhs = c.Arg0; isCatch = true;  arm = c.Arg5; capture = Tok(c.Arg3); return true;
             default: lhs = it; isCatch = false; return false;
         }
     }
+    /// <summary>A control-flow <c>orelse</c> / <c>catch</c> (see <see cref="IsControlFlowFallback"/>) in a SUB-expression:
+    /// hoisted to a temp before the enclosing statement (ANF). The conditional jump and the payload capture become buffer
+    /// statements, and the construct evaluates to the payload temp. In a full-RHS position DeclOf / LowerStmt handle it.
+    /// </summary>
+    private CExpr LowerControlFlowFallbackExpr(Item expr)
+    {
+        IsControlFlowFallback(expr, out var cfLhs, out var cfIsCatch, out var cfCap, out var cfArm);
+        var buf = RequireHoistable(cfIsCatch ? "catch (control-flow fallback)" : "orelse (control-flow fallback)");
+        var savedImpure = _hoistImpureSeen;
+        Symbol? anfSym = null;
+        var cfStmt = LowerControlFlowFallback(cfLhs, cfIsCatch, cfCap, cfArm, payload =>
+        {
+            anfSym = _symbols.Declare(new Symbol { Name = "__anf" + _anfTempCounter++, Kind = SymKind.Var, Type = payload.Type });
+            return new DeclStmt(new List<LocalDecl> { new(anfSym, payload) });
+        });
+        _hoistImpureSeen = savedImpure;   // the construct's internals are sequenced in the buffer
+        if (anfSym is not { } payloadSym)
+        {
+            throw new IrUnsupportedException("internal: control-flow fallback did not bind a payload");
+        }
+        buf.Add(cfStmt);
+        return new VarRef(payloadSym) { Type = payloadSym.Type };
+    }
+
+    /// <summary>True for a jump expression: <c>break</c> / <c>continue</c>, plain, labeled or with a value (the
+    /// <c>fb*</c> records, zig-grammar-peg P1b).</summary>
+    private static bool IsJumpArm(Item arm) => arm.Content is Zig.FbBreak or Zig.FbBreakLabel or Zig.FbBreakLabelValue
+        or Zig.FbContinue or Zig.FbContinueLabel or Zig.FbContinueLabelValue;
+
+    /// <summary>True for an expression that never yields a value: a jump, a <c>return</c>, or an <c>if</c> both of whose
+    /// arms are one. As an <c>orelse</c> / <c>catch</c> fallback it makes the construct a control-flow fallback.</summary>
+    private static bool IsNoreturnArm(Item arm) => IsJumpArm(arm) || arm.Content is Zig.ReturnExpr
+        || arm.Content is Zig.IfExpr ie && IsNoreturnArm(ie.Arg4) && IsNoreturnArm(ie.Arg6);
+
+    /// <summary>One arm of a noreturn <c>if</c> fallback: a <c>return</c> lowers under its own hoist buffer (its value
+    /// may hoist), a jump as the statement it spells.</summary>
+    private CStmt LowerExitArm(Item arm) => arm.Content is Zig.ReturnExpr ? Hoisted(() => LowerFallbackArm(arm)) : LowerFallbackArm(arm);
+
     /// <summary><c>catch |e| return if (c) a else b</c> (task #146): the condition first, then one of two returns, which is
     /// what the value <c>if</c> under a <c>return</c> means. A comptime-known condition keeps only its return.</summary>
     private CStmt LowerReturnIf(Item condItem, Item thenItem, Item elseItem)
@@ -290,12 +329,9 @@ internal sealed partial class ZigLowering
     /// <c>switch</c> arm is handled by the caller (it fills a result, it is not a jump).</summary>
     private CStmt LowerFallbackArm(Item arm) => arm.Content switch
     {
-        Zig.OrElseReturn r   => LowerReturn(r.Arg3),
-        Zig.CatchReturn r    => LowerReturn(r.Arg3),
-        Zig.OrElseReturnVoid or Zig.CatchReturnVoid => LowerReturnVoid(),
-        Zig.FbReturn r       => LowerReturn(r.Arg1),
-        Zig.FbReturnSwitch rs => LowerReturn(rs.Arg1),
-        Zig.FbReturnIf ri    => LowerReturnIf(ri.Arg3, ri.Arg5, ri.Arg7),
+        Zig.ReturnExpr { Arg1: null } => LowerReturnVoid(),
+        Zig.ReturnExpr { Arg1.Content: Zig.IfExpr ri } when !HasTypeArm(ri) => LowerReturnIf(ri.Arg2, ri.Arg4, ri.Arg6),
+        Zig.ReturnExpr { Arg1: { } returned } => LowerReturn(returned),
         Zig.FbBreak          => LowerUnlabeledBreak(),
         Zig.FbContinue       => new Continue(),
         Zig.FbBreakLabel b   => LowerLabeledLoopJump(Tok(b.Arg2), isContinue: false),
@@ -303,9 +339,7 @@ internal sealed partial class ZigLowering
         Zig.FbContinueLabel c => LowerLabeledLoopJump(Tok(c.Arg2), isContinue: true),
         Zig.FbContinueLabelValue c => LowerSwitchContinue(Tok(c.Arg2), c.Arg3),
         Zig.FbBlock b        => LowerStmt(b.Arg0),
-        Zig.FbIfJumps j      => LowerIfExits(j.Arg2, () => LowerFallbackArm(j.Arg4), () => LowerFallbackArm(j.Arg6)),
-        Zig.FbIfReturnJump j => LowerIfExits(j.Arg2, () => Hoisted(() => LowerReturn(j.Arg5)), () => LowerFallbackArm(j.Arg7)),
-        Zig.FbIfJumpReturn j => LowerIfExits(j.Arg2, () => LowerFallbackArm(j.Arg4), () => Hoisted(() => LowerReturn(j.Arg7))),
+        Zig.IfExpr j when IsNoreturnArm(j.Arg4) && IsNoreturnArm(j.Arg6) => LowerIfExits(j.Arg2, () => LowerExitArm(j.Arg4), () => LowerExitArm(j.Arg6)),
         _ => throw new IrUnsupportedException("internal: fallback arm " + (arm.Content?.GetType().Name ?? "null")),
     };
     /// <summary>Whether a fallback arm can finish NORMALLY — i.e. fall off its end into the code after

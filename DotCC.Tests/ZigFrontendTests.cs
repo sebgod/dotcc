@@ -2066,6 +2066,17 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void A_jump_as_a_plain_operand_is_rejected_by_name()
+    {
+        // zig accepts `f(return 1)` (a noreturn operand); dotcc lowers a jump only where something runs after it decides
+        // (an `orelse` / `catch` fallback, an `if` arm, a statement), and says so rather than "zig expression: …".
+        Should.Throw<CompileException>(() => EmitZig(
+            "fn f(x: u8) u8 { return x; }\n" +
+            "pub fn main() u8 { return f(return 1); }\n"))
+            .Message.ShouldContain("not as an operand here");
+    }
+
+    [Fact]
     public void An_extern_var_parses_and_is_rejected_only_where_it_is_read()
     {
         // Extern DATA (`pub extern var _mh_execute_header: mach_hdr;` in std's c.zig) has no binding in dotcc. The

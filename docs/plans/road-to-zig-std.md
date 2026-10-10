@@ -1246,28 +1246,26 @@ place a poison IS needed is the top-level tombstone, and that is what landed.
 
 ### S9 — surface-debt bricks (many S/M; parallel any time; wall-finder-ranked)
 
-**Current ranking (2026-10-10, after four worklist batches and zig-grammar-peg P1a: 433 of 553 files parse-clean,
-78.3%; it was 341 / 61.7% on 2026-10-09 and 187 / 33.8% at the 2026-09-23 report).** Batch 1 took an empty file (25
+**Current ranking (2026-10-10, after four worklist batches and zig-grammar-peg P1: 438 of 553 files parse-clean,
+79.2%; it was 341 / 61.7% on 2026-10-09 and 187 / 33.8% at the 2026-09-23 report).** Batch 1 took an empty file (25
 files; the installed std ships its `test.zig` files as 0 bytes), `align(N)` on an untyped container-level
 `const`/`var` (20) and `pub extern` (13, which also brought `extern var`; extern data parses and is rejected by name
 only where it is read). Batch 2 took the inline container field types (`extern`/`packed` struct and union, `enum(uN)`)
 and a named `extern union`. Batch 3 took a labeled block as a struct-literal field value, a field typed by a comptime
 `if`, `**T` and an empty `enum {}`. Batch 4 took `union(enum(uN))`, `callconv` on an `extern fn` prototype, the
-`extern`/`packed` prong types and an empty `struct {}` type arm. Then [zig-grammar-peg](zig-grammar-peg.md) P1a made
-an `if` expression an operand anywhere (11 more files). The head of
+`extern`/`packed` prong types and an empty `struct {}` type arm. Then [zig-grammar-peg](zig-grammar-peg.md) P1 made
+`if`, `return`, `break` and `continue` operands anywhere (16 more files). The head of
 [`std-parse-probe.report.txt`](std-parse-probe.report.txt) now, each bucket read off the line it fails on:
 
 | Files | Construct (first-fail) | Example |
 |---|---|---|
-| 7 | **an else-less `if` with a `return` body as a switch prong** | `.system_lib => \|lib\| if (mem.eql(…)) return true,` (`Build/Step/Compile.zig`) |
+| 5 | **`} else \|err\| …` on a statement `if` with no then-capture** | `if (dir.symLink(…)) { return; } else \|err\| switch (err) {` (`Io/Dir.zig`) |
+| 4 | **an else-less `if` with a `return` body as a switch prong** | `.system_lib => \|lib\| if (mem.eql(…)) return true,` (`Build/Step/Compile.zig`) |
 | 4 | **an `if` whose body is another `if`, as a statement ending `;`** | `if (opt) \|p\| if (p > 0) { … };` (`Io/Writer.zig`) |
 | 4 | **a struct literal typed by an inline `struct {…}`** | `struct { … }{ .keys = … }` (`debug/Dwarf.zig`) |
-| 4 | **`} else \|_\| {}`** after a block-bodied error-union `if` | (`crypto/ecdsa.zig`) |
 | 3 | an `else` after a nested `if` chain (to triage) | (`Thread.zig:76`) |
-| 3 | **a struct literal typed by an inline struct type** (`}{`) | (`compress/flate/token.zig`) |
 
-The `if` and `return` shapes are zig-grammar-peg's P1b (`return`/`break`/`continue` as open primaries) and P2
-(statement `if` as zig's IfStatement).
+The `if` shapes are zig-grammar-peg P2 (statement `if` as zig's IfStatement, with one optional payload).
 
 The historical ranking below is kept for the record.
 

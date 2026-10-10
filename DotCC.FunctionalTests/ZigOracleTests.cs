@@ -7450,6 +7450,65 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{} {d} {} {s} {d}\\n\", .{ eq, neg, notc, tag, m });\n" +
             "}\n", 0,
             "11 25 6\n2 6 9\ntrue -7 true id-64 18" },
+        // zig-grammar-peg P1b: `return` / `break` / `continue` as expressions: `orelse return if …`, `catch |e| return switch …`,
+        // an `orelse if (c) break else continue` fallback, and a statement `if (c) return v else { … }`.
+        new object[] { "jumps_as_expressions",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "const E = error{ Bad, Worse };\n" +
+            "\n" +
+            "fn half(x: u32) E!u32 {\n" +
+            "    if (x == 0) return error.Bad;\n" +
+            "    if (x > 100) return error.Worse;\n" +
+            "    return x / 2;\n" +
+            "}\n" +
+            "\n" +
+            "fn first(opt: ?u32, wide: bool) u32 {\n" +
+            "    const v = opt orelse return if (wide) 1000 else 10;\n" +
+            "    return v + 1;\n" +
+            "}\n" +
+            "\n" +
+            "fn classify(x: u32) u32 {\n" +
+            "    const h = half(x) catch |e| return switch (e) {\n" +
+            "        error.Bad => 7,\n" +
+            "        error.Worse => 8,\n" +
+            "    };\n" +
+            "    return h;\n" +
+            "}\n" +
+            "\n" +
+            "fn at(i: u32) ?u32 {\n" +
+            "    return switch (i) {\n" +
+            "        1, 4 => null,\n" +
+            "        0 => 3,\n" +
+            "        2 => 9,\n" +
+            "        3 => 12,\n" +
+            "        5 => 40,\n" +
+            "        else => 1,\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "fn scan() u32 {\n" +
+            "    var sum: u32 = 0;\n" +
+            "    var i: u32 = 0;\n" +
+            "    while (i < 7) : (i += 1) {\n" +
+            "        const v = at(i) orelse if (sum > 20) break else continue;\n" +
+            "        sum += v;\n" +
+            "    }\n" +
+            "    return sum;\n" +
+            "}\n" +
+            "\n" +
+            "fn pick(c: bool, x: u32) u32 {\n" +
+            "    if (c) return x * 2 else {\n" +
+            "        return x + 1;\n" +
+            "    }\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() void {\n" +
+            "    std.debug.print(\"{d} {d} {d}\\n\", .{ first(null, true), first(null, false), first(5, true) });\n" +
+            "    std.debug.print(\"{d} {d} {d}\\n\", .{ classify(0), classify(500), classify(9) });\n" +
+            "    std.debug.print(\"{d} {d} {d}\\n\", .{ scan(), pick(true, 4), pick(false, 4) });\n" +
+            "}\n", 0,
+            "1000 10 6\n7 8 4\n24 8 5" },
         // Task #140: std.crypto.blake3's shapes: a late-declared struct const in a field extent, `@intCast` slice bounds,
         // open slices of a many-item pointer, and an array local copied through a pointer.
         new object[] { "blake3_shapes",
