@@ -7904,6 +7904,37 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{} {} {}\\n\", .{ indexOfSize(2), indexOfSize(4), indexOfSize(3) });\n" +
             "}\n", 0,
             "7 ello\n1 2 99" },
+        // zig-grammar-peg P5: inline `enum {…}` / `enum(T) {…}` / `union(enum) {…}` are Types anywhere, as `struct {…}` is: an
+        // optional or array element type (std's zig/AstSmith.zig `?enum { colon, expr }`) and a pointer's child type.
+        new object[] { "enum_union_types_anywhere",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "const Opts = struct {\n" +
+            "    mode: ?enum { colon, expr } = null,\n" +
+            "    flags: [2]enum(u8) { off = 0, on = 7 },\n" +
+            "    shape: union(enum) { circle: u32, square: u16 },\n" +
+            "};\n" +
+            "\n" +
+            "fn area(s: *const union(enum) { circle: u32, square: u16 }) u32 {\n" +
+            "    return switch (s.*) {\n" +
+            "        .circle => |r| 3 * r * r,\n" +
+            "        .square => |a| @as(u32, a) * a,\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() void {\n" +
+            "    var o = Opts{ .flags = .{ .on, .off }, .shape = .{ .square = 5 } };\n" +
+            "    const before = o.mode == null;\n" +
+            "    o.mode = .expr;\n" +
+            "    const tag = @intFromEnum(o.flags[0]) + @intFromEnum(o.flags[1]);\n" +
+            "    const sq = switch (o.shape) {\n" +
+            "        .circle => |r| r,\n" +
+            "        .square => |a| @as(u32, a) * a,\n" +
+            "    };\n" +
+            "    std.debug.print(\"{} {} {} {}\\n\", .{ before, o.mode.? == .expr, tag, sq });\n" +
+            "    std.debug.print(\"{}\\n\", .{area(&.{ .circle = 2 })});\n" +
+            "}\n", 0,
+            "true true 7 25\n12" },
         // Task #140: std.crypto.blake3's shapes: a late-declared struct const in a field extent, `@intCast` slice bounds,
         // open slices of a many-item pointer, and an array local copied through a pointer.
         new object[] { "blake3_shapes",

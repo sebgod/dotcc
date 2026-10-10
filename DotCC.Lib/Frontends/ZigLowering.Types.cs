@@ -395,7 +395,7 @@ internal sealed partial class ZigLowering
 
     /// <summary>True when an <c>if</c> arm is a container type spelled in place (<c>struct { … }</c> /
     /// <c>enum { … }</c>, grammar <c>TypeArm</c>) rather than a value.</summary>
-    private static bool IsTypeArm(Item arm) => arm.Content is Zig.TypeArmEnum or Zig.TypeArmEnumTyped or Zig.InlineStructType;
+    private static bool IsTypeArm(Item arm) => arm.Content is Zig.InlineEnumType or Zig.InlineEnumTypeTyped or Zig.InlineStructType;
 
     /// <summary>True when either arm of an <c>if</c> expression is a <see cref="IsTypeArm">type arm</see>, so the
     /// <c>if</c> chooses a type.</summary>
@@ -410,10 +410,10 @@ internal sealed partial class ZigLowering
             case Zig.InlineStructType s:
                 type = ReifyInlineStruct(arm, s.Arg2);
                 return true;
-            case Zig.TypeArmEnum e:
+            case Zig.InlineEnumType e:
                 type = ReifyInlineEnum(arm, e.Arg2);
                 return true;
-            case Zig.TypeArmEnumTyped et:
+            case Zig.InlineEnumTypeTyped et:
                 type = ReifyInlineEnum(arm, et.Arg5, et.Arg2);
                 return true;
             default:
@@ -897,9 +897,21 @@ internal sealed partial class ZigLowering
         var name = QualifyTypeName($"__AnonEnum{_inlineStructNames.Count}");   // shares the per-module counter
         _inlineStructNames[occurrence] = name;
         if (_currentContainer is { } enumParent) { _containerParents[name] = enumParent; }   // as an inline union's (task #193)
+        List<Item> enumMethods;
+        try
+        {
+            using (EnterContainer(name)) { enumMethods = RegisterEnumZig(name, tagType, enumFields); }
+        }
+        catch
+        {
+            // A member that cannot register (a non-constant value) leaves no type: forget the site, so the next reference
+            // raises that same error instead of finding a name with nothing behind it.
+            _inlineStructNames.Remove(occurrence);
+            throw;
+        }
         using (EnterContainer(name))
         {
-            foreach (var methodDef in RegisterEnumZig(name, tagType, enumFields))
+            foreach (var methodDef in enumMethods)
             {
                 var me = DeclareMethod(name, methodDef);
                 _currentContainer = name;   // DeclareMethod clears it

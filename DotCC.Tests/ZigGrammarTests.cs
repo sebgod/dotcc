@@ -192,6 +192,20 @@ public sealed class ZigGrammarTests
     }
 
     [Fact]
+    public void Inline_enums_and_unions_are_types_anywhere()
+    {
+        FirstNode<Zig.TyOptional>("const T = struct { m: ?enum { a, b } = null };").Arg1.Content.ShouldBeOfType<Zig.InlineEnumType>();
+        FirstNode<Zig.TyArray>("const T = struct { f: [2]enum(u8) { off, on } };").Arg3.Content.ShouldBeOfType<Zig.InlineEnumTypeTyped>();
+        TryParse("fn f(s: *const union(enum) { a: u32, b: u16 }) void { _ = s; }").ShouldBeTrue();
+        // A type-choosing `if` arm and an argument reach the same records.
+        FirstNode<Zig.IfExpr>("const E = if (c) enum { a } else enum(u8) { b };").Arg4.Content.ShouldBeOfType<Zig.InlineEnumType>();
+        FirstNode<Zig.BuiltinCall>("fn f() void { _ = @as(enum { x, y }, .y); }").ShouldNotBeNull();
+        // The named declarations keep their own forms.
+        FirstNode<Zig.EnumDecl>("const E = enum { a, b };").ShouldNotBeNull();
+        FirstNode<Zig.UnionDeclEnum>("const U = union(enum) { a: u8 };").ShouldNotBeNull();
+    }
+
+    [Fact]
     public void Range_multi_object_and_capture_while_loops_are_values()
     {
         FirstNode<Zig.ForMultiElseExpr>("fn f(a: []const u8) usize { const i = for (a, 0..) |x, j| { if (x > 0) break j; } else 0; return i; }")
