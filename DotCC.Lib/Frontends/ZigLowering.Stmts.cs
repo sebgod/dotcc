@@ -240,6 +240,8 @@ internal sealed partial class ZigLowering
             // IR (post = cont), so `continue` runs the cont. The assign form builds an `Assign` post
             // over the AssignOp operator (via ContAssignPost, like stmtWhileContAssign); the bare-expr
             // form a plain one.
+            case Zig.StmtWhileCaptureContBlock w:   // `while (it) |n| : ({ … }) body` (std's heap/ArenaAllocator.zig)
+                return LowerWhileCapture(w.Arg2, Tok(w.Arg5), w.Arg11, null, () => ContBlockPost(w.Arg9));
             case Zig.StmtWhileCaptureCont w:
                 return LowerWhileCapture(w.Arg2, Tok(w.Arg5), w.Arg11, null, () => LowerExpr(w.Arg9));
             case Zig.StmtWhileCaptureContAssign w:

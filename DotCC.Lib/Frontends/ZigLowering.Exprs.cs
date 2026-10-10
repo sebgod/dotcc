@@ -164,15 +164,14 @@ internal sealed partial class ZigLowering
                 // `unreachable` (a keyword; an identifier in this grammar) as a statement or a statement
                 // prong (`0 => unreachable,` in std.Io.Writer.print): zig's safe builds panic "reached
                 // unreachable code", and C23's `unreachable()` already lowers to that loud throw.
-                if (name == "unreachable")
-                {
-                    return new Call("__dotcc_unreachable", new List<CExpr>(), new List<CType>(), null) { Type = CType.Void };
-                }
+                if (name == "unreachable") { return UnreachableCall(); }
                 // The enclosing function is named, since a deep std wall is otherwise hard to place.
                 throw new IrUnsupportedException(_currentFnName.Length > 0
                     ? $"unresolved identifier '{name}' (in '{_currentFnName}')"
                     : $"unresolved identifier '{name}'");
             }
+            // A switch with no prongs (std's unicode.zig, over an empty error set) has no value to reach: it is `unreachable`.
+            case Zig.SwitchExprEmpty: return UnreachableCall();
             case Zig.Grouped g:
             {
                 // A parenthesized value-position control-flow construct — `( if … )` / `( switch … )` /

@@ -37,6 +37,8 @@ internal sealed partial class ZigLowering
     private string? _activeSwitchValueLabel;
     /// <summary>True when <paramref name="e"/> is the bare <c>unreachable</c>.</summary>
     private static bool IsUnreachableItem(Item e) => e.Content is Zig.Ident { Arg0: var tok } && Tok(tok) == "unreachable";
+    /// <summary>zig's <c>unreachable</c>: the loud trap C23's <c>unreachable()</c> also lowers to.</summary>
+    private static Call UnreachableCall() => new("__dotcc_unreachable", new List<CExpr>(), new List<CType>(), null) { Type = CType.Void };
     /// <summary>The prong a switch over a comptime-known integer subject takes (case values, ranges, then
     /// <c>else</c>), or null when the subject does not fold or the prong captures.</summary>
     private ZigProng? TrySelectConstProng(Item subjectItem, Item prongsItem)

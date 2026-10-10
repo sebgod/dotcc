@@ -264,6 +264,16 @@ public sealed class ZigGrammarTests
     }
 
     [Fact]
+    public void Small_std_shapes_6_parse()
+    {
+        FirstNode<Zig.PackedStructDecl>("const S2 = packed struct {};").ShouldNotBeNull();
+        FirstNode<Zig.SwitchExprEmpty>("fn f() u8 { return g() catch |err| switch (err) {}; }").ShouldNotBeNull();
+        FirstNode<Zig.StmtWhileCaptureContBlock>("fn f(it0: ?*N) void { var it = it0; while (it) |n| : ({ it = n.next; }) { _ = n; } }")
+            .ShouldNotBeNull();
+        FirstNode<Zig.MemberExternConst>("const P = struct { pub extern const etext: anyopaque; };").ShouldNotBeNull();
+    }
+
+    [Fact]
     public void Small_std_shapes_parse()
     {
         // `struct { … }{ … }`: a typed literal whose type is an inline struct; `const X = struct {…};` keeps its decl form.
