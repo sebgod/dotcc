@@ -291,6 +291,11 @@ internal sealed partial class ZigLowering
             // `comptime { … }` — a compile-time block statement (Milestone T, part 3): run the block's
             // comptime-value statements at lowering time, emit no runtime code.
             case Zig.ComptimeBlock cb:     return LowerComptimeBlock(cb.Arg1);
+            // `comptime for (…) |…| { … }` (std's asn1/Oid.zig): runs at compile time, as a comptime block's body does.
+            case Zig.ComptimeLoop cl:
+                using (EnterSymbolScope())
+                using (EnterComptime()) { ExecuteComptimeStmt(cl.Arg1); }
+                return new Seq(new List<CStmt>());
 
             // `switch (subject) { prongs ,? } ;?` → the C IR Switch (subject=Arg2, prongs=Arg5; the optional
             // trailing comma and semicolon come after both). A tagged-union subject takes the capture path.

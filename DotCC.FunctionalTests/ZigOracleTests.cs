@@ -7868,6 +7868,42 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{}\\n\", .{Hooks.twice(21)});\n" +
             "}\n", 0,
             "2 2\n40 0\ntrue 3 3 4\n42" },
+        // Small std shapes 4: a by-reference capture prong assignment through a dereferenced union (std's http.zig; the switch had
+        // copied `e.*` into a temp, so `|*l|` writes vanished), an unnamed `extern fn` parameter (Build/abi.zig) and a value
+        // `inline for (a, b,)` with a trailing comma (debug/ElfFile.zig).
+        new object[] { "small_std_shapes_4",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "const Ev = union(enum) { len: u32, name: []const u8, none };\n" +
+            "\n" +
+            "extern \"c\" fn abs(c_int) c_int;\n" +
+            "\n" +
+            "fn shrink(e: *Ev, n: u32) void {\n" +
+            "    switch (e.*) {\n" +
+            "        .len => |*l| l.* -= n,\n" +
+            "        .name => |*s| s.* = s.*[1..],\n" +
+            "        .none => {},\n" +
+            "    }\n" +
+            "}\n" +
+            "\n" +
+            "fn indexOfSize(size: usize) usize {\n" +
+            "    return inline for (\n" +
+            "        [_]type{ u8, u16, u32 },\n" +
+            "        0..,\n" +
+            "    ) |T, i| {\n" +
+            "        if (@sizeOf(T) == size) break i;\n" +
+            "    } else 99;\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() void {\n" +
+            "    var a = Ev{ .len = 10 };\n" +
+            "    var b = Ev{ .name = \"hello\" };\n" +
+            "    shrink(&a, 3);\n" +
+            "    shrink(&b, 0);\n" +
+            "    std.debug.print(\"{} {s}\\n\", .{ a.len, b.name });\n" +
+            "    std.debug.print(\"{} {} {}\\n\", .{ indexOfSize(2), indexOfSize(4), indexOfSize(3) });\n" +
+            "}\n", 0,
+            "7 ello\n1 2 99" },
         // Task #140: std.crypto.blake3's shapes: a late-declared struct const in a field extent, `@intCast` slice bounds,
         // open slices of a many-item pointer, and an array local copied through a pointer.
         new object[] { "blake3_shapes",

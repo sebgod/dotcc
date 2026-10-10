@@ -296,7 +296,7 @@ internal sealed partial class ZigLowering
     /// parameter (wall-plan W3a/W3b) is classified <see cref="ParamKind.ComptimeType"/> when its type is
     /// the <c>type</c> keyword, else <see cref="ParamKind.ComptimeValue"/> — <see cref="DeclareFn"/>
     /// splits those out as the monomorphization keys.</summary>
-    private List<ParamInfo> CollectParamInfos(Item? paramsItem, out bool variadic)
+    private List<ParamInfo> CollectParamInfos(Item? paramsItem, out bool variadic, bool allowUnnamed = false)
     {
         variadic = false;
         var infos = new List<ParamInfo>();
@@ -326,6 +326,12 @@ internal sealed partial class ZigLowering
                         : IsTypeKeyword(pm.Arg2) ? ParamKind.ComptimeType
                         : ParamKind.Runtime));
                     break;
+                // An unnamed `T` (std's Build/abi.zig): zig allows one on an `extern fn` prototype only.
+                case Zig.ParamUnnamed pu when allowUnnamed:
+                    infos.Add(new ParamInfo("_" + i.ToString(CultureInfo.InvariantCulture), pu.Arg0, ParamKind.Runtime));
+                    break;
+                case Zig.ParamUnnamed:
+                    throw new CompileException("zig: a function definition's parameters need names (only an `extern fn` prototype may leave one out)");
                 case Zig.ParamComptime pm:   // 'comptime' IDENT ':' Type
                     // `comptime tables: anytype` (std.fmt.float.binaryToDecimal) is an `anytype` whose argument is comptime:
                     // the anytype path already keys a comptime_int or a pointer to a type by its value (task #85).
@@ -368,7 +374,7 @@ internal sealed partial class ZigLowering
     private void DeclareExternFn(Item nameTok, Item? paramsItem, Item retType)
     {
         var ret = LowerType(retType);
-        var paramInfos = CollectParamInfos(paramsItem, out var variadic);
+        var paramInfos = CollectParamInfos(paramsItem, out var variadic, allowUnnamed: true);
         // An `extern fn` is a C-ABI prototype — a `comptime` or `anytype` parameter (a monomorphization
         // key, not an ABI slot) makes no sense on one, and real zig rejects it too. Reject loudly.
         if (paramInfos.Any(p => p.IsComptime || p.Kind == ParamKind.AnyType))

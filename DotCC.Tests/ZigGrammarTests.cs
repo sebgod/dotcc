@@ -217,6 +217,16 @@ public sealed class ZigGrammarTests
     }
 
     [Fact]
+    public void Small_std_shapes_4_parse()
+    {
+        FirstNode<Zig.ProngCaptureRefAssign>("fn f(e: *E) void { switch (e.*) { .len => |*l| l.* -= 1, else => {} } }").ShouldNotBeNull();
+        FirstNode<Zig.ParamUnnamed>("extern fn g(*const u32, n: u32) bool;").ShouldNotBeNull();
+        FirstNode<Zig.InlineForMultiElseExpr>("fn f() usize { return inline for (a, b,) |x, y| { _ = x; break y; } else 0; }").ShouldNotBeNull();
+        // zig's `comptime Expr;`: the `;` closes it.
+        FirstNode<Zig.ComptimeLoop>("fn f() void { comptime for (xs) |x| { _ = x; }; }").ShouldNotBeNull();
+    }
+
+    [Fact]
     public void Small_std_shapes_parse()
     {
         // `struct { … }{ … }`: a typed literal whose type is an inline struct; `const X = struct {…};` keeps its decl form.

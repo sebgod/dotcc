@@ -413,6 +413,16 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Rejects_an_unnamed_parameter_on_a_function_definition()
+    {
+        // zig allows `fn (u32)` unnamed only on an `extern fn` prototype; a definition needs every name.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "fn f(u32) u32 { return 1; }\n" +
+            "pub fn main() u8 { return @intCast(f(2)); }\n"));
+        ex.Message.ShouldContain("need names");
+    }
+
+    [Fact]
     public void Folds_an_anon_init_concat_operand_borrowing_the_element_type()
     {
         // An anon `.{…}` `++` operand has no explicit type; it BORROWS the element type from the other,
