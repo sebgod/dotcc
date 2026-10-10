@@ -1246,8 +1246,8 @@ place a poison IS needed is the top-level tombstone, and that is what landed.
 
 ### S9 — surface-debt bricks (many S/M; parallel any time; wall-finder-ranked)
 
-**Current ranking (2026-10-10, after the worklist batches and zig-grammar-peg P1 to P5's first step: 491 of 553 files
-parse-clean, 88.8%; it was 341 / 61.7% on 2026-10-09 and 187 / 33.8% at the 2026-09-23 report).** The batches (#306
+**Current ranking (2026-10-10, after the worklist batches and zig-grammar-peg P1 to P5's first step: 493 of 553 files
+parse-clean, 89.2%; it was 341 / 61.7% on 2026-10-09 and 187 / 33.8% at the 2026-09-23 report).** The batches (#306
 to #309) took an empty file, `align(N)` on an untyped declaration, `pub extern` / `extern var`, the inline
 `extern`/`packed` container field types, `enum(uN)` fields, a named `extern union`, labeled-block field values,
 `if`-typed fields, `**T`, empty `enum {}` / `struct {}`, `union(enum(uN))`, extern `callconv` and layout prong types.
@@ -1255,14 +1255,14 @@ to #309) took an empty file, `align(N)` on an untyped declaration, `pub extern` 
 `if (eu) S else |err| S` (P2) and the else-less `if` expression with block arms (P3a). A small-shapes batch then took
 an inline `enum(u8)` call argument, `struct { … }{ … }`, a range `for … else`, a union variant typed by an `if`,
 `*allowzero T`, `[*:0]align(N) const T`, an `enum(u32)` prong type and an expression then-arm on a statement `if`, and P3 made a
-`switch` an operand anywhere, and P5 an inline `struct { … }` a type anywhere; range, multi-object and capture-`while` value loops followed. The
+`switch` an operand anywhere, and P5 an inline `struct { … }` a type anywhere; range, multi-object and capture-`while` value loops followed, then `break v` in prongs and arms, the else-less value
+`while`, `for |*x| … else` and container `extern fn` members. The
 head of [`std-parse-probe.report.txt`](std-parse-probe.report.txt) is a tail of 1-to-4-file buckets, most of them
 zig-grammar-peg P3's (a `switch` or loop as an operand):
 
 | Files | Construct (first-fail) | Example |
 |---|---|---|
 | 2 | **`catch` after a value-less labeled `break`** | `mod.unwind orelse break :unwind catch break :unwind` (`debug/SelfInfo/Elf.zig`) |
-| 2 | **an `extern fn` prototype inside a container** | `pub extern fn fuzzer_init(…) void;` (`Build/abi.zig`) |
 
 The historical ranking below is kept for the record.
 
