@@ -6,7 +6,8 @@
 the else-less `if` expression and block arms (probe 443 to 452). P3 first step done: `switch` as a closed
 primary (probe 466 to 473); labeled blocks and value loops as primaries remain. P5 started: an inline
 `struct { … }` is a Type anywhere (probe 473 to 486). Range, multi-object and capture-`while` value loops
-(still RhsExpr forms, not primaries) took the probe to 491.
+(still RhsExpr forms, not primaries) took the probe to 491. P5 step 2: `enum` / `union` / layout containers are
+Types too (probe 500 to 506).
 
 ## Why
 
@@ -172,3 +173,13 @@ or a `{ … }` block stands there. Lowering builds the statement loop under the 
 never completes runs as a statement. The new precedence decisions are only the statement loop keeping `{…} else` at
 statement start, the same as the older value loops. Making loops primaries is still blocked on the `inline for`
 reduce/reduce conflict with inline-prong case values.
+
+**P5, step 2 as landed.** The other inline containers are Type alternatives: `enum {…}`, `enum(T) {…}`,
+`union(enum) {…}`, `union {…}` and the `extern` / `packed` struct and union forms. Retired: their AType, Arg and ProngType
+copies (ProngType is now unused, with its two prong rules), and TypeArm (an `if` arm reaches every container Type through
+RhsExpr; the lowering of the old `typeArmEnum` reads InlineEnumType). The new precedence decisions are the named
+declarations (`const E = enum {…};`, `const X = extern struct {…};`, `return packed struct {…};`) keeping their own
+forms, and a jump taking a container as its value. The full functional run caught one regression: os/windows.zig
+parsed further and reached an inline enum whose registration throws, and its memo entry then made a second reference
+raise KeyNotFoundException; the entry is now dropped on failure. Still open in P5: the named declarations as ordinary
+`VarDecl`s.
