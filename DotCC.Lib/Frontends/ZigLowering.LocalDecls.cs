@@ -166,7 +166,7 @@ internal sealed partial class ZigLowering
     /// switch has no <c>null</c> prong, its subject is not comptime-known, or the payload does not fold.</summary>
     private bool TryBindComptimeOptionalSwitch(Item nameTok, Item initExpr)
     {
-        var rhs = initExpr.Content is Zig.ComptimeSwitchExpr cs ? cs.Arg1 : initExpr;
+        var rhs = initExpr.Content is Zig.PreComptime { Arg1.Content: Zig.SwitchExpr } cs ? cs.Arg1 : initExpr;
         var (subject, prongsItem) = rhs.Content switch
         {
             Zig.SwitchExpr s => (s.Arg2, s.Arg5),

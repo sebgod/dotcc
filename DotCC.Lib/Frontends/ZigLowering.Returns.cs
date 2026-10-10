@@ -264,9 +264,10 @@ internal sealed partial class ZigLowering
         {
             // `a orelse return [v]`, `a catch break`, `a catch |e| return v`, `a orelse if (c) break else return`: an ordinary
             // orelse / catch whose fallback is noreturn (zig-grammar-peg P1b made the jumps expressions).
-            case Zig.OrElse o when IsNoreturnArm(o.Arg2):        lhs = o.Arg0; isCatch = false; arm = o.Arg2; return true;
-            case Zig.CatchOp c when IsNoreturnArm(c.Arg2):       lhs = c.Arg0; isCatch = true;  arm = c.Arg2; return true;
-            case Zig.CatchCapture c when IsNoreturnArm(c.Arg5):  lhs = c.Arg0; isCatch = true;  arm = c.Arg5; capture = Tok(c.Arg3); return true;
+            // A `switch` fallback (`catch |err| switch (err) { … }`, zig-grammar-peg P3) is one too: its prongs yield or jump.
+            case Zig.OrElse o when IsNoreturnArm(o.Arg2) || o.Arg2.Content is Zig.SwitchExpr:        lhs = o.Arg0; isCatch = false; arm = o.Arg2; return true;
+            case Zig.CatchOp c when IsNoreturnArm(c.Arg2) || c.Arg2.Content is Zig.SwitchExpr:       lhs = c.Arg0; isCatch = true;  arm = c.Arg2; return true;
+            case Zig.CatchCapture c when IsNoreturnArm(c.Arg5) || c.Arg5.Content is Zig.SwitchExpr:  lhs = c.Arg0; isCatch = true;  arm = c.Arg5; capture = Tok(c.Arg3); return true;
             case Zig.OrElseArm o:        lhs = o.Arg0; isCatch = false; arm = o.Arg2; return true;
             case Zig.CatchArm c:         lhs = c.Arg0; isCatch = true;  arm = c.Arg2; return true;
             case Zig.CatchCaptureArm c:  lhs = c.Arg0; isCatch = true;  arm = c.Arg5; capture = Tok(c.Arg3); return true;
@@ -398,7 +399,7 @@ internal sealed partial class ZigLowering
         };
         if (!isCatch && knownOptional is not null && lhs.Type.Unqualified is CType.Optional { Inner: var knownInner })
         {
-            if (knownOptional is DefaultLit && arm.Content is not (Zig.FbSwitch or Zig.FbLabeled) && !ArmCanFallThrough(arm))
+            if (knownOptional is DefaultLit && arm.Content is not (Zig.SwitchExpr or Zig.FbLabeled) && !ArmCanFallThrough(arm))
             {
                 return LowerFallbackArm(arm);
             }
@@ -460,18 +461,18 @@ internal sealed partial class ZigLowering
         // A `switch` arm over a `!void` whose result nobody binds (`self.shrinkAndFreePrecise(…) catch |e|
         // switch (e) { error.OutOfMemory => { …; return; } };` in array_list) yields no value: it is a
         // statement switch on the failure path, so its prongs may be void blocks.
-        var voidSwitch = arm.Content is Zig.FbSwitch && bind is null && payload.Type.Unqualified.Equals(CType.Void);
+        var voidSwitch = arm.Content is Zig.SwitchExpr && bind is null && payload.Type.Unqualified.Equals(CType.Void);
         // The value arm's result is at the RESULT type, which zig takes from the result location: `const lnum: ?usize =
         // parseUnsigned(…) catch |err| switch (err) { error.InvalidCharacter => null, … };` (std.SemanticVersion.order,
         // task #195) is a `?usize` whose prong may be `null`, not the `usize` payload. Only an optional sink over the payload
         // widens it; any other declared type keeps the payload's (the binding coerces it as before).
         if (resultSink?.Unqualified is CType.Optional { Inner: var sinkInner }
             && sinkInner.Unqualified.Equals(payload.Type.Unqualified)
-            && arm.Content is Zig.FbSwitch or Zig.FbLabeled)
+            && arm.Content is Zig.SwitchExpr or Zig.FbLabeled)
         {
             payload = new Cast(resultSink, payload) { Type = resultSink };
         }
-        Symbol? switchResult = arm.Content is Zig.FbSwitch or Zig.FbLabeled && !voidSwitch
+        Symbol? switchResult = arm.Content is Zig.SwitchExpr or Zig.FbLabeled && !voidSwitch
             ? _symbols.Declare(new Symbol { Name = "__cfv" + _anfTempCounter++, Kind = SymKind.Var, Type = payload.Type })
             : null;
         // The failure path, in its own scope: `catch |e|` binds the error code first (a `_` binds
@@ -485,13 +486,13 @@ internal sealed partial class ZigLowering
                 var errSym = _symbols.Declare(new Symbol { Name = cap, Kind = SymKind.Var, Type = CType.ErrorSet });
                 onFail.Add(new DeclStmt(new List<LocalDecl> { new(errSym, new Member(lhsRef, "Code", false) { Type = CType.ErrorSet }) }));
             }
-            if (arm.Content is Zig.FbSwitch fs && switchResult is { } result)
+            if (arm.Content is Zig.SwitchExpr && switchResult is { } result)
             {
                 // A value-yielding `switch` arm (`a catch |err| switch (err) { error.X => 0, else => return err }`)
                 // FILLS a result on the failure path — each prong a value or a jump — and the success path
                 // fills it with the payload, so the consumer reads one temp either way.
                 var resultRef = new VarRef(result) { Type = payload.Type, IsLValue = true };
-                onFail.Add(LowerValueControlFlowStmt(fs.Arg0, payload.Type, temp =>
+                onFail.Add(LowerValueControlFlowStmt(arm, payload.Type, temp =>
                     new ExprStmt(new Assign(null, resultRef, new VarRef(temp) { Type = temp.Type }) { Type = payload.Type })));
                 pre.Add(new DeclStmt(new List<LocalDecl> { new(result, null) }));
                 pre.Add(new If(test, new Block(onFail),
@@ -512,14 +513,9 @@ internal sealed partial class ZigLowering
                     new Block(new List<CStmt> { new ExprStmt(new Assign(null, resultRef, payload) { Type = payload.Type }) })));
                 payload = new VarRef(blkResult) { Type = payload.Type };
             }
-            else if (voidSwitch && arm.Content is Zig.FbSwitch { Arg0.Content: var voidSw })
+            else if (voidSwitch && arm.Content is Zig.SwitchExpr voidSw)
             {
-                var (swSubject, swProngs) = voidSw switch
-                {
-                    Zig.SwitchExpr se => (se.Arg2, se.Arg5),
-                    _ => throw new IrUnsupportedException("zig switch arm: " + (voidSw?.GetType().Name ?? "null")),
-                };
-                onFail.Add(LowerSwitchStmt(swSubject, swProngs));
+                onFail.Add(LowerSwitchStmt(voidSw.Arg2, voidSw.Arg5));
                 pre.Add(new If(test, new Block(onFail), null));
             }
             else

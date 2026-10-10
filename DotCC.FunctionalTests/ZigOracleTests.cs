@@ -7693,6 +7693,53 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{d}\\n\", .{code(.mac)});\n" +
             "}\n", 0,
             "5 103 103 6\n10" },
+        // zig-grammar-peg P3: a `switch` as an operand anywhere (a PrimaryExpr, as in zig): `3 * switch … + 1`, `force or switch …`,
+        // `switch … < 0`, `comptime switch`, and a switch as a positional tuple element (std's zig/Ast.zig).
+        new object[] { "switch_as_operand",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "const Kind = enum { small, big, huge };\n" +
+            "\n" +
+            "fn weight(k: Kind) u32 {\n" +
+            "    return 3 * switch (k) {\n" +
+            "        .small => @as(u32, 1),\n" +
+            "        .big => 10,\n" +
+            "        .huge => 100,\n" +
+            "    } + 1;\n" +
+            "}\n" +
+            "\n" +
+            "fn isHeavy(k: Kind, force: bool) bool {\n" +
+            "    return force or switch (k) {\n" +
+            "        .small => false,\n" +
+            "        else => true,\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "fn sign(x: i32) bool {\n" +
+            "    return switch (x) {\n" +
+            "        0 => @as(i32, 0),\n" +
+            "        else => x,\n" +
+            "    } < 0;\n" +
+            "}\n" +
+            "\n" +
+            "fn width(comptime k: Kind) u32 {\n" +
+            "    return comptime switch (k) {\n" +
+            "        .small => 8,\n" +
+            "        .big => 16,\n" +
+            "        .huge => 32,\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() void {\n" +
+            "    const k: Kind = .big;\n" +
+            "    std.debug.print(\"{d} {d} {} {}\\n\", .{ weight(.small), weight(k), isHeavy(.small, false), isHeavy(.huge, false) });\n" +
+            "    std.debug.print(\"{} {} {d}\\n\", .{ sign(-4), sign(7), width(.huge) });\n" +
+            "    std.debug.print(\"{d} {d}\\n\", .{ switch (k) {\n" +
+            "        .small => @as(u32, 1),\n" +
+            "        else => 2,\n" +
+            "    }, width(.small) });\n" +
+            "}\n", 0,
+            "4 31 false true\ntrue false 32\n2 8" },
         // Task #140: std.crypto.blake3's shapes: a late-declared struct const in a field extent, `@intCast` slice bounds,
         // open slices of a many-item pointer, and an array local copied through a pointer.
         new object[] { "blake3_shapes",

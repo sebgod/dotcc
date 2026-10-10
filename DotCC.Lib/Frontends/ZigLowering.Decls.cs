@@ -591,7 +591,6 @@ internal sealed partial class ZigLowering
             var attr = fd.Content switch
             {
                 Zig.StructField f => (Tok(f.Arg0), (Item?)null, false),
-                Zig.StructFieldSwitch f => (Tok(f.Arg0), null, false),
                 Zig.StructFieldIf f => (Tok(f.Arg0), null, false),
                 Zig.StructFieldDefault f => (Tok(f.Arg0), null, true),
                 Zig.StructFieldAligned f => (Tok(f.Arg0), f.Arg5, false),
@@ -620,9 +619,6 @@ internal sealed partial class ZigLowering
             {
                 case Zig.StructField f:          // FieldDecl -> IDENT ':' Type
                     fields.Add(PackedAwareField(Tok(f.Arg0), f.Arg2, layout));
-                    break;
-                case Zig.StructFieldSwitch f:    // FieldDecl -> IDENT ':' SwitchExpr (a comptime-selected type)
-                    fields.Add(new StructField(Tok(f.Arg0), LowerSwitchType(f.Arg2)));
                     break;
                 case Zig.StructFieldIf f:        // FieldDecl -> IDENT ':' IfExpr (a comptime-selected type)
                     fields.Add(new StructField(Tok(f.Arg0), LowerType(f.Arg2)));
@@ -2074,7 +2070,7 @@ internal sealed partial class ZigLowering
             case Zig.SwitchExpr s:         return LowerSwitchExpr(s.Arg2, s.Arg5, sink);
             // `comptime switch` / `comptime if` in value position: the inner form, whose comptime-known
             // subject already selects one arm at lowering time.
-            case Zig.ComptimeSwitchExpr c: return LowerExprSink(c.Arg1, sink);
+            case Zig.PreComptime { Arg1.Content: Zig.SwitchExpr } c: return LowerExprSink(c.Arg1, sink);
             case Zig.ComptimeLabeledBlock clb: return ComptimeLabeledBlockValue(clb.Arg1, sink);
             case Zig.PreComptime { Arg1.Content: Zig.IfExpr } c: return LowerExprSink(c.Arg1, sink);
             // A value-position capture `if` with a result type (`const a: ?Alignment = if (x) |b| … else null;`).
