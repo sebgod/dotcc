@@ -211,6 +211,8 @@ internal sealed partial class ZigLowering
             case Zig.StmtWhile w:       return new While(LowerExpr(w.Arg2), LowerStmt(w.Arg4));
             // `while (c) body else elsebody` (task #130): the else runs when the condition ends the loop, not a `break`.
             case Zig.StmtWhileElse w:   return LowerWhileElseStmt(w.Arg2, w.Arg4, w.Arg6);
+            case Zig.StmtWhileContAssignElse w:
+                return LowerWhileElseStmt(w.Arg2, w.Arg10, w.Arg12, () => ContAssignPost(w.Arg6, w.Arg7, w.Arg8));
 
             // `while (cond) : (cont) body` → the C IR `For` (no init): the cont runs after each
             // iteration AND on `continue`, exactly matching C's for-update — so `continue`

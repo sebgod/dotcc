@@ -792,7 +792,7 @@ internal sealed partial class ZigLowering
     /// the else when the condition, not a <c>break</c>, ended the loop. A <c>continue</c> in the body re-tests the condition,
     /// as zig's does. With no <c>break</c> out of the body the else follows unguarded, so C# sees a returning else end
     /// the function.</summary>
-    private CStmt LowerWhileElseStmt(Item condItem, Item bodyItem, Item elseItem)
+    private CStmt LowerWhileElseStmt(Item condItem, Item bodyItem, Item elseItem, Func<CExpr>? contPost = null)
     {
         using var symbolScope = EnterSymbolScope();
         // Numbered: a nested while-else's flag would otherwise shadow its enclosing one's, which C# refuses (CS0136).
@@ -804,7 +804,10 @@ internal sealed partial class ZigLowering
             new Break(),
         }), null);
         var userBody = LowerStmt(bodyItem);
-        var loop = new While(new LitBool(true) { Type = CType.Bool }, new Block(new List<CStmt> { exit, userBody }));
+        // A continue-expression (`while (c) : (i += 1)`) is the C `for`'s post, so a `continue` runs it before the next test.
+        CStmt loop = contPost is { } post
+            ? new For(null, new LitBool(true) { Type = CType.Bool }, post(), new Block(new List<CStmt> { exit, userBody }))
+            : new While(new LitBool(true) { Type = CType.Bool }, new Block(new List<CStmt> { exit, userBody }));
         var elseStmt = LowerStmt(elseItem);
         symbolScope.Dispose();
         return new Block(new List<CStmt>

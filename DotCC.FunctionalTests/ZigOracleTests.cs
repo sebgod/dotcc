@@ -7962,6 +7962,38 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{} {} {}\\n\", .{ widen(true, 1 << 40), widen(false, 21), @intFromEnum(Tag.b) });\n" +
             "}\n", 0,
             "9 5 1\n2199023255552 42 301" },
+        // Small std shapes 5: an `extern threadlocal var` container member (std's c.zig), `while (c) : (i += 1) … else return null;`
+        // (coff.zig) and a value `for … else { return …; }` whose `else` is a block (debug/SelfInfo/Windows.zig).
+        new object[] { "small_std_shapes_5",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "const C = struct {\n" +
+            "    extern threadlocal var never_read: c_int;\n" +
+            "\n" +
+            "    pub fn firstAbove(xs: []const u32, limit: u32) ?usize {\n" +
+            "        var i: usize = 0;\n" +
+            "        while (i < xs.len) : (i += 1) {\n" +
+            "            if (xs[i] > limit) break;\n" +
+            "        } else return null;\n" +
+            "        return i;\n" +
+            "    }\n" +
+            "};\n" +
+            "\n" +
+            "fn firstEven(xs: []const u32) u32 {\n" +
+            "    const v = for (xs) |x| {\n" +
+            "        if (x % 2 == 0) break x;\n" +
+            "    } else {\n" +
+            "        return 999;\n" +
+            "    };\n" +
+            "    return v + 1;\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() void {\n" +
+            "    const xs = [_]u32{ 1, 3, 8, 5 };\n" +
+            "    std.debug.print(\"{} {}\\n\", .{ C.firstAbove(&xs, 4) orelse 77, C.firstAbove(&xs, 50) orelse 77 });\n" +
+            "    std.debug.print(\"{} {}\\n\", .{ firstEven(&xs), firstEven(xs[0..2]) });\n" +
+            "}\n", 0,
+            "2 77\n9 999" },
         // Task #140: std.crypto.blake3's shapes: a late-declared struct const in a field extent, `@intCast` slice bounds,
         // open slices of a many-item pointer, and an array local copied through a pointer.
         new object[] { "blake3_shapes",

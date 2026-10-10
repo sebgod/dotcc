@@ -1495,6 +1495,10 @@ internal sealed partial class ZigLowering
             {
                 Zig.FnTypeParamUnnamed u => LowerType(u.Arg0),
                 Zig.FnTypeParamNamed n   => LowerType(n.Arg2),
+                Zig.FnTypeParamComptimeUnnamed => throw new IrUnsupportedException(
+                    "a function TYPE with a `comptime` parameter is a generic function type, which has no function-pointer form"),
+                Zig.FnTypeParamVariadic => throw new IrUnsupportedException(
+                    "a C-variadic function TYPE (`fn (…, ...)`) has no function-pointer form yet"),
                 Zig.FnTypeParamComptime  => throw new IrUnsupportedException(
                     "a function TYPE with a `comptime` parameter is a generic function type, which has no function-pointer "
                     + "form (std.Options' `logFn`)"),
