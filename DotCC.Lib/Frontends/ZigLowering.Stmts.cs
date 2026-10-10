@@ -203,7 +203,7 @@ internal sealed partial class ZigLowering
             // An expression then-arm of a statement `if` (`if (c) f() else …`, `if (x) |s| s.close(io) else |_| {}`).
             case Zig.ThenExpr t:        return LowerArmStmt(t.Arg0);
             // The jump body of a statement `if` / prong (`if (c) return v else …`, `=> if (x) |v| break`), zig-grammar-peg P1b.
-            case Zig.ReturnExpr or Zig.FbBreak or Zig.FbBreakLabel or Zig.FbBreakLabelValue
+            case Zig.ReturnExpr or Zig.FbBreak or Zig.FbBreakLabel or Zig.FbBreakLabelValue or Zig.FbBreakValue
               or Zig.FbContinue or Zig.FbContinueLabel or Zig.FbContinueLabelValue:
                 return LowerExitArm(stmt);
             case Zig.StmtIfAssignElse f:           return LowerIfStmt(f.Arg2, f.Arg4, f.Arg6);
@@ -337,6 +337,8 @@ internal sealed partial class ZigLowering
             // `for (…) |…| body else elsebody` (task #108): the else runs when the loop ends without a `break`.
             case Zig.StmtForSliceElse f:
                 return LowerForParallel(new[] { new ForObject(f.Arg2, false, null) }, new[] { (Tok(f.Arg5), false) }, f.Arg7, f.Arg9);
+            case Zig.StmtForSliceRefElse f:   // for (s) |*x| body else elsebody
+                return LowerForParallel(new[] { new ForObject(f.Arg2, false, null) }, new[] { (Tok(f.Arg6), true) }, f.Arg8, f.Arg10);
             case Zig.StmtForRangeElse f:   // for (start..end) |i| body else elsebody
                 return LowerForParallel(new[] { new ForObject(f.Arg2, true, f.Arg4) }, new[] { (Tok(f.Arg7), false) }, f.Arg9, f.Arg11);
             case Zig.StmtForMultiElse f:

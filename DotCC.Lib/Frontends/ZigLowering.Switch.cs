@@ -214,6 +214,7 @@ internal sealed partial class ZigLowering
         Zig.PjBreak => LowerUnlabeledBreak(),
         Zig.PjBreakLabel b => LowerLabeledLoopJump(Tok(b.Arg2), isContinue: false),
         Zig.PjBreakLabelValue b => Hoisted(() => LowerLabeledBreak(Tok(b.Arg2), b.Arg3)),
+        Zig.PjBreakValue b => Hoisted(() => LowerBreakValue(b.Arg1)),
         Zig.PjContinue => new Continue(),
         Zig.PjContinueLabel c => LowerLabeledLoopJump(Tok(c.Arg2), isContinue: true),
         Zig.PjContinueLabelValue c => LowerSwitchContinue(Tok(c.Arg2), c.Arg3),

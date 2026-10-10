@@ -300,7 +300,7 @@ internal sealed partial class ZigLowering
 
     /// <summary>True for a jump expression: <c>break</c> / <c>continue</c>, plain, labeled or with a value (the
     /// <c>fb*</c> records, zig-grammar-peg P1b).</summary>
-    private static bool IsJumpArm(Item arm) => arm.Content is Zig.FbBreak or Zig.FbBreakLabel or Zig.FbBreakLabelValue
+    private static bool IsJumpArm(Item arm) => arm.Content is Zig.FbBreak or Zig.FbBreakLabel or Zig.FbBreakLabelValue or Zig.FbBreakValue
         or Zig.FbContinue or Zig.FbContinueLabel or Zig.FbContinueLabelValue;
 
     /// <summary>True for an expression that never yields a value: a jump, a <c>return</c>, or an <c>if</c> both of whose
@@ -337,6 +337,7 @@ internal sealed partial class ZigLowering
         Zig.FbContinue       => new Continue(),
         Zig.FbBreakLabel b   => LowerLabeledLoopJump(Tok(b.Arg2), isContinue: false),
         Zig.FbBreakLabelValue b => Hoisted(() => LowerLabeledBreak(Tok(b.Arg2), b.Arg3)),
+        Zig.FbBreakValue b   => Hoisted(() => LowerBreakValue(b.Arg1)),
         Zig.FbContinueLabel c => LowerLabeledLoopJump(Tok(c.Arg2), isContinue: true),
         Zig.FbContinueLabelValue c => LowerSwitchContinue(Tok(c.Arg2), c.Arg3),
         Zig.FbBlock b        => LowerStmt(b.Arg0),

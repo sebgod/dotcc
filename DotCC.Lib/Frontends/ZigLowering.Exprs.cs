@@ -960,7 +960,7 @@ internal sealed partial class ZigLowering
                 return LowerControlFlowFallbackExpr(expr);
             // A jump in a position no construct above gives it (`f(return 1)`, `x + break`): zig accepts it, as a noreturn
             // operand, but nothing would run after it, so dotcc has no lowering for it.
-            case Zig.ReturnExpr or Zig.FbBreak or Zig.FbBreakLabel or Zig.FbBreakLabelValue
+            case Zig.ReturnExpr or Zig.FbBreak or Zig.FbBreakLabel or Zig.FbBreakLabelValue or Zig.FbBreakValue
               or Zig.FbContinue or Zig.FbContinueLabel or Zig.FbContinueLabelValue:
                 throw new IrUnsupportedException(
                     "zig: a `return` / `break` / `continue` is lowered as an `orelse` / `catch` fallback, an `if` arm or a statement, "

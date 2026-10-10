@@ -589,6 +589,8 @@ productions:
       # { return EnumTag; }`): the else runs when the loop ends without a `break`. In this dangling-else group, as the
       # while-capture else is, so a Stmt body followed by `else` shifts into it.
       - { lhs: LoopStmt, rhs: ['for', '(', Expr, ')', '|', IDENT, '|', Stmt, 'else', Stmt],           action: stmtForSliceElse }
+      # The by-reference twin (std's coff.zig: `for (self.getSectionHeaders()) |*sect| { … } else return error.X;`).
+      - { lhs: LoopStmt, rhs: ['for', '(', Expr, ')', '|', '*', IDENT, '|', Stmt, 'else', Stmt],      action: stmtForSliceRefElse }
       # The counted range with an `else` (std's Io/Writer.zig: `for (0..max_bytes) |_| { … } else unreachable;`).
       - { lhs: LoopStmt, rhs: ['for', '(', Expr, '..', Expr, ')', '|', IDENT, '|', Stmt, 'else', Stmt], action: stmtForRangeElse }
       - { lhs: LoopStmt, rhs: ['for', '(', ForObjs, ",?", ')', '|', ForCaps, '|', Stmt, 'else', Stmt], action: stmtForMultiElse }
@@ -1557,6 +1559,9 @@ productions:
       - { lhs: ProngJump, rhs: ['continue', ':', IDENT],        action: pjContinueLabel }
       # `.raw => continue :sw .block_header,` (GH #286): a labeled switch's continue, with its new operand.
       - { lhs: ProngJump, rhs: ['continue', ':', IDENT, RhsExpr], action: pjContinueLabelValue }
+      # An unlabeled `break v` (std's Io/Dispatch.zig: `.SUCCESS => break @intCast(rc),`) yields from the innermost value
+      # loop. After `break`, a token that starts a value shifts; `,` and `}` reduce the value-less form.
+      - { lhs: ProngJump, rhs: ['break', RhsExpr],                action: pjBreakValue }
 
   # Case values: a comma-list of value Exprs, or `else` (the default). The `,` here never
   # clashes with the prong-separator `,` because FOLLOW(CaseVals) = { '=>' } — after a value
@@ -1610,6 +1615,9 @@ productions:
       - { lhs: ContainerDeclaration, rhs: [pub?, FnDef],           action: memberMethod }
       - { lhs: ContainerDeclaration, rhs: [pub?, 'inline', FnDef],        action: memberInlineMethod }
       - { lhs: ContainerDeclaration, rhs: [pub?, 'noinline', FnDef],        action: memberNoinlineMethod }
+      # An `extern fn` prototype as a container member (std's Build/abi.zig: `pub extern fn fuzzer_init(…) void;`), the
+      # top-level `externFnProto`'s shape. Parsed and dropped: a call to one is an unresolved name, loudly.
+      - { lhs: ContainerDeclaration, rhs: [pub?, 'extern', STRING?, 'fn', IDENT, '(', Params?, ')', CallConv, Type, ';'], action: memberExternFn }
       # A container-level `comptime { … }` block (hash_map.zig's `comptime { assert(@sizeOf(Metadata) == 1); }`):
       # analysis-only, dropped like the top-level form (topComptime). `comptime` starts no other member.
       - { lhs: ContainerDeclaration, rhs: ['comptime', Block],      action: memberComptime }
@@ -1863,6 +1871,7 @@ productions:
       - { lhs: JumpExpr, rhs: ['break'],                       action: fbBreak }
       - { lhs: JumpExpr, rhs: ['break', ':', IDENT],           action: fbBreakLabel }
       - { lhs: JumpExpr, rhs: ['break', ':', IDENT, RhsExpr],  action: fbBreakLabelValue }
+      - { lhs: JumpExpr, rhs: ['break', RhsExpr],              action: fbBreakValue }
       - { lhs: JumpExpr, rhs: ['continue'],                    action: fbContinue }
       - { lhs: JumpExpr, rhs: ['continue', ':', IDENT],        action: fbContinueLabel }
       - { lhs: JumpExpr, rhs: ['continue', ':', IDENT, RhsExpr], action: fbContinueLabelValue }
@@ -1880,6 +1889,11 @@ productions:
       # std's Io/Writer.zig): the statement form takes the `if` and the block, so the `;` is an empty statement. zig only
       # allows it in that position; accepting it anywhere changes no program's meaning.
       - { lhs: Stmt, rhs: [';'], action: emptyStmt }
+      # A value `while` with no `else` (`const fd: c.fd_t = while (true) { … break @intCast(rc); … };`, 24 sites in std):
+      # its value is its `break`s', and zig accepts it only when the loop cannot end normally. Here for the same reasons as
+      # the else-less `if`: an `else` after the Block shifts into whileElseExpr, and the statement `while` wins at
+      # statement start.
+      - { lhs: LoopExpr, rhs: ['while', '(', Expr, ')', Block], action: whileNoElseExpr }
 
 lexer:
   root:

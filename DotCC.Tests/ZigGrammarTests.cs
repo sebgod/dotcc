@@ -204,6 +204,19 @@ public sealed class ZigGrammarTests
     }
 
     [Fact]
+    public void Small_std_shapes_3_parse()
+    {
+        FirstNode<Zig.PjBreakValue>("fn f(k: u8) u8 { return while (true) { switch (k) { 0 => break 1, else => {} } }; }").ShouldNotBeNull();
+        FirstNode<Zig.FbBreakValue>("fn f(k: u8) u8 { return while (true) { switch (k) { else => if (k > 1) break 0 } }; }").ShouldNotBeNull();
+        FirstNode<Zig.WhileNoElseExpr>("fn f() u8 { const x: u8 = while (true) { break 3; }; return x; }").ShouldNotBeNull();
+        // An `else` after the Block belongs to the value `while`, not to an enclosing `if`.
+        FirstNode<Zig.IfExprNoElse>("fn f(c: bool) void { _ = if (c) while (c) { break; } else 1; }")
+            .Arg4.Content.ShouldBeOfType<Zig.WhileElseExpr>();
+        FirstNode<Zig.StmtForSliceRefElse>("fn f(xs: []u8) !void { for (xs) |*x| { x.* = 0; } else return error.E; }").ShouldNotBeNull();
+        FirstNode<Zig.MemberExternFn>("const H = struct { pub extern fn g(x: u32) void; };").ShouldNotBeNull();
+    }
+
+    [Fact]
     public void Small_std_shapes_parse()
     {
         // `struct { … }{ … }`: a typed literal whose type is an inline struct; `const X = struct {…};` keeps its decl form.
