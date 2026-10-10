@@ -153,7 +153,7 @@ internal sealed partial class ZigLowering
             default:
                 return null;
         }
-        if (arm.Content is not Zig.TypeArmStruct selected)
+        if (arm.Content is not Zig.InlineStructType selected)
         {
             throw new IrUnsupportedException($"zig: `const {name} = if (…) …` selects a non-struct type arm, which is not lowered yet");
         }

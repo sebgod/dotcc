@@ -591,7 +591,6 @@ internal sealed partial class ZigLowering
             var attr = fd.Content switch
             {
                 Zig.StructField f => (Tok(f.Arg0), (Item?)null, false),
-                Zig.StructFieldIf f => (Tok(f.Arg0), null, false),
                 Zig.StructFieldDefault f => (Tok(f.Arg0), null, true),
                 Zig.StructFieldAligned f => (Tok(f.Arg0), f.Arg5, false),
                 Zig.StructFieldAlignedDefault f => (Tok(f.Arg0), f.Arg5, true),
@@ -619,9 +618,6 @@ internal sealed partial class ZigLowering
             {
                 case Zig.StructField f:          // FieldDecl -> IDENT ':' Type
                     fields.Add(PackedAwareField(Tok(f.Arg0), f.Arg2, layout));
-                    break;
-                case Zig.StructFieldIf f:        // FieldDecl -> IDENT ':' IfExpr (a comptime-selected type)
-                    fields.Add(new StructField(Tok(f.Arg0), LowerType(f.Arg2)));
                     break;
                 case Zig.StructFieldDefault f:   // FieldDecl -> IDENT ':' Type '=' RhsExpr
                     var fname = Tok(f.Arg0);
@@ -669,6 +665,18 @@ internal sealed partial class ZigLowering
     /// the type it lowers to (std.hash_map's <c>Metadata = packed struct { fingerprint: u7, used: u1 }</c>, one byte in
     /// zig, which <c>@bitCast</c>s to a <c>u8</c>): the backend packs a run of bit-fields into shared storage units, so
     /// the struct's size and bit positions match zig's for these byte-sized runs.</summary>
+    /// <summary>The byte count of <paramref name="count"/> elements of <paramref name="element"/>, as a <c>memcpy</c>
+    /// argument: a literal when the element's size is known here, else <c>count * sizeof(T)</c>. A struct element's size
+    /// is the C# compiler's to settle (<see cref="CType.Named"/> reports 0), so a literal would copy nothing (an array of
+    /// structs initialized from a tuple, <c>.rows = .{ .{ .a = 1 }, .{ .a = 3 } }</c>).</summary>
+    private static CExpr ElementBytes(CType element, long count)
+    {
+        var known = count * element.SizeOf;
+        if (known > 0 || count == 0) { return new LitInt(known.ToString(CultureInfo.InvariantCulture), known) { Type = CType.Int }; }
+        var size = new Cast(CType.Int, new SizeOfExpr(element.Unqualified) { Type = CType.ULong }) { Type = CType.Int };
+        return new Binary(BinOp.Mul, new LitInt(count.ToString(CultureInfo.InvariantCulture), count) { Type = CType.Int }, size) { Type = CType.Int };
+    }
+
     private StructField PackedAwareField(string name, Item typeAst, AggregateLayout layout)
     {
         var type = LowerType(typeAst);
@@ -1599,13 +1607,12 @@ internal sealed partial class ZigLowering
         {
             var value = LowerExprSink(valueItem, ftype);
             var count = ftype.Count ?? throw new IrUnsupportedException($"struct '{named.Name}': field '{fname}' has no comptime length");
-            var bytes = (long)count * ftype.Element.SizeOf;
             var dest = new Member(new VarRef(temp) { Type = named, IsLValue = true }, fname, false) { Type = ftype, IsLValue = true };
             pre.Add(new ExprStmt(new Call("memcpy", new List<CExpr>
             {
                 dest,
                 value,
-                new LitInt(bytes.ToString(CultureInfo.InvariantCulture), bytes) { Type = CType.Int },
+                ElementBytes(ftype.Element, count),
             }) { Type = new CType.Pointer(CType.Void) }));
         }
         _hoistImpureSeen = savedImpure;

@@ -7740,6 +7740,33 @@ public sealed class ZigOracleTests
             "    }, width(.small) });\n" +
             "}\n", 0,
             "4 31 false true\ntrue false 32\n2 8" },
+        // An inline `struct { … }` is a Type like any other (zig's ContainerDecl is a primary type expression): an array or
+        // pointer element type, an if-typed field with a default, a `[_]struct {…}{…}` literal and an `@as` argument. The tuple-
+        // initialized struct-array field also pins the byte count of its copy (a struct element's size was taken as 0).
+        new object[] { "inline_struct_types",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "const wide = true;\n" +
+            "\n" +
+            "const Table = struct {\n" +
+            "    rows: [2]struct { a: u8, b: u16 },\n" +
+            "    link: if (wide) [3]struct { v: u8 } else void = undefined,\n" +
+            "    head: ?*const struct { n: u32 } = null,\n" +
+            "};\n" +
+            "\n" +
+            "pub fn main() void {\n" +
+            "    var t = Table{ .rows = .{ .{ .a = 1, .b = 2 }, .{ .a = 3, .b = 4 } } };\n" +
+            "    t.link[0].v = 9;\n" +
+            "    t.link[2].v = 5;\n" +
+            "    var sum: u32 = 0;\n" +
+            "    for ([_]struct { k: u8, w: u8 }{ .{ .k = 1, .w = 10 }, .{ .k = 2, .w = 20 } }) |e| {\n" +
+            "        sum += @as(u32, e.k) * e.w;\n" +
+            "    }\n" +
+            "    const p = @as(struct { x: i32, y: i32 }, .{ .x = -2, .y = 5 });\n" +
+            "    std.debug.print(\"{} {} {} {}\\n\", .{ t.rows[1].a, t.rows[0].b, t.link[0].v + t.link[2].v, t.head == null });\n" +
+            "    std.debug.print(\"{} {}\\n\", .{ sum, p.x * p.y });\n" +
+            "}\n", 0,
+            "3 2 14 true\n50 -10" },
         // Task #140: std.crypto.blake3's shapes: a late-declared struct const in a field extent, `@intCast` slice bounds,
         // open slices of a many-item pointer, and an array local copied through a pointer.
         new object[] { "blake3_shapes",

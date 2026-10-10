@@ -940,7 +940,6 @@ productions:
       # A tagged enum arm (std.Io.File's `Permissions = … orelse if (is_windows) enum(DWORD) { … } else …`, GH #282),
       # members and methods as a named `enum(T)` has. After `enum`, `(` versus `{` is one token.
       - { lhs: TypeArm, rhs: ['enum', '(', Type, ')', '{', EnumFields?, '}'], action: typeArmEnumTyped }
-      - { lhs: TypeArm, rhs: ['struct', '{', FieldDecls?, '}'], action: typeArmStruct }
       # Value-position captured `if` — `if (opt) |x| thenExpr else elseExpr` (S4a). The `|` after the
       # `)` cannot start a RhsExpr (it is only an infix bitwise-or), so this is conflict-free with the
       # plain ifExpr above. `else` is mandatory (an expression yields a value on both paths). Mirrors
@@ -1085,10 +1084,6 @@ productions:
     rules:
       - { lhs: CurlySuffix, rhs: [Type] }
       - { lhs: CurlySuffix, rhs: [Type, '{', FieldInits?, '}'], action: typedStructInit }
-      # A struct literal typed by an inline `struct { … }` (std's debug/Dwarf.zig: `std.sort.pdq(…, struct { … }{ .keys = … })`).
-      # After the struct's `}`, a `{` selects the literal and a `;` the container declaration that shares the prefix.
-      - { lhs: CurlySuffix, rhs: [InlineStructTy, '{', FieldInits?, '}'], action: typedStructInit }
-      - { lhs: InlineStructTy, rhs: ['struct', '{', FieldDecls?, '}'], action: inlineStructType }
 
   # Type-level prefix ops (right-assoc): `?T`, `*T`, `[]T`, `[N]T`. These sit at
   # operand position; `*`/`&`/`[` here are the SAME tokens as binary mul / bitwise-
@@ -1171,6 +1166,11 @@ productions:
       # so it's a clean 1-token shift at Type position, and the tuple `}` then a function Block `{`
       # is a clean boundary. Mixed named+positional and arity > 7 are rejected in lowering.
       - { lhs: Type, rhs: ['struct', '{', TupleTypes, '}'], action: tyTuple }
+      # An inline `struct { … }` is a Type like any other (zig's ContainerDecl is a primary type expression), so it
+      # nests (`[N]struct {…}`, `*struct {…}`, `?struct {…}`), types a literal (`struct {…}{ .a = 1 }`, `[_]struct {…}{…}`)
+      # and is an argument or a prong value. After `{`, the first member's `:` splits it from the tuple form.
+      - { lhs: Type, rhs: [InlineStructTy] }
+      - { lhs: InlineStructTy, rhs: ['struct', '{', FieldDecls?, '}'], action: inlineStructType }
       # Function-pointer TYPE `fn (Params) RetType` (Milestone W, part 1a) — at a Type position
       # (a const/var annotation, a param/return type), lowered to a managed `delegate*<…>` (a bare
       # `CType.Func`); `*const fn (…) R` / `?*const fn (…) R` compose for free through the existing
@@ -1210,7 +1210,6 @@ productions:
   - derivation: none
     rules:
       - { lhs: AType, rhs: [Type] }
-      - { lhs: AType, rhs: ['struct', '{', FieldDecls?, '}'], action: inlineStructType }
       # The enum twin: `comptime sign: enum { pos, neg }` (std's parseIntWithSign). Same annotation-only
       # slot, so the value-position `const E = enum {…}` (enumDecl) keeps no competitor.
       - { lhs: AType, rhs: ['enum', '{', EnumFields?, '}'],   action: inlineEnumType }
@@ -1394,7 +1393,6 @@ productions:
       # `@as(union(enum) { … }, …)`, task #110), reusing AType's inline actions. `enum` / `union` are not in
       # FIRST(Expr); `struct {…}` shares its prefix with the closure idiom `struct {…}.f`, which continues with
       # `.`, a token no Arg is followed by, so the choice after `}` is still one token.
-      - { lhs: Arg, rhs: ['struct', '{', FieldDecls, '}'],                     action: inlineStructType }
       - { lhs: Arg, rhs: ['enum', '{', EnumFields?, '}'],                       action: inlineEnumType }
       # With a tag type (std's Io/Reader.zig: `r.takeEnum(enum(u8) { … }, .little)`).
       - { lhs: Arg, rhs: ['enum', '(', Type, ')', '{', EnumFields?, '}'],       action: inlineEnumTypeTyped }
@@ -1417,7 +1415,6 @@ productions:
 
   - derivation: none
     rules:
-      - { lhs: ProngType, rhs: ['struct', '{', FieldDecls?, '}'],                    action: inlineStructType }
       - { lhs: ProngType, rhs: ['enum', '{', EnumFields?, '}'],                       action: inlineEnumType }
       - { lhs: ProngType, rhs: ['enum', '(', Type, ')', '{', EnumFields?, '}'],       action: inlineEnumTypeTyped }
       - { lhs: ProngType, rhs: ['union', '(', 'enum', ')', '{', UnionVariants, '}'], action: inlineUnionEnumType }
@@ -1652,9 +1649,11 @@ productions:
       # A field whose TYPE is a comptime `switch` (std.mem.SplitIterator's `delimiter: switch (delimiter_type) { … },`) is
       # the plain field rule since zig-grammar-peg P3 (a `switch` is a Primary, so a Type). A comptime `if`
       # (std's Io/Threaded.zig: `old_sig_io: if (have_sig_io) posix.Sigaction else void,`) needs its own rule: the condition
-      # must fold, as in a type alias. A field slot only: as a general AType (a return type, followed by `{`) an `if`
-      # would clash with a struct-literal arm.
-      - { lhs: FieldDecl, rhs: [IDENT, ':', IfExpr], action: structFieldIf }
+      # must fold, as in a type alias (LowerType folds it). A field slot only: as a general AType (a return type, followed by
+      # `{`) an `if` would clash with a struct-literal arm. It shares the plain field records, with or without a default
+      # (std's compress/flate/Decompress.zig: `linked: if (…) void else [alphabet_size]struct { … } = undefined,`).
+      - { lhs: FieldDecl, rhs: [IDENT, ':', IfExpr], action: structField }
+      - { lhs: FieldDecl, rhs: [IDENT, ':', IfExpr, '=', RhsExpr], action: structFieldDefault }
 
   # Enum body as a MEMBER list (right-recursive over EnumMember, like struct's FieldDecls) — so
   # value members, methods (`fn`/`pub fn`), and consts (`const Self = @This();`) interleave. The

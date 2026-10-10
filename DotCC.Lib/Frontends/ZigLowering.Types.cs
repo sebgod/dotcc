@@ -395,7 +395,7 @@ internal sealed partial class ZigLowering
 
     /// <summary>True when an <c>if</c> arm is a container type spelled in place (<c>struct { … }</c> /
     /// <c>enum { … }</c>, grammar <c>TypeArm</c>) rather than a value.</summary>
-    private static bool IsTypeArm(Item arm) => arm.Content is Zig.TypeArmEnum or Zig.TypeArmEnumTyped or Zig.TypeArmStruct;
+    private static bool IsTypeArm(Item arm) => arm.Content is Zig.TypeArmEnum or Zig.TypeArmEnumTyped or Zig.InlineStructType;
 
     /// <summary>True when either arm of an <c>if</c> expression is a <see cref="IsTypeArm">type arm</see>, so the
     /// <c>if</c> chooses a type.</summary>
@@ -407,7 +407,7 @@ internal sealed partial class ZigLowering
     {
         switch (arm.Content)
         {
-            case Zig.TypeArmStruct s:
+            case Zig.InlineStructType s:
                 type = ReifyInlineStruct(arm, s.Arg2);
                 return true;
             case Zig.TypeArmEnum e:

@@ -493,7 +493,7 @@ internal sealed partial class ZigLowering
         var arm = UnwrapGrouped(rhs).Content is Zig.IfExpr ta
             ? (FoldTypeBodyCondition(fnName, ta.Arg2) ? ta.Arg4 : ta.Arg6)
             : throw new System.InvalidOperationException();
-        if (arm.Content is Zig.TypeArmStruct s)
+        if (arm.Content is Zig.InlineStructType s)
         {
             BindTypeBodyLocalStruct(fnName, name, s.Arg2, typeShadows);
             return;
@@ -687,7 +687,7 @@ internal sealed partial class ZigLowering
                 return (ReifyInlineEnum(cur, e.Arg2), null);
             case Zig.TypeArmEnumTyped et:
                 return (ReifyInlineEnum(cur, et.Arg5, et.Arg2), null);
-            case Zig.TypeArmStruct s:
+            case Zig.InlineStructType s:
                 return (ReifyInlineStruct(cur, s.Arg2), null);
             case Zig.SwitchExpr se:
                 return LowerComptimeTypeSwitch(fnName, se.Arg2, se.Arg5);
