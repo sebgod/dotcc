@@ -457,7 +457,7 @@ internal sealed partial class ZigLowering
     /// may classify it as one before lowering anything.</summary>
     private static bool IsTypeFormer(Item item) => item.Content
         is Zig.TyPointer or Zig.TyPtrConst or Zig.TyPointerPointer or Zig.TyPointerPointerConst or Zig.TyCPtr or Zig.TyCPtrConst
-        or Zig.TyManyPtr or Zig.TyManyPtrConst or Zig.TySentPtr or Zig.TySentPtrConst
+        or Zig.TyManyPtr or Zig.TyManyPtrConst or Zig.TySentPtr or Zig.TySentPtrConst or Zig.TySentPtrAlign or Zig.TySentPtrConstAlign
         or Zig.TyOptional or Zig.TySlice or Zig.TySliceConst or Zig.TySentSlice or Zig.TySentSliceConst
         or Zig.TyPointerAlign or Zig.TyPtrConstAlign or Zig.TyManyPtrAlign or Zig.TyManyPtrConstAlign
         or Zig.TySliceAlign or Zig.TySliceConstAlign
@@ -719,6 +719,8 @@ internal sealed partial class ZigLowering
         // a documented cut. Const rides as a TypeQual on the element, same as the non-sentinel forms.
         Zig.TySentPtr p      => new CType.Pointer(LowerDataType(p.Arg1)),
         Zig.TySentPtrConst p => new CType.Pointer(LowerDataType(p.Arg2).WithQuals(TypeQual.Const)),
+        Zig.TySentPtrAlign p      => new CType.Pointer(LowerDataType(p.Arg2)),                            // [*:0]align(N) T
+        Zig.TySentPtrConstAlign p => new CType.Pointer(LowerDataType(p.Arg3).WithQuals(TypeQual.Const)),   // [*:0]align(N) const T
         Zig.TySentSlice s      => new CType.Slice(LowerDataType(s.Arg1)),
         Zig.TySentSliceConst s => new CType.Slice(LowerDataType(s.Arg2).WithQuals(TypeQual.Const)),
         // `[N]T` fixed-size array → CType.Array(element, N). N must be an integer literal
