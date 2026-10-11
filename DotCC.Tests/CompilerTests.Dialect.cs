@@ -321,6 +321,7 @@ public sealed partial class CompilerTests
     [InlineData("[[nodiscard]] int f(void) { return 1; }\nint main() { return 0; }", "c17", "[[attributes]]", "C23")]
     [InlineData("int main() { [[maybe_unused]] int x = 0; return x; }", "c17", "[[attributes]]", "C23")]
     [InlineData("enum Color : unsigned char { Red };\nint main() { return 0; }", "c17", "enum", "C23")]
+    [InlineData("enum : unsigned char { Red };\nint main() { return 0; }", "c17", "enum", "C23")]
     [InlineData("#define LOG(fmt, ...) fmt\nint main() { return 0; }", "c90", "variadic macro", "C99")]
     [InlineData("#warning hi\nint main() { return 0; }", "c17", "#warning", "C23")]
     [InlineData("int main() { int x = 1; x = x + 1; int y = 2; return x + y; }", "c90", "mixed declarations", "C99")]

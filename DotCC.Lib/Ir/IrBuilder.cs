@@ -352,8 +352,7 @@ internal sealed partial class IrBuilder
             // interpreter. A holding assertion emits nothing; a zero or non-constant
             // controlling expression is a collected compile error. The message-less
             // arity gates C23 (it postdates the two-arg C11 form).
-            case C.StaticAssert sa: Gate(2011, "_Static_assert", fn); CheckStaticAssert(sa.Arg2, sa.Arg4, SrcPos.From(fn)); break;
-            case C.StaticAssertNoMsg sa: Gate(2023, "_Static_assert with no message", fn); CheckStaticAssert(sa.Arg2, null, SrcPos.From(fn)); break;
+            case C.StaticAssertDecl sa: BuildStaticAssert(sa, fn, SrcPos.From(fn)); break;
             default: throw new IrUnsupportedException(TypeName(fn.Content));
         }
     }
@@ -658,34 +657,47 @@ internal sealed partial class IrBuilder
         {
             case C.AttrListCons c: CollectDeclAttrs(c.Arg0); CollectDeclAttrs(c.Arg2); break;
             case C.AttrNoreturn: _pendingAttrNoreturn = true; break;
-            case C.AttrIdent a when Tok(a.Arg0) == "noreturn": _pendingAttrNoreturn = true; break;
-            case C.AttrIdent a when Tok(a.Arg0) == "deprecated": _pendingAttrDeprecated ??= ""; break;
-            case C.AttrCall a when Tok(a.Arg0) == "deprecated":
-                _pendingAttrDeprecated ??= TryStringLiteral(a.Arg2) ?? "";
+            case C.Attr a when IsBareAttr(a, "noreturn"): _pendingAttrNoreturn = true; break;
+            // `deprecated` and `nodiscard`, bare, with empty parens or with a reason:
+            // a null argument (no clause, or `()`) gives the empty message.
+            case C.Attr a when AttrNameOf(a) is (null, "deprecated"):
+                _pendingAttrDeprecated ??= TryStringLiteral(AttrArgOf(a)) ?? "";
                 break;
-            case C.AttrIdent a when Tok(a.Arg0) == "nodiscard": _pendingAttrNodiscard ??= ""; break;
-            case C.AttrCall a when Tok(a.Arg0) == "nodiscard":
-                _pendingAttrNodiscard ??= TryStringLiteral(a.Arg2) ?? "";
+            case C.Attr a when AttrNameOf(a) is (null, "nodiscard"):
+                _pendingAttrNodiscard ??= TryStringLiteral(AttrArgOf(a)) ?? "";
                 break;
             // GCC's constructor attribute, `[[gnu::constructor]]` or with a priority,
-            // `[[gnu::constructor(101)]]`: the function runs before main. An empty
-            // `[[gnu::constructor()]]` (a null argument) takes the default priority.
-            case C.AttrNamespaced a when IsGnu(a.Arg0) && Tok(a.Arg3) is "constructor" or "__constructor__":
-                _pendingAttrConstructor ??= IrModule.DefaultConstructorPriority;
-                break;
-            case C.AttrNsCall { Arg5: null } a when IsGnu(a.Arg0) && Tok(a.Arg3) is "constructor" or "__constructor__":
-                _pendingAttrConstructor ??= IrModule.DefaultConstructorPriority;
-                break;
-            case C.AttrNsCall { Arg5: { } prio } a when IsGnu(a.Arg0) && Tok(a.Arg3) is "constructor" or "__constructor__":
-                _pendingAttrConstructor ??= (int)(ConstEval(BuildExpr(prio))
-                    ?? throw new IrUnsupportedException("a constructor priority that is not an integer constant expression"));
+            // `[[gnu::constructor(101)]]`: the function runs before main. A bare or
+            // empty `[[gnu::constructor()]]` (a null argument) takes the default priority.
+            case C.Attr a when AttrNameOf(a) is ("gnu" or "__gnu__", "constructor" or "__constructor__"):
+                _pendingAttrConstructor ??= AttrArgOf(a) is { } prio
+                    ? (int)(ConstEval(BuildExpr(prio))
+                        ?? throw new IrUnsupportedException("a constructor priority that is not an integer constant expression"))
+                    : IrModule.DefaultConstructorPriority;
                 break;
             default: break; // all other attribute shapes: accepted + ignored
         }
     }
 
-    /// <summary>True when an attribute's namespace is GCC's, <c>gnu</c> or <c>__gnu__</c>.</summary>
-    private static bool IsGnu(Item ns) => Tok(ns) is "gnu" or "__gnu__";
+    /// <summary>An attribute's namespace and name (C23 6.7.12.1's attribute-token):
+    /// <c>(null, "deprecated")</c> for a standard attribute, <c>("gnu", "aligned")</c>
+    /// for a prefixed one.</summary>
+    private static (string? Ns, string Name) AttrNameOf(C.Attr a) => a.Arg0.Content switch
+    {
+        C.AttrStdName n => (null, Tok(n.Arg0)),
+        C.AttrNsName n => (Tok(n.Arg0), Tok(n.Arg3)),
+        var other => throw new IrUnsupportedException(TypeName(other)),
+    };
+
+    /// <summary>An attribute's argument, the <c>E</c> of its <c>( E? )</c> clause, or
+    /// null when it has no clause or an empty one.</summary>
+    private static Item? AttrArgOf(C.Attr a) =>
+        a.Arg1 is { Content: C.AttrArgs { Arg1: { } arg } } ? arg : null;
+
+    /// <summary>True when <paramref name="a"/> is the standard attribute
+    /// <paramref name="name"/> with no namespace and no argument clause.</summary>
+    private static bool IsBareAttr(C.Attr a, string name) =>
+        a.Arg1 is null && AttrNameOf(a) is (null, var n) && n == name;
 
     /// <summary>True when an <c>AttrList</c> contains the C23 <c>[[fallthrough]]</c>
     /// attribute (a bare identifier). Recognized structurally — like the attributes in
@@ -695,7 +707,7 @@ internal sealed partial class IrBuilder
     private bool AttrListHasFallthrough(Item it) => it.Content switch
     {
         C.AttrListCons c => AttrListHasFallthrough(c.Arg0) || AttrListHasFallthrough(c.Arg2),
-        C.AttrIdent a => Tok(a.Arg0) == "fallthrough",
+        C.Attr a => IsBareAttr(a, "fallthrough"),
         _ => false,
     };
 
@@ -707,7 +719,7 @@ internal sealed partial class IrBuilder
     private bool AttrListHasMaybeUnused(Item it) => it.Content switch
     {
         C.AttrListCons c => AttrListHasMaybeUnused(c.Arg0) || AttrListHasMaybeUnused(c.Arg2),
-        C.AttrIdent a => Tok(a.Arg0) == "maybe_unused",
+        C.Attr a => IsBareAttr(a, "maybe_unused"),
         _ => false,
     };
 
@@ -1117,10 +1129,11 @@ internal sealed partial class IrBuilder
     /// enum (so it renders <c>EnumName.Member</c> and decays to its underlying int
     /// only at C's plain-int contexts), and an <see cref="EnumTypeDef"/> is emitted.
     /// An ANONYMOUS, un-typedef'd enum has no C# name, so its enumerators stay plain
-    /// int constants (named constants) rather than synthesizing a type. Returns the
-    /// enum's <see cref="CType"/> — the <see cref="CType.Enum"/>, or
-    /// <see cref="CType.Int"/> for the anonymous form — so a typedef caller can alias
-    /// the name to it.</summary>
+    /// constants (named constants) of its underlying type rather than synthesizing a
+    /// type: <see cref="CType.Int"/>, or the fixed underlying type of a C23
+    /// <c>enum : T { … }</c>. Returns the enum's <see cref="CType"/> (the
+    /// <see cref="CType.Enum"/>, or that underlying type for the anonymous form), so
+    /// a typedef caller can alias the name to it.</summary>
     private CType RegisterEnum(string? tag, Item? baseType, Item enumList, string? typedefName = null)
     {
         var underlying = baseType is { } bt ? ResolveType(bt) : CType.Int;
@@ -1153,7 +1166,7 @@ internal sealed partial class IrBuilder
             _symbols.Declare(new Symbol
             {
                 Name = name, Kind = SymKind.EnumConst,
-                Type = (CType?)enumType ?? CType.Int, ConstValue = next, IsGlobal = true,
+                Type = (CType?)enumType ?? underlying, ConstValue = next, IsGlobal = true,
             });
             if (enumType is not null) { members.Add(new EnumMember(name, next)); }
             next++;
@@ -1164,7 +1177,7 @@ internal sealed partial class IrBuilder
             if (tag is not null) { _enumTypes[tag] = enumType; }
             AddEnumDef(enumType.Name, underlying, members);
         }
-        return (CType?)enumType ?? CType.Int;
+        return (CType?)enumType ?? underlying;
     }
 
 
@@ -1432,8 +1445,9 @@ internal sealed partial class IrBuilder
         // An untagged definition has a null tag (Arg1, the optional ID).
         C.TypeStructDef t => DefineAggregate(it, OptTok(t.Arg1), t.Arg3, isUnion: false),
         C.TypeUnionDef t => DefineAggregate(it, OptTok(t.Arg1), t.Arg3, isUnion: true),
-        C.TypeEnumDef t => DefineEnum(it, OptTok(t.Arg1), null, t.Arg3),
-        C.TypeEnumDefTyped t => DefineEnum(it, Tok(t.Arg1), t.Arg3, t.Arg5),
+        // An enum (C23 6.7.2.2) has a null tag (Arg1) when untagged and a null
+        // EnumBase (Arg2) when it has no fixed underlying type.
+        C.EnumSpecifier t => DefineEnum(it, OptTok(t.Arg1), t.Arg2 is { Content: C.EnumBase b } ? b.Arg1 : null, t.Arg4),
         // Storage classes and function specifiers, a Type prefix or suffix (C11
         // 6.7.1, 6.7.4): dropped from the type. The declaration reads its storage
         // class structurally (DeclSpecsOf); the ones with a lowering of their own
@@ -2097,8 +2111,7 @@ internal sealed partial class IrBuilder
             // Block-scope `_Static_assert(expr[, "msg"]);` — compile-time only,
             // evaluated exactly like the file-scope forms; a holding assertion
             // emits nothing. The message-less arity gates C23.
-            case C.StaticAssertStmt s: Gate(2011, "_Static_assert", it); CheckStaticAssert(s.Arg2, s.Arg4, pos); return EmptyStmt(pos);
-            case C.StaticAssertStmtNoMsg s: Gate(2023, "_Static_assert with no message", it); CheckStaticAssert(s.Arg2, null, pos); return EmptyStmt(pos);
+            case C.StaticAssertDecl s: BuildStaticAssert(s, it, pos); return EmptyStmt(pos);
             // C23 `[[attr]]` prepending a statement / block-scope declaration —
             // gate C23, then unwrap to the inner statement. Two recognized attrs
             // carry meaning here; every other shape is accepted + ignored:
@@ -3123,6 +3136,24 @@ internal sealed partial class IrBuilder
         }
     }
 
+    /// <summary>A <c>_Static_assert</c> declaration (file or block scope, one
+    /// <c>StaticAssert</c> nonterminal for both): gate its arity, then evaluate it via
+    /// <see cref="CheckStaticAssert"/>. The two-argument form is C11; the message-less
+    /// one (a null <c>StaticAssertMsg</c>) is C23.</summary>
+    private void BuildStaticAssert(C.StaticAssertDecl sa, Item at, SrcPos pos)
+    {
+        if (sa.Arg3 is { Content: C.StaticAssertMsg msg })
+        {
+            Gate(2011, "_Static_assert", at);
+            CheckStaticAssert(sa.Arg2, msg.Arg1, pos);
+        }
+        else
+        {
+            Gate(2023, "_Static_assert with no message", at);
+            CheckStaticAssert(sa.Arg2, null, pos);
+        }
+    }
+
     /// <summary>Evaluate a <c>_Static_assert(expr[, "msg"]);</c> (C11 §6.7.10) at
     /// compile time via <see cref="ConstEval"/>. The controlling expression must be an
     /// integer constant expression: a non-constant one (e.g. a <c>const</c> variable
@@ -3233,10 +3264,12 @@ internal sealed partial class IrBuilder
         if (sym is { Kind: SymKind.EnumConst })
         {
             // An enumerator of a real (named) enum renders as EnumName.Member; one of
-            // an anonymous int-constant enum lowers to its literal integer value.
+            // an anonymous enum lowers to its literal integer value, typed int or the
+            // fixed underlying type of a C23 `enum : T { … }` (each backend renders a
+            // literal by its type: a C# suffix, a wat i64.const).
             return sym.Type.Unqualified is CType.Enum
                 ? new EnumConstRef(sym) { Type = sym.Type }
-                : new LitInt(sym.ConstValue.ToString(System.Globalization.CultureInfo.InvariantCulture), sym.ConstValue) { Type = CType.Int };
+                : new LitInt(sym.ConstValue.ToString(System.Globalization.CultureInfo.InvariantCulture), sym.ConstValue) { Type = sym.Type };
         }
         if (sym is not null)
         {

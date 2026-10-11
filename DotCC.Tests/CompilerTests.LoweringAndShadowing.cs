@@ -591,6 +591,30 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
+    public void C23_untagged_enum_with_underlying_type_types_its_constants()
+    {
+        // C23's `enum identifier? enum-type-specifier? { … }`: the tag and the base
+        // are independent, so an untagged enum can fix its type. Its constants have
+        // that type (here 8 bytes, where a plain enum's are int), and a typedef'd
+        // one is a real C# enum on the mapped base.
+        var src = WriteTemp("""
+            enum : long long { Big = 1LL << 40 };
+            typedef enum : unsigned char { Low, High = 200 } Small;
+            _Static_assert(sizeof(Big) == 8, "Big has the fixed type");
+            _Static_assert(sizeof(Small) == 1, "Small is one byte");
+            long long big(void) { return Big; }
+            int main() { Small s = High; return (int)(big() >> 40) + (int)s - 201; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c23"));
+            emitted.ShouldContain("enum Small : byte");
+            emitted.ShouldContain("High = 200,");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void Local_shadowing_a_libc_builtin_name_is_a_plain_call()
     {
         // A function-pointer local named like a libc builtin must be called as

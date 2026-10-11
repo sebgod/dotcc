@@ -496,6 +496,13 @@ symbols:
   # CastExpr — C11 6.5.4's cast-expression tier, between Mul and Unary (see the
   # cast group): a Unary, or `( Type ) CastExpr`.
   - CastExpr       # 205 non-terminal: cast-expression
+  # Helper nonterminals for grouped optionals (a `Helper?` slot stands for an
+  # optional run of symbols, which `X?` alone cannot spell).
+  - StaticAssert   # 206 non-terminal: `_Static_assert ( E StaticAssertMsg? ) ;`, file and block scope
+  - StaticAssertMsg # 207 non-terminal: a static assertion's `, STRING` message
+  - AttrName       # 208 non-terminal: an attribute's name, `ID` or `ID :: ID`
+  - AttrArgs       # 209 non-terminal: an attribute's argument clause, `( E? )`
+  - EnumBase       # 210 non-terminal: a C23 enum's fixed underlying type, `: Type`
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -609,11 +616,10 @@ productions:
       - { lhs: Fn, rhs: [Type, DeclItemList, ';'], action: globalDeclList }
 
       # `_Static_assert(expr, "msg");` (C11) and `_Static_assert(expr);`
-      # (C23, message optional). File-scope form. Compile-time only — no
-      # observable runtime behaviour — so the visitor lowers it to a comment
-      # (see Visit(C.StaticAssert)); valid programs emit nothing.
-      - { lhs: Fn, rhs: ['_Static_assert', '(', E, ',', STRING, ')', ';'], action: staticAssert }
-      - { lhs: Fn, rhs: ['_Static_assert', '(', E, ')', ';'],              action: staticAssertNoMsg }
+      # (C23, message optional), at file scope. The StaticAssert nonterminal is
+      # shared with block scope (see the StaticAssert group); compile-time only,
+      # so a holding assertion emits nothing.
+      - { lhs: Fn, rhs: [StaticAssert] }
       # C23 `[[attr]]` prepending any file-scope declaration — ACCEPTED +
       # IGNORED (gated C23 in the lowering). A chain of specifiers
       # (`[[a]] [[b]] int f();`) recurses through the wrapper.
@@ -669,13 +675,17 @@ productions:
   # order, and `enum ID :` must shift into the typed definition rather than reduce
   # `enum ID` for an unnamed bit-field (`enum E : 3;` is not supported). The binder
   # defines each occurrence's type once. The tag is optional (`ID?`, C11's
-  # `struct identifier? { … }`); an untagged definition has a null tag.
+  # `struct identifier? { … }`); an untagged definition has a null tag. An enum
+  # is C23 6.7.2.2's `enum identifier? enum-type-specifier? { … }`: both the tag
+  # and the EnumBase are optional, so `enum : unsigned char { … }` is an untagged
+  # enum with a fixed underlying type. EnumBase stays in this group so that its
+  # `:` keeps winning over the bit-field reduce.
   - derivation: none
     rules:
       - { lhs: Type, rhs: ['struct', ID?, '{', MemberList, '}'],       action: typeStructDef }
       - { lhs: Type, rhs: ['union', ID?, '{', MemberList, '}'],        action: typeUnionDef }
-      - { lhs: Type, rhs: ['enum', ID?, '{', EnumList, '}'],           action: typeEnumDef }
-      - { lhs: Type, rhs: ['enum', ID, ':', Type, '{', EnumList, '}'], action: typeEnumDefTyped }
+      - { lhs: Type, rhs: ['enum', ID?, EnumBase?, '{', EnumList, '}'], action: enumSpecifier }
+      - { lhs: EnumBase, rhs: [':', Type],                             action: enumBase }
 
   # Type — the "declarator type" non-terminal. Most C type forms reduce to
   # this via TypeSpecList (the C-standard declaration-specifier sequence:
@@ -912,10 +922,8 @@ productions:
       - { lhs: Stmt, rhs: ['case', E, ':', Stmt],          action: caseLabel }
       - { lhs: Stmt, rhs: ['default', ':', Stmt],          action: defaultLabel }
       - { lhs: Stmt, rhs: [';'],                           action: stmtEmpty }
-      # Block-scope `_Static_assert` — same two arities as the file-scope
-      # form above. Lowers to a comment (compile-time only).
-      - { lhs: Stmt, rhs: ['_Static_assert', '(', E, ',', STRING, ')', ';'], action: staticAssertStmt }
-      - { lhs: Stmt, rhs: ['_Static_assert', '(', E, ')', ';'],              action: staticAssertStmtNoMsg }
+      # Block-scope `_Static_assert`, the same StaticAssert as at file scope.
+      - { lhs: Stmt, rhs: [StaticAssert] }
       # C23 `[[attr]]` prepending a statement or block-scope declaration —
       # ACCEPTED + IGNORED (gated C23). Also covers the bare
       # attribute-declaration `[[fallthrough]];`: it wraps the EMPTY statement
@@ -1480,13 +1488,23 @@ productions:
     rules:
       - { lhs: AttrList, rhs: [Attr] }
       - { lhs: AttrList, rhs: [AttrList, ',', Attr],                 action: attrListCons }
-      - { lhs: Attr, rhs: [ID],                                      action: attrIdent }
+      # C23 6.7.12.1's `attribute-token attribute-argument-clause?`: a name, bare
+      # or namespaced, then an optional argument clause whose argument is itself
+      # optional, so `deprecated`, `deprecated()` and `deprecated("msg")` are one
+      # record (a null AttrArgs, an AttrArgs with a null E, and one with an E).
+      - { lhs: Attr, rhs: [AttrName, AttrArgs?],                     action: attr }
       - { lhs: Attr, rhs: ['_Noreturn'],                             action: attrNoreturn }
-      - { lhs: Attr, rhs: [ID, ':', ':', ID],                        action: attrNamespaced }
-      # The call forms' argument is optional (`E?`), so an empty `deprecated()`
-      # is the same record as `deprecated("msg")` with a null argument.
-      - { lhs: Attr, rhs: [ID, '(', E?, ')'],                        action: attrCall }
-      - { lhs: Attr, rhs: [ID, ':', ':', ID, '(', E?, ')'],          action: attrNsCall }
+      - { lhs: AttrName, rhs: [ID],                                  action: attrStdName }
+      - { lhs: AttrName, rhs: [ID, ':', ':', ID],                    action: attrNsName }
+      - { lhs: AttrArgs, rhs: ['(', E?, ')'],                        action: attrArgs }
+
+  # `_Static_assert ( E , STRING ) ;` (C11 6.7.10) and the C23 message-less
+  # `_Static_assert ( E ) ;`, one nonterminal for the file-scope (Fn) and the
+  # block-scope (Stmt) declaration. The binder gates the message-less form on C23.
+  - derivation: none
+    rules:
+      - { lhs: StaticAssert, rhs: ['_Static_assert', '(', E, StaticAssertMsg?, ')', ';'], action: staticAssertDecl }
+      - { lhs: StaticAssertMsg, rhs: [',', STRING],                  action: staticAssertMsg }
 
 lexer:
   root:
