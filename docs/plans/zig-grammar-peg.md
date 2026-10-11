@@ -261,3 +261,16 @@ multi-object value `for`), where each had needed its own rule. The lowering read
 captures of a `for` (one plain object, one bounded range, several, an `else`) and the payload / continue / else parts of a
 `while` pick the same loop lowerings as before; the records were renamed, so every old site was a compile error. The
 resolved-conflict diff has the same dangling-`else` and `inline` decisions on the merged forms and nothing new.
+
+**Loops as zig has them (2026-10-11).** Three more of zig's loop rules, each replacing special cases:
+- `LoopStatement <- inline? (For / While)`: `inline` is part of LoopStmt, so a label (`outer: inline for`) and anything
+  that takes a loop reach it.
+- `ForExpr <- ForPrefix Expr (else Expr)?`: a value loop's `else` is an optional `LoopElse`. The loops are LAST and LoopElse
+  is earlier, so an `else` after the body shifts (the ElseStmt technique). With no `else`, a loop in a statement position is
+  the statement loop, so the prong's statement-loop body (`ProngBody -> LoopStmt`) and `whileNoElseExpr` retired: a
+  prong `=> for (l.items) |e| h.update(e),` (std's Build.zig) and `=> |s| inline for (…) { … },` (zon/parse.zig) are
+  value loops, and a value switch prong `=> for (…) { … } else .tuple,` (zig/Ast/Render.zig) fills the switch's temp.
+- `ForPrefix AssignExpr (; / else Statement)`: `forStmtThen` / `whileStmtThen`, a body with no `;` ended by `else`, the
+  statement `if`'s ThenExpr twin (std's zig/WindowsSdk.zig).
+zig reads `=> for (xs) |x| sum += x` as an assignment to the loop and rejects it ("invalid left-hand side to assignment");
+dotcc's grammar reads it the same way and now rejects it the same way. Probe 525 to 528.
