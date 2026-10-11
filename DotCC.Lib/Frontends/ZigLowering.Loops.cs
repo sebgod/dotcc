@@ -36,12 +36,60 @@ internal sealed partial class ZigLowering
     {
         switch (loopItem.Content)
         {
+            case Zig.ForStmt f:
+                return LowerInlineFor(f, loopItem);
+            // `inline while (cond) : (i = i + step) body` — comptime-UNROLLED while (Milestone T,
+            // part 3). The loop counter must be a `comptime var` mutated by the continue-expression;
+            // each round folds the condition (with the counter substituted in), unrolls a body copy,
+            // then applies the continue-expr to advance the counter — all at lowering time.
+            case Zig.WhileStmt { Arg4: null, Arg7: null, Arg5.Content: Zig.WhileContAssign wa } w:
+                return UnrollInlineWhile(w.Arg2, wa.Arg2, wa.Arg3, wa.Arg4, w.Arg6);
+            // `inline while (true) { … }` with no continue-expression (std.Io.Writer.print's outer loop): it
+            // unrolls until a comptime `break`.
+            case Zig.WhileStmt { Arg4: null, Arg5: null, Arg7: null } w:
+                return UnrollInlineWhile(w.Arg2, null, null, null, w.Arg6);
+            default:
+                throw InlineLoopUnsupported(loopItem);
+        }
+    }
+    /// <summary>The loud cut for an <c>inline</c> loop shape that does not unroll.</summary>
+    private IrUnsupportedException InlineLoopUnsupported(Item loopItem) => new(
+        "`inline` is only supported on a counted `for (lo..hi) |i|` range loop, a "
+        + "`for (arr) |x|` over a fixed array, a `for` over a comptime member list "
+        + "(single, parallel `(a, b) |x, y|`, or indexed `(list, 0..) |x, i|`), or an "
+        + "`inline while (c) : (i = …)` with a `comptime var` counter (comptime "
+        + "unrolling) — the by-ref `|*x|` `for` forms, `inline for` over a runtime "
+        + "slice, and a bare/expr-cont `inline while` are not supported yet"
+        + (_currentFnName.Length > 0 ? $" (in '{_currentFnName}', a {loopItem.Content?.GetType().Name})" : ""));
+    /// <summary>Unroll an <c>inline for</c> (<c>forStmt</c>), by the shape of its objects: several objects walk comptime lists
+    /// (or arrays led by one) in lockstep; one object is a counted range, a comptime list, a comptime string or a fixed
+    /// array.</summary>
+    private CStmt LowerInlineFor(Zig.ForStmt f, Item loopItem)
+    {
+        var (objects, captures) = DecomposeForMulti(f.Arg2, f.Arg6);
+        var elseBody = ForElseBody(f.Arg10);
+        var body = f.Arg9;
+        // `inline for (a, b, 0.., …) |x, y, i, …|` — comptime lists walked in lockstep (road-to-zig-std S6; any number
+        // of them since task #108); `inline for (s.ptrs, &ptrs, field_types) |in, *out, field_type|` (std.MultiArrayList,
+        // task #108) leads with an array. An `else` (std.json.static's innerParse, task #210) runs after the copies.
+        if (objects.Count > 1)
+        {
+            return objects[0] is { IsRange: false } first && TryComptimeIterable(first.Expr, out _)
+                ? UnrollComptimeMultiFor(f.Arg2, f.Arg6, body, elseBody)
+                : UnrollMixedInlineFor(f.Arg2, f.Arg6, body, elseBody);
+        }
+        var obj = objects[0];
+        var (capture, byRef) = captures[0];
+        if (byRef) { throw InlineLoopUnsupported(loopItem); }
+        var objExpr = obj.Expr;
+        switch (obj)
+        {
             // `inline for (lo..hi) |i|` — the counted range. Bounds fold NOW (during this pass) via the
             // const-eval interpreter — literals / constant arithmetic / sizeof — so a forward-referenced
             // comptime CALL in a bound (whose callee may not be lowered yet) is intentionally not folded.
-            case Zig.StmtForRange f:
+            case { IsRange: true, End: { } endItem } when elseBody is null:
             {
-                if (_ir.ConstEval(LowerExpr(f.Arg2)) is not { } lo || _ir.ConstEval(LowerExpr(f.Arg4)) is not { } hi)
+                if (_ir.ConstEval(LowerExpr(obj.Expr)) is not { } lo || _ir.ConstEval(LowerExpr(endItem)) is not { } hi)
                 {
                     throw new IrUnsupportedException(
                         "`inline for` bounds must be compile-time-known integer constants");
@@ -52,49 +100,37 @@ internal sealed partial class ZigLowering
                         $"`inline for` upper bound ({hi}) is below the lower bound ({lo})");
                 }
                 // The capture is the usize index, bound to a literal in each copy.
-                return UnrollInlineFor(hi - lo, Tok(f.Arg7), CType.ULong, f.Arg9,
+                return UnrollInlineFor(hi - lo, capture, CType.ULong, body,
                     k => new LitInt((lo + k).ToString(System.Globalization.CultureInfo.InvariantCulture), lo + k) { Type = CType.ULong });
             }
 
             // `inline for (<comptime list>) |x|` — over a `@typeInfo` member list or a `[_]type{…}`
             // literal (road-to-zig-std S6): the consumer S5c's lists exist for. A comptime list has
-            // no runtime representation, so these three cases MUST precede the runtime-array case
-            // below, and the capture binds comptime (UnrollComptimeFor), not as an emitted `const`.
-            case Zig.StmtForSlice cf when TryComptimeIterable(cf.Arg2, out var cl):
-                return UnrollComptimeFor(new[] { (cl, Tok(cf.Arg5)) }, cf.Arg7);
-
-            // `inline for (…) |…| { … break; } else { … }` (std.json.static's innerParse, task #210): the copies, then the
-            // else body, which a `break` in any copy jumps past; a copy that always breaks leaves no else to reach.
-            case Zig.StmtForSliceElse cfe when TryComptimeIterable(cfe.Arg2, out var cle):
-                return UnrollComptimeFor(new[] { (cle, Tok(cfe.Arg5)) }, cfe.Arg7, cfe.Arg9);
-            case Zig.StmtForMultiElse cme when FirstForObject(cme.Arg2) is { } firstE0 && TryComptimeIterable(firstE0, out _):
-                return UnrollComptimeMultiFor(cme.Arg2, cme.Arg6, cme.Arg8, cme.Arg10);
-            case Zig.StmtForMultiElse mme:      return UnrollMixedInlineFor(mme.Arg2, mme.Arg6, mme.Arg8, mme.Arg10);
-
-            // `inline for (a, b, 0.., …) |x, y, i, …|` — comptime lists walked in lockstep (road-to-zig-std S6; any number
-            // of them since task #108). Measured in the pinned std the pair `(field_names, field_types)` is the DOMINANT
-            // member-list shape (17 uses); `(list, 0..)` binds the list's own indices. See UnrollComptimeMultiFor.
-            case Zig.StmtForMulti cm when FirstForObject(cm.Arg2) is { } first0 && TryComptimeIterable(first0, out _):
-                return UnrollComptimeMultiFor(cm.Arg2, cm.Arg6, cm.Arg8);
-            // `inline for (s.ptrs, &ptrs, field_types) |in, *out, field_type|` (std.MultiArrayList.Slice.subslice, task
-            // #108): fixed-length arrays in lockstep with comptime lists, led by an array. See UnrollMixedInlineFor.
-            case Zig.StmtForMulti mm:      return UnrollMixedInlineFor(mm.Arg2, mm.Arg6, mm.Arg8);
+            // no runtime representation, so this case MUST precede the runtime-array case
+            // below, and the capture binds comptime (UnrollComptimeFor), not as an emitted `const`. An `else` (task #210)
+            // runs after the copies, unless a `break` in one jumps past it.
+            case { IsRange: false } when TryComptimeIterable(obj.Expr, out var cl):
+                return UnrollComptimeFor(new[] { (cl, capture) }, body, elseBody);
+            // An open range, or an `else` on a single-object loop that is not over a comptime list, does not unroll.
+            case { IsRange: true }:
+            case { } when elseBody is not null:
+                throw InlineLoopUnsupported(loopItem);
 
             // `inline for (cs) |c|` over a comptime STRING (std.fmt.parse_float's FloatStream.firstIsLower, a
             // `comptime cs: []const u8` seed): one copy per byte, the capture bound to that byte as a literal.
-            case Zig.StmtForSlice ss when EvalComptimeValue(ss.Arg2) is LitStr csv:
+            case { } when EvalComptimeValue(obj.Expr) is LitStr csv:
             {
                 var bytes = DotCC.EmitHelpers.StringByteValues(csv.Segments).ToList();
-                return UnrollInlineFor(bytes.Count, Tok(ss.Arg5), CType.UChar, ss.Arg7,
+                return UnrollInlineFor(bytes.Count, capture, CType.UChar, body,
                     k => new LitInt(((int)bytes[(int)k]).ToString(System.Globalization.CultureInfo.InvariantCulture), bytes[(int)k]) { Type = CType.Int });   // an int constant narrows to the u8 capture
             }
 
             // `inline for (arr) |x|` — over a fixed array of comptime-known length. The operand must be
             // a named array variable (so each element read `arr[k]` is side-effect-free across copies);
             // the capture binds to the element by value.
-            case Zig.StmtForSlice fs:
+            default:
             {
-                var operand = LowerExpr(fs.Arg2);
+                var operand = LowerExpr(objExpr);
                 if (operand.Type.Unqualified is not CType.Array arr || arr.Count is not int n)
                 {
                     throw new IrUnsupportedException(
@@ -111,7 +147,7 @@ internal sealed partial class ZigLowering
                         spliced.Add(_ir.SpliceComptimeValue(elem)
                             ?? throw new IrUnsupportedException("`inline for` over a comptime array: an element has no static form"));
                     }
-                    return UnrollInlineFor(n, Tok(fs.Arg5), arr.Element, fs.Arg7, k => spliced[(int)k]);
+                    return UnrollInlineFor(n, capture, arr.Element, body, k => spliced[(int)k]);
                 }
                 // A name, or a field of one (std.MultiArrayList's `inline for (sizes.bytes) |size|`, task #108): each copy
                 // reads it again without a side effect.
@@ -122,31 +158,102 @@ internal sealed partial class ZigLowering
                         + "element read is side-effect-free under unrolling)");
                 }
                 // Re-lower the operand per copy (a VarRef is idempotent) so each `arr[k]` is its own node.
-                return UnrollInlineFor(n, Tok(fs.Arg5), arr.Element, fs.Arg7,
-                    k => new DotCC.Ir.Index(LowerExpr(fs.Arg2), new LitInt(k.ToString(System.Globalization.CultureInfo.InvariantCulture), k) { Type = CType.ULong }) { Type = arr.Element });
+                return UnrollInlineFor(n, capture, arr.Element, body,
+                    k => new DotCC.Ir.Index(LowerExpr(objExpr), new LitInt(k.ToString(System.Globalization.CultureInfo.InvariantCulture), k) { Type = CType.ULong }) { Type = arr.Element });
             }
-
-            // `inline while (cond) : (i = i + step) body` — comptime-UNROLLED while (Milestone T,
-            // part 3). The loop counter must be a `comptime var` mutated by the continue-expression;
-            // each round folds the condition (with the counter substituted in), unrolls a body copy,
-            // then applies the continue-expr to advance the counter — all at lowering time.
-            case Zig.StmtWhileContAssign w:
-                return UnrollInlineWhile(w.Arg2, w.Arg6, w.Arg7, w.Arg8, w.Arg10);
-            // `inline while (true) { … }` with no continue-expression (std.Io.Writer.print's outer loop): it
-            // unrolls until a comptime `break`.
-            case Zig.StmtWhile w:
-                return UnrollInlineWhile(w.Arg2, null, null, null, w.Arg4);
-
-            default:
-                throw new IrUnsupportedException(
-                    "`inline` is only supported on a counted `for (lo..hi) |i|` range loop, a "
-                    + "`for (arr) |x|` over a fixed array, a `for` over a comptime member list "
-                    + "(single, parallel `(a, b) |x, y|`, or indexed `(list, 0..) |x, i|`), or an "
-                    + "`inline while (c) : (i = …)` with a `comptime var` counter (comptime "
-                    + "unrolling) — the by-ref `|*x|` `for` forms, `inline for` over a runtime "
-                    + "slice, and a bare/expr-cont `inline while` are not supported yet"
-                    + (_currentFnName.Length > 0 ? $" (in '{_currentFnName}', a {loopItem.Content?.GetType().Name})" : ""));
         }
+    }
+    /// <summary>A statement <c>while</c> (<c>whileStmt</c>, zig's WhileStatement): a plain <c>while</c>, a <c>For</c> when it has
+    /// a continue clause (which then runs on <c>continue</c> too), <see cref="LowerWhileElseStmt"/> with an <c>else</c>, and
+    /// <see cref="LowerWhileCapture"/> with a payload capture (an optional's payload each turn; <c>else |e|</c> binds an
+    /// error union's error).</summary>
+    private CStmt LowerWhileStatement(Zig.WhileStmt w)
+    {
+        var (capture, byRef, _) = PayloadParts(w.Arg4);
+        var contPost = ContPostOf(w.Arg5);
+        var (elseBody, errName) = ElseStmtParts(w.Arg7);
+        if (capture is null)
+        {
+            if (errName is not null)
+            {
+                throw new IrUnsupportedException("zig `while (eu) … else |e| …` needs a payload capture on the `while` (`|v|` or `|_|`)");
+            }
+            if (elseBody is not null) { return LowerWhileElseStmt(w.Arg2, w.Arg6, elseBody, contPost); }
+            return contPost is { } post
+                ? new For(null, LowerExpr(w.Arg2), post(), LowerStmt(w.Arg6))
+                : new While(LowerExpr(w.Arg2), LowerStmt(w.Arg6));
+        }
+        if (byRef) { throw new IrUnsupportedException("zig `while (opt) |*x|`: a by-reference while capture is not supported yet"); }
+        return LowerWhileCapture(w.Arg2, capture, w.Arg6, elseBody is { } eb ? (eb, errName) : null, contPost);
+    }
+    /// <summary>The post-iteration step of a <c>while</c> continue clause (<c>WhileCont</c>): an assignment, an expression or a
+    /// block; null for none.</summary>
+    private Func<CExpr>? ContPostOf(Item? cont) => cont?.Content switch
+    {
+        null => null,
+        Zig.WhileContAssign a => () => ContAssignPost(a.Arg2, a.Arg3, a.Arg4),
+        Zig.WhileContExpr e => () => LowerExpr(e.Arg2),
+        Zig.WhileContBlock b => () => ContBlockPost(b.Arg2),
+        var other => throw new IrUnsupportedException("internal: while continue clause " + other.GetType().Name),
+    };
+    /// <summary>The <c>else</c> body of a <c>for</c>, which takes no capture.</summary>
+    private static Item? ForElseBody(Item? elseClause)
+    {
+        var (body, errName) = ElseStmtParts(elseClause);
+        if (errName is not null) { throw new CompileException("zig: a `for` loop's `else` takes no capture"); }
+        return body;
+    }
+    /// <summary>A statement <c>for</c> (<c>forStmt</c>, zig's ForStatement), by the shape of its objects and captures: in a
+    /// comptime context a comptime list unrolls; an <c>else</c> walks every object in lockstep
+    /// (<see cref="LowerForParallel"/>); one bounded range is the counted loop; one object is a slice walk
+    /// (<see cref="LowerForSlice"/>, by value or by reference); several are <see cref="LowerForMulti"/>.</summary>
+    private CStmt LowerForStatement(Zig.ForStmt f)
+    {
+        var (objects, captures) = DecomposeForMulti(f.Arg2, f.Arg6);
+        var elseBody = ForElseBody(f.Arg10);
+        var body = f.Arg9;
+        // A plain `for` over a comptime member list in a COMPTIME context (std.meta.stringToEnum's `comptime build_kvs:
+        // { for (@typeInfo(T).@"enum".field_names, 0..) |name, i| kvs_array[i] = .{ name, @field(T, name) }; … }`, task
+        // #116): zig runs the loop at compile time, so each capture is comptime-known, which is what `inline for`'s unroll
+        // gives; a runtime loop would have nothing to iterate.
+        if (_comptimeDepth > 0 && objects[0] is { IsRange: false } ctFirst && TryComptimeIterable(ctFirst.Expr, out var ctList))
+        {
+            return objects.Count == 1
+                ? UnrollComptimeFor(new[] { (ctList, captures[0].Name) }, body, elseBody)
+                : UnrollComptimeMultiFor(f.Arg2, f.Arg6, body, elseBody);
+        }
+        // `for (…) |…| body else elsebody` (task #108): the else runs when the loop ends without a `break`.
+        if (elseBody is not null) { return LowerForParallel(objects, captures, body, elseBody); }
+        if (objects is [{ IsRange: true, End: { } end } range]) { return LowerForRange(range.Expr, end, captures[0].Name, body); }
+        // `for (s) |x| body` walks a slice's elements (x a per-iteration copy); `|*x|` takes each by reference, a `*T` into the
+        // slice (Milestone M, part 4).
+        if (objects is [{ IsRange: false } one])
+        {
+            return captures[0].ByRef
+                ? LowerForSlice(LowerExpr(one.Expr), captures[0].Name, null, body, byRef: true)
+                : LowerForSlice(LowerExpr(one.Expr), captures[0].Name, null, body, byRef: false, DeclaredElemBitsOfValue(one.Expr));
+        }
+        // The MULTI-object `for (a, b, 0.., …) |x, *y, i, …|` (task #108): `(s, N..)` walks the slice with its index; any
+        // other shape walks every object in lockstep.
+        return LowerForMulti(f.Arg2, f.Arg6, body);
+    }
+    /// <summary><c>for (start..end) |i| body</c> → C <c>for (usize i = start; i &lt; end; i++) body</c>. The capture
+    /// <c>i</c> is the usize loop index (its own scope so it doesn't leak); the end is cast to usize so the comparison is
+    /// unsigned-clean (C# forbids ulong&lt;&gt;signed).</summary>
+    private CStmt LowerForRange(Item startItem, Item endItem, string capture, Item body)
+    {
+        using var symbolScope = EnterSymbolScope();
+        var start = LowerExpr(startItem);
+        var end = LowerExpr(endItem);
+        var iSym = _symbols.Declare(new Symbol { Name = capture, Kind = SymKind.Var, Type = CType.ULong });
+        RecordValueBits(iSym, 64, null);   // a usize (task #132: real std's `{d}` asks its width)
+        var iRef = new VarRef(iSym) { Type = CType.ULong, IsLValue = true };
+        var init = new DeclStmt(new List<LocalDecl> { new(iSym, start) });
+        var cond = new Binary(BinOp.Lt, iRef, new Cast(CType.ULong, end) { Type = CType.ULong }) { Type = CType.Int };
+        var post = new Unary(UnOp.PostInc, iRef) { Type = CType.ULong };
+        var lowered = LowerStmt(body);
+        symbolScope.Dispose();
+        return new For(init, cond, post, lowered);
     }
     /// <summary>Unroll an <c>inline while (cond) : (lhs = rhs) body</c> (Milestone T, part 3). The
     /// continue-expression's target must be a <c>comptime var</c> counter (so its value is known at
@@ -544,12 +651,7 @@ internal sealed partial class ZigLowering
     private int _inlineUnrollDepth;
     /// <summary>True for a runtime loop statement (every <c>LoopStmt</c> form), which gets an unlabeled
     /// break target (<see cref="LowerLoopWithBreakTarget"/>).</summary>
-    private static bool IsRuntimeLoopStmt(object? content) => content is
-        Zig.StmtWhile or Zig.StmtWhileElse or Zig.StmtWhileCont or Zig.StmtWhileContAssign or Zig.StmtWhileContBlock
-        or Zig.StmtWhileCapture or Zig.StmtWhileCaptureElse or Zig.StmtWhileCaptureErrElse
-        or Zig.StmtWhileCaptureCont or Zig.StmtWhileCaptureContAssign
-        or Zig.StmtForRange or Zig.StmtForSlice or Zig.StmtForSliceRef or Zig.StmtForMulti
-        or Zig.StmtForSliceElse or Zig.StmtForMultiElse or Zig.StmtForRangeElse;
+    private static bool IsRuntimeLoopStmt(object? content) => content is Zig.WhileStmt or Zig.ForStmt;
     /// <summary>Lower a runtime loop with an unlabeled break target (<see cref="LoopBreakTarget"/>), so a
     /// <c>break</c> inside a <c>switch</c> in its body exits the loop, as in zig. The label is emitted
     /// after the loop only when such a break used it; otherwise the loop lowers exactly as before.</summary>
@@ -595,8 +697,7 @@ internal sealed partial class ZigLowering
         }).ToList();
         var captures = Flatten(capsItem).Select(c => c.Content switch
         {
-            Zig.ForCapVal v => (Name: Tok(v.Arg0), ByRef: false),
-            Zig.ForCapRef r => (Name: Tok(r.Arg1), ByRef: true),
+            Zig.ForCapture cap => (Name: Tok(cap.Arg1), ByRef: cap.Arg0 is not null),
             _ => throw new IrUnsupportedException("zig multi-object `for`: unexpected capture " + (c.Content?.GetType().Name ?? "null")),
         }).ToList();
         if (objects.Count != captures.Count)

@@ -175,11 +175,11 @@ internal sealed partial class ZigLowering
             // A comptime `while (cond) : (cont) body` / `while (cond) body` — interpreted (the cont or
             // the body mutates the counter). `inline while` here would unroll-to-IR (wrong in a comptime
             // block); the plain `while` IS the comptime loop.
-            case Zig.StmtWhileContAssign w:
-                ExecuteComptimeWhile(w.Arg2, (w.Arg6, w.Arg8), w.Arg10);
+            case Zig.WhileStmt { Arg4: null, Arg7: null, Arg5.Content: Zig.WhileContAssign wa } w:
+                ExecuteComptimeWhile(w.Arg2, (wa.Arg2, wa.Arg4), w.Arg6);
                 break;
-            case Zig.StmtWhile w:
-                ExecuteComptimeWhile(w.Arg2, null, w.Arg4);
+            case Zig.WhileStmt { Arg4: null, Arg5: null, Arg7: null } w:
+                ExecuteComptimeWhile(w.Arg2, null, w.Arg6);
                 break;
             // `if (K == []const u8) @compileError(…);` (hash_map's getAutoHashFn): the condition folds and
             // only the taken branch runs, which is where zig raises a `@compileError`.
