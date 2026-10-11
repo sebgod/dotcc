@@ -183,11 +183,9 @@ internal sealed partial class ZigLowering
                 break;
             // `if (K == []const u8) @compileError(…);` (hash_map's getAutoHashFn): the condition folds and
             // only the taken branch runs, which is where zig raises a `@compileError`.
-            case Zig.StmtIf i:
-                if (FoldComptimeBlockCondition(i.Arg2)) { ExecuteComptimeStmt(i.Arg4); }
-                break;
-            case Zig.StmtIfElse i:
-                ExecuteComptimeStmt(FoldComptimeBlockCondition(i.Arg2) ? i.Arg4 : i.Arg6);
+            case Zig.StmtIf { Arg4: null } i when ElseStmtParts(i.Arg6) is { ErrName: null } plainElse:
+                if (FoldComptimeBlockCondition(i.Arg2)) { ExecuteComptimeStmt(i.Arg5); }
+                else if (plainElse.Body is { } elseBody) { ExecuteComptimeStmt(elseBody); }
                 break;
             // `@compileError("…");` reached at comptime raises the author's message.
             case Zig.StmtExpr { Arg0.Content: Zig.BuiltinCall { Arg2: not null } ce } when Tok(ce.Arg0) == "@compileError":

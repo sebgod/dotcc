@@ -480,7 +480,7 @@ internal sealed partial class ZigLowering
             Zig.IfExpr ta when IsTypeArm(ta.Arg4) && IsTypeArm(ta.Arg6) => true,
             Zig.IfExpr mixed when HasTypeArm(mixed) => TryTypeAliasRhs(cur, out _),
             Zig.IfExpr ie => IsTypeConstMember(ie.Arg4),
-            Zig.IfExprCapture ic => IsTypeConstMember(ic.Arg7),
+            Zig.IfExprCapture ic => IsTypeConstMember(ic.Arg5),
             _ => IsTypeFormer(cur) || TryTypeAliasRhs(cur, out _),
         };
     }

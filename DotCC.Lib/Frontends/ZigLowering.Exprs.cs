@@ -258,9 +258,7 @@ internal sealed partial class ZigLowering
             // `x` in the then-branch, so a pure ternary can't express it; it hoists (ANF) to a result
             // temp assigned by a real `if`. See LowerIfCaptureExpr.
             case Zig.IfExprCapture ec:
-                return LowerIfCaptureExpr(ec.Arg2, Tok(ec.Arg5), ec.Arg7, ec.Arg9);
-            case Zig.IfExprCaptureErr ee:
-                return LowerIfCaptureExpr(ee.Arg2, Tok(ee.Arg5), ee.Arg7, ee.Arg12, null, Tok(ee.Arg10));
+                return LowerIfCaptureExprOf(ec, null);
             // A switch EXPRESSION reached with no result-location type (e.g. `x = switch(y){…}`
             // where the LHS type still flows in via LowerExprSink, or an inferred `const`). The
             // sink-carrying path is in LowerExprSink; here the arm types are inferred.

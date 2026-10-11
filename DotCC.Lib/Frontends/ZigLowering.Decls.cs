@@ -2091,9 +2091,7 @@ internal sealed partial class ZigLowering
             case Zig.PreComptime { Arg1.Content: Zig.IfExpr } c: return LowerExprSink(c.Arg1, sink);
             // A value-position capture `if` with a result type (`const a: ?Alignment = if (x) |b| … else null;`).
             case Zig.IfExprCapture ec when sink is not null:
-                return LowerIfCaptureExpr(ec.Arg2, Tok(ec.Arg5), ec.Arg7, ec.Arg9, sink);
-            case Zig.IfExprCaptureErr ee when sink is not null:
-                return LowerIfCaptureExpr(ee.Arg2, Tok(ee.Arg5), ee.Arg7, ee.Arg12, sink, Tok(ee.Arg10));
+                return LowerIfCaptureExprOf(ec, sink);
             // `comptime e` keeps its result location (hash_map's `const max_align: Alignment = comptime
             // .fromByteUnits(…);`, a decl literal that needs the sink to resolve), then folds as LowerExpr's does.
             case Zig.PreComptime pc when sink is not null:

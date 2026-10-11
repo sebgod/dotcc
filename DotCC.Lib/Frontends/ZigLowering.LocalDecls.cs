@@ -134,7 +134,7 @@ internal sealed partial class ZigLowering
                     null => throw new IrUnsupportedException($"zig: `const {name} = if (…) struct {{…}} else …` needs a comptime condition"),
                 };
                 break;
-            case Zig.IfExprCapture ca when IsTypeArm(ca.Arg7) && IsTypeArm(ca.Arg9):
+            case Zig.IfExprCapture ca when IsTypeArm(ca.Arg5) && IsTypeArm(ca.Arg8):
                 if (!TryComptimeOptionalCond(ca.Arg2, out var copt))
                 {
                     throw new IrUnsupportedException(
@@ -142,12 +142,12 @@ internal sealed partial class ZigLowering
                 }
                 if (copt.HasValue)
                 {
-                    arm = ca.Arg7;
-                    extraSeeds.Add((Tok(ca.Arg5), copt.Value, copt.Inner));
+                    arm = ca.Arg5;
+                    extraSeeds.Add((PayloadParts(ca.Arg4).Name ?? "_", copt.Value, copt.Inner));
                 }
                 else
                 {
-                    arm = ca.Arg9;
+                    arm = ca.Arg8;
                 }
                 break;
             default:

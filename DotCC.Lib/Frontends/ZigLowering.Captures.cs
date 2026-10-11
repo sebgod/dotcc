@@ -297,6 +297,17 @@ internal sealed partial class ZigLowering
         var capSym = _symbols.Declare(new Symbol { Name = capName, Kind = SymKind.Var, Type = bindType });
         _comptimeVars[capSym] = (value, bindType);
     }
+    /// <summary>A value-position <c>if (x) |v| a else [|e|] b</c> (<c>ifExprCapture</c>): its payloads read, then
+    /// <see cref="LowerIfCaptureExpr"/>. A by-reference capture there is a loud cut.</summary>
+    private CExpr LowerIfCaptureExprOf(Zig.IfExprCapture ec, CType? sink)
+    {
+        var (capture, byRef, _) = PayloadParts(ec.Arg4);
+        if (byRef)
+        {
+            throw new IrUnsupportedException("zig value `if (x) |*v| …`: a by-reference capture in an `if` expression is not supported yet");
+        }
+        return LowerIfCaptureExpr(ec.Arg2, capture ?? "_", ec.Arg5, ec.Arg8, sink, PayloadParts(ec.Arg7).Name);
+    }
     private CExpr LowerIfCaptureExpr(Item condItem, string capName, Item thenItem, Item elseItem, CType? sink = null,
         string? errCapName = null)
     {

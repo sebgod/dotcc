@@ -226,17 +226,12 @@ internal sealed partial class ZigLowering
                     var (t, bits) = LowerComptimeTypeExpr(fnName, r.Arg1);
                     return new TypeBodyResult(false, null, t, bits);
                 }
-                case Zig.StmtIf f:
-                    if (WalkComptimeIf(fnName, f.Arg2, f.Arg4, null, typeShadows) is { } r1) { return r1; }
+                case Zig.StmtIf { Arg4: null } f when ElseStmtParts(f.Arg6) is { ErrName: null } plainElse:
+                    if (WalkComptimeIf(fnName, f.Arg2, f.Arg5, plainElse.Body, typeShadows) is { } r1) { return r1; }
                     break;
-                case Zig.StmtIfElse f:
-                    if (WalkComptimeIf(fnName, f.Arg2, f.Arg4, f.Arg6, typeShadows) is { } r2) { return r2; }
-                    break;
-                case Zig.StmtIfCapture f:
-                    if (WalkComptimeIfCapture(fnName, f.Arg2, Tok(f.Arg5), f.Arg7, null, typeShadows) is { } r3) { return r3; }
-                    break;
-                case Zig.StmtIfCaptureElse f:
-                    if (WalkComptimeIfCapture(fnName, f.Arg2, Tok(f.Arg5), f.Arg7, f.Arg9, typeShadows) is { } r4) { return r4; }
+                case Zig.StmtIf f when PayloadParts(f.Arg4) is { Name: { } cap, ByRef: false }
+                                       && ElseStmtParts(f.Arg6) is { ErrName: null } capElse:
+                    if (WalkComptimeIfCapture(fnName, f.Arg2, cap, f.Arg5, capElse.Body, typeShadows) is { } r3) { return r3; }
                     break;
                 case Zig.Block:
                     if (WalkTypeBody(fnName, BodyStatements(stmt), typeShadows) is { } r5) { return r5; }
@@ -666,15 +661,15 @@ internal sealed partial class ZigLowering
                 if (!TryComptimeOptionalCond(ic.Arg2, out var copt))
                 {
                     throw new IrUnsupportedException(
-                        $"type-returning generic '{fnName}': a captured `if (x) |{Tok(ic.Arg5)}|` type must test a "
+                        $"type-returning generic '{fnName}': a captured `if (x) |{PayloadParts(ic.Arg4).Name}|` type must test a "
                         + "comptime-known optional");
                 }
-                if (!copt.HasValue) { return LowerComptimeTypeExpr(fnName, ic.Arg9); }   // null → the else type
+                if (!copt.HasValue) { return LowerComptimeTypeExpr(fnName, ic.Arg8); }   // null → the else type
                 _symbols.EnterScope();
                 try
                 {
-                    BindFoldedCapture(Tok(ic.Arg5), copt.Value, copt.Inner);
-                    return LowerComptimeTypeExpr(fnName, ic.Arg7);                        // payload → the then type
+                    BindFoldedCapture(PayloadParts(ic.Arg4).Name ?? "_", copt.Value, copt.Inner);
+                    return LowerComptimeTypeExpr(fnName, ic.Arg5);                        // payload → the then type
                 }
                 finally
                 {
