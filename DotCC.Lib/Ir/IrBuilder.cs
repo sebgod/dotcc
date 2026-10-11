@@ -3264,11 +3264,12 @@ internal sealed partial class IrBuilder
         if (sym is { Kind: SymKind.EnumConst })
         {
             // An enumerator of a real (named) enum renders as EnumName.Member; one of
-            // an anonymous int-constant enum lowers to its literal integer value, cast
-            // to the fixed underlying type of a C23 `enum : T { … }` when it is not int.
-            if (sym.Type.Unqualified is CType.Enum) { return new EnumConstRef(sym) { Type = sym.Type }; }
-            var lit = new LitInt(sym.ConstValue.ToString(System.Globalization.CultureInfo.InvariantCulture), sym.ConstValue) { Type = CType.Int };
-            return sym.Type.Unqualified == CType.Int ? lit : new Cast(sym.Type, lit) { Type = sym.Type };
+            // an anonymous enum lowers to its literal integer value, typed int or the
+            // fixed underlying type of a C23 `enum : T { … }` (each backend renders a
+            // literal by its type: a C# suffix, a wat i64.const).
+            return sym.Type.Unqualified is CType.Enum
+                ? new EnumConstRef(sym) { Type = sym.Type }
+                : new LitInt(sym.ConstValue.ToString(System.Globalization.CultureInfo.InvariantCulture), sym.ConstValue) { Type = sym.Type };
         }
         if (sym is not null)
         {
