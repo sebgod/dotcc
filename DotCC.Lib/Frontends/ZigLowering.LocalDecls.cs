@@ -558,7 +558,7 @@ internal sealed partial class ZigLowering
         }
         // A const bound to a `comptime label: { … }` block (std.meta.stringToEnum's `const kvs = comptime build_kvs: { … };`,
         // task #116) is comptime-known: its evaluated aggregate is what a later comptime use reads (`initComptime(kvs)`).
-        if (isConst && initExpr.Content is Zig.ComptimeLabeledBlock && _ir.EvalComptimeValue(init) is { } blockValue)
+        if (isConst && initExpr.Content is Zig.PreComptime { Arg1.Content: Zig.LabeledBlock or Zig.LabeledSwitch } && _ir.EvalComptimeValue(init) is { } blockValue)
         {
             _ir.ComptimeGlobals[sym2] = blockValue;
         }

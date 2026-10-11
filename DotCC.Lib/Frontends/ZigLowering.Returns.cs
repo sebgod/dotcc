@@ -265,9 +265,9 @@ internal sealed partial class ZigLowering
             // `a orelse return [v]`, `a catch break`, `a catch |e| return v`, `a orelse if (c) break else return`: an ordinary
             // orelse / catch whose fallback is noreturn (zig-grammar-peg P1b made the jumps expressions).
             // A `switch` fallback (`catch |err| switch (err) { … }`, zig-grammar-peg P3) is one too: its prongs yield or jump.
-            case Zig.OrElse o when IsNoreturnArm(o.Arg2) || o.Arg2.Content is Zig.SwitchExpr:        lhs = o.Arg0; isCatch = false; arm = o.Arg2; return true;
-            case Zig.CatchOp c when IsNoreturnArm(c.Arg2) || c.Arg2.Content is Zig.SwitchExpr:       lhs = c.Arg0; isCatch = true;  arm = c.Arg2; return true;
-            case Zig.CatchCapture c when IsNoreturnArm(c.Arg5) || c.Arg5.Content is Zig.SwitchExpr:  lhs = c.Arg0; isCatch = true;  arm = c.Arg5; capture = Tok(c.Arg3); return true;
+            case Zig.OrElse o when IsNoreturnArm(o.Arg2) || o.Arg2.Content is Zig.SwitchExpr or Zig.LabeledBlock or Zig.LabeledSwitch:        lhs = o.Arg0; isCatch = false; arm = o.Arg2; return true;
+            case Zig.CatchOp c when IsNoreturnArm(c.Arg2) || c.Arg2.Content is Zig.SwitchExpr or Zig.LabeledBlock or Zig.LabeledSwitch:       lhs = c.Arg0; isCatch = true;  arm = c.Arg2; return true;
+            case Zig.CatchCapture c when IsNoreturnArm(c.Arg5) || c.Arg5.Content is Zig.SwitchExpr or Zig.LabeledBlock or Zig.LabeledSwitch:  lhs = c.Arg0; isCatch = true;  arm = c.Arg5; capture = Tok(c.Arg3); return true;
             case Zig.OrElseArm o:        lhs = o.Arg0; isCatch = false; arm = o.Arg2; return true;
             case Zig.CatchArm c:         lhs = c.Arg0; isCatch = true;  arm = c.Arg2; return true;
             case Zig.CatchCaptureArm c:  lhs = c.Arg0; isCatch = true;  arm = c.Arg5; capture = Tok(c.Arg3); return true;
@@ -401,7 +401,7 @@ internal sealed partial class ZigLowering
         };
         if (!isCatch && knownOptional is not null && lhs.Type.Unqualified is CType.Optional { Inner: var knownInner })
         {
-            if (knownOptional is DefaultLit && arm.Content is not (Zig.SwitchExpr or Zig.FbLabeled) && !ArmCanFallThrough(arm))
+            if (knownOptional is DefaultLit && arm.Content is not (Zig.SwitchExpr or Zig.LabeledBlock or Zig.LabeledSwitch) && !ArmCanFallThrough(arm))
             {
                 return LowerFallbackArm(arm);
             }
@@ -470,11 +470,11 @@ internal sealed partial class ZigLowering
         // widens it; any other declared type keeps the payload's (the binding coerces it as before).
         if (resultSink?.Unqualified is CType.Optional { Inner: var sinkInner }
             && sinkInner.Unqualified.Equals(payload.Type.Unqualified)
-            && arm.Content is Zig.SwitchExpr or Zig.FbLabeled)
+            && arm.Content is Zig.SwitchExpr or Zig.LabeledBlock or Zig.LabeledSwitch)
         {
             payload = new Cast(resultSink, payload) { Type = resultSink };
         }
-        Symbol? switchResult = arm.Content is Zig.SwitchExpr or Zig.FbLabeled && !voidSwitch
+        Symbol? switchResult = arm.Content is Zig.SwitchExpr or Zig.LabeledBlock or Zig.LabeledSwitch && !voidSwitch
             ? _symbols.Declare(new Symbol { Name = "__cfv" + _anfTempCounter++, Kind = SymKind.Var, Type = payload.Type })
             : null;
         // The failure path, in its own scope: `catch |e|` binds the error code first (a `_` binds
@@ -503,7 +503,7 @@ internal sealed partial class ZigLowering
                 // visible to the statements that follow, not only inside the arm.
                 payload = new VarRef(result) { Type = payload.Type };
             }
-            else if (arm.Content is Zig.FbLabeled { Arg0.Content: Zig.LabeledBlock lb } && switchResult is { } blkResult)
+            else if (arm.Content is Zig.LabeledBlock lb && switchResult is { } blkResult)
             {
                 // A labeled VALUE block arm (`x orelse init: { …; break :init v; }`, std.fmt.ArgState): it
                 // fills the result on the failure path only, the payload fills it otherwise.

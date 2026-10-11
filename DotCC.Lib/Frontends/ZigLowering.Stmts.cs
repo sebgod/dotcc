@@ -358,6 +358,8 @@ internal sealed partial class ZigLowering
 
             // A brace block in statement position (`Stmt -> Block`, pass-through).
             case Zig.Block:             return LowerBlock(stmt);
+            // A value loop's brace-less body (`for (xs) |x| switch (x) { … } else v`): the expression runs as a statement.
+            case Zig.LoopBodyExpr b:    return LowerArmStmt(b.Arg0);
 
             default: throw new IrUnsupportedException("zig statement: " + (stmt.Content?.GetType().Name ?? "null"));
         }

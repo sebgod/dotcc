@@ -274,6 +274,42 @@ public sealed class ZigGrammarTests
     }
 
     [Fact]
+    public void Labeled_blocks_and_value_loops_are_primaries()
+    {
+        // The lexer's LABEL (an identifier followed by `: {`, `: for`, `: while`, `: inline` or `: switch`) makes a labeled
+        // block an operand without touching `len :0` or `[N:0]T`.
+        FirstNode<Zig.Add>("fn f() u32 { return blk: { break :blk 1; } + 1; }").Arg0.Content.ShouldBeOfType<Zig.LabeledBlock>();
+        FirstNode<Zig.CallArgs>("fn f() void { g(blk: { break :blk 1; }); }").ShouldNotBeNull();
+        TryParse("fn f(b: [*]u8, n: usize) [:0]u8 { return b[0..n :0]; }").ShouldBeTrue();
+        TryParse("const A = [4:0]u8;").ShouldBeTrue();
+        FirstNode<Zig.LabeledLoop>("fn f() void { outer: for (xs) |x| { _ = x; continue :outer; } }").ShouldNotBeNull();
+        // A container field typed by a `switch` stays a field (zig's ContainerField tries `IDENT :` first).
+        FirstNode<Zig.StructField>("const S = struct { x: switch (c) { else => u8 }, };").ShouldNotBeNull();
+        FirstNode<Zig.LabeledSwitch>("fn f(x: u8) void { sw: switch (x) { 0 => continue :sw 1, else => {} } }").ShouldNotBeNull();
+        // A value loop is an operand and an argument (zig's ForExpr is a PrimaryExpr).
+        FirstNode<Zig.CallArgs>("fn f(xs: []i32) void { g(for (xs) |x| (if (x <= 0) break false) else true); }")
+            .ShouldNotBeNull();
+        FirstNode<Zig.BoolAnd>("fn f(c: bool, xs: []u8) bool { return c and for (xs) |x| { if (x == 0) break false; } else true; }")
+            .Arg2.Content.ShouldBeOfType<Zig.ForElseExpr>();
+    }
+
+    [Fact]
+    public void A_value_loop_body_may_be_an_expression()
+    {
+        // zig's `ForPrefix Expr else Expr`: the body is a LoopBodyExpr; a braced body stays a Block.
+        FirstNode<Zig.ForElseExpr>("fn f(xs: []u8) u8 { return for (xs) |x| switch (x) { 0 => break x, else => {} } else 1; }")
+            .Arg7.Content.ShouldBeOfType<Zig.LoopBodyExpr>().Arg0.Content.ShouldBeOfType<Zig.SwitchExpr>();
+        FirstNode<Zig.ForElseExpr>("fn f(xs: []i32) bool { return for (xs) |x| (if (x <= 0) break false) else true; }")
+            .Arg7.Content.ShouldBeOfType<Zig.LoopBodyExpr>();
+        FirstNode<Zig.WhileContAssignElseExpr>("fn f(n: u32) u32 { var i: u32 = 0; return while (i < n) : (i += 1) g(i) else 0; }")
+            .Arg10.Content.ShouldBeOfType<Zig.LoopBodyExpr>();
+        FirstNode<Zig.ForElseExpr>("fn f(xs: []u8) u8 { return for (xs) |x| { break x; } else 0; }").Arg7.Content.ShouldBeOfType<Zig.Block>();
+        // An `else` after an else-less `if` body binds to the `if` (the nearest), as in zig.
+        FirstNode<Zig.ForElseExpr>("fn f(xs: []u8) u8 { return for (xs) |x| if (x > 0) break x else 2 else 3; }")
+            .Arg7.Content.ShouldBeOfType<Zig.LoopBodyExpr>().Arg0.Content.ShouldBeOfType<Zig.IfExpr>();
+    }
+
+    [Fact]
     public void Small_std_shapes_parse()
     {
         // `struct { … }{ … }`: a typed literal whose type is an inline struct; `const X = struct {…};` keeps its decl form.

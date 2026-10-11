@@ -196,8 +196,8 @@ internal sealed partial class ZigLowering
             ? LowerForSlice(LowerExpr(condOrIter), elem, null, blockItem, byRef)
             // `while (c) : (i += 1)` → the C `For` with that post, so a `continue` runs it (as the statement form).
             : contAssign is { } cont
-                ? new For(null, LowerExpr(condOrIter), ContAssignPost(cont.Target, cont.Op, cont.Value), LowerBlock(blockItem))
-                : new While(LowerExpr(condOrIter), LowerBlock(blockItem));
+                ? new For(null, LowerExpr(condOrIter), ContAssignPost(cont.Target, cont.Op, cont.Value), LowerStmt(blockItem))
+                : new While(LowerExpr(condOrIter), LowerStmt(blockItem));
         _loopValues.Pop();
 
         // `… else return v` / `… else break :outer …` / `… else { continue; }`: normal completion leaves by a jump, so the
