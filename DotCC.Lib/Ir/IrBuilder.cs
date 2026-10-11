@@ -2150,10 +2150,12 @@ internal sealed partial class IrBuilder
             case C.StmtBreak: return new Break { Pos = pos };
             case C.StmtContinue: return new Continue { Pos = pos };
             case C.StmtForDecl s: return BuildForDecl(s) with { Pos = pos };
+            // for ( init? ; cond? ; post? ) body: Arg2, Arg4, Arg6, each null when absent.
             case C.StmtForExpr s:
-                return new For(new ExprStmt(BuildCommaExpr(s.Arg2)), BuildForCond(s.Arg4), BuildForPost(s.Arg6), BuildStmt(s.Arg8)) { Pos = pos };
-            case C.StmtForNoInit s:
-                return new For(null, BuildForCond(s.Arg3), BuildForPost(s.Arg5), BuildStmt(s.Arg7)) { Pos = pos };
+            {
+                var init = BuildForClause(s.Arg2) is { } initExpr ? new ExprStmt(initExpr) : null;
+                return new For(init, BuildForCond(s.Arg4), BuildForClause(s.Arg6), BuildStmt(s.Arg8)) { Pos = pos };
+            }
             case C.StmtSwitch s: return BuildSwitch(s, pos);
             // A case/default label NESTED in a switch body statement (Duff's device).
             // BuildSwitch handles the top-level ones; a nested one reaches here.
@@ -2706,46 +2708,34 @@ internal sealed partial class IrBuilder
 
     private For BuildForDecl(C.StmtForDecl s)
     {
-        // for ( <decl> ; <cond> ; <post> ) <body> — Arg2 is the ScopeEnter epsilon;
-        // Decl=Arg3, ForCond=Arg5, ForPost=Arg7, body=Arg9 (see legacy StmtForDecl).
+        // for ( <decl> ; <cond>? ; <post>? ) <body>: Arg2 is the ScopeEnter epsilon;
+        // Decl=Arg3, cond=Arg5, post=Arg7 (each null when absent), body=Arg9.
         _symbols.EnterScope();
         Gate(1999, "for-loop initializer declaration", s.Arg3);
         var init = BuildForInitDecl(s.Arg3);
         var cond = BuildForCond(s.Arg5);
-        var post = BuildForPost(s.Arg7);
+        var post = BuildForClause(s.Arg7);
         var body = BuildStmt(s.Arg9);
         _symbols.ExitScope();
         return new For(init, cond, post, body);
     }
 
-    private CExpr? BuildForCond(Item it) => it.Content switch
-    {
-        C.ForCondExpr e => BuildExpr(e.Arg0),
-        C.ForCondEmpty => null,
-        _ => throw new IrUnsupportedException(TypeName(it.Content)),
-    };
+    /// <summary>A <c>for</c> condition (the optional comma-tier Expr), or null when
+    /// it is absent (the loop runs until a jump leaves it).</summary>
+    private CExpr? BuildForCond(Item? it) => it is null ? null : BuildExpr(it);
 
-    private CExpr? BuildForPost(Item it) => it.Content switch
+    /// <summary>A <c>for</c> init or update clause (the optional comma-tier Expr),
+    /// null when absent. A top-level comma operator (<c>i++, j--</c>) becomes a
+    /// <see cref="CommaSeq"/>, which codegen renders as C#'s native <c>a, b</c> list
+    /// in those positions; one operand passes through.</summary>
+    private CExpr? BuildForClause(Item? it)
     {
-        C.ForPostEmpty => null,
-        C.ForPostExprs e => BuildCommaExpr(e.Arg0),
-        _ => throw new IrUnsupportedException(TypeName(it.Content)),
-    };
-
-    /// <summary>A comma-separated expression list (for-init / for-update). One
-    /// expression passes through; several become a <see cref="CommaSeq"/> that
-    /// codegen renders as C#'s native <c>a, b</c> list in those positions.</summary>
-    private CExpr BuildCommaExpr(Item it)
-    {
+        if (it is null) { return null; }
         var items = new List<CExpr>();
         void Walk(Item node)
         {
-            switch (node.Content)
-            {
-                case C.CommaExprCons c: Walk(c.Arg0); items.Add(BuildExpr(c.Arg2)); break;
-                case C.CommaExprOne o: items.Add(BuildExpr(o.Arg0)); break;
-                default: items.Add(BuildExpr(node)); break;
-            }
+            if (node.Content is C.CommaOp c) { Walk(c.Arg0); items.Add(BuildExpr(c.Arg2)); }
+            else { items.Add(BuildExpr(node)); }
         }
         Walk(it);
         return items.Count == 1 ? items[0] : new CommaSeq(items) { Type = items[^1].Type };
