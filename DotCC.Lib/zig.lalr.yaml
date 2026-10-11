@@ -317,6 +317,7 @@ symbols:
   - Payload        # 216 a capture `|x|` / `|*x|` / `|x, i|` (zig's PtrIndexPayload)
   - PayloadTag     # 217 the `, i` of a two-name capture
   - ProngBody      # 218 a switch prong's body: a block, a value, an assignment, `comptime { … }` or a loop
+  - ElseStmt       # 219 a statement `if`'s `else Payload? Stmt` (zig's `KEYWORD_else Payload? Statement`)
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -543,8 +544,13 @@ productions:
   # Dangling-else: rightmost group so `else` shifts onto the nearest open `if`.
   - derivation: rightmost
     rules:
-      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', Stmt],                 action: stmtIf }
-      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', Stmt, 'else', Stmt],   action: stmtIfElse }
+      # The statement `if`, as zig's IfStatement: `IfPrefix Statement (else Payload? Statement)?`, the prefix carrying an
+      # optional payload (`if (opt) |x|`, `|*x|`, the error union's `if (eu) |v| … else |e| …`, and `if (eu) S else |e| S`
+      # with no then-capture, std's Io/Dir.zig). A `|` after `)` or after `else` starts the payload; no Stmt starts with
+      # `|`. ElseStmt is in this rightmost group too: the `else` shift advances its item, so the dangling `else` binds to
+      # the nearest `if`.
+      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', Payload?, Stmt, ElseStmt?], action: stmtIf }
+      - { lhs: ElseStmt, rhs: ['else', Payload?, Stmt], action: elseStmt }
       # `comptime if (c) stmt [else stmt]` — an `if` STATEMENT evaluated at compile time (std's
       # findScalarPos: `comptime if (block_x_len < 4) break;` inside an `inline for`). The condition must
       # fold; the untaken arm is never lowered. In this rightmost group so `else` binds as for a plain
@@ -555,42 +561,13 @@ productions:
       # zig parses `comptime if …` as an EXPRESSION statement, so a block-bodied one takes a closing `;`
       # (`comptime if (c) {…} else {…};`). Both spellings are accepted: `;` cannot start a Stmt, so the
       # shift after the last arm is unambiguous.
-      # Payload-capturing `if` (Milestone M): `if (opt) |x| then [else …]` binds an optional's
-      # payload (or, in part 3, an error-union's success value) in the then-branch. After the
-      # condition `')'`, a `'|'` lookahead selects the capture form — no Stmt begins with `'|'`
-      # (the bitor operator never starts an expression), so this is conflict-free with the plain
-      # `if`, and lives in the same rightmost group (dangling-else applies identically). The
-      # capture name may be `_` (discard — test only, no binding). The error-union `else |e|`
-      # capture (part 3) and the by-ref `|*x|` form (part 4) extend these two productions.
-      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', Stmt],                 action: stmtIfCapture }
-      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', Stmt, 'else', Stmt],   action: stmtIfCaptureElse }
-      # The by-ref capture `if (opt) |*v|` (std.enums.EnumMap.init, task #94): `v` points AT the payload. After
-      # `'|'`, a `'*'` lookahead selects it over the by-value `IDENT` form, conflict-free.
-      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', '|', '*', IDENT, '|', Stmt],                 action: stmtIfCaptureRef }
-      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', '|', '*', IDENT, '|', Stmt, 'else', Stmt],   action: stmtIfCaptureRefElse }
-      # `if (eu) |x| then else |e| elsebody` — error-union capture (Milestone M, part 3): bind the
-      # success payload to `x` in the then-branch, the error to `e` in the else-branch. After the
-      # then-Stmt's `else`, a `|` lookahead selects this error-capture form over the plain
-      # `… else Stmt` above (no Stmt begins with `|`) — conflict-free, same rightmost group.
-      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', Stmt, 'else', '|', IDENT, '|', Stmt], action: stmtIfCaptureErrElse }
-      # The error capture without a then-capture (zig-grammar-peg P2; std's Io/Dir.zig: `if (dir.symLink(…)) { return; } else
-      # |err| switch (err) {…}`): an error-union condition whose success value is discarded. After `else`, a `|` selects it.
-      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', Stmt, 'else', '|', IDENT, '|', Stmt], action: stmtIfElseErr }
-      # A `return Expr` then-arm with no `;` of its own, ended by the `else` (the `;` ends the else arm).
-      # After `return Expr`, `else` selects the arm and `;` the ordinary return statement: a 1-token split.
-      # The then-arm is any expression with no `;` of its own (zig's `IfPrefix AssignExpr else Statement`): a jump, a call
-      # (`if (loser) |s| s.close(io) else |_| {}`, std's Io/net/HostName.zig). ThenExpr wraps it so lowering takes it as a
-      # statement; it is in this group, before RhsExpr's, so the statement form wins the `else` over the `if` expression.
+      # zig's `IfPrefix AssignExpr else Statement`: a then-arm with no `;` of its own, ended by the `else` (the `;` ends the
+      # else arm), so after the value `else` selects the arm and `;` the ordinary statement. A value (a call, a jump) or an
+      # assignment (std.fmt.float's `if (olength > 1) index += olength - 1 else index -= 1;`, task #96); the assignment
+      # shares its prefix with the assignment statement, split by the same `;` / `else` token.
       - { lhs: ThenExpr, rhs: [Expr], action: thenExpr }
-      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', ThenExpr, 'else', Stmt], action: stmtIfReturnElse }
-      # An assignment then-arm with no `;` of its own, ended by the `else` (std.fmt.float.formatScientific's
-      # `if (olength > 1) index += olength - 1 else index -= 1;`, task #96). It shares its whole prefix with the
-      # assignment STATEMENT (`Expr op= RhsExpr ';'`), so the decision is the 1-token split after the value: `;`
-      # ends the statement, `else` the arm. Both go through AssignOp, so the operator reduces the same way in each.
-      - { lhs: AssignArm, rhs: [Expr, AssignOp, RhsExpr], action: assignArm }
-      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', AssignArm, 'else', Stmt], action: stmtIfAssignElse }
-      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', ThenExpr, 'else', Stmt], action: stmtIfCaptureReturnElse }
-      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', ThenExpr, 'else', '|', IDENT, '|', Stmt], action: stmtIfCaptureReturnErrElse }
+      - { lhs: ThenExpr, rhs: [Expr, AssignOp, RhsExpr], action: assignArm }
+      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', Payload?, ThenExpr, ElseStmt], action: stmtIfThen }
 
       # Payload-capturing `while` — mirrors the if-capture family, in the same rightmost/dangling-else
       # group (the `else` shift-reduce is resolved identically). `while (opt) |x| body` binds an
@@ -950,11 +927,10 @@ productions:
       # `)` cannot start a RhsExpr (it is only an infix bitwise-or), so this is conflict-free with the
       # plain ifExpr above. `else` is mandatory (an expression yields a value on both paths). Mirrors
       # the statement forms `stmtIfCapture*`; the optional/pointer payload binds `x` in the then-branch.
-      - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', IfArm, 'else', IfArm], action: ifExprCapture }
+      - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', Payload, IfArm, 'else', Payload?, IfArm], action: ifExprCapture }
       # Over an error union, with the error captured too (std.Io.Writer.Allocating.sendFile:
       # `if (file_reader.getSize()) |size| size - pos else |_| std.atomic.cache_line`). `|` after `else` is a clean
       # shift, distinct from an RhsExpr start, as in the statement form.
-      - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', IfArm, 'else', '|', IDENT, '|', IfArm], action: ifExprCaptureErr }
       # The condition may be a `switch` expression (std.mem.SplitIterator.next's
       # `if (switch (delimiter_type) { .scalar => findScalarPos(…), … }) |delim_start| … else …`). `switch` is not
       # in FIRST(Expr), so after `if (` it is a clean shift; the record is the same.
@@ -1801,7 +1777,7 @@ productions:
   - derivation: rightmost
     rules:
       - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', IfArm],                 action: ifExprNoElse }
-      - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', IfArm], action: ifExprCaptureNoElse }
+      - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', Payload, IfArm], action: ifExprCaptureNoElse }
       # The `;` that closes an `if` written as an expression statement whose arm is a block (`if (opt) |p| if (n > 0) { … };`,
       # std's Io/Writer.zig): the statement form takes the `if` and the block, so the `;` is an empty statement. zig only
       # allows it in that position; accepting it anywhere changes no program's meaning.

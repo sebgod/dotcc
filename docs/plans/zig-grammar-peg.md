@@ -10,7 +10,8 @@ primary (probe 466 to 473); labeled blocks and value loops as primaries remain. 
 Types too (probe 500 to 506). zig's IfTypeExpr, an `if` in a type position, took it to 510. **P3 done** (2026-10-11): labeled blocks and value loops are
 primaries, on a lexer LABEL token, and a value loop's body may be a brace-less expression (probe 518 to 522). **P4 step 1
 done** (2026-10-11): a switch prong is one rule, `CaseVals => Payload? ProngBody` (25 prong rules and the ProngJump group to 8).
-Next: the `if` / `while` / `for` payloads.
+**Step 2 done:** one statement `if` with a payload on either side (13 rules to 3), and one capture value `if` (probe 523).
+Next: one value `if` (plain and capture as a single record) and the `while` / `for` payloads.
 
 ## Why
 
@@ -228,3 +229,13 @@ ProngBody is a Block, any RhsExpr (which since P1 / P3a carries `return`, `break
 union-switch, comptime-fold and fn-alias paths became reads of that view. The resolved-conflict diff only lost lines
 (31 prong-`return` / ProngJump against JumpExpr decisions, none added); the probe's failing-file list is unchanged
 (522); the written rule count fell from 519 to 496.
+
+**P4 step 2 as landed (2026-10-11): one statement `if`.** zig's IfStatement is `IfPrefix Statement (else Payload?
+Statement)?`. The 13 statement-if rules (plain, `|x|`, `|*x|`, `else |e|` with and without a then-capture, and the
+no-`;` then-arm twins) are `Stmt -> if ( Expr ) Payload? Stmt ElseStmt?` and `… Payload? ThenExpr ElseStmt`, with
+`ElseStmt -> else Payload? Stmt` in the same rightmost group: the `else` shift advances ElseStmt's item, so it is
+ranked there and the dangling `else` still binds to the nearest `if` (the dump shows the same decisions, moved onto
+ElseStmt). The capture value `if` is one rule with a Payload on each side, so `|*x|` and `else |e|` parse there too
+(a by-reference capture on a value `if` is a loud lowering cut). The plain value `if` stays its own record for now:
+merging it moves the arm indices that about 45 lowering sites read, so it waits for a rename that makes every site a
+compile error. Probe 522 to 523 (debug.zig).

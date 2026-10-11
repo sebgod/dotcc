@@ -108,7 +108,10 @@ internal sealed partial class ZigLowering
                 }
                 return new If(LowerExpr(n.Arg2), LowerArmStmt(n.Arg4), null);
             case Zig.IfExprCaptureNoElse c:
-                return LowerIfCapture(c.Arg2, Tok(c.Arg5), c.Arg7, null, null);
+            {
+                var (capture, byRef, _) = PayloadParts(c.Arg4);
+                return LowerIfCapture(c.Arg2, capture ?? "_", c.Arg5, null, null, byRef);
+            }
             case Zig.IfExpr ie:
                 if ((TryFoldComptimeCondition(ie.Arg2) ?? TryFoldTypeIfCondition(ie.Arg2)) is { } taken)
                 {

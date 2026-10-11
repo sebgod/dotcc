@@ -997,17 +997,16 @@ internal sealed partial class ZigLowering
         _ => throw new IrUnsupportedException("zig switch prong: " + (prong.Content?.GetType().Name ?? "null")),
     };
 
+    /// <summary>The parts of an optional payload capture (zig's PtrIndexPayload): <c>|x|</c>, <c>|*x|</c>, <c>|x, i|</c>. All
+    /// null / false for no payload.</summary>
+    private static (string? Name, bool ByRef, string? Tag) PayloadParts(Item? payload) => payload?.Content is Zig.Payload pl
+        ? (Tok(pl.Arg2), pl.Arg1 is not null, pl.Arg3?.Content is Zig.PayloadTag t ? Tok(t.Arg1) : null)
+        : (null, false, null);
+
     /// <summary>The <see cref="ZigProng"/> view of <c>caseVals =&gt; payload? body</c>, the body classified by what it is.</summary>
     private static ZigProng ProngOf(Item caseVals, Item? payload, Item body)
     {
-        string? capture = null, tag = null;
-        var byRef = false;
-        if (payload?.Content is Zig.Payload pl)
-        {
-            capture = Tok(pl.Arg2);
-            byRef = pl.Arg1 is not null;
-            tag = pl.Arg3?.Content is Zig.PayloadTag t ? Tok(t.Arg1) : null;
-        }
+        var (capture, byRef, tag) = PayloadParts(payload);
         var view = new ZigProng(caseVals, capture, null, null, null, false, ByRef: byRef, TagName: tag);
         return body.Content switch
         {

@@ -79,6 +79,27 @@ internal sealed partial class ZigLowering
         }
         return stmts;
     }
+    /// <summary>Lower a statement <c>if</c> (<c>stmtIf</c> / <c>stmtIfThen</c>): a plain one through
+    /// <see cref="LowerIfStmt"/>, and one with a payload on either side through <see cref="LowerIfCapture"/>, which binds an
+    /// optional's payload (<c>|x|</c>, or <c>|*x|</c> pointing at it) or an error union's value and error
+    /// (<c>else |e|</c>).</summary>
+    private CStmt LowerIfStatement(Item cond, Item? payload, Item then, Item? elseClause)
+    {
+        var (capture, byRef, _) = PayloadParts(payload);
+        var (elseBody, errName) = ElseStmtParts(elseClause);
+        return capture is null && errName is null
+            ? LowerIfStmt(cond, then, elseBody)
+            : LowerIfCapture(cond, capture ?? "_", then, elseBody, errName, byRef);
+    }
+    /// <summary>The statement and error-capture name of an <c>else Payload? Stmt</c> clause (null for none). An error
+    /// capture is by value: zig has no <c>else |*e|</c>.</summary>
+    private static (Item? Body, string? ErrName) ElseStmtParts(Item? elseClause)
+    {
+        if (elseClause?.Content is not Zig.ElseStmt e) { return (null, null); }
+        var (errName, errByRef, _) = PayloadParts(e.Arg1);
+        if (errByRef) { throw new IrUnsupportedException("zig `else |*e|`: an error capture cannot be by reference"); }
+        return (e.Arg2, errName);
+    }
     private CStmt LowerStmt(Item stmt)
     {
         if (IsRuntimeLoopStmt(stmt.Content) && !ReferenceEquals(_loopBeingWrapped, stmt))
@@ -182,31 +203,19 @@ internal sealed partial class ZigLowering
 
             // if (cond) then [else else]  — `then`/`else`/`body` are themselves Stmts
             // (a single statement or a brace Block), which LowerStmt handles uniformly.
-            case Zig.StmtIf f:          return LowerIfStmt(f.Arg2, f.Arg4, null);
-            case Zig.StmtIfElse f:      return LowerIfStmt(f.Arg2, f.Arg4, f.Arg6);
+            // `if (c) S [else S]`, with an optional payload on either side (`if (opt) |x|`, `|*x|`, `if (eu) |v| … else |e| …`,
+            // `if (eu) S else |e| S`); the no-`;` then-arm twin (`if (c) f() else …`, `if (c) i += 1 else …`) is the same.
+            case Zig.StmtIf f:          return LowerIfStatement(f.Arg2, f.Arg4, f.Arg5, f.Arg6);
+            case Zig.StmtIfThen f:      return LowerIfStatement(f.Arg2, f.Arg4, f.Arg5, f.Arg6);
             case Zig.StmtComptimeIf f:     return LowerComptimeIfStmt(f.Arg3, f.Arg5, null);
             case Zig.StmtComptimeIfElse f: return LowerComptimeIfStmt(f.Arg3, f.Arg5, f.Arg7);
 
-            // `if (opt) |x| then [else else]` — payload-capturing `if` (Milestone M). Binds the
-            // optional's payload (value `?T` or niche pointer) — or, with `else |e|`, an
-            // error-union's success/error (part 3) — in the matching branch. See LowerIfCapture.
-            case Zig.StmtIfCapture f:        return LowerIfCapture(f.Arg2, Tok(f.Arg5), f.Arg7, null, null);
-            case Zig.StmtIfCaptureElse f:    return LowerIfCapture(f.Arg2, Tok(f.Arg5), f.Arg7, f.Arg9, null);
-            case Zig.StmtIfCaptureRef f:     return LowerIfCapture(f.Arg2, Tok(f.Arg6), f.Arg8, null, null, byRef: true);
-            case Zig.StmtIfCaptureRefElse f: return LowerIfCapture(f.Arg2, Tok(f.Arg6), f.Arg8, f.Arg10, null, byRef: true);
-            case Zig.StmtIfCaptureErrElse f: return LowerIfCapture(f.Arg2, Tok(f.Arg5), f.Arg7, f.Arg12, Tok(f.Arg10));
-            case Zig.StmtIfElseErr f:        return LowerIfCapture(f.Arg2, "_", f.Arg4, f.Arg9, Tok(f.Arg7));   // if (eu) S else |e| S
-            // `if (c) return x else …;` — a `return Expr` then-arm (ReturnArm), otherwise the same `if`.
-            case Zig.StmtIfReturnElse f:           return LowerIfStmt(f.Arg2, f.Arg4, f.Arg6);
-            case Zig.StmtIfCaptureReturnElse f:    return LowerIfCapture(f.Arg2, Tok(f.Arg5), f.Arg7, f.Arg9, null);
-            case Zig.StmtIfCaptureReturnErrElse f: return LowerIfCapture(f.Arg2, Tok(f.Arg5), f.Arg7, f.Arg12, Tok(f.Arg10));
             // An expression then-arm of a statement `if` (`if (c) f() else …`, `if (x) |s| s.close(io) else |_| {}`).
             case Zig.ThenExpr t:        return LowerArmStmt(t.Arg0);
             // The jump body of a statement `if` / prong (`if (c) return v else …`, `=> if (x) |v| break`), zig-grammar-peg P1b.
             case Zig.ReturnExpr or Zig.FbBreak or Zig.FbBreakLabel or Zig.FbBreakLabelValue or Zig.FbBreakValue
               or Zig.FbContinue or Zig.FbContinueLabel or Zig.FbContinueLabelValue:
                 return LowerExitArm(stmt);
-            case Zig.StmtIfAssignElse f:           return LowerIfStmt(f.Arg2, f.Arg4, f.Arg6);
             case Zig.AssignArm a:                  return LowerAssignOpStmt(a.Arg0, a.Arg1, a.Arg2);
             case Zig.StmtWhile w:       return new While(LowerExpr(w.Arg2), LowerStmt(w.Arg4));
             // `while (c) body else elsebody` (task #130): the else runs when the condition ends the loop, not a `break`.

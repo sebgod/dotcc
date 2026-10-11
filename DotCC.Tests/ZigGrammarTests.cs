@@ -146,8 +146,10 @@ public sealed class ZigGrammarTests
     public void A_statement_if_takes_an_error_capture_without_a_then_capture()
     {
         // zig-grammar-peg P2 (std's Io/Dir.zig): the success value is discarded, the error bound.
-        var s = FirstNode<Zig.StmtIfElseErr>("fn f() void { if (g()) { return; } else |err| switch (err) { else => {} } }");
-        s.Arg4.Content.ShouldBeOfType<Zig.Block>();
+        var s = FirstNode<Zig.StmtIf>("fn f() void { if (g()) { return; } else |err| switch (err) { else => {} } }");
+        s.Arg4.ShouldBeNull();
+        s.Arg5.Content.ShouldBeOfType<Zig.Block>();
+        s.Arg6.ShouldNotBeNull().Content.ShouldBeOfType<Zig.ElseStmt>().Arg1.ShouldNotBeNull().Content.ShouldBeOfType<Zig.Payload>();
     }
 
     [Fact]
@@ -274,6 +276,24 @@ public sealed class ZigGrammarTests
     }
 
     [Fact]
+    public void An_if_takes_one_optional_payload_on_each_side()
+    {
+        // zig's IfPrefix `if ( Expr ) PtrPayload?` and `else Payload?`: one statement record for every capture combination.
+        FirstNode<Zig.StmtIf>("fn f(o: ?u8) void { if (o) |*p| { p.* = 1; } }").Arg4.ShouldNotBeNull();
+        var both = FirstNode<Zig.StmtIf>("fn f(x: E!u8) void { if (x) |v| { g(v); } else |e| { h(e); } }");
+        both.Arg4.ShouldNotBeNull();
+        both.Arg6.ShouldNotBeNull().Content.ShouldBeOfType<Zig.ElseStmt>().Arg1.ShouldNotBeNull();
+        FirstNode<Zig.StmtIfThen>("fn f(c: bool, i: *u8) void { if (c) i.* += 1 else i.* -= 1; }")
+            .Arg5.Content.ShouldBeOfType<Zig.AssignArm>();
+        // The value `if` with a capture, by reference too (std's Build/Configuration.zig), with or without `else |e|`.
+        FirstNode<Zig.IfExprCapture>("fn f(o: ?u8) u8 { return if (o) |*p| p.* else 0; }")
+            .Arg4.Content.ShouldBeOfType<Zig.Payload>().Arg1.ShouldNotBeNull();
+        FirstNode<Zig.IfExprCapture>("fn f(x: E!u8) u8 { return if (x) |v| v else |_| 0; }").Arg7.ShouldNotBeNull();
+        // The dangling `else` still binds to the nearest `if`.
+        FirstNode<Zig.StmtIf>("fn f(a: bool, b: bool) void { if (a) if (b) g() else h(); }").Arg6.ShouldBeNull();
+    }
+
+    [Fact]
     public void A_prong_is_one_payload_and_one_body()
     {
         // zig's SwitchProng: `SwitchCase => PtrIndexPayload? AssignExpr`, one Prong record for every capture and body.
@@ -342,8 +362,8 @@ public sealed class ZigGrammarTests
         FirstNode<Zig.TyPointerAlign>("const P = *allowzero anyopaque;").Arg1.Content.ShouldBeOfType<Zig.PtrAllowzero>();
         FirstNode<Zig.TySentPtrConstAlign>("fn f(p: [*:0]align(1) const u16) void { _ = p; }").ShouldNotBeNull();
         // An expression then-arm on a statement `if` with an `else`: a ThenExpr, not an expression statement.
-        FirstNode<Zig.StmtIfCaptureReturnErrElse>("fn f(x: E!u8) void { if (x) |s| g(s) else |_| {} }")
-            .Arg7.Content.ShouldBeOfType<Zig.ThenExpr>();
+        FirstNode<Zig.StmtIfThen>("fn f(x: E!u8) void { if (x) |s| g(s) else |_| {} }")
+            .Arg5.Content.ShouldBeOfType<Zig.ThenExpr>();
     }
 
     [Fact]
