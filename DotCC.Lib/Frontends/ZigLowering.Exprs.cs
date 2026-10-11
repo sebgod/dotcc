@@ -205,27 +205,27 @@ internal sealed partial class ZigLowering
 
             // A value `if` with one arm that returns or jumps (`if (c) return v else w`, `x else break`): the jump hoists
             // ahead of the statement, and the expression is the other arm's value.
-            case Zig.IfExpr ir when ir.Arg4.Content is Zig.ReturnExpr { Arg1: { } thenReturned }:
-                return LowerIfReturnThen(ir.Arg2, thenReturned, ir.Arg6, null);
-            case Zig.IfExpr er when er.Arg6.Content is Zig.ReturnExpr { Arg1: { } elseReturned }:
-                return LowerIfElseReturn(er.Arg2, er.Arg4, elseReturned, null);
-            case Zig.IfExpr tj when IsJumpArm(tj.Arg4):
-                return LowerIfEarlyJump(tj.Arg2, jumpOnTrue: true, tj.Arg4, tj.Arg6, null);
-            case Zig.IfExpr ej when IsJumpArm(ej.Arg6):
-                return LowerIfEarlyJump(ej.Arg2, jumpOnTrue: false, ej.Arg6, ej.Arg4, null);
+            case Zig.IfElseExpr { Arg4: null, Arg7: null } ir when ir.Arg5.Content is Zig.ReturnExpr { Arg1: { } thenReturned }:
+                return LowerIfReturnThen(ir.Arg2, thenReturned, ir.Arg8, null);
+            case Zig.IfElseExpr { Arg4: null, Arg7: null } er when er.Arg8.Content is Zig.ReturnExpr { Arg1: { } elseReturned }:
+                return LowerIfElseReturn(er.Arg2, er.Arg5, elseReturned, null);
+            case Zig.IfElseExpr { Arg4: null, Arg7: null } tj when IsJumpArm(tj.Arg5):
+                return LowerIfEarlyJump(tj.Arg2, jumpOnTrue: true, tj.Arg5, tj.Arg8, null);
+            case Zig.IfElseExpr { Arg4: null, Arg7: null } ej when IsJumpArm(ej.Arg8):
+                return LowerIfEarlyJump(ej.Arg2, jumpOnTrue: false, ej.Arg8, ej.Arg5, null);
             // if (cond) a else b  — the if-EXPRESSION, lowered to a ternary. Both
             // branches are RhsExpr; the backend renders the condition as a bool.
-            case Zig.IfExpr e:
+            case Zig.IfElseExpr { Arg4: null, Arg7: null } e:
             {
                 // A comptime condition (a TYPE comparison `Result == Accumulate` in std.fmt.parseIntWithSign,
                 // a comptime tag) selects its arm at lowering time, as a statement `if`'s does: the other arm
                 // may not even lower (it may name a value only the taken arm's types admit).
-                if (TryFoldComptimeCondition(e.Arg2) is { } taken) { return LowerExpr(taken ? e.Arg4 : e.Arg6); }
+                if (TryFoldComptimeCondition(e.Arg2) is { } taken) { return LowerExpr(taken ? e.Arg5 : e.Arg8); }
                 // The condition first, as zig evaluates it; each arm under its own hoist buffer (task #203).
                 var ifImpure = _hoistImpureSeen;
                 var ifCond = LowerExpr(e.Arg2);
-                var (then, thenPre) = LowerArmIsolated(() => LowerExpr(e.Arg4));
-                var (otherwise, elsePre) = LowerArmIsolated(() => LowerExpr(e.Arg6));
+                var (then, thenPre) = LowerArmIsolated(() => LowerExpr(e.Arg5));
+                var (otherwise, elsePre) = LowerArmIsolated(() => LowerExpr(e.Arg8));
                 if (thenPre.Count > 0 || elsePre.Count > 0)
                 {
                     return HoistedValueIf(ifCond, ifImpure, then, thenPre, otherwise, elsePre,
@@ -236,15 +236,15 @@ internal sealed partial class ZigLowering
             // `a ++ if (c) x else y` as a whole right-hand side (std.fmt.bytesToHex's `"0123456789" ++ if (case == .upper)
             // "ABCDEF" else "abcdef"`, task #170): the concatenation distributes into the arms, each a compile-time `++`,
             // and the condition (a runtime one in bytesToHex) selects between the two results.
-            case Zig.Concat ci when ci.Arg2.Content is Zig.IfExpr concatArms:
+            case Zig.Concat ci when ci.Arg2.Content is Zig.IfElseExpr { Arg4: null, Arg7: null } concatArms:
             {
                 if (TryFoldComptimeCondition(concatArms.Arg2) is { } takenConcat)
                 {
-                    return LowerConcat(ci.Arg0, takenConcat ? concatArms.Arg4 : concatArms.Arg6);
+                    return LowerConcat(ci.Arg0, takenConcat ? concatArms.Arg5 : concatArms.Arg8);
                 }
                 var concatCond = LowerExpr(concatArms.Arg2);
-                var thenConcat = LowerConcat(ci.Arg0, concatArms.Arg4);
-                var elseConcat = LowerConcat(ci.Arg0, concatArms.Arg6);
+                var thenConcat = LowerConcat(ci.Arg0, concatArms.Arg5);
+                var elseConcat = LowerConcat(ci.Arg0, concatArms.Arg8);
                 // Arms of two lengths make the `if` a slice, whose runtime value `++` cannot take (zig: "slice being
                 // concatenated must be comptime-known"); one type (one length) is an array.
                 if (!thenConcat.Type.Unqualified.Equals(elseConcat.Type.Unqualified))
@@ -257,7 +257,7 @@ internal sealed partial class ZigLowering
             // Value-position captured `if` — `if (opt) |x| thenE else elseE` (S4a). The payload binds
             // `x` in the then-branch, so a pure ternary can't express it; it hoists (ANF) to a result
             // temp assigned by a real `if`. See LowerIfCaptureExpr.
-            case Zig.IfExprCapture ec:
+            case Zig.IfElseExpr ec:
                 return LowerIfCaptureExprOf(ec, null);
             // A switch EXPRESSION reached with no result-location type (e.g. `x = switch(y){…}`
             // where the LHS type still flows in via LowerExprSink, or an inferred `const`). The
@@ -266,7 +266,7 @@ internal sealed partial class ZigLowering
             // `comptime switch` / `comptime if` in value position (see the LowerExprSink cases).
             case Zig.PreComptime { Arg1.Content: Zig.SwitchExpr } c: return LowerExpr(c.Arg1);
             case Zig.PreComptime { Arg1.Content: Zig.LabeledBlock or Zig.LabeledSwitch } clb: return ComptimeLabeledBlockValue(clb.Arg1, null);
-            case Zig.PreComptime { Arg1.Content: Zig.IfExpr } c: return LowerExpr(c.Arg1);
+            case Zig.PreComptime { Arg1.Content: Zig.IfElseExpr } c: return LowerExpr(c.Arg1);
 
             // A labeled value-block in a pure-expression position (an if/switch-expression arm, a
             // binary sub-operand) — it produces a value via statements, which a C# expression can't

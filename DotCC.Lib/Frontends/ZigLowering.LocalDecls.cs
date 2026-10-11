@@ -125,16 +125,16 @@ internal sealed partial class ZigLowering
         var extraSeeds = new List<ValueSeed>();
         switch (initExpr.Content)
         {
-            case Zig.IfExpr ta when IsTypeArm(ta.Arg4) && IsTypeArm(ta.Arg6):
+            case Zig.IfElseExpr { Arg4: null, Arg7: null } ta when IsTypeArm(ta.Arg5) && IsTypeArm(ta.Arg8):
                 arm = (TryFoldComptimeCondition(ta.Arg2) ?? (_ir.ConstEval(LowerExpr(ta.Arg2)) is { } cv ? cv != 0 : (bool?)null))
                       switch
                 {
-                    true => ta.Arg4,
-                    false => ta.Arg6,
+                    true => ta.Arg5,
+                    false => ta.Arg8,
                     null => throw new IrUnsupportedException($"zig: `const {name} = if (…) struct {{…}} else …` needs a comptime condition"),
                 };
                 break;
-            case Zig.IfExprCapture ca when IsTypeArm(ca.Arg5) && IsTypeArm(ca.Arg8):
+            case Zig.IfElseExpr ca when IsTypeArm(ca.Arg5) && IsTypeArm(ca.Arg8):
                 if (!TryComptimeOptionalCond(ca.Arg2, out var copt))
                 {
                     throw new IrUnsupportedException(
@@ -243,13 +243,13 @@ internal sealed partial class ZigLowering
                 }
                 return elseArm is { } ea ? TryResolveFnAlias(ea) : null;
             }
-            case Zig.IfExpr e:
+            case Zig.IfElseExpr { Arg4: null, Arg7: null } e:
             {
                 // std/sort/block.zig: `if (builtin.mode == .Debug) struct { … }.lessThan else lessThanFn`.
-                if (TryFoldComptimeCondition(e.Arg2) is { } taken) { return TryResolveFnAlias(taken ? e.Arg4 : e.Arg6); }
+                if (TryFoldComptimeCondition(e.Arg2) is { } taken) { return TryResolveFnAlias(taken ? e.Arg5 : e.Arg8); }
                 CExpr cond;
                 using (EnterThrowawayHoist()) { cond = LowerExpr(e.Arg2); }
-                return _ir.ConstEval(cond) is { } c ? TryResolveFnAlias(c != 0 ? e.Arg4 : e.Arg6) : null;
+                return _ir.ConstEval(cond) is { } c ? TryResolveFnAlias(c != 0 ? e.Arg5 : e.Arg8) : null;
             }
             // An arm naming a comptime FUNCTION parameter (`else lessThanFn`), or a closure-idiom method.
             case Zig.Ident fid when _fnAliases.TryGetValue(Tok(fid.Arg0), out var passed):

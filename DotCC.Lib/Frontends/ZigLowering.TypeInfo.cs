@@ -123,9 +123,9 @@ internal sealed partial class ZigLowering
             return typeProng is { Expr: { } typeArm, CaptureName: null } ? DeclaredBitsOfTypeArg(typeArm) : null;
         }
         // A comptime `if` choosing a type (`const DT = if (@bitSizeOf(T) <= 64) u64 else u128;`): the taken arm's width.
-        if (cur.Content is Zig.IfExpr typeIf && TryFoldTypeIfCondition(typeIf.Arg2) is { } typeIfTaken)
+        if (cur.Content is Zig.IfElseExpr { Arg4: null, Arg7: null } typeIf && TryFoldTypeIfCondition(typeIf.Arg2) is { } typeIfTaken)
         {
-            return DeclaredBitsOfTypeArg(typeIfTaken ? typeIf.Arg4 : typeIf.Arg6);
+            return DeclaredBitsOfTypeArg(typeIfTaken ? typeIf.Arg5 : typeIf.Arg8);
         }
         // An untyped enum's inferred `@typeInfo(E).@"enum".tag_type`: zig's width (`u2` for four members).
         if (cur.Content is Zig.Field { Arg2: var tagTok } tagField && Tok(tagTok) == "tag_type" && TryEvalTypeInfo(tagField.Arg0, out var tagInfo)
@@ -390,7 +390,7 @@ internal sealed partial class ZigLowering
         Zig.SliceOpen so => DeclaredElemBitsOfValue(so.Arg0),
         Zig.SliceRangeSentinel srs => DeclaredElemBitsOfValue(srs.Arg0),
         Zig.SliceOpenSentinel sos => DeclaredElemBitsOfValue(sos.Arg0),
-        Zig.IfExpr ie when DeclaredElemBitsOfValue(ie.Arg4) is { } t && DeclaredElemBitsOfValue(ie.Arg6) == t => t,
+        Zig.IfElseExpr { Arg4: null, Arg7: null } ie when DeclaredElemBitsOfValue(ie.Arg5) is { } t && DeclaredElemBitsOfValue(ie.Arg8) == t => t,
         _ => null,
     };
 

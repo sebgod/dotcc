@@ -97,7 +97,7 @@ internal sealed partial class ZigLowering
                           or "@intFromFloat" or "@floatFromInt" or "@enumFromInt" or "@alignCast"
                     // A value `if` at a slice payload (std.mem.join's `return if (zero) try allocator.dupe(…) else
                     // &[0]u8{};`): each arm coerces to the slice.
-                    || valueItem.Content is Zig.IfExpr && eu.Payload.Unqualified is CType.Slice
+                    || valueItem.Content is Zig.IfElseExpr { Arg4: null, Arg7: null } && eu.Payload.Unqualified is CType.Slice
                     // A comptime-bounded slice at an array-pointer payload (std.Io.Reader.takeArray's `return (try
                     // r.take(n))[0..n];` for a `*[n]u8`, task #202): the slice's own pointer.
                     || valueItem.Content is Zig.SliceRange && eu.Payload.Unqualified is CType.Pointer
@@ -306,7 +306,7 @@ internal sealed partial class ZigLowering
     /// <summary>True for an expression that never yields a value: a jump, a <c>return</c>, or an <c>if</c> both of whose
     /// arms are one. As an <c>orelse</c> / <c>catch</c> fallback it makes the construct a control-flow fallback.</summary>
     private static bool IsNoreturnArm(Item arm) => IsJumpArm(arm) || arm.Content is Zig.ReturnExpr or Zig.SwitchExprEmpty
-        || arm.Content is Zig.IfExpr ie && IsNoreturnArm(ie.Arg4) && IsNoreturnArm(ie.Arg6);
+        || arm.Content is Zig.IfElseExpr { Arg4: null, Arg7: null } ie && IsNoreturnArm(ie.Arg5) && IsNoreturnArm(ie.Arg8);
 
     /// <summary>One arm of a noreturn <c>if</c> fallback: a <c>return</c> lowers under its own hoist buffer (its value
     /// may hoist), a jump as the statement it spells.</summary>
@@ -331,7 +331,7 @@ internal sealed partial class ZigLowering
     private CStmt LowerFallbackArm(Item arm) => arm.Content switch
     {
         Zig.ReturnExpr { Arg1: null } => LowerReturnVoid(),
-        Zig.ReturnExpr { Arg1.Content: Zig.IfExpr ri } when !HasTypeArm(ri) => LowerReturnIf(ri.Arg2, ri.Arg4, ri.Arg6),
+        Zig.ReturnExpr { Arg1.Content: Zig.IfElseExpr { Arg4: null, Arg7: null } ri } when !HasTypeArm(ri) => LowerReturnIf(ri.Arg2, ri.Arg5, ri.Arg8),
         Zig.ReturnExpr { Arg1: { } returned } => LowerReturn(returned),
         Zig.FbBreak          => LowerUnlabeledBreak(),
         Zig.FbContinue       => new Continue(),
@@ -342,7 +342,7 @@ internal sealed partial class ZigLowering
         Zig.FbContinueLabelValue c => LowerSwitchContinue(Tok(c.Arg2), c.Arg3),
         Zig.FbBlock b        => LowerStmt(b.Arg0),
         Zig.SwitchExprEmpty  => new ExprStmt(UnreachableCall()),   // `catch |err| switch (err) {}`: an empty error set
-        Zig.IfExpr j when IsNoreturnArm(j.Arg4) && IsNoreturnArm(j.Arg6) => LowerIfExits(j.Arg2, () => LowerExitArm(j.Arg4), () => LowerExitArm(j.Arg6)),
+        Zig.IfElseExpr { Arg4: null, Arg7: null } j when IsNoreturnArm(j.Arg5) && IsNoreturnArm(j.Arg8) => LowerIfExits(j.Arg2, () => LowerExitArm(j.Arg5), () => LowerExitArm(j.Arg8)),
         _ => throw new IrUnsupportedException("internal: fallback arm " + (arm.Content?.GetType().Name ?? "null")),
     };
     /// <summary>Whether a fallback arm can finish NORMALLY — i.e. fall off its end into the code after

@@ -89,7 +89,7 @@ internal sealed partial class ZigLowering
         var (elseBody, errName) = ElseStmtParts(elseClause);
         return capture is null && errName is null
             ? LowerIfStmt(cond, then, elseBody)
-            : LowerIfCapture(cond, capture ?? "_", then, elseBody, errName, byRef);
+            : LowerIfCapture(cond, capture ?? "_", then, elseBody, errName, byRef, thenCaptured: capture is not null);
     }
     /// <summary>The statement and error-capture name of an <c>else Payload? Stmt</c> clause (null for none). An error
     /// capture is by value: zig has no <c>else |*e|</c>.</summary>

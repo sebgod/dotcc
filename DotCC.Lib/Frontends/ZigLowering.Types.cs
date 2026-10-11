@@ -358,16 +358,16 @@ internal sealed partial class ZigLowering
 
             // `const DT = if (@bitSizeOf(T) <= 64) u64 else u128;` (std.fmt.float.render, task #77): a comptime condition
             // choosing between two types. A runtime condition, or an arm that is not a type, is left to the value path.
-            case Zig.IfExpr ie when TryFoldTypeIfCondition(ie.Arg2) is { } takenArm
-                                    && TryTypeAliasRhs(takenArm ? ie.Arg4 : ie.Arg6, out var ifType):
+            case Zig.IfElseExpr { Arg4: null, Arg7: null } ie when TryFoldTypeIfCondition(ie.Arg2) is { } takenArm
+                                    && TryTypeAliasRhs(takenArm ? ie.Arg5 : ie.Arg8, out var ifType):
                 type = ifType;
                 return true;
 
             // `const Api = if (is_windows) struct { … } else struct { … };` at a module or container's top level, and the
             // mixed `if (!is_windows) noreturn else struct { … }` (std.Io.Terminal's WindowsApi, task #191): the condition
             // folds, and a container arm reifies as the inline type it spells, as in an annotation.
-            case Zig.IfExpr ta when HasTypeArm(ta) && TryFoldTypeIfCondition(ta.Arg2) is { } takenTypeArm
-                                    && TryTypeArmType(takenTypeArm ? ta.Arg4 : ta.Arg6, out var armsType):
+            case Zig.IfElseExpr { Arg4: null, Arg7: null } ta when HasTypeArm(ta) && TryFoldTypeIfCondition(ta.Arg2) is { } takenTypeArm
+                                    && TryTypeArmType(takenTypeArm ? ta.Arg5 : ta.Arg8, out var armsType):
                 type = armsType;
                 return true;
 
@@ -399,7 +399,7 @@ internal sealed partial class ZigLowering
 
     /// <summary>True when either arm of an <c>if</c> expression is a <see cref="IsTypeArm">type arm</see>, so the
     /// <c>if</c> chooses a type.</summary>
-    private static bool HasTypeArm(Zig.IfExpr e) => IsTypeArm(e.Arg4) || IsTypeArm(e.Arg6);
+    private static bool HasTypeArm(Zig.IfElseExpr e) => IsTypeArm(e.Arg5) || IsTypeArm(e.Arg8);
 
     /// <summary>The type one arm of a type-choosing <c>if</c> names (task #191): an inline <c>struct { … }</c> /
     /// <c>enum { … }</c> reified as the type it spells, or a type expression.</summary>
@@ -477,10 +477,10 @@ internal sealed partial class ZigLowering
         while (cur.Content is Zig.Grouped g) { cur = g.Arg1; }
         return cur.Content switch
         {
-            Zig.IfExpr ta when IsTypeArm(ta.Arg4) && IsTypeArm(ta.Arg6) => true,
-            Zig.IfExpr mixed when HasTypeArm(mixed) => TryTypeAliasRhs(cur, out _),
-            Zig.IfExpr ie => IsTypeConstMember(ie.Arg4),
-            Zig.IfExprCapture ic => IsTypeConstMember(ic.Arg5),
+            Zig.IfElseExpr { Arg4: null, Arg7: null } ta when IsTypeArm(ta.Arg5) && IsTypeArm(ta.Arg8) => true,
+            Zig.IfElseExpr { Arg4: null, Arg7: null } mixed when HasTypeArm(mixed) => TryTypeAliasRhs(cur, out _),
+            Zig.IfElseExpr { Arg4: null, Arg7: null } ie => IsTypeConstMember(ie.Arg5),
+            Zig.IfElseExpr ic => IsTypeConstMember(ic.Arg5),
             _ => IsTypeFormer(cur) || TryTypeAliasRhs(cur, out _),
         };
     }
@@ -804,8 +804,8 @@ internal sealed partial class ZigLowering
         Zig.SwitchExpr => LowerSwitchType(type),
         // A type chosen by a comptime `if` in an annotation (`old_sig_io: if (have_sig_io) posix.Sigaction else void,` in
         // std's Io/Threaded.zig): the same fold a `const T = if (…) A else B;` alias takes. A runtime condition has no type.
-        Zig.IfExpr when TryTypeAliasRhs(type, out var ifType) => ifType,
-        Zig.IfExpr => throw new IrUnsupportedException(
+        Zig.IfElseExpr when TryTypeAliasRhs(type, out var ifType) => ifType,
+        Zig.IfElseExpr => throw new IrUnsupportedException(
             "zig: an `if` in a type position needs a condition dotcc can fold at compile time, and a type in the arm it takes"),
         // `info.tag_type orelse @compileError("…")` (std.meta.Tag, task #142): an optional TYPE, else the fallback.
         Zig.OrElse optType => LowerOrElseType(optType.Arg0, optType.Arg2),
@@ -1367,8 +1367,8 @@ internal sealed partial class ZigLowering
                 return named;
             case Zig.PreAddrOf { Arg1: { Content: Zig.Field } dotted } when TryResolveQualifiedNestedType(dotted) is { Unqualified: CType.Named } nested:
                 return nested;
-            case Zig.IfExpr ie when TryFoldComptimeCondition(ie.Arg2) is { } taken:
-                return TryComptimeTypePointer(taken ? ie.Arg4 : ie.Arg6);
+            case Zig.IfElseExpr { Arg4: null, Arg7: null } ie when TryFoldComptimeCondition(ie.Arg2) is { } taken:
+                return TryComptimeTypePointer(taken ? ie.Arg5 : ie.Arg8);
             case Zig.SwitchExpr:
             {
                 var (subject, prongs) = expr.Content switch
@@ -1399,7 +1399,7 @@ internal sealed partial class ZigLowering
     {
         Zig.Grouped g => LooksLikeTypePointer(g.Arg1),
         Zig.PreAddrOf { Arg1.Content: Zig.Ident or Zig.Field } => true,
-        Zig.IfExpr ie => LooksLikeTypePointer(ie.Arg4) && LooksLikeTypePointer(ie.Arg6),
+        Zig.IfElseExpr { Arg4: null, Arg7: null } ie => LooksLikeTypePointer(ie.Arg5) && LooksLikeTypePointer(ie.Arg8),
         _ => false,
     };
 
