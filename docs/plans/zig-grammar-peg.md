@@ -8,7 +8,9 @@ primary (probe 466 to 473); labeled blocks and value loops as primaries remain. 
 `struct { … }` is a Type anywhere (probe 473 to 486). Range, multi-object and capture-`while` value loops
 (still RhsExpr forms, not primaries) took the probe to 491. P5 step 2: `enum` / `union` / layout containers are
 Types too (probe 500 to 506). zig's IfTypeExpr, an `if` in a type position, took it to 510. **P3 done** (2026-10-11): labeled blocks and value loops are
-primaries, on a lexer LABEL token, and a value loop's body may be a brace-less expression (probe 518 to 522). Next: P4.
+primaries, on a lexer LABEL token, and a value loop's body may be a brace-less expression (probe 518 to 522). **P4 step 1
+done** (2026-10-11): a switch prong is one rule, `CaseVals => Payload? ProngBody` (25 prong rules and the ProngJump group to 8).
+Next: the `if` / `while` / `for` payloads.
 
 ## Why
 
@@ -216,3 +218,13 @@ an else-less brace-less loop is still not a value (it is zig's statement loop, w
 factoring to avoid one rule per loop shape). The resolved-conflict diff: the statement labeled block winning at
 statement start (as `switch` does), the field-name reduce, and the `inline for` reduce/reduce; the probe's failing-file
 list lost four files (Progress.zig, compress/flate/Compress.zig, zig/AstGen.zig, zig/TokenSmith.zig) and gained none.
+
+**P4 step 1 as landed (2026-10-11): one prong rule.** zig's SwitchProng is `inline? SwitchCase => PtrIndexPayload?
+AssignExpr`; dotcc's had grown 25 rules (every body form times `|x|`, `|*x|`, `|x, tag|`) plus a ProngJump group
+duplicating JumpExpr. Now `Prong -> CaseVals '=>' Payload? ProngBody`, `Payload -> '|' *? IDENT PayloadTag? '|'`, and
+ProngBody is a Block, any RhsExpr (which since P1 / P3a carries `return`, `break`, `continue` and the else-less capture
+`if`), an assignment, `comptime { … }` or a statement loop. The lowering reads every prong through one view
+(`DecomposeProng`, classifying the body by what it is), so the 74 record matches across the switch, value-switch,
+union-switch, comptime-fold and fn-alias paths became reads of that view. The resolved-conflict diff only lost lines
+(31 prong-`return` / ProngJump against JumpExpr decisions, none added); the probe's failing-file list is unchanged
+(522); the written rule count fell from 519 to 496.

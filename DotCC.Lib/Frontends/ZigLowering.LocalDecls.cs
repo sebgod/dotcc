@@ -231,13 +231,13 @@ internal sealed partial class ZigLowering
                 Item? elseArm = null;
                 foreach (var prong in Flatten(prongsItem))
                 {
-                    if (prong.Content is not Zig.ProngExpr pe) { return null; }
-                    if (pe.Arg0.Content is Zig.CaseElse) { elseArm = pe.Arg2; continue; }
-                    foreach (var label in LowerCaseVals(pe.Arg0, subject.Type))
+                    if (!IsPlainValueProng(prong) || DecomposeProng(prong) is not { Expr: { } armValue } pe) { return null; }
+                    if (pe.CaseVals.Content is Zig.CaseElse) { elseArm = armValue; continue; }
+                    foreach (var label in LowerCaseVals(pe.CaseVals, subject.Type))
                     {
                         if (label.HiExpr is null && label.CaseExpr is { } ce && _ir.ConstEval(ce) == v)
                         {
-                            return TryResolveFnAlias(pe.Arg2);
+                            return TryResolveFnAlias(armValue);
                         }
                     }
                 }
@@ -279,7 +279,7 @@ internal sealed partial class ZigLowering
     /// <summary>True when every arm of a switch is a bare dotted path (<c>.pos =&gt; math.add</c>): the only
     /// shape <see cref="TryResolveFnAlias"/> evaluates, so an ordinary value switch is never lowered twice.</summary>
     private static bool LooksLikeFnAliasArms(Item prongsItem)
-        => Flatten(prongsItem).All(p => p.Content is Zig.ProngExpr { Arg2.Content: Zig.Field });
+        => Flatten(prongsItem).All(p => IsPlainValueProng(p) && DecomposeProng(p).Expr?.Content is Zig.Field);
     // `const`/`var x = init;` — lower under an ANF hoist buffer so a catch/orelse in a SUB-expression
     // of the initializer (`const r = 1 + (a catch b());`) lifts to a temp before the decl. A
     // WHOLE-init catch / control-flow fallback is intercepted at the top of DeclOfInner (its own

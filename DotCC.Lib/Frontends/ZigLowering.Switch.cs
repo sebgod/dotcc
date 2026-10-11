@@ -70,8 +70,8 @@ internal sealed partial class ZigLowering
         }
         return elseProng;
     }
-    /// <summary>Lower the one prong a comptime subject selected (a block, a value, a <c>return</c>, a jump, an
-    /// assignment), as a statement.</summary>
+    /// <summary>Lower one prong's body (a block, a value, a <c>return</c>, a jump, an assignment, a loop) as a statement:
+    /// the prong a comptime subject selected, or any prong of a runtime switch once its capture is bound.</summary>
     private CStmt LowerSelectedProng(ZigProng prong) => prong switch
     {
         { Block: { } blk } => LowerBlock(blk),
@@ -79,11 +79,15 @@ internal sealed partial class ZigLowering
         { Return: { } r } => Hoisted(() => LowerReturn(r)),
         { ReturnsVoid: true } => LowerReturnVoid(),
         { Jump: { } j } => LowerProngJump(j),
-        { Assign: { } pa } => LowerProngAssign(pa),
-        { IfCaptureReturn: { } icr } => LowerIfCapture(icr.Arg4, Tok(icr.Arg7), icr.Arg9, null, null),
+        { Assign: { } a } => LowerAssignProngBody(a.Target, a.Op, a.Value),
         { Loop: { } loop } => LowerStmt(loop),
         _ => new Seq(new List<CStmt>()),
     };
+    /// <summary>A prong body of a RUNTIME switch: as <see cref="LowerSelectedProng"/>, but a <c>comptime { … }</c> arm needs
+    /// a comptime subject, as zig requires.</summary>
+    private CStmt LowerRuntimeProngBody(ZigProng prong) => prong.Comptime
+        ? throw new IrUnsupportedException("zig `=> comptime { … }` prong in a switch whose subject is not comptime-known")
+        : LowerSelectedProng(prong);
     /// <summary>True for an <c>if</c> expression whose arms are statements rather than values (zig-grammar-peg P3a): an
     /// else-less one (zig's <c>else</c> is optional), or one with a non-empty <c>{ … }</c> block arm. Its value is void, so
     /// it has a meaning only where a statement stands (an expression statement, a prong body).</summary>
@@ -169,8 +173,6 @@ internal sealed partial class ZigLowering
         Labeled l => ContainsGotoTo(l.Body, label),
         _ => false,
     };
-    /// <summary>An assignment prong body: <c>v =&gt; lhs = rhs</c>, or a compound one (<c>0 =&gt; hits += 1</c>).</summary>
-    private CStmt LowerProngAssign(Zig.ProngAssign pa) => LowerAssignProngBody(pa.Arg2, pa.Arg3, pa.Arg4);
     /// <summary>The assignment an assignment prong performs (<c>lhs = rhs</c>, or a compound <c>lhs += rhs</c>), shared by
     /// the plain form and its capture twin (<c>.on =&gt; |v| total += v</c>, task #109). A saturating operator had read
     /// as a plain <c>=</c> here (<see cref="CompoundOpOf"/> has none), so <c>x +|= y</c> in a prong stored <c>y</c>.</summary>
@@ -216,13 +218,13 @@ internal sealed partial class ZigLowering
     /// <c>=&gt; break :blk v</c>) exactly as the matching statement lowers.</summary>
     private CStmt LowerProngJump(Item jump) => jump.Content switch
     {
-        Zig.PjBreak => LowerUnlabeledBreak(),
-        Zig.PjBreakLabel b => LowerLabeledLoopJump(Tok(b.Arg2), isContinue: false),
-        Zig.PjBreakLabelValue b => Hoisted(() => LowerLabeledBreak(Tok(b.Arg2), b.Arg3)),
-        Zig.PjBreakValue b => Hoisted(() => LowerBreakValue(b.Arg1)),
-        Zig.PjContinue => new Continue(),
-        Zig.PjContinueLabel c => LowerLabeledLoopJump(Tok(c.Arg2), isContinue: true),
-        Zig.PjContinueLabelValue c => LowerSwitchContinue(Tok(c.Arg2), c.Arg3),
+        Zig.FbBreak => LowerUnlabeledBreak(),
+        Zig.FbBreakLabel b => LowerLabeledLoopJump(Tok(b.Arg2), isContinue: false),
+        Zig.FbBreakLabelValue b => Hoisted(() => LowerLabeledBreak(Tok(b.Arg2), b.Arg3)),
+        Zig.FbBreakValue b => Hoisted(() => LowerBreakValue(b.Arg1)),
+        Zig.FbContinue => new Continue(),
+        Zig.FbContinueLabel c => LowerLabeledLoopJump(Tok(c.Arg2), isContinue: true),
+        Zig.FbContinueLabelValue c => LowerSwitchContinue(Tok(c.Arg2), c.Arg3),
         _ => throw new IrUnsupportedException("zig switch jump prong: " + (jump.Content?.GetType().Name ?? "null")),
     };
     /// <summary>The body of <see cref="LowerSwitchStmt"/>. <paramref name="continueLabel"/> is the switch's label when it
@@ -290,9 +292,7 @@ internal sealed partial class ZigLowering
         var errorType = subject.Type is { Unqualified: CType.ErrorSetType } et ? et : null;
         var errorSwitch = errorType is not null;
         var pre = new List<CStmt>();
-        if (errorType is { } swType && subject is not VarRef
-            && prongs.Any(p => p.Content is Zig.ProngCapture or Zig.ProngCaptureExpr or Zig.ProngCaptureReturn
-                                   or Zig.ProngCaptureReturnVoid or Zig.ProngCaptureJump))
+        if (errorType is { } swType && subject is not VarRef && prongs.Any(p => DecomposeProng(p).CaptureName is not null))
         {
             var st = _symbols.Declare(new Symbol { Name = "__sw" + _blockLabelCounter++, Kind = SymKind.Var, Type = swType });
             pre.Add(new DeclStmt(new List<LocalDecl> { new(st, subject) }));
@@ -300,8 +300,8 @@ internal sealed partial class ZigLowering
         }
         foreach (var prongItem in prongs)
         {
-            if (errorSwitch && prongItem.Content is Zig.ProngCapture or Zig.ProngCaptureExpr or Zig.ProngCaptureReturn
-                                                    or Zig.ProngCaptureReturnVoid or Zig.ProngCaptureJump)
+            var view = DecomposeProng(prongItem);
+            if (errorSwitch && view.CaptureName is not null && prongItem.Content is not Zig.InlineProng)
             {
                 sections.Add(LowerErrorCaptureSection(prongItem, subject));
                 continue;
@@ -313,37 +313,16 @@ internal sealed partial class ZigLowering
                 sections.AddRange(LowerInlineProngSections(inlineProng.Arg1, subject));
                 continue;
             }
-            if (prongItem.Content is Zig.ProngCapture or Zig.ProngCaptureRef
-                or Zig.ProngCaptureExpr or Zig.ProngCaptureReturn or Zig.ProngCaptureReturnVoid
-                or Zig.ProngCaptureRefExpr or Zig.ProngCaptureRefReturn or Zig.ProngCaptureRefReturnVoid
-                or Zig.ProngCaptureJump or Zig.ProngCaptureAssign or Zig.ProngCaptureRefAssign)
+            if (view.CaptureName is not null)
             {
                 throw new IrUnsupportedException(
                     "zig switch payload capture `|x|` is only valid on a tagged-union switch");
             }
-            // A prong body is a braced Block (`=> { … }`), a bare expression (`=> expr`, an expression
-            // statement here, e.g. `1 => doThing()`), or a `return` (`=> return [e]`) — the last is the
-            // common shape for an enum switch whose arms each return (e.g. `switch (order) { .lt =>
-            // return .lt, … }`). `return` bodies reuse the statement return-lowering (error-union
-            // wrapping / errdefer routing), so an `E!T` prong return propagates correctly.
-            Item caseVals;
-            List<CStmt> body;
-            switch (prongItem.Content)
-            {
-                case Zig.Prong p:            caseVals = p.Arg0;  body = new List<CStmt> { LowerBlock(p.Arg2) }; break;
-                case Zig.ProngExpr pe:       caseVals = pe.Arg0; body = new List<CStmt> { LowerProngExprStmt(pe.Arg2) }; break;
-                case Zig.ProngReturn pr:     caseVals = pr.Arg0; body = new List<CStmt> { Hoisted(() => LowerReturn(pr.Arg3)) }; break;
-                case Zig.ProngReturnVoid pr: caseVals = pr.Arg0; body = new List<CStmt> { LowerReturnVoid() }; break;
-                case Zig.ProngJump pj:       caseVals = pj.Arg0; body = new List<CStmt> { LowerProngJump(pj.Arg2) }; break;
-                case Zig.ProngAssign pa:     caseVals = pa.Arg0; body = new List<CStmt> { LowerProngAssign(pa) }; break;
-                case Zig.ProngLoop plp:      caseVals = plp.Arg0; body = new List<CStmt> { LowerStmt(plp.Arg2) }; break;
-                case Zig.ProngIfCaptureReturn picr:
-                    caseVals = picr.Arg0; body = new List<CStmt> { LowerIfCapture(picr.Arg4, Tok(picr.Arg7), picr.Arg9, null, null) }; break;
-                // A runtime switch cannot run a `comptime { … }` arm; zig requires a comptime subject for one.
-                case Zig.ProngComptimeBlock:
-                    throw new IrUnsupportedException("zig `=> comptime { … }` prong in a switch whose subject is not comptime-known");
-                default: throw new IrUnsupportedException("zig switch prong: " + (prongItem.Content?.GetType().Name ?? "null"));
-            }
+            // The body as a statement (`=> { … }`, `1 => doThing()`, `.lt => return .lt`, a jump, an assignment, a loop).
+            // A `return` reuses the statement return-lowering (error-union wrapping / errdefer routing), so an `E!T` prong
+            // return propagates correctly.
+            var caseVals = view.CaseVals;
+            var body = new List<CStmt> { LowerRuntimeProngBody(view) };
             var labels = LowerCaseVals(caseVals, subject.Type); // case values compare against the subject
             if (!EndsInJump(body)) { body.Add(new Break()); }   // no Zig fall-through
             sections.Add(new SwitchSection(labels, body));
@@ -381,11 +360,7 @@ internal sealed partial class ZigLowering
                 var capSym = _symbols.Declare(new Symbol { Name = cap, Kind = SymKind.Var, Type = subject.Type });
                 stmts.Add(new DeclStmt(new List<LocalDecl> { new(capSym, subject) }));
             }
-            if (prong.Block is { } block) { stmts.Add(LowerBlock(block)); }
-            else if (prong.Expr is { } expr) { stmts.Add(LowerProngExprStmt(expr)); }
-            else if (prong.Return is { } returned) { stmts.Add(Hoisted(() => LowerReturn(returned))); }
-            else if (prong.ReturnsVoid) { stmts.Add(LowerReturnVoid()); }
-            else if (prong.Jump is { } jump) { stmts.Add(LowerProngJump(jump)); }
+            stmts.Add(LowerRuntimeProngBody(prong));
         }
         finally
         {
@@ -445,10 +420,12 @@ internal sealed partial class ZigLowering
     /// the top of that prong's block. The subject is hoisted to a temp first (unless it is already a
     /// simple variable) so each capture re-reads it without re-evaluating a side-effecting subject
     /// expression.</summary>
+    /// <summary>True for a plain value prong, <c>v =&gt; expr</c>: no capture, not <c>inline</c>, a value body. A switch made
+    /// of these alone can be a C# switch expression.</summary>
+    private static bool IsPlainValueProng(Item prong)
+        => prong.Content is not Zig.InlineProng && DecomposeProng(prong) is { Expr: not null, CaptureName: null };
     /// <summary>True for a prong whose payload capture is by reference (<c>|*x|</c>), directly or under <c>inline</c>.</summary>
-    private static bool IsRefCaptureProng(Item prong) => prong.Content is Zig.ProngCaptureRef or Zig.ProngCaptureRefExpr
-        or Zig.ProngCaptureRefReturn or Zig.ProngCaptureRefReturnVoid or Zig.ProngCaptureRefAssign
-        || prong.Content is Zig.InlineProng ip && IsRefCaptureProng(ip.Arg1);
+    private static bool IsRefCaptureProng(Item prong) => DecomposeProng(prong).ByRef;
     private CStmt LowerUnionSwitch(CExpr subject, Item prongsItem, ZigUnionInfo info, Func<Item, CStmt>? fillValue = null)
     {
         // A VALUE switch (`const n: u8 = switch (spec) { .none => 1, .number => |v| v * 4 };`) passes
@@ -510,69 +487,12 @@ internal sealed partial class ZigLowering
         // capture bound to that variant's payload, and its body.
         void AddUnionSection(Item prongItem, Item? onlyCase)
         {
-            // A bare-expr prong (`=> expr`) in a union STATEMENT switch is an expression statement,
-            // with no payload capture (capture needs a braced block); handle it up front.
-            if (prongItem.Content is Zig.ProngExpr pe)
-            {
-                RejectUnionRange(pe.Arg0, info);
-                var exprLabels = LowerCaseVals(pe.Arg0, info.TagType);
-                var peBody = new List<CStmt> { ProngValue(pe.Arg2) };
-                if (!EndsInJump(peBody)) { peBody.Add(new Break()); }
-                sections.Add(new SwitchSection(exprLabels, peBody));
-                return;
-            }
-            // A `return`-body prong (`.variant => return [e]`) without a capture — symmetric with the
-            // non-union `LowerSwitch` (road-to-zig-std S9). `return` reuses the statement return-lowering
-            // (error-union wrapping / errdefer). The capture-BODY prong forms (`|x| return e` / `|x| e`)
-            // remain a follow-up — a capture there still hits the default loud cut below.
-            if (prongItem.Content is Zig.ProngReturn or Zig.ProngReturnVoid)
-            {
-                Item rCase;
-                List<CStmt> rBody;
-                if (prongItem.Content is Zig.ProngReturn prr)
-                {
-                    rCase = prr.Arg0;
-                    rBody = new List<CStmt> { Hoisted(() => LowerReturn(prr.Arg3)) };
-                }
-                else
-                {
-                    var prv = (Zig.ProngReturnVoid)prongItem.Content;
-                    rCase = prv.Arg0;
-                    rBody = new List<CStmt> { LowerReturnVoid() };
-                }
-                RejectUnionRange(rCase, info);
-                var rLabels = LowerCaseVals(rCase, info.TagType);
-                sections.Add(new SwitchSection(rLabels, rBody));   // `return` is a jump — no Break needed
-                return;
-            }
-            // A prong body is a Block, or (road-to-zig-std S9) a bare expr / `return [e]`, each with an
-            // optional `|x|` / `|*x|` payload capture. Decompose the shape once, then lower the body
-            // INSIDE the capture scope so it sees the binding.
-            Item caseVals; string? captureName; bool captureByRef;
-            Item? blockBody = null, exprBody = null, returnBody = null, jumpBody = null;
-            Zig.ProngAssign? assignBody = null;
-            (Item Target, Item Op, Item Value)? captureAssign = null;
-            var voidReturn = false;
-            switch (prongItem.Content)
-            {
-                case Zig.Prong p:                     caseVals = p.Arg0; captureName = null;        captureByRef = false; blockBody  = p.Arg2; break;
-                // `.off => total += 5` (task #109): the assignment prong the plain switch has (#64).
-                case Zig.ProngAssign p:               caseVals = p.Arg0; captureName = null;        captureByRef = false; assignBody = p;      break;
-                case Zig.ProngCaptureAssign p:        caseVals = p.Arg0; captureName = Tok(p.Arg3); captureByRef = false; captureAssign = (p.Arg5, p.Arg6, p.Arg7); break;
-                // `.content_length => |*len| len.* -= n,` (std's http.zig): the assignment writes through the payload pointer.
-                case Zig.ProngCaptureRefAssign p:     caseVals = p.Arg0; captureName = Tok(p.Arg4); captureByRef = true;  captureAssign = (p.Arg6, p.Arg7, p.Arg8); break;
-                case Zig.ProngCapture p:              caseVals = p.Arg0; captureName = Tok(p.Arg3); captureByRef = false; blockBody  = p.Arg5; break;
-                case Zig.ProngCaptureRef p:           caseVals = p.Arg0; captureName = Tok(p.Arg4); captureByRef = true;  blockBody  = p.Arg6; break;
-                case Zig.ProngCaptureExpr p:          caseVals = p.Arg0; captureName = Tok(p.Arg3); captureByRef = false; exprBody   = p.Arg5; break;
-                case Zig.ProngCaptureReturn p:        caseVals = p.Arg0; captureName = Tok(p.Arg3); captureByRef = false; returnBody = p.Arg6; break;
-                case Zig.ProngCaptureReturnVoid p:    caseVals = p.Arg0; captureName = Tok(p.Arg3); captureByRef = false; voidReturn = true;   break;
-                case Zig.ProngCaptureRefExpr p:       caseVals = p.Arg0; captureName = Tok(p.Arg4); captureByRef = true;  exprBody   = p.Arg6; break;
-                case Zig.ProngCaptureRefReturn p:     caseVals = p.Arg0; captureName = Tok(p.Arg4); captureByRef = true;  returnBody = p.Arg7; break;
-                case Zig.ProngCaptureRefReturnVoid p: caseVals = p.Arg0; captureName = Tok(p.Arg4); captureByRef = true;  voidReturn = true;   break;
-                case Zig.ProngJump p:                 caseVals = p.Arg0; captureName = null;        captureByRef = false; jumpBody   = p.Arg2; break;
-                case Zig.ProngCaptureJump p:          caseVals = p.Arg0; captureName = Tok(p.Arg3); captureByRef = false; jumpBody   = p.Arg5; break;
-                default: throw new IrUnsupportedException("zig switch prong: " + (prongItem.Content?.GetType().Name ?? "null"));
-            }
+            // A prong body is a Block, a bare expr, a `return [e]`, a jump, an assignment or a loop, each with an optional
+            // `|x|` / `|*x|` payload capture. The body is lowered INSIDE the capture scope so it sees the binding.
+            var view = DecomposeProng(prongItem);
+            var caseVals = view.CaseVals;
+            var captureName = view.CaptureName;
+            var captureByRef = view.ByRef;
             if (onlyCase is null) { RejectUnionRange(caseVals, info); }
             // `.variant` → EnumConstRef(U_Tag.variant); an unrolled `inline` prong has the one variant it stands for.
             var labels = onlyCase is { } one
@@ -583,15 +503,9 @@ internal sealed partial class ZigLowering
             // wrapping / errdefer). For a block the statements are flattened (so a leading capture decl
             // sits in the same scope); the other forms are a single statement.
             List<CStmt> LowerProngBody() =>
-                blockBody is not null    ? new List<CStmt>(LowerBlock(blockBody).Stmts)
-                : exprBody is not null   ? new List<CStmt> { ProngValue(exprBody) }
-                : returnBody is not null ? new List<CStmt> { Hoisted(() => LowerReturn(returnBody)) }
-                : voidReturn             ? new List<CStmt> { LowerReturnVoid() }
-                : jumpBody is not null   ? new List<CStmt> { LowerProngJump(jumpBody) }
-                : assignBody is not null ? new List<CStmt> { LowerProngAssign(assignBody) }
-                : captureAssign is { } ca
-                    ? new List<CStmt> { LowerAssignProngBody(ca.Target, ca.Op, ca.Value) }
-                : throw new IrUnsupportedException("zig switch capture prong has no body");
+                view.Block is { } blockBody && !view.Comptime ? new List<CStmt>(LowerBlock(blockBody).Stmts)
+                : view.Expr is { } exprBody ? new List<CStmt> { ProngValue(exprBody) }
+                : new List<CStmt> { LowerRuntimeProngBody(view) };
 
             List<CStmt> body;
             if (captureName is not null && captureName != "_")
@@ -618,7 +532,7 @@ internal sealed partial class ZigLowering
             }
             else
             {
-                body = blockBody is not null ? new List<CStmt> { LowerBlock(blockBody) } : LowerProngBody();
+                body = view.Block is { } plainBlock && !view.Comptime ? new List<CStmt> { LowerBlock(plainBlock) } : LowerProngBody();
             }
             if (!EndsInJump(body)) { body.Add(new Break()); }   // no Zig fall-through
             sections.Add(new SwitchSection(labels, body));
@@ -792,22 +706,22 @@ internal sealed partial class ZigLowering
         var armHoists = new List<List<CStmt>>();
         foreach (var prongItem in Flatten(prongsItem))
         {
-            if (prongItem.Content is not Zig.ProngExpr pe)
+            if (DecomposeProng(prongItem) is not { Expr: { } peValue, CaptureName: null } pe || prongItem.Content is Zig.InlineProng)
             {
                 throw new IrUnsupportedException(
                     "zig switch-expression prong must yield a value (`v => expr`); a block-bodied prong " +
                     "(a labeled `break :blk v`) is supported only as a full `const`/`var`/`return`/assignment RHS " +
                     "(Milestone Y, part 1), not in a sub-expression; a `|x|` capture in a switch expression is not supported yet");
             }
-            var (value, hoisted) = LowerArmIsolated(() => LowerExprSink(pe.Arg2, sink));
+            var (value, hoisted) = LowerArmIsolated(() => LowerExprSink(peValue, sink));
             armHoists.Add(hoisted);
             // `else` → the `_` default arm; otherwise the prong's case values become the arm's
             // labels (a multi-value prong → several, rendered `a or b`), reusing LowerCaseVals so an
             // inclusive range `lo...hi` lowers to a relational-pattern label exactly as in a
             // statement switch.
-            arms.Add(pe.Arg0.Content is Zig.CaseElse
+            arms.Add(pe.CaseVals.Content is Zig.CaseElse
                 ? new SwitchExprArm(null, value)
-                : new SwitchExprArm(LowerCaseVals(pe.Arg0, subject.Type), value));
+                : new SwitchExprArm(LowerCaseVals(pe.CaseVals, subject.Type), value));
         }
         // A Zig switch over an error set or enum is exhaustive — real zig proves the prongs cover
         // every member, so no `else` is required. dotcc erases an error set to a flat `ushort` and
@@ -846,8 +760,8 @@ internal sealed partial class ZigLowering
         // An all-value switch stays a runtime C# switch, unless a prong is a `@compileError` (std.math.floatMantissaBits'
         // `else => @compileError("unknown floating point type …")`): zig never analyses an unselected prong, so a
         // comptime-known subject must select before any other prong lowers.
-        if (prongs.All(p => p.Content is Zig.ProngExpr) && !prongs.Any(p => p.Content is Zig.ProngExpr { Arg2.Content: Zig.BuiltinCall { Arg2: not null } cb }
-                                                                            && Tok(cb.Arg0) == "@compileError"))
+        if (prongs.All(IsPlainValueProng) && !prongs.Any(p => DecomposeProng(p).Expr?.Content is Zig.BuiltinCall { Arg2: not null } cb
+                                                                && Tok(cb.Arg0) == "@compileError"))
         {
             return null;
         }
