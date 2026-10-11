@@ -319,6 +319,7 @@ symbols:
   - ProngBody      # 218 a switch prong's body: a block, a value, an assignment, `comptime { … }` or a loop
   - ElseStmt       # 219 a statement `if`'s `else Payload? Stmt` (zig's `KEYWORD_else Payload? Statement`)
   - WhileCont      # 220 a `while` continue clause `: (…)` (zig's WhileContinueExpr)
+  - LoopElse       # 221 a value loop's `else Payload? IfArm`
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -569,6 +570,11 @@ productions:
       - { lhs: ThenExpr, rhs: [Expr], action: thenExpr }
       - { lhs: ThenExpr, rhs: [Expr, AssignOp, RhsExpr], action: assignArm }
       - { lhs: Stmt, rhs: ['if', '(', Expr, ')', Payload?, ThenExpr, ElseStmt], action: stmtIfThen }
+      # The loops' twin, zig's `ForPrefix AssignExpr (SEMICOLON / KEYWORD_else Statement)`: a body with no `;` of its own,
+      # ended by the `else` (std's zig/WindowsSdk.zig: `for (nums[1..]) |*num| num.* = parse(…) orelse continue :iterate
+      # else if (it.next()) |_| continue;`).
+      - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', Payload?, WhileCont?, ThenExpr, ElseStmt], action: whileStmtThen }
+      - { lhs: LoopStmt, rhs: ['for', '(', ForObjs, ",?", ')', '|', ForCaps, ",?", '|', ThenExpr, ElseStmt], action: forStmtThen }
 
       # The statement loops, as zig's WhileStatement and ForStatement: `WhilePrefix Statement (else Payload? Statement)?`,
       # the prefix `while ( Expr ) PtrPayload? WhileContinueExpr?`, and `ForPrefix Statement (else Statement)?`, the prefix
@@ -677,7 +683,7 @@ productions:
       # wrapped form and unrolls the range case (`inline while` / `inline for` over a slice are deferred,
       # a clear error). `'inline'` is a distinct keyword token at statement position, so it can never
       # begin an Expr/decl — conflict-free with the other Stmt forms.
-      - { lhs: Stmt, rhs: ['inline', LoopStmt], action: inlineLoop }
+      - { lhs: LoopStmt, rhs: ['inline', LoopStmt], action: inlineLoop }
       - { lhs: Stmt, rhs: ['return', RhsExpr, ';'],         action: stmtReturn }
       - { lhs: Stmt, rhs: ['return', ';'],                   action: stmtReturnVoid }
       # A type-returning function's body (wall-plan W4): `fn Pair(comptime T: type) type { return
@@ -873,21 +879,12 @@ productions:
       - { lhs: LoopBody, rhs: [Block] }
       - { lhs: LoopBody, rhs: [LoopBodyExpr] }
       - { lhs: LoopBodyExpr, rhs: [Expr], action: loopBodyExpr }
-      # The value loops, zig's WhileExpr and ForExpr, with the statement loops' prefixes. The `else` is an IfArm (a value,
-      # a `{ … }` block that never completes, or a jump: `… else return null;`, std.bit_set). A `label:` prefixes any of
-      # them (`lbl: for … else …`, so `break :lbl v` targets it).
-      - { lhs: LoopExpr, rhs: ['while', '(', Expr, ')', Payload?, WhileCont?, LoopBody, 'else', Payload?, IfArm], action: whileExpr }
-      - { lhs: LoopExpr, rhs: ['for', '(', ForObjs, ",?", ')', '|', ForCaps, ",?", '|', LoopBody, 'else', IfArm], action: forExpr }
+      # A value loop's `else`: an IfArm (a value, a `{ … }` block that never completes, or a jump: `… else return null;`,
+      # std.bit_set), with an error capture after a `while`. HERE, ahead of the loops (which are LAST): the `else` shift
+      # advances this item, so it outranks reducing an else-less loop, and the dangling `else` binds to the nearest loop.
+      - { lhs: LoopElse, rhs: ['else', Payload?, IfArm], action: loopElse }
+      # A `label:` prefixes any value loop (`lbl: for … else …`, so `break :lbl v` targets it).
       - { lhs: LoopExpr, rhs: [LABEL, ':', LoopExpr], action: labeledLoopExpr }
-
-  # The comptime-unrolled value loop (std.enums.tagName, task #131: `return inline for (field_names, field_values)
-  # |f_name, f_value| { if (@intFromEnum(e) == f_value) break f_name; } else null;`), over one comptime list or several
-  # in lockstep, AFTER the plain loops. In a switch, `inline for (…) |x| b else y =>` reads two ways: an `inline`
-  # prong whose case value is a `for` expression, or a case value that is an `inline for`. zig's SwitchProng takes
-  # `KEYWORD_inline` first, so the plain `for` (the earlier group) wins the reduce/reduce.
-  - derivation: none
-    rules:
-      - { lhs: LoopExpr, rhs: ['inline', 'for', '(', ForObjs, ",?", ')', '|', ForCaps, ",?", '|', LoopBody, 'else', IfArm], action: inlineForExpr }
 
   - derivation: leftmost
     rules:
@@ -1347,8 +1344,6 @@ productions:
       - { lhs: ProngBody, rhs: [Expr, AssignOp, RhsExpr], action: prongAssign }
       # std.math.sqrt's `.comptime_int => comptime { … }`: after `comptime`, a `{` starts no Prefix, a clean shift.
       - { lhs: ProngBody, rhs: ['comptime', Block], action: prongComptimeBlock }
-      # A loop STATEMENT (std.Io.Writer.writeSplat's `else => for (0..splat) |_| { … },`).
-      - { lhs: ProngBody, rhs: [LoopStmt], action: prongLoop }
       # zig's PtrIndexPayload: `|x|`, `|*x|`, `|x, i|`, `|*x, i|`.
       - { lhs: Payload, rhs: ['|', "*?", IDENT, PayloadTag?, '|'], action: payload }
       - { lhs: PayloadTag, rhs: [',', IDENT], action: payloadTag }
@@ -1683,17 +1678,32 @@ productions:
       # std's Io/Writer.zig): the statement form takes the `if` and the block, so the `;` is an empty statement. zig only
       # allows it in that position; accepting it anywhere changes no program's meaning.
       - { lhs: Stmt, rhs: [';'], action: emptyStmt }
-      # A value `while` with no `else` (`const fd: c.fd_t = while (true) { … break @intCast(rc); … };`, 24 sites in std):
-      # its value is its `break`s', and zig accepts it only when the loop cannot end normally. Here for the same reasons as
-      # the else-less `if`: an `else` after the Block shifts into whileElseExpr, and the statement `while` wins at
-      # statement start.
-      - { lhs: LoopExpr, rhs: ['while', '(', Expr, ')', Block], action: whileNoElseExpr }
       # zig's IfTypeExpr: an `if` choosing a TYPE wherever a type goes, its arms types (no init list): `vec: []if (is_const)
       # iovec_const else iovec` (std's Io/Dispatch.zig), `value: if (is_64) u64 else u32`, a return type `fn f(…) if (c) A else B
       # { … }` (math.zig), `?if (c) *anyopaque else noreturn`, `enum(if (c) u32 else u8)`. LAST: where a value `if` can stand,
       # the `else` after a type-shaped arm reduces into the IfExpr (the ordinary value `if`), so this form only parses where
       # nothing but a type can.
       - { lhs: Type, rhs: ['if', '(', Expr, ')', Type, 'else', Type], action: tyIf }
+
+  # The value loops, zig's WhileExpr and ForExpr (`Prefix Expr (KEYWORD_else Expr)?`): the statement loops' prefixes, a
+  # LoopBody (a Block, or a brace-less expression: `for (xs) |x| switch (x) { … } else v`, std's zig/AstGen.zig) and an
+  # optional LoopElse. LAST, like the else-less `if`: an `else` after the body shifts into the LoopElse (an earlier group),
+  # and where the statement loop shares the prefix (statement start) the statement wins. With no `else` the value is the
+  # `break`s' alone (`const fd = while (true) { … break rc; … };`, 24 std sites); in a statement position (a prong body,
+  # `.list => |l| for (l.items) |e| h.update(e),`, std's Build.zig) it is the statement loop.
+  - derivation: rightmost
+    rules:
+      - { lhs: LoopExpr, rhs: ['while', '(', Expr, ')', Payload?, WhileCont?, LoopBody, LoopElse?], action: whileValue }
+      - { lhs: LoopExpr, rhs: ['for', '(', ForObjs, ",?", ')', '|', ForCaps, ",?", '|', LoopBody, LoopElse?], action: forValue }
+
+  # The comptime-unrolled value loop (std.enums.tagName, task #131: `return inline for (field_names, field_values)
+  # |f_name, f_value| { if (@intFromEnum(e) == f_value) break f_name; } else null;`), AFTER the plain loops. In a switch,
+  # `inline for (…) |x| b else y =>` reads two ways: an `inline` prong whose case value is a `for` expression, or a case
+  # value that is an `inline for`. zig's SwitchProng takes `KEYWORD_inline` first, so the plain `for` wins the
+  # reduce/reduce.
+  - derivation: rightmost
+    rules:
+      - { lhs: LoopExpr, rhs: ['inline', 'for', '(', ForObjs, ",?", ')', '|', ForCaps, ",?", '|', LoopBody, LoopElse?], action: inlineForValue }
 
 lexer:
   root:

@@ -8033,6 +8033,63 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{} {}\\n\", .{ sumSkippingTwos(&a), five });\n" +
             "}\n", 0,
             "53 5" },
+        // zig-grammar-peg P5 loops: a value loop's optional `else` (an else-less `for` as a union prong body, a loop `else` in a value
+        // switch prong), a `for … |*n, i| n.* = … else …` body ended by `else` (std's zig/WindowsSdk.zig) and a labeled `inline for`.
+        new object[] { "loop_expressions",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "const Item = union(enum) { list: []const u8, one: u8, none };\n" +
+            "\n" +
+            "fn total(it: Item) u32 {\n" +
+            "    var sum: u32 = 0;\n" +
+            "    switch (it) {\n" +
+            "        .list => |l| for (l) |e| {\n" +
+            "            sum += e;\n" +
+            "        },\n" +
+            "        .one => |o| sum += o,\n" +
+            "        .none => {},\n" +
+            "    }\n" +
+            "    return sum;\n" +
+            "}\n" +
+            "\n" +
+            "const Kind = enum { small, big };\n" +
+            "\n" +
+            "fn classify(xs: []const u8) Kind {\n" +
+            "    return switch (xs.len) {\n" +
+            "        0 => .small,\n" +
+            "        else => for (xs) |x| {\n" +
+            "            if (x > 9) break .big;\n" +
+            "        } else .small,\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "fn parseAll(nums: []u8, src: []const u8) u8 {\n" +
+            "    var bad: u8 = 0;\n" +
+            "    for (nums, 0..) |*n, i| n.* = src[i] * 2 else if (src.len > nums.len) {\n" +
+            "        bad = 1;\n" +
+            "    }\n" +
+            "    return bad + nums[0] + nums[1];\n" +
+            "}\n" +
+            "\n" +
+            "fn sumFields() u32 {\n" +
+            "    const names = [_][]const u8{ \"a\", \"bb\", \"ccc\" };\n" +
+            "    var n: u32 = 0;\n" +
+            "    outer: inline for (names) |name| {\n" +
+            "        if (name.len == 3) break :outer;\n" +
+            "        n += name.len;\n" +
+            "    }\n" +
+            "    return n;\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() void {\n" +
+            "    const xs = [_]u8{ 1, 2, 3 };\n" +
+            "    var nums = [_]u8{ 0, 0 };\n" +
+            "    const src = [_]u8{ 4, 1, 7 };\n" +
+            "    std.debug.print(\"{} {} {}\\n\", .{ total(.{ .list = &xs }), total(.{ .one = 5 }), total(.none) });\n" +
+            "    std.debug.print(\"{} {}\\n\", .{ classify(&xs) == .small, classify(&[_]u8{ 3, 12 }) == .big });\n" +
+            "    std.debug.print(\"{} {}\\n\", .{ parseAll(&nums, &src), sumFields() });\n" +
+            "}\n", 0,
+            "6 5 0\ntrue true\n11 3" },
         // zig-grammar-peg P4: one `while` prefix (a capture with a continue clause and an `else`, a block continue) and one `for`
         // (one object with a trailing comma, a by-reference capture, a labeled multi-object value `for`, a range with `else`).
         new object[] { "loop_payloads",

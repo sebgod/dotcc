@@ -219,8 +219,17 @@ internal sealed partial class ZigLowering
             case Zig.AssignArm a:                  return LowerAssignOpStmt(a.Arg0, a.Arg1, a.Arg2);
             // `while (c) [|x|] [: (cont)] body [else [|e|] body]` (zig's WhileStatement) and `for (objs) |caps| body [else body]`:
             // see LowerWhileStatement / LowerForStatement.
-            case Zig.WhileStmt w:       return LowerWhileStatement(w);
-            case Zig.ForStmt f:         return LowerForStatement(f);
+            case Zig.WhileStmt w:       return LowerWhileLoop(w.Arg2, w.Arg4, w.Arg5, w.Arg6, w.Arg7);
+            case Zig.ForStmt f:         return LowerForLoop(f.Arg2, f.Arg6, f.Arg9, f.Arg10);
+            // The no-`;` body twins (`for (…) |*n| n.* = f() orelse continue else …;`, zig's `AssignExpr else Statement`).
+            case Zig.WhileStmtThen w:   return LowerWhileLoop(w.Arg2, w.Arg4, w.Arg5, w.Arg6, w.Arg7);
+            case Zig.ForStmtThen f:     return LowerForLoop(f.Arg2, f.Arg6, f.Arg9, f.Arg10);
+            // An else-less value loop where a statement stands (a prong body `=> for (xs) |x| f(x),`, std's Build.zig): its
+            // value is void, so it is the statement loop.
+            case Zig.WhileValue { Arg7: null } w: return LowerWhileLoop(w.Arg2, w.Arg4, w.Arg5, w.Arg6, null);
+            case Zig.ForValue { Arg10: null } f:  return LowerForLoop(f.Arg2, f.Arg6, f.Arg9, null);
+            case Zig.InlineForValue { Arg11: null } f: return LowerInlineForLoop(f.Arg3, f.Arg7, f.Arg10, null, stmt);
+            case Zig.LabeledLoopExpr l when IsVoidLoop(l.Arg2): return LowerLabeledLoop(Tok(l.Arg0), l.Arg2);
 
             // `break;` / `continue;` — reuse the C IR loop-control nodes (the C# backend
             // renders them verbatim; valid inside the while/for forms above).
@@ -701,8 +710,14 @@ internal sealed partial class ZigLowering
     /// or wrapping operator the shared Assign node with its <see cref="BinOp"/> as CompoundOp (a native C# <c>op=</c>, which
     /// evaluates the lvalue once and already wraps in the unchecked context); a saturating one
     /// <c>x = ZigMath.Sat…(x, y)</c>.</summary>
+    /// <summary>True for a control-flow expression (a value loop, a value `if`, a `switch`), which can never be assigned to.</summary>
+    private static bool IsControlFlowExpr(Item e) => e.Content is Zig.WhileValue or Zig.ForValue or Zig.InlineForValue
+        or Zig.LabeledLoopExpr or Zig.IfElseExpr or Zig.IfThenExpr or Zig.SwitchExpr;
     private CStmt LowerAssignOpStmt(Item lhs, Item opItem, Item rhs) => opItem.Content switch
     {
+        // zig's "invalid left-hand side to assignment": a prong `=> for (xs) |x| sum += x,` assigns to the whole loop, since a
+        // prong body is `Expr (AssignOp Expr)?` and a loop's brace-less body is an Expr (write `{ sum += x; }`).
+        _ when IsControlFlowExpr(lhs) => throw new CompileException("zig: invalid left-hand side to assignment"),
         Zig.AopAssign => LowerAssignStmt(lhs, rhs),
         Zig.AopAddSat => SatCompoundAssign(lhs, "SatAdd", rhs),
         Zig.AopSubSat => SatCompoundAssign(lhs, "SatSub", rhs),

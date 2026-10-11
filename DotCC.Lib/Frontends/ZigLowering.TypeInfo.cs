@@ -980,9 +980,9 @@ internal sealed partial class ZigLowering
     /// <summary>One decomposed <c>switch</c> prong (zig's <c>SwitchCase =&gt; PtrIndexPayload? AssignExpr</c>): its case-value
     /// list, an optional payload capture (by value or by reference, with an optional tag name), and exactly one body form: a
     /// braced block (<see cref="Comptime"/> for <c>comptime { … }</c>), a value expression, a <c>return [v]</c>, a jump, an
-    /// assignment, or a statement loop. Every switch position reads prongs through this view.</summary>
+    /// or assignment. Every switch position reads prongs through this view.</summary>
     private sealed record ZigProng(Item CaseVals, string? CaptureName, Item? Block, Item? Expr, Item? Return, bool ReturnsVoid,
-        Item? Jump = null, (Item Target, Item Op, Item Value)? Assign = null, string? Cut = null, Item? Loop = null,
+        Item? Jump = null, (Item Target, Item Op, Item Value)? Assign = null, string? Cut = null,
         bool ByRef = false, string? TagName = null, bool Comptime = false)
     {
         /// <summary>True for a prong with a payload capture that binds a name (<c>|_|</c> binds none).</summary>
@@ -1013,7 +1013,6 @@ internal sealed partial class ZigLowering
             Zig.Block => view with { Block = body },
             Zig.ProngComptimeBlock c => view with { Block = c.Arg1, Comptime = true },
             Zig.ProngAssign a => view with { Assign = (a.Arg0, a.Arg1, a.Arg2) },
-            Zig.ProngLoop l => view with { Loop = l.Arg0 },
             Zig.ReturnExpr { Arg1: null } => view with { ReturnsVoid = true },
             Zig.ReturnExpr r => view with { Return = r.Arg1 },
             Zig.FbBreak or Zig.FbBreakLabel or Zig.FbBreakLabelValue or Zig.FbBreakValue

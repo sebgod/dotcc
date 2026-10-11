@@ -40,7 +40,7 @@ internal sealed partial class ZigLowering
         Zig.PreComptime { Arg1.Content: Zig.IfElseExpr } c => IsValueControlFlowStmt(c.Arg1),
         // A value-position loop (`while/for … else`, Milestone Y part 2) ALWAYS needs the statement
         // lowering — a loop that yields via `break v` / an `else` value can't be a C# expression.
-        Zig.WhileExpr or Zig.ForExpr or Zig.InlineForExpr or Zig.LabeledLoopExpr or Zig.WhileNoElseExpr => true,
+        Zig.WhileValue or Zig.ForValue or Zig.InlineForValue or Zig.LabeledLoopExpr => true,
         _ => false,
     };
     /// <summary>True when any prong of a switch EXPRESSION needs statements to yield its value — a
@@ -60,7 +60,7 @@ internal sealed partial class ZigLowering
             }
             // A value prong needs statements only for a labeled value block; every other body (a block, a `comptime { … }`
             // block that returns, std.math.log2; a `return`, std.fmt.charToDigit; a jump; an assignment; a loop) is one.
-            return view.Expr is { } value ? IsLabeledValue(value) : true;
+            return view.Expr is { } value ? IsLabeledValue(value) || IsValueControlFlowStmt(value) : true;
         });
     /// <summary>Lower a value-position control-flow form that needs statements to produce its value
     /// (see <see cref="IsValueControlFlowStmt"/>) as a C# STATEMENT, then hand the result temp to
@@ -72,7 +72,7 @@ internal sealed partial class ZigLowering
         Zig.IfElseExpr { Arg4: null, Arg7: null } or Zig.SwitchExpr => LowerValueIfSwitch(rhs, sink, consume),
         Zig.PreComptime { Arg1.Content: Zig.SwitchExpr } c => LowerValueControlFlowStmt(c.Arg1, sink, consume),
         Zig.PreComptime { Arg1.Content: Zig.IfElseExpr } c => LowerValueControlFlowStmt(c.Arg1, sink, consume),
-        Zig.WhileExpr or Zig.ForExpr or Zig.InlineForExpr or Zig.LabeledLoopExpr or Zig.WhileNoElseExpr
+        Zig.WhileValue or Zig.ForValue or Zig.InlineForValue or Zig.LabeledLoopExpr
             => LowerLoopValue(rhs, sink, consume),
         _ => throw new IrUnsupportedException(
             "internal: value control-flow statement on " + (rhs.Content?.GetType().Name ?? "null")),
@@ -141,15 +141,15 @@ internal sealed partial class ZigLowering
         }
         switch (loopItem.Content)
         {
-            case Zig.WhileExpr w:
+            case Zig.WhileValue w:
             {
                 var (capture, captureByRef, _) = PayloadParts(w.Arg4);
                 if (captureByRef) { throw new IrUnsupportedException("zig value `while (opt) |*x|`: a by-reference while capture is not supported yet"); }
-                if (w.Arg8 is not null)
+                if (w.Arg7?.Content is Zig.LoopElse { Arg1: not null })
                 {
                     throw new IrUnsupportedException("zig value `while (eu) |v| … else |e| …`: an error capture on a value loop's `else` is not supported yet");
                 }
-                condOrIter = w.Arg2; blockItem = w.Arg6; elseItem = w.Arg9;
+                condOrIter = w.Arg2; blockItem = w.Arg6; elseItem = LoopElseArm(w.Arg7);
                 var contPost = ContPostOf(w.Arg5);
                 // `while (it) |node| { … } else …` (heap/ArenaAllocator.zig); `while (i < n) : (i += 1) { … } else true`
                 // (std.bit_set.ArrayBitSet.eql): the C `For` with that post, so a `continue` runs it (as the statement form).
@@ -157,10 +157,10 @@ internal sealed partial class ZigLowering
                 else if (contPost is { } post) { statementLoop = () => new For(null, LowerExpr(w.Arg2), post(), LowerStmt(w.Arg6)); }
                 break;
             }
-            case Zig.ForExpr f:
+            case Zig.ForValue f:
             {
                 var (objects, captures) = DecomposeForMulti(f.Arg2, f.Arg6);
-                condOrIter = f.Arg2; blockItem = f.Arg9; elseItem = f.Arg11;
+                condOrIter = f.Arg2; blockItem = f.Arg9; elseItem = LoopElseArm(f.Arg10, forLoop: true);
                 if (objects is [{ IsRange: false } one])
                 {
                     condOrIter = one.Expr;
@@ -174,15 +174,13 @@ internal sealed partial class ZigLowering
                 }
                 break;
             }
-            case Zig.InlineForExpr f:
+            case Zig.InlineForValue f:
             {
                 var (objects, captures) = DecomposeForMulti(f.Arg3, f.Arg7);
-                condOrIter = f.Arg3; blockItem = f.Arg10; elseItem = f.Arg12;
+                condOrIter = f.Arg3; blockItem = f.Arg10; elseItem = LoopElseArm(f.Arg11, forLoop: true);
                 inlineFor = (f.Arg3, f.Arg7, objects.Count > 1, objects[0].Expr, captures[0].Name);
                 break;
             }
-            // `while (true) { … break v; … }`: no `else`, so the value is the `break`s' alone (zig rejects a loop that can end).
-            case Zig.WhileNoElseExpr w:      condOrIter = w.Arg2; blockItem = w.Arg4; elseItem = null; break;
             default: throw new IrUnsupportedException("internal: loop-value on " + (rhs.Content?.GetType().Name ?? "null"));
         }
 
@@ -245,6 +243,15 @@ internal sealed partial class ZigLowering
         stmts.Add(consume(temp));
         return new Seq(stmts);
     }
+    /// <summary>The arm of a value loop's optional <c>else</c> (<c>LoopElse</c>), or null: with no <c>else</c> the loop's value is
+    /// its <c>break</c>s' alone (<c>while (true) { … break v; … }</c>; zig rejects such a loop when it can end). A <c>for</c>'s
+    /// <c>else</c> takes no capture.</summary>
+    private static Item? LoopElseArm(Item? loopElse, bool forLoop = false)
+    {
+        if (loopElse?.Content is not Zig.LoopElse e) { return null; }
+        if (forLoop && e.Arg1 is not null) { throw new CompileException("zig: a `for` loop's `else` takes no capture"); }
+        return e.Arg2;
+    }
     /// <summary>An lvalue reference to a value-loop result temp at its (now-resolved) type.</summary>
     private static VarRef LvRef(LoopValueTarget t) => new VarRef(t.Temp) { Type = t.ResultType!, IsLValue = true };
     /// <summary>Lower a <c>break v</c> targeting <paramref name="target"/>: assign the value to the
@@ -272,6 +279,15 @@ internal sealed partial class ZigLowering
         // An `unreachable` prong (`error.CodepointTooLarge => unreachable` in std.unicode's utf16LeToUtf8Impl, task #188) has
         // no value to store: it is the trap, as a statement. (Assigned, its `void` call was CS0029.)
         if (IsUnreachableItem(valueItem)) { return new ExprStmt(LowerExpr(valueItem)); }
+        // A value loop (`=> for (…) |m| { … break .other; } else .tuple,`, std's zig/Ast/Render.zig) fills its own temp.
+        if (valueItem.Content is Zig.WhileValue or Zig.ForValue or Zig.InlineForValue or Zig.LabeledLoopExpr)
+        {
+            return LowerLoopValue(valueItem, rt.ResultType, loopTemp =>
+            {
+                rt.ResultType ??= loopTemp.Type;
+                return new ExprStmt(new Assign(null, RtRef(rt), new VarRef(loopTemp) { Type = loopTemp.Type }) { Type = rt.ResultType });
+            });
+        }
         if (IsLabeledValue(valueItem))
         {
             return LowerLabeledValue(valueItem, rt.ResultType, blkTemp =>
