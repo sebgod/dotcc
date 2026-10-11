@@ -657,34 +657,47 @@ internal sealed partial class IrBuilder
         {
             case C.AttrListCons c: CollectDeclAttrs(c.Arg0); CollectDeclAttrs(c.Arg2); break;
             case C.AttrNoreturn: _pendingAttrNoreturn = true; break;
-            case C.AttrIdent a when Tok(a.Arg0) == "noreturn": _pendingAttrNoreturn = true; break;
-            case C.AttrIdent a when Tok(a.Arg0) == "deprecated": _pendingAttrDeprecated ??= ""; break;
-            case C.AttrCall a when Tok(a.Arg0) == "deprecated":
-                _pendingAttrDeprecated ??= TryStringLiteral(a.Arg2) ?? "";
+            case C.Attr a when IsBareAttr(a, "noreturn"): _pendingAttrNoreturn = true; break;
+            // `deprecated` and `nodiscard`, bare, with empty parens or with a reason:
+            // a null argument (no clause, or `()`) gives the empty message.
+            case C.Attr a when AttrNameOf(a) is (null, "deprecated"):
+                _pendingAttrDeprecated ??= TryStringLiteral(AttrArgOf(a)) ?? "";
                 break;
-            case C.AttrIdent a when Tok(a.Arg0) == "nodiscard": _pendingAttrNodiscard ??= ""; break;
-            case C.AttrCall a when Tok(a.Arg0) == "nodiscard":
-                _pendingAttrNodiscard ??= TryStringLiteral(a.Arg2) ?? "";
+            case C.Attr a when AttrNameOf(a) is (null, "nodiscard"):
+                _pendingAttrNodiscard ??= TryStringLiteral(AttrArgOf(a)) ?? "";
                 break;
             // GCC's constructor attribute, `[[gnu::constructor]]` or with a priority,
-            // `[[gnu::constructor(101)]]`: the function runs before main. An empty
-            // `[[gnu::constructor()]]` (a null argument) takes the default priority.
-            case C.AttrNamespaced a when IsGnu(a.Arg0) && Tok(a.Arg3) is "constructor" or "__constructor__":
-                _pendingAttrConstructor ??= IrModule.DefaultConstructorPriority;
-                break;
-            case C.AttrNsCall { Arg5: null } a when IsGnu(a.Arg0) && Tok(a.Arg3) is "constructor" or "__constructor__":
-                _pendingAttrConstructor ??= IrModule.DefaultConstructorPriority;
-                break;
-            case C.AttrNsCall { Arg5: { } prio } a when IsGnu(a.Arg0) && Tok(a.Arg3) is "constructor" or "__constructor__":
-                _pendingAttrConstructor ??= (int)(ConstEval(BuildExpr(prio))
-                    ?? throw new IrUnsupportedException("a constructor priority that is not an integer constant expression"));
+            // `[[gnu::constructor(101)]]`: the function runs before main. A bare or
+            // empty `[[gnu::constructor()]]` (a null argument) takes the default priority.
+            case C.Attr a when AttrNameOf(a) is ("gnu" or "__gnu__", "constructor" or "__constructor__"):
+                _pendingAttrConstructor ??= AttrArgOf(a) is { } prio
+                    ? (int)(ConstEval(BuildExpr(prio))
+                        ?? throw new IrUnsupportedException("a constructor priority that is not an integer constant expression"))
+                    : IrModule.DefaultConstructorPriority;
                 break;
             default: break; // all other attribute shapes: accepted + ignored
         }
     }
 
-    /// <summary>True when an attribute's namespace is GCC's, <c>gnu</c> or <c>__gnu__</c>.</summary>
-    private static bool IsGnu(Item ns) => Tok(ns) is "gnu" or "__gnu__";
+    /// <summary>An attribute's namespace and name (C23 6.7.12.1's attribute-token):
+    /// <c>(null, "deprecated")</c> for a standard attribute, <c>("gnu", "aligned")</c>
+    /// for a prefixed one.</summary>
+    private static (string? Ns, string Name) AttrNameOf(C.Attr a) => a.Arg0.Content switch
+    {
+        C.AttrStdName n => (null, Tok(n.Arg0)),
+        C.AttrNsName n => (Tok(n.Arg0), Tok(n.Arg3)),
+        var other => throw new IrUnsupportedException(TypeName(other)),
+    };
+
+    /// <summary>An attribute's argument, the <c>E</c> of its <c>( E? )</c> clause, or
+    /// null when it has no clause or an empty one.</summary>
+    private static Item? AttrArgOf(C.Attr a) =>
+        a.Arg1 is { Content: C.AttrArgs { Arg1: { } arg } } ? arg : null;
+
+    /// <summary>True when <paramref name="a"/> is the standard attribute
+    /// <paramref name="name"/> with no namespace and no argument clause.</summary>
+    private static bool IsBareAttr(C.Attr a, string name) =>
+        a.Arg1 is null && AttrNameOf(a) is (null, var n) && n == name;
 
     /// <summary>True when an <c>AttrList</c> contains the C23 <c>[[fallthrough]]</c>
     /// attribute (a bare identifier). Recognized structurally — like the attributes in
@@ -694,7 +707,7 @@ internal sealed partial class IrBuilder
     private bool AttrListHasFallthrough(Item it) => it.Content switch
     {
         C.AttrListCons c => AttrListHasFallthrough(c.Arg0) || AttrListHasFallthrough(c.Arg2),
-        C.AttrIdent a => Tok(a.Arg0) == "fallthrough",
+        C.Attr a => IsBareAttr(a, "fallthrough"),
         _ => false,
     };
 
@@ -706,7 +719,7 @@ internal sealed partial class IrBuilder
     private bool AttrListHasMaybeUnused(Item it) => it.Content switch
     {
         C.AttrListCons c => AttrListHasMaybeUnused(c.Arg0) || AttrListHasMaybeUnused(c.Arg2),
-        C.AttrIdent a => Tok(a.Arg0) == "maybe_unused",
+        C.Attr a => IsBareAttr(a, "maybe_unused"),
         _ => false,
     };
 

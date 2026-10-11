@@ -500,6 +500,8 @@ symbols:
   # optional run of symbols, which `X?` alone cannot spell).
   - StaticAssert   # 206 non-terminal: `_Static_assert ( E StaticAssertMsg? ) ;`, file and block scope
   - StaticAssertMsg # 207 non-terminal: a static assertion's `, STRING` message
+  - AttrName       # 208 non-terminal: an attribute's name, `ID` or `ID :: ID`
+  - AttrArgs       # 209 non-terminal: an attribute's argument clause, `( E? )`
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -1481,13 +1483,15 @@ productions:
     rules:
       - { lhs: AttrList, rhs: [Attr] }
       - { lhs: AttrList, rhs: [AttrList, ',', Attr],                 action: attrListCons }
-      - { lhs: Attr, rhs: [ID],                                      action: attrIdent }
+      # C23 6.7.12.1's `attribute-token attribute-argument-clause?`: a name, bare
+      # or namespaced, then an optional argument clause whose argument is itself
+      # optional, so `deprecated`, `deprecated()` and `deprecated("msg")` are one
+      # record (a null AttrArgs, an AttrArgs with a null E, and one with an E).
+      - { lhs: Attr, rhs: [AttrName, AttrArgs?],                     action: attr }
       - { lhs: Attr, rhs: ['_Noreturn'],                             action: attrNoreturn }
-      - { lhs: Attr, rhs: [ID, ':', ':', ID],                        action: attrNamespaced }
-      # The call forms' argument is optional (`E?`), so an empty `deprecated()`
-      # is the same record as `deprecated("msg")` with a null argument.
-      - { lhs: Attr, rhs: [ID, '(', E?, ')'],                        action: attrCall }
-      - { lhs: Attr, rhs: [ID, ':', ':', ID, '(', E?, ')'],          action: attrNsCall }
+      - { lhs: AttrName, rhs: [ID],                                  action: attrStdName }
+      - { lhs: AttrName, rhs: [ID, ':', ':', ID],                    action: attrNsName }
+      - { lhs: AttrArgs, rhs: ['(', E?, ')'],                        action: attrArgs }
 
   # `_Static_assert ( E , STRING ) ;` (C11 6.7.10) and the C23 message-less
   # `_Static_assert ( E ) ;`, one nonterminal for the file-scope (Fn) and the

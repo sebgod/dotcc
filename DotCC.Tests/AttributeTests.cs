@@ -257,6 +257,27 @@ public sealed class AttributeTests
     }
 
     [Fact]
+    public void A_namespaced_standard_name_is_a_vendor_attribute()
+    {
+        // An attribute is a name (bare or `ns::name`) and an optional argument
+        // clause. The namespace is part of the name: `gnu::deprecated("x")` is a
+        // vendor attribute and stays inert, while the bare `deprecated("y")` lowers.
+        var src = WriteTemp("""
+            [[gnu::deprecated("x")]] int vendor(void) { return 1; }
+            [[deprecated("y")]] int standard(void) { return 2; }
+            int main(void) { return 0; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c23"));
+            emitted.ShouldContain("[System.Obsolete(\"y\")]");
+            emitted.ShouldNotContain("[System.Obsolete(\"x\")]");
+            emitted.ShouldContain("static int vendor()");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void Nested_subscripts_still_lex_as_two_brackets()
     {
         // The regression the glued-token design must not cause: `a[b[0]]` ends
