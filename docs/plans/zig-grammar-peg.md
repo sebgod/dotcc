@@ -11,8 +11,9 @@ Types too (probe 500 to 506). zig's IfTypeExpr, an `if` in a type position, took
 primaries, on a lexer LABEL token, and a value loop's body may be a brace-less expression (probe 518 to 522). **P4 step 1
 done** (2026-10-11): a switch prong is one rule, `CaseVals => Payload? ProngBody` (25 prong rules and the ProngJump group to 8).
 **Step 2 done:** one statement `if` with a payload on either side (13 rules to 3), and one capture value `if` (probe 523).
-**Step 3 done:** one value `if` (`ifElseExpr` / `ifThenExpr`, plain and captured alike; probe 524). Next: the `while` / `for`
-payloads.
+**Step 3 done:** one value `if` (`ifElseExpr` / `ifThenExpr`, plain and captured alike; probe 524). **P4 done** (step 4): one
+`while` and one `for`, statement and value (33 loop rules to 8; probe 525). The written rule count went from 519 to 461
+over P4.
 
 ## Why
 
@@ -248,3 +249,15 @@ site became a compile error and was migrated by hand, a plain one keeping its me
 }` guard (then Arg5, else Arg8) and the captured ones after it. That gave crypto/tls/Client.zig's `if (c) { … } else |err|
 switch …` (probe 523 to 524). The oracle row caught a missing rejection: zig refuses `if (eu) a else |e| b` over a
 non-void payload ("error union payload is ignored"), and so does dotcc now, as a value and as a statement.
+
+**P4 step 4 as landed (2026-10-11): one `while`, one `for`.** zig's WhilePrefix is `while ( Expr ) PtrPayload?
+WhileContinueExpr?` and ForPrefix `for ( ForArgumentsList ) PtrListPayload`. The 20 statement-loop rules are two,
+`LoopStmt -> while ( Expr ) Payload? WhileCont? Stmt ElseStmt?` and `LoopStmt -> for ( ForObjs ,? ) | ForCaps ,? | Stmt
+ElseStmt?`, in ElseStmt's rightmost group; the 12 value-loop rules are `whileExpr`, `forExpr`, `inlineForExpr` (still a
+later group, for the `inline` prong reduce/reduce) and `LABEL : LoopExpr`. `WhileCont` is the assignment, expression or
+block continue clause; `ForObjs` takes one object, so `for (xs,) |x|` parses (std's Io/Uring.zig, probe 524 to 525); a
+capture is `*? IDENT`. Every combination now composes (a capture `while` with a continue and an `else`, a labeled
+multi-object value `for`), where each had needed its own rule. The lowering reads the records by shape: the objects and
+captures of a `for` (one plain object, one bounded range, several, an `else`) and the payload / continue / else parts of a
+`while` pick the same loop lowerings as before; the records were renamed, so every old site was a compile error. The
+resolved-conflict diff has the same dangling-`else` and `inline` decisions on the merged forms and nothing new.

@@ -217,45 +217,10 @@ internal sealed partial class ZigLowering
               or Zig.FbContinue or Zig.FbContinueLabel or Zig.FbContinueLabelValue:
                 return LowerExitArm(stmt);
             case Zig.AssignArm a:                  return LowerAssignOpStmt(a.Arg0, a.Arg1, a.Arg2);
-            case Zig.StmtWhile w:       return new While(LowerExpr(w.Arg2), LowerStmt(w.Arg4));
-            // `while (c) body else elsebody` (task #130): the else runs when the condition ends the loop, not a `break`.
-            case Zig.StmtWhileElse w:   return LowerWhileElseStmt(w.Arg2, w.Arg4, w.Arg6);
-            case Zig.StmtWhileContAssignElse w:
-                return LowerWhileElseStmt(w.Arg2, w.Arg10, w.Arg12, () => ContAssignPost(w.Arg6, w.Arg7, w.Arg8));
-
-            // `while (cond) : (cont) body` → the C IR `For` (no init): the cont runs after each
-            // iteration AND on `continue`, exactly matching C's for-update — so `continue`
-            // inside the loop runs the cont, faithful to Zig. The assignment cont (`i += 1`,
-            // `i = i + 1`, …) builds an Assign CExpr post over the AssignOp operator (mirroring the
-            // Stmt assignment family via ContAssignPost); the bare-expr cont a plain one.
-            case Zig.StmtWhileCont w:
-                return new For(null, LowerExpr(w.Arg2), LowerExpr(w.Arg6), LowerStmt(w.Arg8));
-            case Zig.StmtWhileContAssign w:
-                return new For(null, LowerExpr(w.Arg2), ContAssignPost(w.Arg6, w.Arg7, w.Arg8), LowerStmt(w.Arg10));
-            case Zig.StmtWhileContBlock w:
-                return new For(null, LowerExpr(w.Arg2), ContBlockPost(w.Arg6), LowerStmt(w.Arg8));
-
-            // `while (opt) |x| body` — optional payload capture-while (Milestone M, part 2). See
-            // LowerWhileCapture (desugars to `while (true) { … if (has) { bind; body } else break; }`).
-            case Zig.StmtWhileCapture w: return LowerWhileCapture(w.Arg2, Tok(w.Arg5), w.Arg7);
-            // `while (opt) |x| body else elsebody` — the else runs on natural exit (payload null / a
-            // user `break` skips it, matching Zig). `while (eu) |x| body else |e| elsebody` — the error
-            // branch binds `e` and runs elsebody, then exits.
-            case Zig.StmtWhileCaptureElse w:
-                return LowerWhileCapture(w.Arg2, Tok(w.Arg5), w.Arg7, (w.Arg9, null));
-            case Zig.StmtWhileCaptureErrElse w:
-                return LowerWhileCapture(w.Arg2, Tok(w.Arg5), w.Arg7, (w.Arg12, Tok(w.Arg10)));
-            // `while (opt) |x| : (cont) body` — capture-while with a continue-expression → the C `For`
-            // IR (post = cont), so `continue` runs the cont. The assign form builds an `Assign` post
-            // over the AssignOp operator (via ContAssignPost, like stmtWhileContAssign); the bare-expr
-            // form a plain one.
-            case Zig.StmtWhileCaptureContBlock w:   // `while (it) |n| : ({ … }) body` (std's heap/ArenaAllocator.zig)
-                return LowerWhileCapture(w.Arg2, Tok(w.Arg5), w.Arg11, null, () => ContBlockPost(w.Arg9));
-            case Zig.StmtWhileCaptureCont w:
-                return LowerWhileCapture(w.Arg2, Tok(w.Arg5), w.Arg11, null, () => LowerExpr(w.Arg9));
-            case Zig.StmtWhileCaptureContAssign w:
-                return LowerWhileCapture(w.Arg2, Tok(w.Arg5), w.Arg13, null,
-                    () => ContAssignPost(w.Arg9, w.Arg10, w.Arg11));
+            // `while (c) [|x|] [: (cont)] body [else [|e|] body]` (zig's WhileStatement) and `for (objs) |caps| body [else body]`:
+            // see LowerWhileStatement / LowerForStatement.
+            case Zig.WhileStmt w:       return LowerWhileStatement(w);
+            case Zig.ForStmt f:         return LowerForStatement(f);
 
             // `break;` / `continue;` — reuse the C IR loop-control nodes (the C# backend
             // renders them verbatim; valid inside the while/for forms above).
@@ -313,57 +278,6 @@ internal sealed partial class ZigLowering
             // `switch (subject) { prongs ,? } ;?` → the C IR Switch (subject=Arg2, prongs=Arg5; the optional
             // trailing comma and semicolon come after both). A tagged-union subject takes the capture path.
             case Zig.StmtSwitch s:         return LowerSwitchStmt(s.Arg2, s.Arg5);
-
-            // `for (start..end) |i| body` → C `for (usize i = start; i < end; i++) body`. The
-            // capture `i` is the usize loop index (its own scope so it doesn't leak); the end
-            // is cast to usize so the comparison is unsigned-clean (C# forbids ulong<>signed).
-            case Zig.StmtForRange f:
-            {
-                using var symbolScope = EnterSymbolScope();
-                var start = LowerExpr(f.Arg2);
-                var end = LowerExpr(f.Arg4);
-                var iSym = _symbols.Declare(new Symbol { Name = Tok(f.Arg7), Kind = SymKind.Var, Type = CType.ULong });
-                RecordValueBits(iSym, 64, null);   // a usize (task #132: real std's `{d}` asks its width)
-                var iRef = new VarRef(iSym) { Type = CType.ULong, IsLValue = true };
-                var init = new DeclStmt(new List<LocalDecl> { new(iSym, start) });
-                var cond = new Binary(BinOp.Lt, iRef, new Cast(CType.ULong, end) { Type = CType.ULong }) { Type = CType.Int };
-                var post = new Unary(UnOp.PostInc, iRef) { Type = CType.ULong };
-                var body = LowerStmt(f.Arg9);
-                symbolScope.Dispose();
-                return new For(init, cond, post, body);
-            }
-
-            // A plain `for` over a comptime member list in a COMPTIME context (std.meta.stringToEnum's `comptime build_kvs:
-            // { for (@typeInfo(T).@"enum".field_names, 0..) |name, i| kvs_array[i] = .{ name, @field(T, name) }; … }`, task
-            // #116): zig runs the loop at compile time, so each capture is comptime-known, which is what `inline for`'s unroll
-            // gives; a runtime loop would have nothing to iterate.
-            case Zig.StmtForSlice ctf when _comptimeDepth > 0 && TryComptimeIterable(ctf.Arg2, out var ctList):
-                return UnrollComptimeFor(new[] { (ctList, Tok(ctf.Arg5)) }, ctf.Arg7);
-            case Zig.StmtForMulti ctm when _comptimeDepth > 0 && FirstForObject(ctm.Arg2) is { } ctFirst && TryComptimeIterable(ctFirst, out _):
-                return UnrollComptimeMultiFor(ctm.Arg2, ctm.Arg6, ctm.Arg8);
-
-            // `for (s) |x| body` — iterate a slice's elements (x = a per-iteration copy).
-            case Zig.StmtForSlice f:     // for '(' Expr ')' '|' IDENT '|' Stmt
-                return LowerForSlice(LowerExpr(f.Arg2), Tok(f.Arg5), null, f.Arg7, byRef: false, DeclaredElemBitsOfValue(f.Arg2));
-            // `for (s) |*x| body` — BY-REFERENCE element capture: x is a `*T` into the slice (Milestone M, part 4).
-            case Zig.StmtForSliceRef f:  // for '(' Expr ')' '|' '*' IDENT '|' Stmt
-                return LowerForSlice(LowerExpr(f.Arg2), Tok(f.Arg6), null, f.Arg8, byRef: true);
-            // The MULTI-object `for (a, b, 0.., …) |x, *y, i, …|` (task #108, one production since the fixed pair / triple /
-            // indexed shapes): `(s, N..)` walks the slice with its index; any other shape walks every object in lockstep. The
-            // `inline for` over comptime member lists takes these before they get here (LowerInlineLoop).
-            case Zig.StmtForMulti f:      return LowerForMulti(f.Arg2, f.Arg6, f.Arg8);   // `,?` after the objects is Arg3
-            // `for (…) |…| body else elsebody` (task #108): the else runs when the loop ends without a `break`.
-            case Zig.StmtForSliceElse f:
-                return LowerForParallel(new[] { new ForObject(f.Arg2, false, null) }, new[] { (Tok(f.Arg5), false) }, f.Arg7, f.Arg9);
-            case Zig.StmtForSliceRefElse f:   // for (s) |*x| body else elsebody
-                return LowerForParallel(new[] { new ForObject(f.Arg2, false, null) }, new[] { (Tok(f.Arg6), true) }, f.Arg8, f.Arg10);
-            case Zig.StmtForRangeElse f:   // for (start..end) |i| body else elsebody
-                return LowerForParallel(new[] { new ForObject(f.Arg2, true, f.Arg4) }, new[] { (Tok(f.Arg7), false) }, f.Arg9, f.Arg11);
-            case Zig.StmtForMultiElse f:
-            {
-                var (objects, captures) = DecomposeForMulti(f.Arg2, f.Arg6);
-                return LowerForParallel(objects, captures, f.Arg8, f.Arg10);
-            }
 
             // A brace block in statement position (`Stmt -> Block`, pass-through).
             case Zig.Block:             return LowerBlock(stmt);

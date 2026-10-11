@@ -8033,6 +8033,85 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{} {}\\n\", .{ sumSkippingTwos(&a), five });\n" +
             "}\n", 0,
             "53 5" },
+        // zig-grammar-peg P4: one `while` prefix (a capture with a continue clause and an `else`, a block continue) and one `for`
+        // (one object with a trailing comma, a by-reference capture, a labeled multi-object value `for`, a range with `else`).
+        new object[] { "loop_payloads",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "const Node = struct { v: u32, next: ?*Node };\n" +
+            "\n" +
+            "fn sumCont(head: ?*Node) u32 {\n" +
+            "    var it = head;\n" +
+            "    var total: u32 = 0;\n" +
+            "    while (it) |n| : (it = n.next) {\n" +
+            "        if (n.v == 2) continue;\n" +
+            "        total += n.v;\n" +
+            "    } else {\n" +
+            "        total += 100;\n" +
+            "    }\n" +
+            "    return total;\n" +
+            "}\n" +
+            "\n" +
+            "fn firstBig(head: ?*Node) u32 {\n" +
+            "    var it = head;\n" +
+            "    return while (it) |n| : (it = n.next) {\n" +
+            "        if (n.v > 3) break n.v;\n" +
+            "    } else 0;\n" +
+            "}\n" +
+            "\n" +
+            "fn zeroAll(xs: []u8) u8 {\n" +
+            "    for (\n" +
+            "        xs,\n" +
+            "    ) |*x| {\n" +
+            "        x.* = 0;\n" +
+            "    }\n" +
+            "    var s: u8 = 0;\n" +
+            "    for (xs, 0..) |x, i| s += x + @as(u8, @intCast(i));\n" +
+            "    return s;\n" +
+            "}\n" +
+            "\n" +
+            "fn findPair(xs: []const u8) usize {\n" +
+            "    return outer: for (xs, 0..) |x, i| {\n" +
+            "        for (xs[i + 1 ..]) |y| {\n" +
+            "            if (x + y == 10) break :outer i;\n" +
+            "        }\n" +
+            "    } else 99;\n" +
+            "}\n" +
+            "\n" +
+            "fn countTo(n: u32) u32 {\n" +
+            "    var i: u32 = 0;\n" +
+            "    var steps: u32 = 0;\n" +
+            "    while (i < n) : ({\n" +
+            "        i += 1;\n" +
+            "        steps += 2;\n" +
+            "    }) {} else {\n" +
+            "        steps += 1;\n" +
+            "    }\n" +
+            "    return steps;\n" +
+            "}\n" +
+            "\n" +
+            "fn rangeElse(n: usize) usize {\n" +
+            "    var acc: usize = 0;\n" +
+            "    for (0..n) |k| {\n" +
+            "        if (k == 7) break;\n" +
+            "        acc += k;\n" +
+            "    } else {\n" +
+            "        acc += 1000;\n" +
+            "    }\n" +
+            "    return acc;\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() void {\n" +
+            "    var c = Node{ .v = 4, .next = null };\n" +
+            "    var b = Node{ .v = 2, .next = &c };\n" +
+            "    var a = Node{ .v = 1, .next = &b };\n" +
+            "    var buf = [_]u8{ 5, 6, 7 };\n" +
+            "    const xs = [_]u8{ 1, 4, 3, 6 };\n" +
+            "    std.debug.print(\"{} {}\\n\", .{ sumCont(&a), firstBig(&a) });\n" +
+            "    std.debug.print(\"{} {}\\n\", .{ zeroAll(&buf), findPair(&xs) });\n" +
+            "    std.debug.print(\"{} {} {}\\n\", .{ countTo(3), rangeElse(4), rangeElse(9) });\n" +
+            "}\n", 0,
+            "105 4\n3 1\n7 1006 21" },
         // zig-grammar-peg P4: one payload on each side of an `if` (value `if (eu) |v| … else |_| …`, a by-reference statement
         // capture `if (o.*) |*p|`, `if (eu) |v| { … } else |e| { … }`, a no-`;` then-arm) and a by-reference prong capture.
         new object[] { "payload_captures",

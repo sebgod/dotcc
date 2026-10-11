@@ -318,6 +318,7 @@ symbols:
   - PayloadTag     # 217 the `, i` of a two-name capture
   - ProngBody      # 218 a switch prong's body: a block, a value, an assignment, `comptime { … }` or a loop
   - ElseStmt       # 219 a statement `if`'s `else Payload? Stmt` (zig's `KEYWORD_else Payload? Statement`)
+  - WhileCont      # 220 a `while` continue clause `: (…)` (zig's WhileContinueExpr)
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -569,46 +570,16 @@ productions:
       - { lhs: ThenExpr, rhs: [Expr, AssignOp, RhsExpr], action: assignArm }
       - { lhs: Stmt, rhs: ['if', '(', Expr, ')', Payload?, ThenExpr, ElseStmt], action: stmtIfThen }
 
-      # Payload-capturing `while` — mirrors the if-capture family, in the same rightmost/dangling-else
-      # group (the `else` shift-reduce is resolved identically). `while (opt) |x| body` binds an
-      # optional's payload each iteration; the loop exits (running an `else`, if present) when the
-      # payload is null. A `'|'` after the condition `')'` selects the capture form (no Stmt begins
-      # with `'|'`); the LoopStmt LHS lets a `label:` prefix it. Lowered by LowerWhileCapture (desugars
-      # to `while (true) { var __cap = cond; if (has) { bind; body } else { [else]; break; } }`).
-      - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', '|', IDENT, '|', Stmt],                 action: stmtWhileCapture }
-      - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', '|', IDENT, '|', Stmt, 'else', Stmt],   action: stmtWhileCaptureElse }
-      # `while (eu) |x| body else |e| elsebody` — error-union capture-while: bind the success payload
-      # each turn; on error bind `e`, run the else-branch, then exit. After the body's `else`, a `'|'`
-      # selects this over the plain `… else Stmt` above (no Stmt begins with `'|'`) — conflict-free,
-      # exactly like stmtIfCaptureErrElse.
-      - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', '|', IDENT, '|', Stmt, 'else', '|', IDENT, '|', Stmt], action: stmtWhileCaptureErrElse }
-      # `for (…) |…| body else elsebody` (task #108, std.meta.FieldEnum's `for (values, 0..) |v, i| { … break; } else
-      # { return EnumTag; }`): the else runs when the loop ends without a `break`. In this dangling-else group, as the
-      # while-capture else is, so a Stmt body followed by `else` shifts into it.
-      - { lhs: LoopStmt, rhs: ['for', '(', Expr, ')', '|', IDENT, '|', Stmt, 'else', Stmt],           action: stmtForSliceElse }
-      # The by-reference twin (std's coff.zig: `for (self.getSectionHeaders()) |*sect| { … } else return error.X;`).
-      - { lhs: LoopStmt, rhs: ['for', '(', Expr, ')', '|', '*', IDENT, '|', Stmt, 'else', Stmt],      action: stmtForSliceRefElse }
-      # The counted range with an `else` (std's Io/Writer.zig: `for (0..max_bytes) |_| { … } else unreachable;`).
-      - { lhs: LoopStmt, rhs: ['for', '(', Expr, '..', Expr, ')', '|', IDENT, '|', Stmt, 'else', Stmt], action: stmtForRangeElse }
-      - { lhs: LoopStmt, rhs: ['for', '(', ForObjs, ",?", ')', '|', ForCaps, '|', Stmt, 'else', Stmt], action: stmtForMultiElse }
-      # The same with a trailing comma after the objects (std.json.static's innerParse: `inline for (…, 0..,) |…| { … }
-      # else { … }`, task #210).
-      # The plain `while (c) body else elsebody` statement (std.bit_set.DynamicBitSetUnmanaged.findFirstSet, task #130:
-      # `while (offset < self.bit_length) { if (mask[0] != 0) break; … } else return null;`), in this group for the same
-      # dangling-else reason.
-      - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', Stmt, 'else', Stmt],                         action: stmtWhileElse }
-      # The `while (c) : (i += 1)` form's twin (std's coff.zig: `while (i < n) : (i += 1) { … break; } else return null;`): the else runs when the
-      # condition ends the loop, not after a `break`.
-      - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', ':', '(', Expr, AssignOp, RhsExpr, ')', Stmt, 'else', Stmt], action: stmtWhileContAssignElse }
-      # `while (opt) |x| : (cont) body` — capture-while WITH a continue-expression (runs after each
-      # iteration AND on `continue`), lowered to the C `For` IR (post = cont) so `continue` runs the
-      # cont — faithful to Zig, like the non-capture stmtWhileCont pair. After `'|' IDENT '|'`, a `':'`
-      # selects the cont form (disjoint from a Stmt-first body / an `else`). The `: (Expr AssignOp RhsExpr)`
-      # assign form and `: (Expr)` bare form mirror stmtWhileContAssign / stmtWhileCont. (A cont + else
-      # combination is not modeled — rare.)
-      - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', '|', IDENT, '|', ':', '(', Expr, AssignOp, RhsExpr, ')', Stmt], action: stmtWhileCaptureContAssign }
-      - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', '|', IDENT, '|', ':', '(', Expr, ')', Stmt],                    action: stmtWhileCaptureCont }
-      - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', '|', IDENT, '|', ':', '(', Block, ')', Stmt],                   action: stmtWhileCaptureContBlock }
+      # The statement loops, as zig's WhileStatement and ForStatement: `WhilePrefix Statement (else Payload? Statement)?`,
+      # the prefix `while ( Expr ) PtrPayload? WhileContinueExpr?`, and `ForPrefix Statement (else Statement)?`, the prefix
+      # `for ( ForArgumentsList ) PtrListPayload`. Two rules for what were 20: the capture `while (opt) |x|` (an optional's
+      # payload each turn; `else |e|` binds an error union's error), the continue clause `: (i += 1)` / `: (step())` /
+      # `: ({ … })` (it runs after each turn and on `continue`), the `else` (it runs when the loop ends without a
+      # `break`), and every `for` shape: one object or several (`for (a, &b, 0..) |x, *y, i|`), a range, by-value or
+      # by-reference captures, zig fmt's trailing commas. In this rightmost group with ElseStmt, so a dangling `else`
+      # binds to the nearest `if` or loop. The lowering reads them through one view (WhileParts / ForParts).
+      - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', Payload?, WhileCont?, Stmt, ElseStmt?], action: whileStmt }
+      - { lhs: LoopStmt, rhs: ['for', '(', ForObjs, ",?", ')', '|', ForCaps, ",?", '|', Stmt, ElseStmt?], action: forStmt }
 
   # `switch (x) { prong, … }` as a STATEMENT. Each prong is `CaseVals => Block`; Zig switch has NO
   # fall-through, so the lowering appends a `break` to each section. The trailing-comma forms differ only
@@ -623,23 +594,12 @@ productions:
 
   - derivation: none
     rules:
-      # The while/for loops are `LoopStmt` (not `Stmt` directly) so a `label:` prefix can wrap any
-      # of them uniformly (`Stmt -> IDENT ':' LoopStmt`, below) without duplicating each form. A
-      # plain `Stmt -> LoopStmt` (below) keeps an unlabeled loop a statement. Their actions/record
-      # names are unchanged, so the lowering for stmtWhile/stmtForRange/… is untouched.
-      - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', Stmt], action: stmtWhile }
-      # `while (cond) : (cont) body` — the continue-expression runs after each iteration
-      # (and on `continue`), exactly like C's `for(; cond; cont)`, so it lowers to the C IR
-      # `For` (no init). Zig's PEG: `WhilePrefix (COLON LPAREN AssignExpr RPAREN)? Block`. The
-      # cont is an AssignExpr, but our `Expr` cascade has no assignment, so an assignment cont
-      # `: (lhs op rhs)` gets its own production over the `AssignOp` operator nonterminal (the
-      # canonical `: (i += 1)` and plain `: (i = i + 1)`), and a bare-expr cont (`: (step())`)
-      # the other. The op-vs-`)` after the inner Expr is a clean shift/reduce decision.
-      - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', ':', '(', Expr, AssignOp, RhsExpr, ')', Stmt], action: stmtWhileContAssign }
-      - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', ':', '(', Expr, ')', Stmt],                    action: stmtWhileCont }
-      # A BLOCK continue expression, `while (c) : ({ a += 1; b += 1; }) body` (17 in std; hash_map's
-      # iterators). `{` is outside FIRST(Expr), so after `: (` it is a 1-token shift decision.
-      - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', ':', '(', Block, ')', Stmt],                   action: stmtWhileContBlock }
+      # A `while` continue clause, zig's WhileContinueExpr `: ( AssignExpr )`: an assignment (`: (i += 1)`, over the
+      # AssignOp every assignment form shares), a bare expression (`: (step())`) or a block (`: ({ a += 1; b += 1; })`,
+      # hash_map's iterators; `{` is outside FIRST(Expr), so after `: (` it is a 1-token decision).
+      - { lhs: WhileCont, rhs: [':', '(', Expr, AssignOp, RhsExpr, ')'], action: whileContAssign }
+      - { lhs: WhileCont, rhs: [':', '(', Expr, ')'],                    action: whileContExpr }
+      - { lhs: WhileCont, rhs: [':', '(', Block, ')'],                   action: whileContBlock }
       # The assignment operator, zig's AssignOp: plain `=`, the compound `+=`…`^=`, the wrapping `+%=`…`*%=` and the
       # saturating `+|=`…`*|=`. Every assignment form goes through it (a statement, an `if` arm, a prong body, a
       # `while` continue clause), so the operator always reduces the same way and the lowering maps it in one place.
@@ -660,9 +620,6 @@ productions:
       - { lhs: AssignOp, rhs: ['+|='], action: aopAddSat }
       - { lhs: AssignOp, rhs: ['-|='], action: aopSubSat }
       - { lhs: AssignOp, rhs: ['*|='], action: aopMulSat }
-      # NOTE: the payload-capturing `while` family (`while (opt) |x| …`, its `else` / `else |e|`
-      # completions, and the `: (cont)` continue-expr form) lives in the dangling-else `rightmost`
-      # group with the `if`-capture family (below) — the `else` shift-reduce needs identical handling.
       - { lhs: Stmt, rhs: ['break', ';'],    action: stmtBreak }
       - { lhs: Stmt, rhs: ['continue', ';'], action: stmtContinue }
       # `break v;` — an UNLABELED break carrying a VALUE (Milestone Y, part 2), yielding `v` from the
@@ -700,41 +657,6 @@ productions:
       # Zig switch has NO fall-through, so the lowering appends a `break` to each section
       # (the C# backend would otherwise synthesize C's fall-through). The two productions
       # differ only by an optional trailing comma after the last prong.
-      # `for (start..end) |i| body` — the range `for`. Lowers to the C IR
-      # `for (usize i = start; i < end; i++) body`; the `|i|` capture is the usize loop index
-      # (Zig's range-for index type). The body is a Stmt (single statement or a block), like
-      # `while`.
-      - { lhs: LoopStmt, rhs: ['for', '(', Expr, '..', Expr, ')', '|', IDENT, '|', Stmt], action: stmtForRange }
-      # for-over-slice. `for (s) |x| body` iterates the elements; `for (s, 0..) |x, i| body`
-      # also binds the usize index. Conflict-free against the range form: after `for ( Expr`,
-      # the lookahead selects — `..` → range, `)` → slice, `,` → slice+index. (The by-ref `|*x|`
-      # forms are below; a non-zero index start `for (s, 5..)` is deferred.)
-      - { lhs: LoopStmt, rhs: ['for', '(', Expr, ')', '|', IDENT, '|', Stmt], action: stmtForSlice }
-      # The MULTI-object `for (a, b, 0.., …) |x, *y, i, …|` (task #108): any number of objects (an Expr, an open range
-      # `N..`, a bounded `N..M`) and as many captures, each by value or by reference, plus zig fmt's trailing comma. It
-      # replaced nine fixed shapes (pairs, triples, `(s, 0..)`, by-ref pairs) that std.MultiArrayList outgrew
-      # (`for (a, &b, c) |x, *y, z|`, `for (a, b, 0..)`, four objects). After `for ( Expr`, `)` selects the single-object
-      # forms, `..` the range form or a range object, and `,` this one; after `ForObjs ','`, `)` is the trailing comma.
-      - { lhs: LoopStmt, rhs: ['for', '(', ForObjs, ",?", ')', '|', ForCaps, '|', Stmt], action: stmtForMulti }
-      # `for (a, b) |x, y| body` — the PARALLEL form: two operands walked in lockstep, one capture
-      # each (road-to-zig-std S6). Conflict-free against the indexed form above by the SAME 1-token
-      # lookahead the block already relies on: after `for ( Expr ',' Expr`, `..` selects the indexed
-      # production and `)` this one — distinct terminals, so it is a shift either way. Measured in the
-      # pinned std this is the DOMINANT member-list shape (`inline for (info.field_names,
-      # info.field_types) |field_name, field_type|`, 17 uses vs 11 single-list).
-      # A THREE-object runtime `for (a, b, c) |x, y, z|` (40 in std; hash_map's `for (metadata, keys,
-      # values) |m, k, v|`, road-to-zig-std G5), and a trailing comma after the last object (zig fmt's
-      # one-object-per-line layout). After `Expr ',' Expr`, a `,` then `Expr` / `)` extends this family
-      # and `..` / `)` select the forms above; each is a distinct terminal, so every decision is a shift.
-      # BY-REFERENCE captures in the pair form (std.mem.swap's `for (a_bytes, b_bytes) |*ab, *bb|`): a
-      # leading `*` (vs IDENT) at each capture position is a distinct terminal, so each shape is a shift.
-      # `for (s) |*x| body` — BY-REFERENCE element capture (Milestone M, part 4): `x` is a `*T` into
-      # the slice, so `x.* = …` writes through to the element. After the capture `'|'`, a `'*'`
-      # lookahead selects this over the by-value `'|' IDENT '|'` form (distinct tokens) — conflict-free.
-      - { lhs: LoopStmt, rhs: ['for', '(', Expr, ')', '|', '*', IDENT, '|', Stmt], action: stmtForSliceRef }
-      # `for (s, 0..) |*x, i| body` — the BY-REFERENCE element capture WITH the usize index (Milestone
-      # Z). Same `'*'`-after-`'|'` lookahead selects it over the by-value indexed `'|' IDENT ',' …` form
-      # — conflict-free; `x` is a `*T` into the slice and `i` the index.
       # A loop is a statement; and a `label:` may prefix one — `outer: while (…) { … break :outer; }`
       # (Milestone L, part 3). `IDENT ':' LoopStmt` reuses the same `:` lookahead trick as the value-
       # block: at statement start an IDENT also begins an Expr, but a Primary is never followed by
@@ -947,34 +869,16 @@ productions:
       # The value-position loops. The body is a LoopBody: a braced Block (the value form runs statements and yields via
       # `break v`) or, as zig's `ForPrefix Expr else Expr`, a brace-less expression (`for (xs) |x| switch (x) { … } else v`,
       # std's zig/AstGen.zig; `while (i < n) switch (it.next()) { … } else .unknown`, debug.zig). The `else` clause supplies
-      # the value on normal completion. The `while`-else and the most common `for (slice) |x|`-else forms, each optionally
-      # labeled (`lbl: … else …`, so `break :lbl v` targets it).
+      # the value on normal completion.
       - { lhs: LoopBody, rhs: [Block] }
       - { lhs: LoopBody, rhs: [LoopBodyExpr] }
       - { lhs: LoopBodyExpr, rhs: [Expr], action: loopBodyExpr }
-      - { lhs: LoopExpr, rhs: ['while', '(', Expr, ')', LoopBody, 'else', IfArm],                          action: whileElseExpr }
-      - { lhs: LoopExpr, rhs: ['for', '(', Expr, ')', '|', IDENT, '|', LoopBody, 'else', IfArm],           action: forElseExpr }
-      - { lhs: LoopExpr, rhs: [LABEL, ':', 'while', '(', Expr, ')', LoopBody, 'else', IfArm],              action: labeledWhileElseExpr }
-      - { lhs: LoopExpr, rhs: [LABEL, ':', 'for', '(', Expr, ')', '|', IDENT, '|', LoopBody, 'else', IfArm], action: labeledForElseExpr }
-      # `const mask = for (self.masks) |mask| { if (mask != 0) break mask; … } else return null;`
-      # (std.bit_set.ArrayBitSet.findFirstSet): the else RETURNS from the function instead of yielding, so the
-      # loop's value comes from its `break`s alone. Since zig-grammar-peg P1b a `return` is an RhsExpr, so these are the
-      # forms above with a ReturnExpr else; the lowering keys on it.
-      # A value `while` with an assignment continue-expression (std.bit_set.ArrayBitSet.eql:
-      # `return while (i < num_masks) : (i += 1) { … break false; } else true;`). After `)`, a `:` or a `{`
-      # decides between this and the plain value `while` in one token.
-      - { lhs: LoopExpr, rhs: ['while', '(', Expr, ')', ':', '(', Expr, AssignOp, RhsExpr, ')', LoopBody, 'else', IfArm], action: whileContAssignElseExpr }
-      # The by-ref capture (`for (&self.masks) |*mask| { … break mask; } else return null;`, toggleFirstSet): the
-      # break yields the element POINTER. After `|`, a `*` or an IDENT decides the capture form in one token.
-      - { lhs: LoopExpr, rhs: ['for', '(', Expr, ')', '|', '*', IDENT, '|', LoopBody, 'else', IfArm],    action: forRefElseExpr }
-      # A range, multi-object or capture-`while` value loop (std's Io/Dispatch.zig: `const data = for (operation.data, 0..)
-      # |buffer, data_index| { … } else break :result …;`, crypto/bcrypt.zig: `key_remainder -= for (0..amt) |i| { … } else 0;`,
-      # heap/ArenaAllocator.zig: `const node: *Node = while (it) |node| { … } else { continue; };`). The `else` is an IfArm,
-      # so a `{ … }` block (which never completes) or a jump stands there too. After `(`, the objects decide the `for`
-      # form as the statement loops do; after `)`, a `|` versus a `{` or `:` decides the `while` form.
-      - { lhs: LoopExpr, rhs: ['for', '(', Expr, '..', Expr, ')', '|', IDENT, '|', LoopBody, 'else', IfArm],        action: forRangeElseExpr }
-      - { lhs: LoopExpr, rhs: ['for', '(', ForObjs, ",?", ')', '|', ForCaps, '|', LoopBody, 'else', IfArm],       action: forMultiElseExpr }
-      - { lhs: LoopExpr, rhs: ['while', '(', Expr, ')', '|', IDENT, '|', LoopBody, 'else', IfArm],                 action: whileCaptureElseExpr }
+      # The value loops, zig's WhileExpr and ForExpr, with the statement loops' prefixes. The `else` is an IfArm (a value,
+      # a `{ … }` block that never completes, or a jump: `… else return null;`, std.bit_set). A `label:` prefixes any of
+      # them (`lbl: for … else …`, so `break :lbl v` targets it).
+      - { lhs: LoopExpr, rhs: ['while', '(', Expr, ')', Payload?, WhileCont?, LoopBody, 'else', Payload?, IfArm], action: whileExpr }
+      - { lhs: LoopExpr, rhs: ['for', '(', ForObjs, ",?", ')', '|', ForCaps, ",?", '|', LoopBody, 'else', IfArm], action: forExpr }
+      - { lhs: LoopExpr, rhs: [LABEL, ':', LoopExpr], action: labeledLoopExpr }
 
   # The comptime-unrolled value loop (std.enums.tagName, task #131: `return inline for (field_names, field_values)
   # |f_name, f_value| { if (@intFromEnum(e) == f_value) break f_name; } else null;`), over one comptime list or several
@@ -983,8 +887,7 @@ productions:
   # `KEYWORD_inline` first, so the plain `for` (the earlier group) wins the reduce/reduce.
   - derivation: none
     rules:
-      - { lhs: LoopExpr, rhs: ['inline', 'for', '(', Expr, ')', '|', IDENT, '|', LoopBody, 'else', IfArm],       action: inlineForElseExpr }
-      - { lhs: LoopExpr, rhs: ['inline', 'for', '(', ForObjs, ",?", ')', '|', ForCaps, '|', LoopBody, 'else', IfArm], action: inlineForMultiElseExpr }
+      - { lhs: LoopExpr, rhs: ['inline', 'for', '(', ForObjs, ",?", ')', '|', ForCaps, ",?", '|', LoopBody, 'else', IfArm], action: inlineForExpr }
 
   - derivation: leftmost
     rules:
@@ -1397,7 +1300,9 @@ productions:
 
   - derivation: none
     rules:
-      - { lhs: ForObjs, rhs: [ForObj, ',', ForObj],  action: forObjsTwo }
+      # zig's ForArgumentsList: one object or several (a transparent pass-through for one), each an expression, an open
+      # range `N..` or a bounded `N..M`. A single object takes zig fmt's trailing comma too (`for (xs,) |x|`).
+      - { lhs: ForObjs, rhs: [ForObj] }
       - { lhs: ForObjs, rhs: [ForObjs, ',', ForObj], action: forObjsCons }
       - { lhs: ForObj, rhs: [Expr],                  action: forObj }
       - { lhs: ForObj, rhs: [Expr, '..'],            action: forObjFrom }
@@ -1406,8 +1311,7 @@ productions:
       # check rather than a parse error.
       - { lhs: ForCaps, rhs: [ForCap] }
       - { lhs: ForCaps, rhs: [ForCaps, ',', ForCap], action: forCapsCons }
-      - { lhs: ForCap, rhs: [IDENT],                 action: forCapVal }
-      - { lhs: ForCap, rhs: ['*', IDENT],            action: forCapRef }
+      - { lhs: ForCap, rhs: ["*?", IDENT],           action: forCapture }
 
   # A named field init's value: an Expr, or `{}` (void; `{` is not in FIRST(Expr), so conflict-free).
   - derivation: none
