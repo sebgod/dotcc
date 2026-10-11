@@ -352,8 +352,7 @@ internal sealed partial class IrBuilder
             // interpreter. A holding assertion emits nothing; a zero or non-constant
             // controlling expression is a collected compile error. The message-less
             // arity gates C23 (it postdates the two-arg C11 form).
-            case C.StaticAssert sa: Gate(2011, "_Static_assert", fn); CheckStaticAssert(sa.Arg2, sa.Arg4, SrcPos.From(fn)); break;
-            case C.StaticAssertNoMsg sa: Gate(2023, "_Static_assert with no message", fn); CheckStaticAssert(sa.Arg2, null, SrcPos.From(fn)); break;
+            case C.StaticAssertDecl sa: BuildStaticAssert(sa, fn, SrcPos.From(fn)); break;
             default: throw new IrUnsupportedException(TypeName(fn.Content));
         }
     }
@@ -2097,8 +2096,7 @@ internal sealed partial class IrBuilder
             // Block-scope `_Static_assert(expr[, "msg"]);` — compile-time only,
             // evaluated exactly like the file-scope forms; a holding assertion
             // emits nothing. The message-less arity gates C23.
-            case C.StaticAssertStmt s: Gate(2011, "_Static_assert", it); CheckStaticAssert(s.Arg2, s.Arg4, pos); return EmptyStmt(pos);
-            case C.StaticAssertStmtNoMsg s: Gate(2023, "_Static_assert with no message", it); CheckStaticAssert(s.Arg2, null, pos); return EmptyStmt(pos);
+            case C.StaticAssertDecl s: BuildStaticAssert(s, it, pos); return EmptyStmt(pos);
             // C23 `[[attr]]` prepending a statement / block-scope declaration —
             // gate C23, then unwrap to the inner statement. Two recognized attrs
             // carry meaning here; every other shape is accepted + ignored:
@@ -3120,6 +3118,24 @@ internal sealed partial class IrBuilder
         {
             Diagnostics.Add(new Diagnostic(Severity.Warning,
                 $"{context} discards 'const' qualifier from pointer target type", pos, _file));
+        }
+    }
+
+    /// <summary>A <c>_Static_assert</c> declaration (file or block scope, one
+    /// <c>StaticAssert</c> nonterminal for both): gate its arity, then evaluate it via
+    /// <see cref="CheckStaticAssert"/>. The two-argument form is C11; the message-less
+    /// one (a null <c>StaticAssertMsg</c>) is C23.</summary>
+    private void BuildStaticAssert(C.StaticAssertDecl sa, Item at, SrcPos pos)
+    {
+        if (sa.Arg3 is { Content: C.StaticAssertMsg msg })
+        {
+            Gate(2011, "_Static_assert", at);
+            CheckStaticAssert(sa.Arg2, msg.Arg1, pos);
+        }
+        else
+        {
+            Gate(2023, "_Static_assert with no message", at);
+            CheckStaticAssert(sa.Arg2, null, pos);
         }
     }
 
