@@ -668,12 +668,16 @@ internal sealed partial class IrBuilder
                 _pendingAttrNodiscard ??= TryStringLiteral(a.Arg2) ?? "";
                 break;
             // GCC's constructor attribute, `[[gnu::constructor]]` or with a priority,
-            // `[[gnu::constructor(101)]]`: the function runs before main.
+            // `[[gnu::constructor(101)]]`: the function runs before main. An empty
+            // `[[gnu::constructor()]]` (a null argument) takes the default priority.
             case C.AttrNamespaced a when IsGnu(a.Arg0) && Tok(a.Arg3) is "constructor" or "__constructor__":
                 _pendingAttrConstructor ??= IrModule.DefaultConstructorPriority;
                 break;
-            case C.AttrNsCall a when IsGnu(a.Arg0) && Tok(a.Arg3) is "constructor" or "__constructor__":
-                _pendingAttrConstructor ??= (int)(ConstEval(BuildExpr(a.Arg5))
+            case C.AttrNsCall { Arg5: null } a when IsGnu(a.Arg0) && Tok(a.Arg3) is "constructor" or "__constructor__":
+                _pendingAttrConstructor ??= IrModule.DefaultConstructorPriority;
+                break;
+            case C.AttrNsCall { Arg5: { } prio } a when IsGnu(a.Arg0) && Tok(a.Arg3) is "constructor" or "__constructor__":
+                _pendingAttrConstructor ??= (int)(ConstEval(BuildExpr(prio))
                     ?? throw new IrUnsupportedException("a constructor priority that is not an integer constant expression"));
                 break;
             default: break; // all other attribute shapes: accepted + ignored
@@ -708,12 +712,13 @@ internal sealed partial class IrBuilder
     };
 
     /// <summary>The decoded UTF-8 text of a string-literal expression item, or null
-    /// when the expression isn't a plain string literal. Structural (AST) recognition;
+    /// when the expression isn't a plain string literal or is absent (the empty
+    /// argument of an attribute call, <c>deprecated()</c>). Structural (AST) recognition;
     /// adjacent segments concatenate and escapes decode through the same
     /// single-source-of-truth decoder as string lowering.</summary>
-    private string? TryStringLiteral(Item e)
+    private string? TryStringLiteral(Item? e)
     {
-        if (e.Content is not C.Str s) { return null; }
+        if (e?.Content is not C.Str s) { return null; }
         var bytes = DotCC.EmitHelpers.StringByteValues(CollectStrSegments(s.Arg0));
         var arr = new byte[bytes.Count];
         for (var i = 0; i < bytes.Count; i++) { arr[i] = (byte)bytes[i]; }
@@ -1026,26 +1031,28 @@ internal sealed partial class IrBuilder
 
     private FnSig ExtractFnSig(Item it) => it.Content switch
     {
+        // A null param list (Arg3 / Arg5 / Arg9) is `()`, the optional ParamList absent.
         C.FnSig n => new(ResolveType(n.Arg0), Tok(n.Arg1), BuildParams(n.Arg3, out var v0), v0, DeclaresStatic(n.Arg0)),
-        C.FnSigNoArgs n => new(ResolveType(n.Arg0), Tok(n.Arg1), new(), false, DeclaresStatic(n.Arg0)),
         // Parenthesized declarator name `T (name)(args)` — identical to
         // `T name(args)`; the parens are pure grouping around the name (public
         // headers wrap API names so a same-named function-like macro can't expand
         // at the declaration). Name is Arg2, the param list Arg5.
         C.FnSigParen n => new(ResolveType(n.Arg0), Tok(n.Arg2), BuildParams(n.Arg5, out var vp), vp, DeclaresStatic(n.Arg0)),
-        C.FnSigParenNoArgs n => new(ResolveType(n.Arg0), Tok(n.Arg2), new(), false, DeclaresStatic(n.Arg0)),
         // Function returning a function pointer: `Ret (*name(params))(fnPtrParams)`
         // (e.g. <signal.h>'s `void (*signal(int, void(*)(int)))(int)`). The result
         // type is the function-pointer `Ret (*)(fnPtrParams)`; name + params are the
         // outer declarator's.
         C.FnSigRetFnPtr n => new(FnPtrType(n.Arg0, n.Arg9), Tok(n.Arg3), BuildParams(n.Arg5, out var vr), vr, DeclaresStatic(n.Arg0)),
-        C.FnSigRetFnPtrNoArgs n => new(FnPtrType(n.Arg0, null), Tok(n.Arg3), BuildParams(n.Arg5, out var vrn), vrn, DeclaresStatic(n.Arg0)),
         _ => throw new IrUnsupportedException(TypeName(it.Content)),
     };
 
-    private List<ParamInfo> BuildParams(Item paramList, out bool variadic)
+    /// <summary>The parameters of a <c>ParamList</c>, with <paramref name="variadic"/>
+    /// set by a trailing <c>...</c>. A null list (the optional ParamList of an empty
+    /// <c>()</c>) and <c>(void)</c> both declare no parameters.</summary>
+    private List<ParamInfo> BuildParams(Item? paramList, out bool variadic)
     {
         var acc = new List<ParamInfo>();
+        if (paramList is null) { variadic = false; return acc; }
         var vararg = false;
         var unnamed = 0;
         void Walk(Item it)
@@ -1303,20 +1310,21 @@ internal sealed partial class IrBuilder
     private CType.Func FnPtrTailType(CType ret, Item tailItem) => tailItem.Content switch
     {
         C.FnPtrTail t => FnPtrType(ret, t.Arg1),
-        C.FnPtrTailNoArgs => FnPtrType(ret, null),
         _ => throw new IrUnsupportedException(TypeName(tailItem.Content)),
     };
 
     /// <summary>Whether a <c>FnPtrQuals</c> run (the qualifiers after a declarator's
     /// <c>*</c>) includes <c>const</c> (the pointer itself is then read-only).
-    /// <c>volatile</c> / <c>restrict</c> have no C# model and are accepted.</summary>
-    private static bool QualsHaveConst(Item quals) => quals.Content switch
+    /// <c>volatile</c> / <c>restrict</c> have no C# model and are accepted. A null run
+    /// (the optional FnPtrQuals absent) has none.</summary>
+    private static bool QualsHaveConst(Item? quals) => quals?.Content switch
     {
+        null => false,
         C.FnPtrQualConst or C.FnPtrQualsConst => true,
         C.FnPtrQualVolatile or C.FnPtrQualRestrict => false,
         C.FnPtrQualsVolatile q => QualsHaveConst(q.Arg0),
         C.FnPtrQualsRestrict q => QualsHaveConst(q.Arg0),
-        _ => throw new IrUnsupportedException(TypeName(quals.Content)),
+        { } other => throw new IrUnsupportedException(TypeName(other)),
     };
 
     /// <summary>A <c>FnPtrName</c> (<c>(*name)</c> / <c>(*quals name)</c> /
@@ -1327,8 +1335,7 @@ internal sealed partial class IrBuilder
         CType type = FnPtrTailType(ret, tailItem);
         return nameItem.Content switch
         {
-            C.FnPtrName n => (Tok(n.Arg2), type),
-            C.FnPtrNameQual n => (Tok(n.Arg3), QualsHaveConst(n.Arg2) ? type.WithQuals(TypeQual.Const) : type),
+            C.FnPtrName n => (Tok(n.Arg3), QualsHaveConst(n.Arg2) ? type.WithQuals(TypeQual.Const) : type),
             // `(**name)`: a pointer to the function pointer.
             C.FnPtrNamePtr n => (Tok(n.Arg3), new CType.Pointer(type)),
             _ => throw new IrUnsupportedException(TypeName(nameItem.Content)),
@@ -1341,13 +1348,11 @@ internal sealed partial class IrBuilder
     private (Item Name, Item? Dims, CType Elem) FnPtrArrParts(CType ret, Item arrItem, Item tailItem)
     {
         CType elem = FnPtrTailType(ret, tailItem);
-        CType Q(Item quals) => QualsHaveConst(quals) ? elem.WithQuals(TypeQual.Const) : elem;
+        CType Q(Item? quals) => QualsHaveConst(quals) ? elem.WithQuals(TypeQual.Const) : elem;
         return arrItem.Content switch
         {
-            C.FnPtrArr a => (a.Arg2, a.Arg3, elem),
-            C.FnPtrArrQual a => (a.Arg3, a.Arg4, Q(a.Arg2)),
-            C.FnPtrArrOpen a => (a.Arg2, null, elem),
-            C.FnPtrArrOpenQual a => (a.Arg3, null, Q(a.Arg2)),
+            C.FnPtrArr a => (a.Arg3, a.Arg4, Q(a.Arg2)),
+            C.FnPtrArrOpen a => (a.Arg3, null, Q(a.Arg2)),
             _ => throw new IrUnsupportedException(TypeName(arrItem.Content)),
         };
     }
@@ -1424,12 +1429,10 @@ internal sealed partial class IrBuilder
         // Tag definitions (C11 6.7.2.1 / 6.7.2.2): the type is defined once per
         // occurrence and the declaration goes on with it (`static const struct X
         // { … } t[] = …;`, `union { int i; float f; } u;`, `typedef enum { … } Mode;`).
-        C.TypeStructDef t => DefineAggregate(it, Tok(t.Arg1), t.Arg3, isUnion: false),
-        C.TypeStructAnonDef t => DefineAggregate(it, null, t.Arg2, isUnion: false),
-        C.TypeUnionDef t => DefineAggregate(it, Tok(t.Arg1), t.Arg3, isUnion: true),
-        C.TypeUnionAnonDef t => DefineAggregate(it, null, t.Arg2, isUnion: true),
-        C.TypeEnumDef t => DefineEnum(it, Tok(t.Arg1), null, t.Arg3),
-        C.TypeEnumAnonDef t => DefineEnum(it, null, null, t.Arg2),
+        // An untagged definition has a null tag (Arg1, the optional ID).
+        C.TypeStructDef t => DefineAggregate(it, OptTok(t.Arg1), t.Arg3, isUnion: false),
+        C.TypeUnionDef t => DefineAggregate(it, OptTok(t.Arg1), t.Arg3, isUnion: true),
+        C.TypeEnumDef t => DefineEnum(it, OptTok(t.Arg1), null, t.Arg3),
         C.TypeEnumDefTyped t => DefineEnum(it, Tok(t.Arg1), t.Arg3, t.Arg5),
         // Storage classes and function specifiers, a Type prefix or suffix (C11
         // 6.7.1, 6.7.4): dropped from the type. The declaration reads its storage
@@ -1445,7 +1448,6 @@ internal sealed partial class IrBuilder
         // A function-pointer type `Ret (*)(params)` — abstract declarator (a cast
         // target, a typedef target, a sizeof operand): lowers to CType.Func.
         C.TypeFnPtr t => FnPtrType(t.Arg0, t.Arg5),
-        C.TypeFnPtrNoArgs t => FnPtrType(t.Arg0, null),
         _ => throw new IrUnsupportedException(TypeName(it.Content)),
     };
 
@@ -1579,7 +1581,6 @@ internal sealed partial class IrBuilder
                 case C.TypeAlignasType t: it = t.Arg4; break;
                 case C.TypeAlignasExpr t: it = t.Arg4; break;
                 case C.TypeFnPtr t: it = t.Arg0; break;
-                case C.TypeFnPtrNoArgs t: it = t.Arg0; break;
                 default:
                     acc.Sort((a, b) => SrcPos.From(a.At).Line != SrcPos.From(b.At).Line
                         ? SrcPos.From(a.At).Line.CompareTo(SrcPos.From(b.At).Line)
@@ -1737,11 +1738,8 @@ internal sealed partial class IrBuilder
     private static Item FnSigType(Item fnSig) => fnSig.Content switch
     {
         C.FnSig n => n.Arg0,
-        C.FnSigNoArgs n => n.Arg0,
         C.FnSigParen n => n.Arg0,
-        C.FnSigParenNoArgs n => n.Arg0,
         C.FnSigRetFnPtr n => n.Arg0,
-        C.FnSigRetFnPtrNoArgs n => n.Arg0,
         _ => throw new IrUnsupportedException(TypeName(fnSig.Content)),
     };
 
@@ -2039,12 +2037,15 @@ internal sealed partial class IrBuilder
         var stmts = new List<CStmt>();
         switch (it.Content)
         {
-            case C.Block b:
+            // `{ }`: the optional StmtList is absent, nothing to scope.
+            case C.Block { Arg2: null }:
+                break;
+            case C.Block { Arg2: { } body }:
                 _symbols.EnterScope();
                 // C90 requires all declarations to precede statements in a block; a
                 // declaration after a statement ("mixed declarations") is C99+.
                 var sawNonDecl = false;
-                FlattenStmts(b.Arg2, x =>
+                FlattenStmts(body, x =>
                 {
                     if (x.Content is C.StmtDecl) { if (sawNonDecl) { Gate(1999, "mixed declarations and code", x); } }
                     else { sawNonDecl = true; }
@@ -2054,8 +2055,6 @@ internal sealed partial class IrBuilder
                 // block is the goto-restart body, so recognition is necessarily block-level.
                 stmts = RewriteSetjmpCaptures(stmts);
                 _symbols.ExitScope();
-                break;
-            case C.BlockEmpty:
                 break;
             default:
                 throw new IrUnsupportedException(TypeName(it.Content));
@@ -2089,7 +2088,6 @@ internal sealed partial class IrBuilder
         switch (it.Content)
         {
             case C.Block: return BuildBlock(it);
-            case C.BlockEmpty: return BuildBlock(it);
             case C.StmtDecl d: return BuildDeclStmt(d.Arg0) with { Pos = pos };
             // Block-scope declarations with no declarators (`struct cD { … };`
             // inside a function body). A type has no storage: dotcc hoists a tag
@@ -2141,13 +2139,14 @@ internal sealed partial class IrBuilder
             }
             case C.StmtWhile s: return new While(BuildExpr(s.Arg2), BuildStmt(s.Arg4)) { Pos = pos };
             case C.StmtDoWhile s: return new DoWhile(BuildStmt(s.Arg1), BuildExpr(s.Arg4)) { Pos = pos };
-            case C.StmtReturn s:
+            // `return;` has a null Expr (the optional slot absent).
+            case C.StmtReturn { Arg1: null }: return new Return(null) { Pos = pos };
+            case C.StmtReturn { Arg1: { } retExpr }:
             {
-                var rv = BuildExpr(s.Arg1);
+                var rv = BuildExpr(retExpr);
                 if (_currentRet is { } rt) { CheckQualifierDiscard(rv, rt, pos, "return"); }
                 return new Return(rv) { Pos = pos };
             }
-            case C.StmtReturnVoid: return new Return(null) { Pos = pos };
             case C.StmtBreak: return new Break { Pos = pos };
             case C.StmtContinue: return new Continue { Pos = pos };
             case C.StmtForDecl s: return BuildForDecl(s) with { Pos = pos };
@@ -2177,7 +2176,7 @@ internal sealed partial class IrBuilder
     {
         var subject = BuildExpr(s.Arg2);
         var raw = new List<Item>();
-        if (s.Arg4.Content is C.Block b) { FlattenStmts(b.Arg2, raw.Add); }
+        if (s.Arg4.Content is C.Block { Arg2: { } stmtList }) { FlattenStmts(stmtList, raw.Add); }
 
         var sections = new List<SwitchSection>();
         var labels = new List<SwitchLabel>();
@@ -2833,12 +2832,12 @@ internal sealed partial class IrBuilder
             C.OffsetofExpr o => BuildOffsetof(o),
             // `va_arg(ap, T)` — special syntax (its 2nd operand is a type).
             C.VaArgExpr v => BuildVaArg(v),
+            // A null ArgList (Arg2) is `f()`.
             C.Call c => BuildCall(c.Arg0, c.Arg2),
-            C.CallNoArgs c => BuildCall(c.Arg0, null),
             // C99/C23 compound literals — (T){…} struct/scalar, (T[]){…} array,
-            // designated, and the C23 empty form.
-            C.CompoundLit c => Gated(1999, "compound literals", c.Arg1, BuildCompoundLit(CompoundLitType(c.Arg1), c.Arg4)),
-            C.CompoundLitEmpty c => Gated(2023, "empty initializer", c.Arg1, BuildCompoundLitEmpty(CompoundLitType(c.Arg1))),
+            // designated, and the C23 empty form (a null InitList, Arg4).
+            C.CompoundLit { Arg4: null } c => Gated(2023, "empty initializer", c.Arg1, BuildCompoundLitEmpty(CompoundLitType(c.Arg1))),
+            C.CompoundLit { Arg4: { } init } c => Gated(1999, "compound literals", c.Arg1, BuildCompoundLit(CompoundLitType(c.Arg1), init)),
             C.CompoundLitArr c => Gated(1999, "compound literals", c.Arg1, BuildArrayCompoundLit(CompoundLitType(c.Arg1), c.Arg2, c.Arg5)),
             C.CompoundLitArrImplicit c => Gated(1999, "compound literals", c.Arg1, BuildArrayCompoundLit(CompoundLitType(c.Arg1), null, c.Arg6)),
             C.CommaOp => BuildCommaOp(it),
@@ -3006,7 +3005,6 @@ internal sealed partial class IrBuilder
     {
         C.Paren p => IsDlsymCall(p.Arg1),
         C.Call call => TryCalleeName(call.Arg0, out var n) && n == "dlsym",
-        C.CallNoArgs call => TryCalleeName(call.Arg0, out var n) && n == "dlsym",
         _ => false,
     };
 
@@ -3876,6 +3874,10 @@ internal sealed partial class IrBuilder
 
     private static string Tok(Item it) => it.Content as string
         ?? throw new IrUnsupportedException("expected terminal, got " + TypeName(it.Content));
+
+    /// <summary>The text of an optional terminal (a grammar <c>X?</c> slot), or null
+    /// when it is absent (an untagged struct/union/enum definition's <c>ID?</c>).</summary>
+    private static string? OptTok(Item? it) => it is null ? null : Tok(it);
 
     private static string TypeName(object? content) =>
         content is null ? "<null>" : content.GetType().Name;

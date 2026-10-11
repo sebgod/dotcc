@@ -27,7 +27,7 @@ internal sealed partial class IrBuilder
     /// has a null outer extent (sized by its initializer, or an <c>extern</c>
     /// declaration, or a flexible array member).</param>
     /// <param name="Init">The initializer: an expression item, or a <c>BraceInit</c>
-    /// item (<see cref="C.BraceInit"/> / <see cref="C.BraceInitEmpty"/>); null when there
+    /// item (<see cref="C.BraceInit"/>, a null InitList for the C23 empty <c>{ }</c>); null when there
     /// is none.</param>
     /// <param name="At">The declarator's name token, for diagnostics.</param>
     /// <param name="VlaDims">An array declarator's bounds when one is not an integer
@@ -254,12 +254,12 @@ internal sealed partial class IrBuilder
     {
         switch (init.Content)
         {
-            case C.BraceInitEmpty:
+            case C.BraceInit { Arg1: null }:
                 Gate(2023, "empty initializer", init);
                 return new DefaultLit { Type = type };
-            case C.BraceInit b:
-                if (IsAggregateType(type)) { return BuildAggregateInit(type, b.Arg1); }
-                return BracedScalar(new InitGroup(ParseInitList(b.Arg1)));
+            case C.BraceInit { Arg1: { } list }:
+                if (IsAggregateType(type)) { return BuildAggregateInit(type, list); }
+                return BracedScalar(new InitGroup(ParseInitList(list)));
             default:
                 var value = BuildExpr(init);
                 EnsureNotEmbed(value);
@@ -287,12 +287,12 @@ internal sealed partial class IrBuilder
         if (d.Init is not { } init) { return new(arr, elem, CompleteFlatCount(d, arr), null); }
         switch (init.Content)
         {
-            case C.BraceInitEmpty:
+            case C.BraceInit { Arg1: null }:
                 Gate(2023, "empty initializer", init);
                 return new(arr, elem, CompleteFlatCount(d, arr), null);
-            case C.BraceInit b:
+            case C.BraceInit { Arg1: { } list }:
             {
-                var items = ParseInitList(b.Arg1);
+                var items = ParseInitList(list);
                 // `char s[] = { "…" }`: the string literal, optionally enclosed in braces.
                 if (items is [InitVal { Value: var sole }] && StringArrayElems(arr, sole) is { } braced)
                 {
@@ -452,11 +452,13 @@ internal sealed partial class IrBuilder
     }
 
     /// <summary>Whether a type specifier declares something on its own: a tag
-    /// (defined or forward-declared) or enumeration constants.</summary>
+    /// (defined or forward-declared) or enumeration constants. An untagged struct or
+    /// union definition (a null tag) declares neither.</summary>
     private static bool DeclaresTag(Item typeItem) => typeItem.Content switch
     {
         C.TypeStruct or C.TypeUnion or C.TypeEnum
-            or C.TypeStructDef or C.TypeUnionDef or C.TypeEnumDef or C.TypeEnumAnonDef or C.TypeEnumDefTyped => true,
+            or C.TypeStructDef { Arg1: not null } or C.TypeUnionDef { Arg1: not null }
+            or C.TypeEnumDef or C.TypeEnumDefTyped => true,
         C.TypeDeclSpec q => DeclaresTag(q.Arg1),
         C.TypeDeclSpecPost q => DeclaresTag(q.Arg0),
         C.TypeConstPre q => DeclaresTag(q.Arg1),
@@ -478,7 +480,7 @@ internal sealed partial class IrBuilder
         {
             core = core.Content switch { C.TypeDeclSpec pre => pre.Arg1, C.TypeDeclSpecPost post => post.Arg0, _ => core };
         }
-        if (core.Content is C.TypeStructAnonDef or C.TypeUnionAnonDef)
+        if (core.Content is C.TypeStructDef { Arg1: null } or C.TypeUnionDef { Arg1: null })
         {
             Diagnostics.Add(new Diagnostic(Severity.Warning, "unnamed struct/union that defines no instances", SrcPos.From(typeItem), _file));
             return;
@@ -509,13 +511,14 @@ internal sealed partial class IrBuilder
     {
         switch (typeItem.Content)
         {
-            case C.TypeStructAnonDef a:
+            // An untagged definition (a null tag) is a C11 anonymous member.
+            case C.TypeStructDef { Arg1: null } a:
                 Gate(2011, "anonymous struct/union member", member);
-                AddAnonMember(a.Arg2, owner, fields, isUnion: false);
+                AddAnonMember(a.Arg3, owner, fields, isUnion: false);
                 return;
-            case C.TypeUnionAnonDef a:
+            case C.TypeUnionDef { Arg1: null } a:
                 Gate(2011, "anonymous struct/union member", member);
-                AddAnonMember(a.Arg2, owner, fields, isUnion: true);
+                AddAnonMember(a.Arg3, owner, fields, isUnion: true);
                 return;
         }
         ResolveType(typeItem);
