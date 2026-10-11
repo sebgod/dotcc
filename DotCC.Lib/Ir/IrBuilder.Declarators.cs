@@ -458,7 +458,7 @@ internal sealed partial class IrBuilder
     {
         C.TypeStruct or C.TypeUnion or C.TypeEnum
             or C.TypeStructDef { Arg1: not null } or C.TypeUnionDef { Arg1: not null }
-            or C.TypeEnumDef or C.TypeEnumDefTyped => true,
+            or C.EnumSpecifier => true,
         C.TypeDeclSpec q => DeclaresTag(q.Arg1),
         C.TypeDeclSpecPost q => DeclaresTag(q.Arg0),
         C.TypeConstPre q => DeclaresTag(q.Arg1),

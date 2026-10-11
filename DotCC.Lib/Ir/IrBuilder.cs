@@ -1129,10 +1129,11 @@ internal sealed partial class IrBuilder
     /// enum (so it renders <c>EnumName.Member</c> and decays to its underlying int
     /// only at C's plain-int contexts), and an <see cref="EnumTypeDef"/> is emitted.
     /// An ANONYMOUS, un-typedef'd enum has no C# name, so its enumerators stay plain
-    /// int constants (named constants) rather than synthesizing a type. Returns the
-    /// enum's <see cref="CType"/> — the <see cref="CType.Enum"/>, or
-    /// <see cref="CType.Int"/> for the anonymous form — so a typedef caller can alias
-    /// the name to it.</summary>
+    /// constants (named constants) of its underlying type rather than synthesizing a
+    /// type: <see cref="CType.Int"/>, or the fixed underlying type of a C23
+    /// <c>enum : T { … }</c>. Returns the enum's <see cref="CType"/> (the
+    /// <see cref="CType.Enum"/>, or that underlying type for the anonymous form), so
+    /// a typedef caller can alias the name to it.</summary>
     private CType RegisterEnum(string? tag, Item? baseType, Item enumList, string? typedefName = null)
     {
         var underlying = baseType is { } bt ? ResolveType(bt) : CType.Int;
@@ -1165,7 +1166,7 @@ internal sealed partial class IrBuilder
             _symbols.Declare(new Symbol
             {
                 Name = name, Kind = SymKind.EnumConst,
-                Type = (CType?)enumType ?? CType.Int, ConstValue = next, IsGlobal = true,
+                Type = (CType?)enumType ?? underlying, ConstValue = next, IsGlobal = true,
             });
             if (enumType is not null) { members.Add(new EnumMember(name, next)); }
             next++;
@@ -1176,7 +1177,7 @@ internal sealed partial class IrBuilder
             if (tag is not null) { _enumTypes[tag] = enumType; }
             AddEnumDef(enumType.Name, underlying, members);
         }
-        return (CType?)enumType ?? CType.Int;
+        return (CType?)enumType ?? underlying;
     }
 
 
@@ -1444,8 +1445,9 @@ internal sealed partial class IrBuilder
         // An untagged definition has a null tag (Arg1, the optional ID).
         C.TypeStructDef t => DefineAggregate(it, OptTok(t.Arg1), t.Arg3, isUnion: false),
         C.TypeUnionDef t => DefineAggregate(it, OptTok(t.Arg1), t.Arg3, isUnion: true),
-        C.TypeEnumDef t => DefineEnum(it, OptTok(t.Arg1), null, t.Arg3),
-        C.TypeEnumDefTyped t => DefineEnum(it, Tok(t.Arg1), t.Arg3, t.Arg5),
+        // An enum (C23 6.7.2.2) has a null tag (Arg1) when untagged and a null
+        // EnumBase (Arg2) when it has no fixed underlying type.
+        C.EnumSpecifier t => DefineEnum(it, OptTok(t.Arg1), t.Arg2 is { Content: C.EnumBase b } ? b.Arg1 : null, t.Arg4),
         // Storage classes and function specifiers, a Type prefix or suffix (C11
         // 6.7.1, 6.7.4): dropped from the type. The declaration reads its storage
         // class structurally (DeclSpecsOf); the ones with a lowering of their own
@@ -3262,10 +3264,11 @@ internal sealed partial class IrBuilder
         if (sym is { Kind: SymKind.EnumConst })
         {
             // An enumerator of a real (named) enum renders as EnumName.Member; one of
-            // an anonymous int-constant enum lowers to its literal integer value.
-            return sym.Type.Unqualified is CType.Enum
-                ? new EnumConstRef(sym) { Type = sym.Type }
-                : new LitInt(sym.ConstValue.ToString(System.Globalization.CultureInfo.InvariantCulture), sym.ConstValue) { Type = CType.Int };
+            // an anonymous int-constant enum lowers to its literal integer value, cast
+            // to the fixed underlying type of a C23 `enum : T { … }` when it is not int.
+            if (sym.Type.Unqualified is CType.Enum) { return new EnumConstRef(sym) { Type = sym.Type }; }
+            var lit = new LitInt(sym.ConstValue.ToString(System.Globalization.CultureInfo.InvariantCulture), sym.ConstValue) { Type = CType.Int };
+            return sym.Type.Unqualified == CType.Int ? lit : new Cast(sym.Type, lit) { Type = sym.Type };
         }
         if (sym is not null)
         {

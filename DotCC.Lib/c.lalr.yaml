@@ -502,6 +502,7 @@ symbols:
   - StaticAssertMsg # 207 non-terminal: a static assertion's `, STRING` message
   - AttrName       # 208 non-terminal: an attribute's name, `ID` or `ID :: ID`
   - AttrArgs       # 209 non-terminal: an attribute's argument clause, `( E? )`
+  - EnumBase       # 210 non-terminal: a C23 enum's fixed underlying type, `: Type`
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -674,13 +675,17 @@ productions:
   # order, and `enum ID :` must shift into the typed definition rather than reduce
   # `enum ID` for an unnamed bit-field (`enum E : 3;` is not supported). The binder
   # defines each occurrence's type once. The tag is optional (`ID?`, C11's
-  # `struct identifier? { … }`); an untagged definition has a null tag.
+  # `struct identifier? { … }`); an untagged definition has a null tag. An enum
+  # is C23 6.7.2.2's `enum identifier? enum-type-specifier? { … }`: both the tag
+  # and the EnumBase are optional, so `enum : unsigned char { … }` is an untagged
+  # enum with a fixed underlying type. EnumBase stays in this group so that its
+  # `:` keeps winning over the bit-field reduce.
   - derivation: none
     rules:
       - { lhs: Type, rhs: ['struct', ID?, '{', MemberList, '}'],       action: typeStructDef }
       - { lhs: Type, rhs: ['union', ID?, '{', MemberList, '}'],        action: typeUnionDef }
-      - { lhs: Type, rhs: ['enum', ID?, '{', EnumList, '}'],           action: typeEnumDef }
-      - { lhs: Type, rhs: ['enum', ID, ':', Type, '{', EnumList, '}'], action: typeEnumDefTyped }
+      - { lhs: Type, rhs: ['enum', ID?, EnumBase?, '{', EnumList, '}'], action: enumSpecifier }
+      - { lhs: EnumBase, rhs: [':', Type],                             action: enumBase }
 
   # Type — the "declarator type" non-terminal. Most C type forms reduce to
   # this via TypeSpecList (the C-standard declaration-specifier sequence:
