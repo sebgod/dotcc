@@ -73,6 +73,18 @@ public sealed class WatBackendTests
     }
 
     [Fact]
+    public void A_constructor_with_empty_parens_takes_the_default_priority()
+    {
+        // `[[gnu::constructor()]]` is the call form with its optional priority absent:
+        // still a constructor, ordered like the bare spelling (after a prioritized one).
+        var wat = Wat("int putchar(int);\n"
+            + "[[gnu::constructor()]] static void late(void) { putchar('L'); }\n"
+            + "[[gnu::constructor(101)]] static void early(void) { putchar('E'); }\n"
+            + "int main(void){ return 0; }");
+        wat.ShouldContain("(func $_start\n    call $early\n    call $late\n    call $main");
+    }
+
+    [Fact]
     public void A_constructor_takes_no_parameters()
     {
         Should.Throw<CompileException>(() => Wat("[[gnu::constructor]] static void f(int x) { (void)x; }\nint main(void){ return 0; }"))

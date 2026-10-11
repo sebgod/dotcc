@@ -51,6 +51,19 @@ public sealed class NodiscardTests
     }
 
     [Fact]
+    public void Empty_parens_warn_like_the_bare_attribute()
+    {
+        // `nodiscard()` is the call form with its optional argument absent; it must
+        // warn exactly like the bare attribute, with no reason appended.
+        var stderr = Stderr("""
+            [[nodiscard()]] int must_use(void) { return 1; }
+            int main(void) { must_use(); return 0; }
+            """);
+        stderr.ShouldContain("ignoring return value of 'must_use', declared with attribute 'nodiscard'");
+        stderr.ShouldNotContain("'nodiscard':");
+    }
+
+    [Fact]
     public void The_reason_string_is_appended()
     {
         var stderr = Stderr("""

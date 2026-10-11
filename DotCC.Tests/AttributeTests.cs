@@ -163,6 +163,25 @@ public sealed class AttributeTests
     }
 
     [Fact]
+    public void Deprecated_with_empty_parens_maps_to_bare_obsolete()
+    {
+        // `deprecated()` is the call form with its optional argument absent: it must
+        // take effect exactly like a bare `deprecated` (it once fell through to the
+        // ignored-attribute default, a record no binder case matched).
+        var src = WriteTemp("""
+            [[deprecated()]] int old_api(void) { return 1; }
+            int main(void) { return 0; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("[System.Obsolete]");
+            emitted.ShouldNotContain("[System.Obsolete(");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void Noreturn_attribute_on_the_prototype_marks_the_definition()
     {
         // The marker rides the SHARED function symbol, so spelling the attribute

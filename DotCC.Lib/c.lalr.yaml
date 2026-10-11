@@ -40,7 +40,8 @@
 #   Rel     : < > <= >=
 #   Add     : + -
 #   Mul     : * /
-#   Unary   : unary * & -                       (right-associative)
+#   CastExpr: ( Type ) cast                     (right-associative)
+#   Unary   : unary * & - and sizeof ++ --      (right-associative)
 #   Postfix : function call                     (left-associative)
 #   Primary : ID, NUM, ( E )
 #
@@ -222,12 +223,10 @@ symbols:
   # before the Block body reduces. That ordering lets __func__ resolve
   # without a placeholder-then-string-replace dance.
   - FnSig          # 134
-  # CommaExprList — one-or-more comma-separated E's. Used in for-loop init
-  # and update positions where C lets you write `for (i=0, j=10; …; i++, j--)`.
-  # C# accepts the same comma-list shape in for-init/update, so the
-  # lowering is just `e1, e2, e3` verbatim. Full C-style comma operator
-  # in arbitrary expression position needs more work — see C-SUPPORT.md.
-  - CommaExprList  # 135
+  # RETIRED: CommaExprList was the for-init / for-update comma list. The `for`
+  # clauses are the comma-tier `Expr?` now (C11 6.8.5); the symbol stays listed
+  # because `symbols:` is append-only.
+  - CommaExprList  # 135 RETIRED
   - '_Float128'    # 136 keyword (C23 optional type) — IEEE-754 binary128.
                    #     GNU spelling `__float128` lexes to this same symbol.
                    #     Lowers to DotCC.Libc.Float128 (software quad).
@@ -254,10 +253,11 @@ symbols:
   # typePtrQualVolatile production.
   - 'const'        # 141 type qualifier (C90)
   - 'volatile'     # 142 type qualifier (C90)
-  # Optional for-loop clauses — each may be empty (`for (;;)`). ForCond empty
-  # means "always true"; ForPost empty means no update step.
-  - ForCond        # 143 non-terminal: for-condition (E or empty)
-  - ForPost        # 144 non-terminal: for-update (CommaExprList or empty)
+  # RETIRED: ForCond / ForPost were the nullable for-condition and for-update.
+  # Both clauses are `Expr?` slots of the `for` rules now; the symbols stay
+  # listed because `symbols:` is append-only.
+  - ForCond        # 143 RETIRED
+  - ForPost        # 144 RETIRED
   # Initializer-element list with an OPTIONAL TRAILING COMMA (`{1, 2, 3,}` —
   # C90-legal). Separate from the call-argument `ArgList` (right-recursive,
   # where a trailing comma is illegal): this one is LEFT-recursive so the
@@ -278,9 +278,10 @@ symbols:
   # assignment (`E`). `Expr → Expr ',' E` is C's comma operator: lowest
   # precedence, left-associative, evaluate each operand left-to-right, value is
   # the last. Used ONLY where C's grammar uses `expression` rather than
-  # `assignment-expression` — the parenthesized primary `( Expr )` and the
-  # expression statement `Expr ;` — so commas in call arguments / initializers
-  # (which stay on `E`) remain separators, not operators.
+  # `assignment-expression` (the parenthesized primary `( Expr )`, the
+  # expression statement `Expr ;`, `return`, the controlling expressions and the
+  # `for` clauses), so commas in call arguments / initializers (which stay on
+  # `E`) remain separators, not operators.
   - Expr           # 147
   # `extern` storage class (C89). On a variable it DECLARES without defining
   # (storage lives in another translation unit); on a function it's the default
@@ -492,6 +493,9 @@ symbols:
   # Compiler.LexC), so a skipped #if group may hold any text; one that survives
   # preprocessing is an error in StrayTokenGuard. No lexer rule or production.
   - STRAY          # 204 terminal: a stray byte (see above)
+  # CastExpr — C11 6.5.4's cast-expression tier, between Mul and Unary (see the
+  # cast group): a Unary, or `( Type ) CastExpr`.
+  - CastExpr       # 205 non-terminal: cast-expression
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -521,10 +525,11 @@ productions:
   # one-Param ParamList the binder reads as no parameters (C11 6.7.6.3p10), as in
   # every parameter list. After the parameters, `{` selects a FnSig (a
   # definition) and `;` / `,` a function declarator (FOLLOW(FnSig) is `{` alone).
+  # The parameter list is optional in every form (`ParamList?`, C11 6.7.6's
+  # `( parameter-type-list? )`), so `()` is the same rule with a null list.
   - derivation: none
     rules:
-      - { lhs: FnSig, rhs: [Type, ID, '(', ParamList, ')'],     action: fnSig }
-      - { lhs: FnSig, rhs: [Type, ID, '(', ')'],                action: fnSigNoArgs }
+      - { lhs: FnSig, rhs: [Type, ID, '(', ParamList?, ')'],     action: fnSig }
       # Parenthesized function-name declarator: `T (name)(args)` ≡ `T name(args)`.
       # The parens are pure grouping around the declarator name. Lua wraps every
       # public API name this way in lua.h prototypes — `LUA_API lua_State
@@ -533,14 +538,12 @@ productions:
       # bare forms. Disjoint from the fn-pointer declarators (`Type ( * ID ) …`)
       # by the `ID` vs `*` right after the first `(`. (The prototype `LUA_API
       # lua_State *(lua_newstate)(…);` is the matching function declarator.)
-      - { lhs: FnSig, rhs: [Type, '(', ID, ')', '(', ParamList, ')'], action: fnSigParen }
-      - { lhs: FnSig, rhs: [Type, '(', ID, ')', '(', ')'],            action: fnSigParenNoArgs }
+      - { lhs: FnSig, rhs: [Type, '(', ID, ')', '(', ParamList?, ')'], action: fnSigParen }
       # Function returning a function pointer: `Type (*name(params))(trailing)`.
       # The `(*name(params))` is the declarator; `(trailing)` is the parameter
       # list of the returned function pointer. E.g. `void (*signal(int, void(*)(int)))(int)`.
       # Disjoint from fnSigParen by `*` right after the first `(`.
-      - { lhs: FnSig, rhs: [Type, '(', '*', ID, '(', ParamList, ')', ')', '(', ParamList, ')'], action: fnSigRetFnPtr }
-      - { lhs: FnSig, rhs: [Type, '(', '*', ID, '(', ParamList, ')', ')', '(', ')'],            action: fnSigRetFnPtrNoArgs }
+      - { lhs: FnSig, rhs: [Type, '(', '*', ID, '(', ParamList, ')', ')', '(', ParamList?, ')'], action: fnSigRetFnPtr }
 
   - derivation: none
     rules:
@@ -567,8 +570,7 @@ productions:
       # The parameter tail of a raw (un-typedef'd) function-pointer declarator,
       # shared by the file-scope, array, static-local and array-member forms
       # below. `(void)` arrives as a one-Param ParamList, as everywhere else.
-      - { lhs: FnPtrTail, rhs: ['(', ParamList, ')'], action: fnPtrTail }
-      - { lhs: FnPtrTail, rhs: ['(', ')'],            action: fnPtrTailNoArgs }
+      - { lhs: FnPtrTail, rhs: ['(', ParamList?, ')'], action: fnPtrTail }
       # A raw declarator's name part: `(*name)` / `(*const name)` (FnPtrName; a
       # scalar fn-ptr is a DeclItem, so file-scope / static / extern / block-scope /
       # static-local / struct-member fn-ptrs and COMMA LISTS of them all ride the
@@ -577,16 +579,15 @@ productions:
       # used by the dispatch-table productions below. Conflict-free: after `( *` the
       # abstract fn-ptr type takes `)`, the fn-returning-fn-ptr FnSig takes `ID (`,
       # a qualifier or `ID )` / `ID [` selects these; FnPtrName reduces only before
-      # the FnPtrTail's `(`, where the pointer-to-array declarator needs `[`.
-      - { lhs: FnPtrName, rhs: ['(', '*', ID, ')'],             action: fnPtrName }
-      - { lhs: FnPtrName, rhs: ['(', '*', FnPtrQuals, ID, ')'], action: fnPtrNameQual }
+      # the FnPtrTail's `(`, where the pointer-to-array declarator needs `[`. The
+      # qualifiers after the `*` are optional (`FnPtrQuals?`, C11 6.7.6's
+      # `* type-qualifier-list?`), null when absent.
+      - { lhs: FnPtrName, rhs: ['(', '*', FnPtrQuals?, ID, ')'], action: fnPtrName }
       # A pointer to a function pointer, `(**name)` (CPython's ceval_gil.c
       # `int (**func)(void *)`). After `( *` a second `*` is taken by nothing else.
       - { lhs: FnPtrName, rhs: ['(', '*', '*', ID, ')'],        action: fnPtrNamePtr }
-      - { lhs: FnPtrArr, rhs: ['(', '*', ID, ArrDims, ')'],             action: fnPtrArr }
-      - { lhs: FnPtrArr, rhs: ['(', '*', FnPtrQuals, ID, ArrDims, ')'], action: fnPtrArrQual }
-      - { lhs: FnPtrArrOpen, rhs: ['(', '*', ID, '[', ']', ')'],             action: fnPtrArrOpen }
-      - { lhs: FnPtrArrOpen, rhs: ['(', '*', FnPtrQuals, ID, '[', ']', ')'], action: fnPtrArrOpenQual }
+      - { lhs: FnPtrArr, rhs: ['(', '*', FnPtrQuals?, ID, ArrDims, ')'], action: fnPtrArr }
+      - { lhs: FnPtrArrOpen, rhs: ['(', '*', FnPtrQuals?, ID, '[', ']', ')'], action: fnPtrArrOpen }
       - { lhs: FnPtrQuals, rhs: ['const'],                action: fnPtrQualConst }
       - { lhs: FnPtrQuals, rhs: ['volatile'],             action: fnPtrQualVolatile }
       - { lhs: FnPtrQuals, rhs: ['restrict'],             action: fnPtrQualRestrict }
@@ -667,15 +668,13 @@ productions:
   # the Type group on purpose: LALR.CC settles a conflict between groups by group
   # order, and `enum ID :` must shift into the typed definition rather than reduce
   # `enum ID` for an unnamed bit-field (`enum E : 3;` is not supported). The binder
-  # defines each occurrence's type once.
+  # defines each occurrence's type once. The tag is optional (`ID?`, C11's
+  # `struct identifier? { … }`); an untagged definition has a null tag.
   - derivation: none
     rules:
-      - { lhs: Type, rhs: ['struct', ID, '{', MemberList, '}'],        action: typeStructDef }
-      - { lhs: Type, rhs: ['struct', '{', MemberList, '}'],            action: typeStructAnonDef }
-      - { lhs: Type, rhs: ['union', ID, '{', MemberList, '}'],         action: typeUnionDef }
-      - { lhs: Type, rhs: ['union', '{', MemberList, '}'],             action: typeUnionAnonDef }
-      - { lhs: Type, rhs: ['enum', ID, '{', EnumList, '}'],            action: typeEnumDef }
-      - { lhs: Type, rhs: ['enum', '{', EnumList, '}'],                action: typeEnumAnonDef }
+      - { lhs: Type, rhs: ['struct', ID?, '{', MemberList, '}'],       action: typeStructDef }
+      - { lhs: Type, rhs: ['union', ID?, '{', MemberList, '}'],        action: typeUnionDef }
+      - { lhs: Type, rhs: ['enum', ID?, '{', EnumList, '}'],           action: typeEnumDef }
       - { lhs: Type, rhs: ['enum', ID, ':', Type, '{', EnumList, '}'], action: typeEnumDefTyped }
 
   # Type — the "declarator type" non-terminal. Most C type forms reduce to
@@ -698,9 +697,9 @@ productions:
       # Abstract function-pointer type — `Type (*)(params)`, used in casts and
       # sizeof. No identifier between `*` and `)` distinguishes these from the
       # FnSig declarator forms (`Type (*ID)(params)`). `(void)` is the one-Param
-      # ParamList the binder reads as no parameters (C11 6.7.6.3p10).
-      - { lhs: Type, rhs: [Type, '(', '*', ')', '(', ParamList, ')'], action: typeFnPtr }
-      - { lhs: Type, rhs: [Type, '(', '*', ')', '(', ')'],            action: typeFnPtrNoArgs }
+      # ParamList the binder reads as no parameters (C11 6.7.6.3p10), and `()` the
+      # absent (null) list.
+      - { lhs: Type, rhs: [Type, '(', '*', ')', '(', ParamList?, ')'], action: typeFnPtr }
       - { lhs: Type, rhs: [TypeSpecList], action: typeFromSpec }
       # `struct ID` as a type reference — used in declarations, parameters,
       # casts, sizeof. The visitor emits just `ID` since C# doesn't require
@@ -820,9 +819,8 @@ productions:
     rules:
       # ScopeEnter fires right after `{` (before the body reduces), giving the
       # emitter a block-entry hook for local-scope tracking. The matching pop is
-      # the block / blockEmpty action.
-      - { lhs: Block, rhs: ['{', ScopeEnter, StmtList, '}'], action: block }
-      - { lhs: Block, rhs: ['{', ScopeEnter, '}'],            action: blockEmpty }
+      # the block action. The statement list is optional (`{ }` has a null one).
+      - { lhs: Block, rhs: ['{', ScopeEnter, StmtList?, '}'], action: block }
       - { lhs: ScopeEnter, rhs: [], action: scopeEnter }
 
   - derivation: leftmost
@@ -852,34 +850,24 @@ productions:
       # `do Stmt while (Expr) ;` — runs the body at least once. Cond is the
       # comma-tier Expr (same lift-side-effects treatment as the other loops).
       - { lhs: Stmt, rhs: ['do', Stmt, 'while', '(', Expr, ')', ';'], action: stmtDoWhile }
-      # for-loop. Three init shapes (decl / expr / empty) × optional cond /
-      # update via the nullable ForCond / ForPost non-terminals — so `for (;;)`,
-      # `for (i=0;;i++)`, `for (; i<n; )` etc. all parse. ForCond produces the
-      # `Cond.B(...)`-wrapped condition (or `true` when empty); ForPost the
-      # update text (or empty). `for (int i …)` (decl init) is the C99 form the
-      # dialect gate flags under -std=c90.
+      # for-loop, C11 6.8.5's two forms: `for ( expression? ; expression? ;
+      # expression? ) statement` and `for ( declaration expression? ;
+      # expression? ) statement`. Each clause is the comma-tier `Expr?`, so
+      # `for (;;)`, `for (i = 0, j = 10; i < j; i++, j--)` and `for (; i < n; )`
+      # are all these two rules. An absent condition means "always true", an
+      # absent init or update means none. `for (int i …)` (decl init) is the C99
+      # form the dialect gate flags under -std=c90.
       # ScopeEnter after `for (` opens a scope for the init declaration (which
       # in C scopes to the whole for-statement, body included) so a `for (int i …)`
       # that shadows an outer `i` is renamed apart. Matching pop is stmtForDecl.
-      - { lhs: Stmt, rhs: ['for', '(', ScopeEnter, Decl, ';', ForCond, ';', ForPost, ')', Stmt], action: stmtForDecl }
-      - { lhs: Stmt, rhs: ['for', '(', CommaExprList, ';', ForCond, ';', ForPost, ')', Stmt], action: stmtForExpr }
-      - { lhs: Stmt, rhs: ['for', '(', ';', ForCond, ';', ForPost, ')', Stmt], action: stmtForNoInit }
-      - { lhs: ForCond, rhs: [Expr], action: forCondExpr }
-      - { lhs: ForCond, rhs: [],  action: forCondEmpty }
-      - { lhs: ForPost, rhs: [CommaExprList], action: forPostExprs }
-      - { lhs: ForPost, rhs: [],              action: forPostEmpty }
-      # Comma-separated expression list. Used in for-init / for-update so
-      # `for (i=0, j=10; …; i++, j--)` parses. C lets the comma operator
-      # appear in arbitrary expression contexts too; that more general
-      # form isn't supported yet (would need a top-level Expr non-terminal
-      # over E, plus a lowering for the value-of-rhs semantics). The
-      # for-init/update positions cover the dominant use case.
-      - { lhs: CommaExprList, rhs: [E],                        action: commaExprOne }
-      - { lhs: CommaExprList, rhs: [CommaExprList, ',', E],    action: commaExprCons }
+      # The epsilon ScopeEnter reduces only before a token that starts a
+      # declaration (a type keyword, TYPE_NAME, a DeclSpec), which never starts an
+      # expression or is `;`, so the two forms split on the token after `(`.
+      - { lhs: Stmt, rhs: ['for', '(', ScopeEnter, Decl, ';', Expr?, ';', Expr?, ')', Stmt], action: stmtForDecl }
+      - { lhs: Stmt, rhs: ['for', '(', Expr?, ';', Expr?, ';', Expr?, ')', Stmt], action: stmtForExpr }
       # `return Expr ;` takes the comma-tier expression (C11 6.8.6.4), like
-      # `Expr ;`: `return (void)f(), 0;`.
-      - { lhs: Stmt, rhs: ['return', Expr, ';'],         action: stmtReturn }
-      - { lhs: Stmt, rhs: ['return', ';'],                action: stmtReturnVoid }
+      # `Expr ;`: `return (void)f(), 0;`. A bare `return;` has a null Expr.
+      - { lhs: Stmt, rhs: ['return', Expr?, ';'],        action: stmtReturn }
       # `break;` / `continue;` — bare keyword + semicolon. Grammar accepts
       # them anywhere a Stmt is valid; semantic validity (must be inside a
       # loop) is enforced by the downstream C# compiler. Matches real C.
@@ -1106,12 +1094,11 @@ productions:
       - { lhs: ArrDeclarator, rhs: [ID, '[', ']', ArrDims], action: arrDeclOpenRows }
       - { lhs: ArrDeclarator, rhs: ['(', ArrDeclarator, ')'], action: arrDeclParen }
 
-  # A brace-enclosed initializer, `{ … }` or the C23 empty `{ }` (InitList needs
-  # at least one element, so a `}` right after `{` selects the empty form).
+  # A brace-enclosed initializer, `{ … }` or the C23 empty `{ }` (C23 6.7.10's
+  # `{ }`, a null InitList; the binder gates it on -std=c23).
   - derivation: none
     rules:
-      - { lhs: BraceInit, rhs: ['{', InitList, '}'], action: braceInit }
-      - { lhs: BraceInit, rhs: ['{', '}'],           action: braceInitEmpty }
+      - { lhs: BraceInit, rhs: ['{', InitList?, '}'], action: braceInit }
 
   # (The MemberInitList / MemberInit symbols are retired: a `.field =` designator is
   # an InitElem, so struct designators work in every brace-initializer position and
@@ -1156,8 +1143,9 @@ productions:
 
   # Comma operator — the full-expression tier above assignment. Left-assoc,
   # lowest precedence. `Expr → E` is the no-comma passthrough; `Expr → Expr , E`
-  # is the operator. Only `( Expr )` (Primary) and `Expr ;` (stmtExpr) use Expr,
-  # so call-argument / initializer commas (on `E`) stay separators.
+  # is the operator. Expr is used where C11 says `expression` (`( Expr )`, an
+  # expression statement, `return`, the controlling expressions and the `for`
+  # clauses), so call-argument / initializer commas (on `E`) stay separators.
   - derivation: leftmost
     rules:
       - { lhs: Expr, rhs: [Expr, ',', E], action: commaOp }
@@ -1214,7 +1202,7 @@ productions:
       # `&` token and the parser disambiguates by context — binary at this
       # precedence vs unary in `Unary`. LALR(1) handles this cleanly because
       # the LHS of `BAnd & Equ` is BAnd (already-reduced expr) whereas the
-      # unary `& Unary` only fires when there's no left-hand expression yet.
+      # unary `& CastExpr` only fires when there's no left-hand expression yet.
       - { lhs: BAnd, rhs: [BAnd, '&', Equ], action: bAnd }
       - { lhs: BAnd, rhs: [Equ] }
 
@@ -1246,50 +1234,56 @@ productions:
 
   - derivation: leftmost
     rules:
-      - { lhs: Mul, rhs: [Mul, '*', Unary], action: mul }
-      - { lhs: Mul, rhs: [Mul, '/', Unary], action: div }
-      - { lhs: Mul, rhs: [Mul, '%', Unary], action: mod }
-      - { lhs: Mul, rhs: [Unary] }
+      - { lhs: Mul, rhs: [Mul, '*', CastExpr], action: mul }
+      - { lhs: Mul, rhs: [Mul, '/', CastExpr], action: div }
+      - { lhs: Mul, rhs: [Mul, '%', CastExpr], action: mod }
+      - { lhs: Mul, rhs: [CastExpr] }
 
-  # Unary operators are right-associative: `--x` is `-(-x)`, `**p` is `*(*p)`.
-  # Cast `(Type) Unary` lives here too so its precedence matches real C
-  # (binds tighter than mul/div, looser than postfix calls). Disambiguates
-  # from `Primary -> '(' E ')'` by lookahead: after `(`, a Type-starting
-  # keyword (int/char/float/double/void) → cast; anything else → paren-expr.
+  # The cast and unary tiers, as C11 6.5.4 / 6.5.3 split them. A cast is its own
+  # tier between Mul and Unary (`cast-expression: unary-expression | ( type-name )
+  # cast-expression`), and the unary operators `& * + - ~ !` take a cast-expression
+  # while `sizeof`, `++` and `--` take a unary-expression. That split is what lets
+  # `sizeof(T) * x` reduce `sizeof(T)` before the `*`: a Unary can no longer be a
+  # cast, so after `sizeof ( Type )` nothing is open that a `*`, `-`, `&` or `+`
+  # could continue (the old shape parsed it as `sizeof((T)*x)`, and the folder
+  # had to parenthesize the sizeof). It also rejects `sizeof (T) x` and
+  # `++(T)x`, which C does too. A cast disambiguates from the `( Expr )` primary by
+  # the token after `(`: a Type-starting keyword or TYPE_NAME is a cast. The
+  # operators are right-associative: `--x` is `-(-x)`, `**p` is `*(*p)`.
   - derivation: rightmost
     rules:
-      - { lhs: Unary, rhs: ['*',  Unary], action: deref }
-      - { lhs: Unary, rhs: ['&',  Unary], action: addrOf }
-      - { lhs: Unary, rhs: ['-',  Unary], action: neg }
+      - { lhs: CastExpr, rhs: ['(', Type, ')', CastExpr], action: cast }
+      - { lhs: CastExpr, rhs: [Unary] }
+      - { lhs: Unary, rhs: ['*',  CastExpr], action: deref }
+      - { lhs: Unary, rhs: ['&',  CastExpr], action: addrOf }
+      - { lhs: Unary, rhs: ['-',  CastExpr], action: neg }
       # Unary plus (C89 §6.5.3.3) — value-preserving no-op beyond the integer
       # promotions. Real code spells it for symmetry (`sexp_inc(ctx, +1)`,
       # chibi's `(+1 | (x >> 63))` sign trick). Lowered to C#'s own unary `+`.
-      - { lhs: Unary, rhs: ['+',  Unary], action: uPlus }
-      - { lhs: Unary, rhs: ['~',  Unary], action: bNot }
+      - { lhs: Unary, rhs: ['+',  CastExpr], action: uPlus }
+      - { lhs: Unary, rhs: ['~',  CastExpr], action: bNot }
       # Logical `!` — C-truthy NOT. Lowers to `(Cond.B(E) ? 0 : 1)` so the
       # result is int (matching C: `!x` yields 0 or 1, never bool).
-      - { lhs: Unary, rhs: ['!',  Unary], action: lNot }
-      # Prefix ++/-- — right-associative like the rest of Unary. C and C#
-      # both forbid stacking (`++++x` doesn't compile in either), but the
-      # grammar lets them stack and the C# compiler will diagnose.
+      - { lhs: Unary, rhs: ['!',  CastExpr], action: lNot }
+      # Prefix ++/-- take a unary-expression (C11 6.5.3). C and C# both forbid
+      # stacking (`++++x` doesn't compile in either), but the grammar lets them
+      # stack and the C# compiler will diagnose.
       - { lhs: Unary, rhs: ['++', Unary], action: preInc }
       - { lhs: Unary, rhs: ['--', Unary], action: preDec }
-      - { lhs: Unary, rhs: ['(', Type, ')', Unary], action: cast }
       # Compound literal (C99) — `(Type){ init }`. An unnamed object of `Type`
       # initialized by the brace list, usable in any expression position. Lowers
       # to a C# object-creation `new Type { field = val, … }` (struct/union only —
       # the Type grammar has no abstract array declarator, so `(int[]){…}` is out
       # of scope and fails loudly). Conflict-free with the cast above: after
-      # `( Type )` the `{` lookahead is not in FIRST(Unary), so the parser shifts
+      # `( Type )` the `{` lookahead is not in FIRST(CastExpr), so the parser shifts
       # into the compound literal; with anything else it's a cast. It is a
       # POSTFIX expression (C11 6.5.2), so `(struct S){…}.field`, `(int[]){…}[i]`
       # and `(T){…}->…` chain like any other postfix operand. Member designators
-      # (`.f =`) are InitElems, as in every brace initializer.
-      - { lhs: Postfix, rhs: ['(', Type, ')', '{', InitList, '}'],     action: compoundLit }
-      # Empty compound literal `(Type){}` (C23) — a zero-valued unnamed object.
-      # Lowers to `default(Type)`, which is universal (works for scalar, struct,
-      # union, pointer). The `}` after `{` keeps it disjoint from the two above.
-      - { lhs: Postfix, rhs: ['(', Type, ')', '{', '}'],               action: compoundLitEmpty }
+      # (`.f =`) are InitElems, as in every brace initializer. The InitList is
+      # optional: the empty compound literal `(Type){}` (C23) is a zero-valued
+      # unnamed object, lowered to `default(Type)` (scalar, struct, union, pointer)
+      # and gated on -std=c23 by the binder.
+      - { lhs: Postfix, rhs: ['(', Type, ')', '{', InitList?, '}'],    action: compoundLit }
       # Array compound literal (C99) — `(int[]){1,2,3}` / `(int[3]){1,2}`. The
       # abstract array declarator is scoped to this context (not the general Type)
       # to avoid grammar conflicts. Conflict-free with the cast / struct-compound
@@ -1319,8 +1313,8 @@ productions:
 
   - derivation: leftmost
     rules:
-      - { lhs: Postfix, rhs: [Postfix, '(', ArgList, ')'], action: call }
-      - { lhs: Postfix, rhs: [Postfix, '(', ')'],            action: callNoArgs }
+      # A call's argument list is optional (C11 6.5.2's `( argument-expression-list? )`).
+      - { lhs: Postfix, rhs: [Postfix, '(', ArgList?, ')'], action: call }
       # `va_arg(ap, Type)` (<stdarg.h>) — dedicated production because the second
       # operand is a TYPE (same reason `sizeof(Type)` has its own rule). Starts
       # with the unique `va_arg` terminal, so it's conflict-free with the call
@@ -1426,7 +1420,7 @@ productions:
       # other expression position is rejected loudly in the IR.
       - { lhs: Primary, rhs: ['EMBED'],     action: embed }
       # Parenthesized expression uses the full `Expr` tier, so `( a, b )` is the
-      # comma operator. (Cast `( Type ) Unary` still disambiguates by the first
+      # comma operator. (Cast `( Type ) CastExpr` still disambiguates by the first
       # token after `(`; function calls use `ArgList`, not `Expr`.)
       - { lhs: Primary, rhs: ['(', Expr, ')'], action: paren }
 
@@ -1489,10 +1483,10 @@ productions:
       - { lhs: Attr, rhs: [ID],                                      action: attrIdent }
       - { lhs: Attr, rhs: ['_Noreturn'],                             action: attrNoreturn }
       - { lhs: Attr, rhs: [ID, ':', ':', ID],                        action: attrNamespaced }
-      - { lhs: Attr, rhs: [ID, '(', ')'],                            action: attrCallEmpty }
-      - { lhs: Attr, rhs: [ID, '(', E, ')'],                         action: attrCall }
-      - { lhs: Attr, rhs: [ID, ':', ':', ID, '(', ')'],              action: attrNsCallEmpty }
-      - { lhs: Attr, rhs: [ID, ':', ':', ID, '(', E, ')'],           action: attrNsCall }
+      # The call forms' argument is optional (`E?`), so an empty `deprecated()`
+      # is the same record as `deprecated("msg")` with a null argument.
+      - { lhs: Attr, rhs: [ID, '(', E?, ')'],                        action: attrCall }
+      - { lhs: Attr, rhs: [ID, ':', ':', ID, '(', E?, ')'],          action: attrNsCall }
 
 lexer:
   root:
