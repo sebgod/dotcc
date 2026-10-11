@@ -221,11 +221,11 @@ public sealed class ZigGrammarTests
     [Fact]
     public void Range_multi_object_and_capture_while_loops_are_values()
     {
-        FirstNode<Zig.ForExpr>("fn f(a: []const u8) usize { const i = for (a, 0..) |x, j| { if (x > 0) break j; } else 0; return i; }")
-            .Arg11.Content.ShouldBeOfType<Zig.IntLit>();
-        FirstNode<Zig.ForExpr>("fn f(n: usize) void { k -= for (0..n) |i| { if (i > 2) break i; } else 0; }").ShouldNotBeNull();
-        FirstNode<Zig.WhileExpr>("fn f(it: ?*N) void { const n = while (it) |x| { break x; } else { return; }; _ = n; }")
-            .Arg9.Content.ShouldBeOfType<Zig.Block>();
+        FirstNode<Zig.ForValue>("fn f(a: []const u8) usize { const i = for (a, 0..) |x, j| { if (x > 0) break j; } else 0; return i; }")
+            .Arg10.Content.ShouldBeOfType<Zig.LoopElse>().Arg2.Content.ShouldBeOfType<Zig.IntLit>();
+        FirstNode<Zig.ForValue>("fn f(n: usize) void { k -= for (0..n) |i| { if (i > 2) break i; } else 0; }").ShouldNotBeNull();
+        FirstNode<Zig.WhileValue>("fn f(it: ?*N) void { const n = while (it) |x| { break x; } else { return; }; _ = n; }")
+            .Arg7.Content.ShouldBeOfType<Zig.LoopElse>().Arg2.Content.ShouldBeOfType<Zig.Block>();
         // At statement start the statement loop keeps its `else`.
         FirstNode<Zig.ForStmt>("fn f(a: []const u8) void { for (a, 0..) |x, j| { _ = x; _ = j; } else {} }").ShouldNotBeNull();
     }
@@ -235,10 +235,10 @@ public sealed class ZigGrammarTests
     {
         FirstNode<Zig.Prong>("fn f(k: u8) u8 { return while (true) { switch (k) { 0 => break 1, else => {} } }; }").Arg3.Content.ShouldBeOfType<Zig.FbBreakValue>();
         FirstNode<Zig.FbBreakValue>("fn f(k: u8) u8 { return while (true) { switch (k) { else => if (k > 1) break 0 } }; }").ShouldNotBeNull();
-        FirstNode<Zig.WhileNoElseExpr>("fn f() u8 { const x: u8 = while (true) { break 3; }; return x; }").ShouldNotBeNull();
+        FirstNode<Zig.WhileValue>("fn f() u8 { const x: u8 = while (true) { break 3; }; return x; }").Arg7.ShouldBeNull();
         // An `else` after the Block belongs to the value `while`, not to an enclosing `if`.
         FirstNode<Zig.IfThenExpr>("fn f(c: bool) void { _ = if (c) while (c) { break; } else 1; }")
-            .Arg5.Content.ShouldBeOfType<Zig.WhileExpr>();
+            .Arg5.Content.ShouldBeOfType<Zig.WhileValue>();
         FirstNode<Zig.ForStmt>("fn f(xs: []u8) !void { for (xs) |*x| { x.* = 0; } else return error.E; }").ShouldNotBeNull();
         FirstNode<Zig.MemberExternFn>("const H = struct { pub extern fn g(x: u32) void; };").ShouldNotBeNull();
     }
@@ -248,7 +248,7 @@ public sealed class ZigGrammarTests
     {
         FirstNode<Zig.Prong>("fn f(e: *E) void { switch (e.*) { .len => |*l| l.* -= 1, else => {} } }").Arg3.Content.ShouldBeOfType<Zig.ProngAssign>();
         FirstNode<Zig.ParamUnnamed>("extern fn g(*const u32, n: u32) bool;").ShouldNotBeNull();
-        FirstNode<Zig.InlineForExpr>("fn f() usize { return inline for (a, b,) |x, y| { _ = x; break y; } else 0; }").ShouldNotBeNull();
+        FirstNode<Zig.InlineForValue>("fn f() usize { return inline for (a, b,) |x, y| { _ = x; break y; } else 0; }").ShouldNotBeNull();
         // zig's `comptime Expr;`: the `;` closes it.
         FirstNode<Zig.ComptimeLoop>("fn f() void { comptime for (xs) |x| { _ = x; }; }").ShouldNotBeNull();
     }
@@ -260,7 +260,7 @@ public sealed class ZigGrammarTests
         FirstNode<Zig.ExternConst>("pub extern const etext: anyopaque;").ShouldNotBeNull();
         FirstNode<Zig.WhileStmt>("fn f(n: u32) ?u32 { var i: u32 = 0; while (i < n) : (i += 1) { break; } else return null; return i; }")
             .ShouldNotBeNull();
-        FirstNode<Zig.ForExpr>("fn f(xs: []u8) u8 { return for (xs) |x| { break x; } else { return 0; }; }").Arg11.Content.ShouldBeOfType<Zig.Block>();
+        FirstNode<Zig.ForValue>("fn f(xs: []u8) u8 { return for (xs) |x| { break x; } else { return 0; }; }").Arg10.Content.ShouldBeOfType<Zig.LoopElse>().Arg2.Content.ShouldBeOfType<Zig.Block>();
         FirstNode<Zig.FnTypeParamVariadic>("const F = *const fn (h: *u8, ...) callconv(.c) u32;").ShouldNotBeNull();
         FirstNode<Zig.FnTypeParamComptimeUnnamed>("const F = fn (comptime type, anytype) void;").ShouldNotBeNull();
     }
@@ -288,8 +288,23 @@ public sealed class ZigGrammarTests
         FirstNode<Zig.ForCapture>("fn f(xs: []u8) void { for (xs) |*x| { x.* = 0; } }").Arg0.ShouldNotBeNull();
         // A label prefixes any value loop.
         FirstNode<Zig.LabeledLoopExpr>("fn f(xs: []u8) u8 { return outer: for (xs) |x| { break :outer x; } else 0; }")
-            .Arg2.Content.ShouldBeOfType<Zig.ForExpr>();
-        FirstNode<Zig.WhileExpr>("fn f(it: ?*N) u8 { return while (it) |n| : (step()) { break n.v; } else 0; }").Arg5.ShouldNotBeNull();
+            .Arg2.Content.ShouldBeOfType<Zig.ForValue>();
+        FirstNode<Zig.WhileValue>("fn f(it: ?*N) u8 { return while (it) |n| : (step()) { break n.v; } else 0; }").Arg5.ShouldNotBeNull();
+    }
+
+    [Fact]
+    public void A_value_loop_has_an_optional_else_and_inline_is_a_loop_statement()
+    {
+        // zig's ForExpr / WhileExpr: `Prefix Expr (else Expr)?`. With no `else`, in a prong body it is the statement loop.
+        FirstNode<Zig.Prong>("fn f(v: V, h: *H) void { switch (v) { .list => |l| for (l.items) |e| h.update(e), else => {} } }")
+            .Arg3.Content.ShouldBeOfType<Zig.ForValue>().Arg9.Content.ShouldBeOfType<Zig.LoopBodyExpr>();
+        // zig's LoopStatement <- inline? (For / While): a labeled `inline for`, and an `inline for` prong body.
+        FirstNode<Zig.LabeledLoop>("fn f() void { outer: inline for (xs) |x| { _ = x; } }").Arg2.Content.ShouldBeOfType<Zig.InlineLoop>();
+        FirstNode<Zig.Prong>("fn f(u: U) void { switch (u) { .s => |s| inline for (s.names) |n| { g(n); }, else => {} } }")
+            .Arg3.Content.ShouldBeOfType<Zig.InlineForValue>();
+        // The no-`;` body ended by `else` (zig's `ForPrefix AssignExpr else Statement`, std's zig/WindowsSdk.zig).
+        FirstNode<Zig.ForStmtThen>("fn f(xs: []u8) void { for (xs) |*n| n.* = g() orelse continue else if (h()) |_| return; }")
+            .Arg9.Content.ShouldBeOfType<Zig.AssignArm>();
     }
 
     [Fact]
@@ -333,7 +348,7 @@ public sealed class ZigGrammarTests
         FirstNode<Zig.Prong>("fn f(x: u8) u8 { switch (x) { 0 => return 1, else => return } }").Arg3.Content.ShouldBeOfType<Zig.ReturnExpr>();
         FirstNode<Zig.Prong>("fn f(x: E!u8) void { switch (x) { else => |e| if (e) |v| return v } }")
             .Arg3.Content.ShouldBeOfType<Zig.IfThenExpr>();
-        FirstNode<Zig.Prong>("fn f(n: u8) void { switch (n) { else => for (0..n) |_| { g(); } } }").Arg3.Content.ShouldBeOfType<Zig.ProngLoop>();
+        FirstNode<Zig.Prong>("fn f(n: u8) void { switch (n) { else => for (0..n) |_| { g(); } } }").Arg3.Content.ShouldBeOfType<Zig.ForValue>().Arg10.ShouldBeNull();
         FirstNode<Zig.Prong>("fn f(comptime T: type) u8 { return switch (T) { u8 => comptime { return 1; }, else => 2 }; }")
             .Arg3.Content.ShouldBeOfType<Zig.ProngComptimeBlock>();
     }
@@ -355,22 +370,22 @@ public sealed class ZigGrammarTests
         FirstNode<Zig.CallArgs>("fn f(xs: []i32) void { g(for (xs) |x| (if (x <= 0) break false) else true); }")
             .ShouldNotBeNull();
         FirstNode<Zig.BoolAnd>("fn f(c: bool, xs: []u8) bool { return c and for (xs) |x| { if (x == 0) break false; } else true; }")
-            .Arg2.Content.ShouldBeOfType<Zig.ForExpr>();
+            .Arg2.Content.ShouldBeOfType<Zig.ForValue>();
     }
 
     [Fact]
     public void A_value_loop_body_may_be_an_expression()
     {
         // zig's `ForPrefix Expr else Expr`: the body is a LoopBodyExpr; a braced body stays a Block.
-        FirstNode<Zig.ForExpr>("fn f(xs: []u8) u8 { return for (xs) |x| switch (x) { 0 => break x, else => {} } else 1; }")
+        FirstNode<Zig.ForValue>("fn f(xs: []u8) u8 { return for (xs) |x| switch (x) { 0 => break x, else => {} } else 1; }")
             .Arg9.Content.ShouldBeOfType<Zig.LoopBodyExpr>().Arg0.Content.ShouldBeOfType<Zig.SwitchExpr>();
-        FirstNode<Zig.ForExpr>("fn f(xs: []i32) bool { return for (xs) |x| (if (x <= 0) break false) else true; }")
+        FirstNode<Zig.ForValue>("fn f(xs: []i32) bool { return for (xs) |x| (if (x <= 0) break false) else true; }")
             .Arg9.Content.ShouldBeOfType<Zig.LoopBodyExpr>();
-        FirstNode<Zig.WhileExpr>("fn f(n: u32) u32 { var i: u32 = 0; return while (i < n) : (i += 1) g(i) else 0; }")
+        FirstNode<Zig.WhileValue>("fn f(n: u32) u32 { var i: u32 = 0; return while (i < n) : (i += 1) g(i) else 0; }")
             .Arg6.Content.ShouldBeOfType<Zig.LoopBodyExpr>();
-        FirstNode<Zig.ForExpr>("fn f(xs: []u8) u8 { return for (xs) |x| { break x; } else 0; }").Arg9.Content.ShouldBeOfType<Zig.Block>();
+        FirstNode<Zig.ForValue>("fn f(xs: []u8) u8 { return for (xs) |x| { break x; } else 0; }").Arg9.Content.ShouldBeOfType<Zig.Block>();
         // An `else` after an else-less `if` body binds to the `if` (the nearest), as in zig.
-        FirstNode<Zig.ForExpr>("fn f(xs: []u8) u8 { return for (xs) |x| if (x > 0) break x else 2 else 3; }")
+        FirstNode<Zig.ForValue>("fn f(xs: []u8) u8 { return for (xs) |x| if (x > 0) break x else 2 else 3; }")
             .Arg9.Content.ShouldBeOfType<Zig.LoopBodyExpr>().Arg0.Content.ShouldBeOfType<Zig.IfElseExpr>();
     }
 

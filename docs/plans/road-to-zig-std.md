@@ -1246,8 +1246,8 @@ place a poison IS needed is the top-level tombstone, and that is what landed.
 
 ### S9 — surface-debt bricks (many S/M; parallel any time; wall-finder-ranked)
 
-**Current ranking (2026-10-11, after the worklist batches and zig-grammar-peg P1 to P5 step 2 and P3 and P4: 525 of 553 files
-parse-clean, 94.9%; it was 341 / 61.7% on 2026-10-09 and 187 / 33.8% at the 2026-09-23 report).** The batches (#306
+**Current ranking (2026-10-11, after the worklist batches and zig-grammar-peg P1 to P5 step 2 and P3, P4 and the loop rules: 528 of 553 files
+parse-clean, 95.5%; it was 341 / 61.7% on 2026-10-09 and 187 / 33.8% at the 2026-09-23 report).** The batches (#306
 to #309) took an empty file, `align(N)` on an untyped declaration, `pub extern` / `extern var`, the inline
 `extern`/`packed` container field types, `enum(uN)` fields, a named `extern union`, labeled-block field values,
 `if`-typed fields, `**T`, empty `enum {}` / `struct {}`, `union(enum(uN))`, extern `callconv` and layout prong types.

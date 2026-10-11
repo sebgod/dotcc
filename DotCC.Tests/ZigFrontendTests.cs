@@ -422,6 +422,17 @@ public sealed class ZigFrontendTests
         ex.Message.ShouldContain("need names");
     }
 
+    [Fact]
+    public void Rejects_an_assignment_to_a_loop_in_a_prong()
+    {
+        // zig: a prong body is `Expr (AssignOp Expr)?` and a loop's brace-less body an Expr, so `for (xs) |x| sum += x` assigns
+        // to the loop ("invalid left-hand side to assignment"); the body needs braces.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "fn f(xs: []const u8, k: u8) u32 { var sum: u32 = 0; switch (k) { 0 => for (xs) |x| sum += x, else => {} } return sum; }\n" +
+            "pub fn main() u8 { return @intCast(f(&[_]u8{1}, 0)); }\n"));
+        ex.Message.ShouldContain("invalid left-hand side to assignment");
+    }
+
     [Theory]
     [InlineData("return if (get()) 1 else |_| 0;")]
     [InlineData("if (get()) { return 1; } else |_| { return 0; }")]

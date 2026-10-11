@@ -37,7 +37,9 @@ internal sealed partial class ZigLowering
         switch (loopItem.Content)
         {
             case Zig.ForStmt f:
-                return LowerInlineFor(f, loopItem);
+                return LowerInlineForLoop(f.Arg2, f.Arg6, f.Arg9, f.Arg10, loopItem);
+            case Zig.ForStmtThen f:
+                return LowerInlineForLoop(f.Arg2, f.Arg6, f.Arg9, f.Arg10, loopItem);
             // `inline while (cond) : (i = i + step) body` — comptime-UNROLLED while (Milestone T,
             // part 3). The loop counter must be a `comptime var` mutated by the continue-expression;
             // each round folds the condition (with the counter substituted in), unrolls a body copy,
@@ -61,22 +63,21 @@ internal sealed partial class ZigLowering
         + "unrolling) — the by-ref `|*x|` `for` forms, `inline for` over a runtime "
         + "slice, and a bare/expr-cont `inline while` are not supported yet"
         + (_currentFnName.Length > 0 ? $" (in '{_currentFnName}', a {loopItem.Content?.GetType().Name})" : ""));
-    /// <summary>Unroll an <c>inline for</c> (<c>forStmt</c>), by the shape of its objects: several objects walk comptime lists
-    /// (or arrays led by one) in lockstep; one object is a counted range, a comptime list, a comptime string or a fixed
-    /// array.</summary>
-    private CStmt LowerInlineFor(Zig.ForStmt f, Item loopItem)
+    /// <summary>Unroll an <c>inline for</c> over <paramref name="objsItem"/> / <paramref name="capsItem"/>, by the shape of its
+    /// objects: several objects walk comptime lists (or arrays led by one) in lockstep; one object is a counted range, a
+    /// comptime list, a comptime string or a fixed array. <paramref name="elseClause"/> is an <c>else Stmt</c> or null.</summary>
+    private CStmt LowerInlineForLoop(Item objsItem, Item capsItem, Item body, Item? elseClause, Item loopItem)
     {
-        var (objects, captures) = DecomposeForMulti(f.Arg2, f.Arg6);
-        var elseBody = ForElseBody(f.Arg10);
-        var body = f.Arg9;
+        var (objects, captures) = DecomposeForMulti(objsItem, capsItem);
+        var elseBody = ForElseBody(elseClause);
         // `inline for (a, b, 0.., …) |x, y, i, …|` — comptime lists walked in lockstep (road-to-zig-std S6; any number
         // of them since task #108); `inline for (s.ptrs, &ptrs, field_types) |in, *out, field_type|` (std.MultiArrayList,
         // task #108) leads with an array. An `else` (std.json.static's innerParse, task #210) runs after the copies.
         if (objects.Count > 1)
         {
             return objects[0] is { IsRange: false } first && TryComptimeIterable(first.Expr, out _)
-                ? UnrollComptimeMultiFor(f.Arg2, f.Arg6, body, elseBody)
-                : UnrollMixedInlineFor(f.Arg2, f.Arg6, body, elseBody);
+                ? UnrollComptimeMultiFor(objsItem, capsItem, body, elseBody)
+                : UnrollMixedInlineFor(objsItem, capsItem, body, elseBody);
         }
         var obj = objects[0];
         var (capture, byRef) = captures[0];
@@ -163,28 +164,28 @@ internal sealed partial class ZigLowering
             }
         }
     }
-    /// <summary>A statement <c>while</c> (<c>whileStmt</c>, zig's WhileStatement): a plain <c>while</c>, a <c>For</c> when it has
-    /// a continue clause (which then runs on <c>continue</c> too), <see cref="LowerWhileElseStmt"/> with an <c>else</c>, and
-    /// <see cref="LowerWhileCapture"/> with a payload capture (an optional's payload each turn; <c>else |e|</c> binds an
-    /// error union's error).</summary>
-    private CStmt LowerWhileStatement(Zig.WhileStmt w)
+    /// <summary>A statement <c>while</c> (zig's WhileStatement) from its parts, an <c>else Payload? Stmt</c> clause or null: a
+    /// plain <c>while</c>, a <c>For</c> when it has a continue clause (which then runs on <c>continue</c> too),
+    /// <see cref="LowerWhileElseStmt"/> with an <c>else</c>, and <see cref="LowerWhileCapture"/> with a payload capture (an
+    /// optional's payload each turn; <c>else |e|</c> binds an error union's error).</summary>
+    private CStmt LowerWhileLoop(Item cond, Item? payload, Item? cont, Item body, Item? elseClause)
     {
-        var (capture, byRef, _) = PayloadParts(w.Arg4);
-        var contPost = ContPostOf(w.Arg5);
-        var (elseBody, errName) = ElseStmtParts(w.Arg7);
+        var (capture, byRef, _) = PayloadParts(payload);
+        var contPost = ContPostOf(cont);
+        var (elseBody, errName) = ElseStmtParts(elseClause);
         if (capture is null)
         {
             if (errName is not null)
             {
                 throw new IrUnsupportedException("zig `while (eu) … else |e| …` needs a payload capture on the `while` (`|v|` or `|_|`)");
             }
-            if (elseBody is not null) { return LowerWhileElseStmt(w.Arg2, w.Arg6, elseBody, contPost); }
+            if (elseBody is not null) { return LowerWhileElseStmt(cond, body, elseBody, contPost); }
             return contPost is { } post
-                ? new For(null, LowerExpr(w.Arg2), post(), LowerStmt(w.Arg6))
-                : new While(LowerExpr(w.Arg2), LowerStmt(w.Arg6));
+                ? new For(null, LowerExpr(cond), post(), LowerStmt(body))
+                : new While(LowerExpr(cond), LowerStmt(body));
         }
         if (byRef) { throw new IrUnsupportedException("zig `while (opt) |*x|`: a by-reference while capture is not supported yet"); }
-        return LowerWhileCapture(w.Arg2, capture, w.Arg6, elseBody is { } eb ? (eb, errName) : null, contPost);
+        return LowerWhileCapture(cond, capture, body, elseBody is { } eb ? (eb, errName) : null, contPost);
     }
     /// <summary>The post-iteration step of a <c>while</c> continue clause (<c>WhileCont</c>): an assignment, an expression or a
     /// block; null for none.</summary>
@@ -203,15 +204,14 @@ internal sealed partial class ZigLowering
         if (errName is not null) { throw new CompileException("zig: a `for` loop's `else` takes no capture"); }
         return body;
     }
-    /// <summary>A statement <c>for</c> (<c>forStmt</c>, zig's ForStatement), by the shape of its objects and captures: in a
-    /// comptime context a comptime list unrolls; an <c>else</c> walks every object in lockstep
+    /// <summary>A statement <c>for</c> (zig's ForStatement) from its parts, an <c>else Stmt</c> clause or null, by the shape of
+    /// its objects and captures: in a comptime context a comptime list unrolls; an <c>else</c> walks every object in lockstep
     /// (<see cref="LowerForParallel"/>); one bounded range is the counted loop; one object is a slice walk
     /// (<see cref="LowerForSlice"/>, by value or by reference); several are <see cref="LowerForMulti"/>.</summary>
-    private CStmt LowerForStatement(Zig.ForStmt f)
+    private CStmt LowerForLoop(Item objsItem, Item capsItem, Item body, Item? elseClause)
     {
-        var (objects, captures) = DecomposeForMulti(f.Arg2, f.Arg6);
-        var elseBody = ForElseBody(f.Arg10);
-        var body = f.Arg9;
+        var (objects, captures) = DecomposeForMulti(objsItem, capsItem);
+        var elseBody = ForElseBody(elseClause);
         // A plain `for` over a comptime member list in a COMPTIME context (std.meta.stringToEnum's `comptime build_kvs:
         // { for (@typeInfo(T).@"enum".field_names, 0..) |name, i| kvs_array[i] = .{ name, @field(T, name) }; … }`, task
         // #116): zig runs the loop at compile time, so each capture is comptime-known, which is what `inline for`'s unroll
@@ -220,7 +220,7 @@ internal sealed partial class ZigLowering
         {
             return objects.Count == 1
                 ? UnrollComptimeFor(new[] { (ctList, captures[0].Name) }, body, elseBody)
-                : UnrollComptimeMultiFor(f.Arg2, f.Arg6, body, elseBody);
+                : UnrollComptimeMultiFor(objsItem, capsItem, body, elseBody);
         }
         // `for (…) |…| body else elsebody` (task #108): the else runs when the loop ends without a `break`.
         if (elseBody is not null) { return LowerForParallel(objects, captures, body, elseBody); }
@@ -235,7 +235,7 @@ internal sealed partial class ZigLowering
         }
         // The MULTI-object `for (a, b, 0.., …) |x, *y, i, …|` (task #108): `(s, N..)` walks the slice with its index; any
         // other shape walks every object in lockstep.
-        return LowerForMulti(f.Arg2, f.Arg6, body);
+        return LowerForMulti(objsItem, capsItem, body);
     }
     /// <summary><c>for (start..end) |i| body</c> → C <c>for (usize i = start; i &lt; end; i++) body</c>. The capture
     /// <c>i</c> is the usize loop index (its own scope so it doesn't leak); the end is cast to usize so the comparison is
@@ -651,7 +651,12 @@ internal sealed partial class ZigLowering
     private int _inlineUnrollDepth;
     /// <summary>True for a runtime loop statement (every <c>LoopStmt</c> form), which gets an unlabeled
     /// break target (<see cref="LowerLoopWithBreakTarget"/>).</summary>
-    private static bool IsRuntimeLoopStmt(object? content) => content is Zig.WhileStmt or Zig.ForStmt;
+    private static bool IsRuntimeLoopStmt(object? content) => content is Zig.WhileStmt or Zig.ForStmt
+        or Zig.WhileStmtThen or Zig.ForStmtThen or Zig.WhileValue { Arg7: null } or Zig.ForValue { Arg10: null };
+    /// <summary>True for a value loop with no <c>else</c> (zig's else is optional), labeled or not: its value is void, so where
+    /// a statement stands it is the statement loop.</summary>
+    private static bool IsVoidLoop(Item e) => e.Content is Zig.WhileValue { Arg7: null } or Zig.ForValue { Arg10: null }
+        or Zig.InlineForValue { Arg11: null } || e.Content is Zig.LabeledLoopExpr l && IsVoidLoop(l.Arg2);
     /// <summary>Lower a runtime loop with an unlabeled break target (<see cref="LoopBreakTarget"/>), so a
     /// <c>break</c> inside a <c>switch</c> in its body exits the loop, as in zig. The label is emitted
     /// after the loop only when such a break used it; otherwise the loop lowers exactly as before.</summary>

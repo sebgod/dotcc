@@ -26,6 +26,7 @@ internal sealed partial class ZigLowering
         _ when _activeSwitchValueLabel is { } valueLabel && !IsUnreachableItem(e) => Hoisted(() => LowerLabeledBreak(valueLabel, e)),
         // `=> if (c) x,` / `=> if (c) { … } else { … },` (zig-grammar-peg P3a): an `if` whose arms are statements.
         _ when IsStatementIf(e) => LowerStatementIf(e),
+        _ when IsVoidLoop(e) => LowerStmt(e),
         Zig.SwitchExpr s => LowerSwitchStmt(s.Arg2, s.Arg5),
         _ => Hoisted(() => new ExprStmt(LowerExpr(e))),
     };
@@ -70,7 +71,7 @@ internal sealed partial class ZigLowering
         }
         return elseProng;
     }
-    /// <summary>Lower one prong's body (a block, a value, a <c>return</c>, a jump, an assignment, a loop) as a statement:
+    /// <summary>Lower one prong's body (a block, a value, a <c>return</c>, a jump, an assignment) as a statement:
     /// the prong a comptime subject selected, or any prong of a runtime switch once its capture is bound.</summary>
     private CStmt LowerSelectedProng(ZigProng prong) => prong switch
     {
@@ -80,7 +81,6 @@ internal sealed partial class ZigLowering
         { ReturnsVoid: true } => LowerReturnVoid(),
         { Jump: { } j } => LowerProngJump(j),
         { Assign: { } a } => LowerAssignProngBody(a.Target, a.Op, a.Value),
-        { Loop: { } loop } => LowerStmt(loop),
         _ => new Seq(new List<CStmt>()),
     };
     /// <summary>A prong body of a RUNTIME switch: as <see cref="LowerSelectedProng"/>, but a <c>comptime { … }</c> arm needs
@@ -134,6 +134,7 @@ internal sealed partial class ZigLowering
         Zig.Grouped g => LowerArmStmt(g.Arg1),
         _ when IsNoreturnArm(arm) => LowerExitArm(arm),
         _ when IsStatementIf(arm) => LowerStatementIf(arm),
+        _ when IsVoidLoop(arm) => LowerStmt(arm),
         Zig.SwitchExpr s => LowerSwitchStmt(s.Arg2, s.Arg5),
         _ => Hoisted(() => new ExprStmt(LowerExpr(arm))),
     };
@@ -435,6 +436,7 @@ internal sealed partial class ZigLowering
         // `fillValue`: each prong's value expression fills the result temp instead of being a statement.
         CStmt ProngValue(Item valueItem) => fillValue is { } fill ? fill(valueItem)
             : IsStatementIf(valueItem) ? LowerStatementIf(valueItem)   // `.lib => |n| if (n == w) return true,` (P3a)
+            : IsVoidLoop(valueItem) ? LowerStmt(valueItem)   // `.list => |l| for (l.items) |e| h.update(e),` (std's Build.zig)
             : new ExprStmt(LowerExpr(valueItem));
         var isPtr = subject.Type.Unqualified is CType.Pointer;
         var pre = new List<CStmt>();
