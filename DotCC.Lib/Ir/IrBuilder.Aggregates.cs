@@ -89,13 +89,24 @@ internal sealed partial class IrBuilder
         }
     }
 
+    /// <summary>One brace-initializer element (C23 6.7.10's <c>designation?
+    /// initializer</c>): its Initializer, designated when the optional Designation
+    /// (Arg0) is present.</summary>
     private Init ParseInitElem(Item it) => it.Content switch
     {
-        C.InitElemExpr e => new InitVal(BuildExpr(e.Arg0)),
-        C.InitElemNest nest => new InitGroup(ParseInitList(nest.Arg1)),
-        C.InitElemDesig d => Designated(it, ParseDesignation(d.Arg0), new InitVal(BuildExpr(d.Arg2))),
-        C.InitElemDesigNest d => Designated(it, ParseDesignation(d.Arg0), new InitGroup(ParseInitList(d.Arg3))),
+        C.InitElem { Arg0: { Content: C.Designation d } } e => Designated(it, ParseDesignation(d.Arg0), ParseInitializer(e.Arg1)),
+        C.InitElem e => ParseInitializer(e.Arg1),
         _ => new InitVal(BuildExpr(it)),
+    };
+
+    /// <summary>An element's Initializer: a braced list is a group (the C23 empty
+    /// <c>{ }</c>, gated, an empty one that zero-initializes its subobject), anything
+    /// else an expression.</summary>
+    private Init ParseInitializer(Item init) => init.Content switch
+    {
+        C.BraceInit { Arg1: null } => Gated(2023, "empty initializer", init, new InitGroup([])),
+        C.BraceInit { Arg1: { } list } => new InitGroup(ParseInitList(list)),
+        _ => new InitVal(BuildExpr(init)),
     };
 
     /// <summary>A designated element, gated C99 (as array designators when the path
@@ -104,20 +115,21 @@ internal sealed partial class IrBuilder
         => Gated(1999, path[0] is IndexDesignator ? "array designators" : "designated initializers", it,
             new InitDesignated(path, value));
 
-    /// <summary>The designator path of a <c>Designation</c>, outermost first.</summary>
-    private List<Designator> ParseDesignation(Item designation)
+    /// <summary>The designator path of a <c>DesignatorList</c> (a Designation without
+    /// its <c>=</c>), outermost first.</summary>
+    private List<Designator> ParseDesignation(Item designatorList)
     {
         var path = new List<Designator>();
         void Walk(Item n)
         {
             switch (n.Content)
             {
-                case C.DesignationCons c: Walk(c.Arg0); path.Add(ParseDesignator(c.Arg1)); break;
-                case C.DesignationOne o: path.Add(ParseDesignator(o.Arg0)); break;
+                case C.DesignatorListCons c: Walk(c.Arg0); path.Add(ParseDesignator(c.Arg1)); break;
+                case C.DesignatorListOne o: path.Add(ParseDesignator(o.Arg0)); break;
                 default: throw new IrUnsupportedException(TypeName(n.Content));
             }
         }
-        Walk(designation);
+        Walk(designatorList);
         return path;
     }
 
@@ -386,9 +398,12 @@ internal sealed partial class IrBuilder
         return child;
     }
 
-    /// <summary>A braced initializer for one subobject of <paramref name="type"/>.</summary>
+    /// <summary>A braced initializer for one subobject of <paramref name="type"/>. An
+    /// empty one (the C23 <c>{ }</c>) zero-initializes it: an aggregate gets an empty
+    /// node, a scalar its default value.</summary>
     private object BuildSubobject(CType type, InitGroup group)
     {
+        if (group.Items is [] && type.Unqualified is not CType.Array && !IsAggregateType(type)) { return new DefaultLit { Type = type }; }
         if (type.Unqualified is CType.Array arr && group.Items is [InitVal only] && StringArrayValue(arr, only.Value) is { } str)
         {
             return str;   // `char name[8] = { "…" }`

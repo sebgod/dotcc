@@ -1574,6 +1574,47 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
+    public void Nested_empty_initializer_zero_inits_its_subobject()
+    {
+        // C23 6.7.10: an element's initializer is an expression or any braced
+        // list, the empty `{}` included, positional or designated. An empty
+        // aggregate subobject stays zero; an empty scalar one is its default.
+        var src = WriteTemp("""
+            struct Point { int x; int y; };
+            struct Line { struct Point a, b; int n; };
+            int main() {
+                struct Line l = { {}, { 1, 2 }, {} };
+                struct Line d = { .a = { 3, 4 }, .b = {}, .n = 5 };
+                int m[2][2] = { {}, { 6, 7 } };
+                return l.b.y + d.n + m[1][1] + l.n;
+            }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c23"));
+            emitted.ShouldContain("b = new Point { x = 1, y = 2 }, n = default(int) };");
+            emitted.ShouldContain("b = new Point {  }, n = 5 };");
+            emitted.ShouldContain("stackalloc int[]{ 0, 0, 6, 7 }");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Theory]
+    [InlineData("struct P { int x; }; struct L { struct P a; int n; };\nint main() { struct L l = { {}, 1 }; return l.n; }")]
+    [InlineData("struct P { int x; }; struct L { struct P a; int n; };\nint main() { struct L l = { .a = {} }; return l.n; }")]
+    public void Nested_empty_initializer_gated_as_c23_under_pedantic(string body)
+    {
+        var src = WriteTemp(body);
+        try
+        {
+            Should.Throw<CompileException>(() =>
+                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17"), warnings: WarningFlags.Default | WarningFlags.PedanticErrors))
+                .Message.ShouldContain("empty initializer");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void Empty_initializer_gated_as_c23_under_pedantic()
     {
         var src = WriteTemp("struct S { int a; }; int main() { struct S s = {}; return s.a; }");
