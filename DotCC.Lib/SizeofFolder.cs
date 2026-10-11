@@ -8,25 +8,17 @@ using LALR.CC.LexicalGrammar;
 namespace DotCC;
 
 /// <summary>
-/// Folds <c>sizeof(T)</c> to its numeric value in the token stream so that
-/// <c>sizeof(int) * CHAR_BIT</c> becomes <c>4 * 8</c> which the LALR parser
-/// handles without conflict. Without this, the grammar's subscript production
-/// (<c>E[E]</c>) creates a conflict that drops binary operators after
-/// <c>sizeof</c>, causing e.g. <c>MAXABITS+1=32</c> to become just <c>4</c>.
+/// Folds <c>sizeof(T)</c> of a scalar or scalar typedef to its numeric value in
+/// the token stream, so <c>sizeof(int) * CHAR_BIT</c> becomes <c>4 * 8</c> (an
+/// integer literal that every constant-expression position takes as is).
 ///
 /// A <c>sizeof(struct/union)</c> can't be folded to a number here (the layout
-/// — size + alignment padding — isn't known at lex time), so it stays as the
-/// <c>sizeof(T)</c> token form. That re-exposes the conflict, but only against
-/// the operators that double as unary-prefix operators: <c>sizeof(S) * x</c>,
-/// <c>sizeof(S) - x</c>, <c>sizeof(S) &amp; x</c> get parsed as a cast inside
-/// the operand (<c>sizeof((S)*x)</c> = the deref's type, dropping <c>* x</c>).
-/// For those, the folder wraps the unfoldable sizeof in parens
-/// (<c>(sizeof(S)) * x</c>) so it's a complete primary and the operator binds
-/// as binary — the struct analogue of the NUM fold. (Other operators —
-/// <c>+ | &lt;&lt;</c> … — have no unary form, so they never absorb and need no
-/// wrap; and a sizeof NOT followed by one of these — e.g.
-/// <c>malloc(sizeof(S))</c> — is left bare so the malloc-sizeof peephole still
-/// sees a sole <c>SizeofType</c> marker.)
+/// (size and alignment padding) isn't known at lex time), so it stays as the
+/// <c>sizeof(T)</c> token form and the binder sizes it. A following operator
+/// that doubles as a unary prefix (<c>sizeof(S) * x</c>, <c>- x</c>,
+/// <c>&amp; x</c>, <c>+ x</c>) binds as the binary operator: the grammar's
+/// cast-expression tier (C11 6.5.4) keeps a cast out of <c>sizeof</c>'s
+/// unary-expression operand, so nothing after <c>sizeof ( Type )</c> can absorb it.
 /// </summary>
 internal sealed class SizeofFolder : RewritingTokenStream
 {
@@ -41,12 +33,11 @@ internal sealed class SizeofFolder : RewritingTokenStream
     /// <summary>Cached byte-sizes of typedef names seen so far. Populated as
     /// <c>typedef</c> declarations stream past; consulted during <see cref="EvalSizeof"/>
     /// when a TYPE_NAME is encountered so the folder can still fold <c>sizeof(myint)</c>
-    /// to a NUM and avoid the parser's binary-op-after-sizeof conflict.</summary>
+    /// to a NUM.</summary>
     private readonly Dictionary<string, int> _typedefSizes = new(StringComparer.Ordinal);
 
     private readonly int _sizeofSym, _lparenSym, _rparenSym, _starSym, _numSym, _idSym, _typeNameSym;
     private readonly int _structSym, _unionSym, _enumSym, _typedefSym, _semiSym;
-    private readonly int _minusSym, _ampSym, _plusSym;
     private readonly int _lbrackSym, _rbrackSym;
 
     public SizeofFolder(ISyncIterator<Item> inner) : base(inner)
@@ -58,9 +49,6 @@ internal sealed class SizeofFolder : RewritingTokenStream
         _lparenSym = map["("];
         _rparenSym = map[")"];
         _starSym = map["*"];
-        _minusSym = map["-"];
-        _ampSym = map["&"];
-        _plusSym = map["+"];
         _lbrackSym = map["["];
         _rbrackSym = map["]"];
         _numSym  = map["NUM"];
@@ -145,28 +133,13 @@ internal sealed class SizeofFolder : RewritingTokenStream
             return;
         }
 
-        // Can't fold (struct/union/enum, or an aggregate typedef) — re-emit the
-        // `sizeof ( Type )` tokens. Peek the token that follows: if it's an
-        // operator that ALSO has a unary-prefix form (`*` deref, `-` negate, `&`
-        // address-of, `+` unary plus), the parser would absorb it into a cast
-        // inside the operand (`sizeof(S) * x` → `sizeof((S)*x)`, silently
-        // dropping `* x`). Wrap the sizeof in parens so it's a complete primary
-        // and the operator binds as a binary operator. A bare sizeof (anything
-        // else following — `)`, `;`, `|`, …) is left untouched so the
-        // malloc-sizeof peephole still sees it.
-        var hasNext = TryReadNext(out var nextTok);
-        var wrap = hasNext && (nextTok!.ID == _starSym || nextTok.ID == _minusSym
-            || nextTok.ID == _ampSym || nextTok.ID == _plusSym);
-        if (wrap) { Emit(new Item(_lparenSym, "(", token.Position)); }
+        // Can't fold (struct/union/enum, or an aggregate typedef): re-emit the
+        // `sizeof ( Type )` tokens unchanged. The grammar's cast-expression tier
+        // makes a following `* - & +` bind as the binary operator, so the parser
+        // needs no help here.
         Emit(token); Emit(lp);
         foreach (var x in typeTokens) Emit(x);
         Emit(new Item(_rparenSym, ")", token.Position));
-        if (wrap) { Emit(new Item(_rparenSym, ")", token.Position)); }
-        // Re-emit the peeked token (the operator, or whatever followed). It can't
-        // be a `sizeof`/`typedef` needing ProcessToken — neither is valid right
-        // after a `sizeof(Type)` without an intervening operator — so emitting it
-        // directly is safe.
-        if (hasNext) { Emit(nextTok!); }
     }
 
     /// <summary>Fold a typedef declarator's array-bound suffix (tokens from

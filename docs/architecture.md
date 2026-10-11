@@ -34,7 +34,7 @@ The C front half is a straight pull-pipe:
         → MacroExpander            (all macro replacement, object-like and function-like, via MacroEngine's per-token hide sets)
         → DialectKeywordRewriter   (dialect-aware keyword promotion: e.g. C23 `bool` → `_Bool`, gated on -std=)
         → TypeNameRewriter         (C lexer hack: promote ID → TYPE_NAME after typedef)
-        → SizeofFolder             (fold `sizeof(T)` → literal, avoiding an ArrDims/Subscript LALR conflict)
+        → SizeofFolder             (fold a scalar `sizeof(T)` → integer literal)
         → SyncLATokenIterator      (one-token lookahead)
         → Parser                   (LALR(1) tables built from c.lalr.yaml; runs the generated C.IdentityVisitor — the parse tree is yielded raw)
         → IrBuilder.AddUnit        (bind the parse tree to the typed IR: CExpr/CStmt with a CType on every expression)
@@ -112,6 +112,7 @@ Auto-detection lives in `Directory.Build.props` (MSBuild `Exists(...)`); the con
 - **Preprocessor directives go in `preprocessor:`** (each becomes an `IPreprocessor` method). Conditionals are handled by LALR.CC's built-in engine — declare them in `conditionals:`; the `IsDefined` hook drives boolean evaluation.
 
 - **Optional symbols** (LALR.CC ≥ 4.10.0): `rhs: [pub?, 'inline', FnDef]` stands for the rules with and without `pub`, expanded at load into the same group with the same action, so the parse table is exactly the hand-written pair's (no helper symbol, no epsilon reduce). The record keeps one field per written symbol, `null` where the optional is absent. YAML's `'pub'` is the scalar `pub`, so the optional spelling is `pub?`. Use it to fold twins whose rows both carry an action; a twin whose short form is an action-less pass-through (`Decl -> FnDef`) would start wrapping that form, so it stays written out.
-- **Check what a grammar edit resolves differently.** Precedence settles conflicts silently, so diff the resolved-conflict dump before and after: `LALRCC_RESOLVED_DUMP=<prefix> dotnet build DotCC.Lib -c Release --no-incremental -p:UseSharedCompilation=false` (sibling LALR.CC, or ≥ 4.10.0) writes `<prefix>.<symbolCount>.txt` per grammar (zig 194, C 205).
+- **Factor the way ISO C's Annex A does, not one rule per edge case.** The C grammar spells its optional pieces with `X?` (a parameter list, an argument list, a block's statements, an initializer list, `return`'s expression, a definition's tag, the three `for` clauses of C11 6.8.5), and its expression tiers follow the standard's, including the separate cast-expression tier (C11 6.5.4) that keeps a cast out of `sizeof`'s and `++`/`--`'s unary-expression operand. A new form should usually be a slot in an existing rule rather than a twin.
+- **Check what a grammar edit resolves differently.** Precedence settles conflicts silently, so diff the resolved-conflict dump before and after: `LALRCC_RESOLVED_DUMP=<prefix> dotnet build DotCC.Lib -c Release --no-incremental -p:UseSharedCompilation=false` (sibling LALR.CC, or ≥ 4.10.0) writes `<prefix>.<symbolCount>.txt` per grammar (zig 220, C 206).
 
 An unresolved conflict throws `GrammarConflictException` with the offending state + lookahead — don't catch it; fix the grammar by adding the colliding productions to a precedence group.

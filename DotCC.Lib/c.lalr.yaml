@@ -40,7 +40,8 @@
 #   Rel     : < > <= >=
 #   Add     : + -
 #   Mul     : * /
-#   Unary   : unary * & -                       (right-associative)
+#   CastExpr: ( Type ) cast                     (right-associative)
+#   Unary   : unary * & - and sizeof ++ --      (right-associative)
 #   Postfix : function call                     (left-associative)
 #   Primary : ID, NUM, ( E )
 #
@@ -492,6 +493,9 @@ symbols:
   # Compiler.LexC), so a skipped #if group may hold any text; one that survives
   # preprocessing is an error in StrayTokenGuard. No lexer rule or production.
   - STRAY          # 204 terminal: a stray byte (see above)
+  # CastExpr — C11 6.5.4's cast-expression tier, between Mul and Unary (see the
+  # cast group): a Unary, or `( Type ) CastExpr`.
+  - CastExpr       # 205 non-terminal: cast-expression
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -1198,7 +1202,7 @@ productions:
       # `&` token and the parser disambiguates by context — binary at this
       # precedence vs unary in `Unary`. LALR(1) handles this cleanly because
       # the LHS of `BAnd & Equ` is BAnd (already-reduced expr) whereas the
-      # unary `& Unary` only fires when there's no left-hand expression yet.
+      # unary `& CastExpr` only fires when there's no left-hand expression yet.
       - { lhs: BAnd, rhs: [BAnd, '&', Equ], action: bAnd }
       - { lhs: BAnd, rhs: [Equ] }
 
@@ -1230,41 +1234,48 @@ productions:
 
   - derivation: leftmost
     rules:
-      - { lhs: Mul, rhs: [Mul, '*', Unary], action: mul }
-      - { lhs: Mul, rhs: [Mul, '/', Unary], action: div }
-      - { lhs: Mul, rhs: [Mul, '%', Unary], action: mod }
-      - { lhs: Mul, rhs: [Unary] }
+      - { lhs: Mul, rhs: [Mul, '*', CastExpr], action: mul }
+      - { lhs: Mul, rhs: [Mul, '/', CastExpr], action: div }
+      - { lhs: Mul, rhs: [Mul, '%', CastExpr], action: mod }
+      - { lhs: Mul, rhs: [CastExpr] }
 
-  # Unary operators are right-associative: `--x` is `-(-x)`, `**p` is `*(*p)`.
-  # Cast `(Type) Unary` lives here too so its precedence matches real C
-  # (binds tighter than mul/div, looser than postfix calls). Disambiguates
-  # from `Primary -> '(' E ')'` by lookahead: after `(`, a Type-starting
-  # keyword (int/char/float/double/void) → cast; anything else → paren-expr.
+  # The cast and unary tiers, as C11 6.5.4 / 6.5.3 split them. A cast is its own
+  # tier between Mul and Unary (`cast-expression: unary-expression | ( type-name )
+  # cast-expression`), and the unary operators `& * + - ~ !` take a cast-expression
+  # while `sizeof`, `++` and `--` take a unary-expression. That split is what lets
+  # `sizeof(T) * x` reduce `sizeof(T)` before the `*`: a Unary can no longer be a
+  # cast, so after `sizeof ( Type )` nothing is open that a `*`, `-`, `&` or `+`
+  # could continue (the old shape parsed it as `sizeof((T)*x)`, and the folder
+  # had to parenthesize the sizeof). It also rejects `sizeof (T) x` and
+  # `++(T)x`, which C does too. A cast disambiguates from the `( Expr )` primary by
+  # the token after `(`: a Type-starting keyword or TYPE_NAME is a cast. The
+  # operators are right-associative: `--x` is `-(-x)`, `**p` is `*(*p)`.
   - derivation: rightmost
     rules:
-      - { lhs: Unary, rhs: ['*',  Unary], action: deref }
-      - { lhs: Unary, rhs: ['&',  Unary], action: addrOf }
-      - { lhs: Unary, rhs: ['-',  Unary], action: neg }
+      - { lhs: CastExpr, rhs: ['(', Type, ')', CastExpr], action: cast }
+      - { lhs: CastExpr, rhs: [Unary] }
+      - { lhs: Unary, rhs: ['*',  CastExpr], action: deref }
+      - { lhs: Unary, rhs: ['&',  CastExpr], action: addrOf }
+      - { lhs: Unary, rhs: ['-',  CastExpr], action: neg }
       # Unary plus (C89 §6.5.3.3) — value-preserving no-op beyond the integer
       # promotions. Real code spells it for symmetry (`sexp_inc(ctx, +1)`,
       # chibi's `(+1 | (x >> 63))` sign trick). Lowered to C#'s own unary `+`.
-      - { lhs: Unary, rhs: ['+',  Unary], action: uPlus }
-      - { lhs: Unary, rhs: ['~',  Unary], action: bNot }
+      - { lhs: Unary, rhs: ['+',  CastExpr], action: uPlus }
+      - { lhs: Unary, rhs: ['~',  CastExpr], action: bNot }
       # Logical `!` — C-truthy NOT. Lowers to `(Cond.B(E) ? 0 : 1)` so the
       # result is int (matching C: `!x` yields 0 or 1, never bool).
-      - { lhs: Unary, rhs: ['!',  Unary], action: lNot }
-      # Prefix ++/-- — right-associative like the rest of Unary. C and C#
-      # both forbid stacking (`++++x` doesn't compile in either), but the
-      # grammar lets them stack and the C# compiler will diagnose.
+      - { lhs: Unary, rhs: ['!',  CastExpr], action: lNot }
+      # Prefix ++/-- take a unary-expression (C11 6.5.3). C and C# both forbid
+      # stacking (`++++x` doesn't compile in either), but the grammar lets them
+      # stack and the C# compiler will diagnose.
       - { lhs: Unary, rhs: ['++', Unary], action: preInc }
       - { lhs: Unary, rhs: ['--', Unary], action: preDec }
-      - { lhs: Unary, rhs: ['(', Type, ')', Unary], action: cast }
       # Compound literal (C99) — `(Type){ init }`. An unnamed object of `Type`
       # initialized by the brace list, usable in any expression position. Lowers
       # to a C# object-creation `new Type { field = val, … }` (struct/union only —
       # the Type grammar has no abstract array declarator, so `(int[]){…}` is out
       # of scope and fails loudly). Conflict-free with the cast above: after
-      # `( Type )` the `{` lookahead is not in FIRST(Unary), so the parser shifts
+      # `( Type )` the `{` lookahead is not in FIRST(CastExpr), so the parser shifts
       # into the compound literal; with anything else it's a cast. It is a
       # POSTFIX expression (C11 6.5.2), so `(struct S){…}.field`, `(int[]){…}[i]`
       # and `(T){…}->…` chain like any other postfix operand. Member designators
@@ -1409,7 +1420,7 @@ productions:
       # other expression position is rejected loudly in the IR.
       - { lhs: Primary, rhs: ['EMBED'],     action: embed }
       # Parenthesized expression uses the full `Expr` tier, so `( a, b )` is the
-      # comma operator. (Cast `( Type ) Unary` still disambiguates by the first
+      # comma operator. (Cast `( Type ) CastExpr` still disambiguates by the first
       # token after `(`; function calls use `ArgList`, not `Expr`.)
       - { lhs: Primary, rhs: ['(', Expr, ')'], action: paren }
 

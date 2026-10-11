@@ -1,9 +1,9 @@
 /* Unary plus (C89) — a value-preserving no-op beyond the integer promotions.
  * Patterns from chibi-scheme: `+1` as a call argument (vm.c's
  * sexp_inc_context_depth(ctx, +1)) and the branch-free sign trick
- * `(+1 | (x >> 63))` (sexp_fx_sign). Also `sizeof(S) + n`, which needs the
- * SizeofFolder to treat `+` as a possible-unary follow token (else the parser
- * reads a cast `sizeof((S) + n)`). */
+ * `(+1 | (x >> 63))` (sexp_fx_sign). Also `sizeof(S) + n`, whose `+` must bind
+ * as binary rather than be read as a cast `sizeof((S) + n)` (the grammar's
+ * cast-expression tier keeps a cast out of sizeof's operand). */
 #include <stdio.h>
 
 struct pair { long a, b; };
