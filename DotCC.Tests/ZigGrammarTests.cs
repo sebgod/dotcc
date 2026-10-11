@@ -231,7 +231,7 @@ public sealed class ZigGrammarTests
     [Fact]
     public void Small_std_shapes_3_parse()
     {
-        FirstNode<Zig.PjBreakValue>("fn f(k: u8) u8 { return while (true) { switch (k) { 0 => break 1, else => {} } }; }").ShouldNotBeNull();
+        FirstNode<Zig.Prong>("fn f(k: u8) u8 { return while (true) { switch (k) { 0 => break 1, else => {} } }; }").Arg3.Content.ShouldBeOfType<Zig.FbBreakValue>();
         FirstNode<Zig.FbBreakValue>("fn f(k: u8) u8 { return while (true) { switch (k) { else => if (k > 1) break 0 } }; }").ShouldNotBeNull();
         FirstNode<Zig.WhileNoElseExpr>("fn f() u8 { const x: u8 = while (true) { break 3; }; return x; }").ShouldNotBeNull();
         // An `else` after the Block belongs to the value `while`, not to an enclosing `if`.
@@ -244,7 +244,7 @@ public sealed class ZigGrammarTests
     [Fact]
     public void Small_std_shapes_4_parse()
     {
-        FirstNode<Zig.ProngCaptureRefAssign>("fn f(e: *E) void { switch (e.*) { .len => |*l| l.* -= 1, else => {} } }").ShouldNotBeNull();
+        FirstNode<Zig.Prong>("fn f(e: *E) void { switch (e.*) { .len => |*l| l.* -= 1, else => {} } }").Arg3.Content.ShouldBeOfType<Zig.ProngAssign>();
         FirstNode<Zig.ParamUnnamed>("extern fn g(*const u32, n: u32) bool;").ShouldNotBeNull();
         FirstNode<Zig.InlineForMultiElseExpr>("fn f() usize { return inline for (a, b,) |x, y| { _ = x; break y; } else 0; }").ShouldNotBeNull();
         // zig's `comptime Expr;`: the `;` closes it.
@@ -271,6 +271,27 @@ public sealed class ZigGrammarTests
         FirstNode<Zig.StmtWhileCaptureContBlock>("fn f(it0: ?*N) void { var it = it0; while (it) |n| : ({ it = n.next; }) { _ = n; } }")
             .ShouldNotBeNull();
         FirstNode<Zig.MemberExternConst>("const P = struct { pub extern const etext: anyopaque; };").ShouldNotBeNull();
+    }
+
+    [Fact]
+    public void A_prong_is_one_payload_and_one_body()
+    {
+        // zig's SwitchProng: `SwitchCase => PtrIndexPayload? AssignExpr`, one Prong record for every capture and body.
+        var plain = FirstNode<Zig.Prong>("fn f(x: u8) u8 { return switch (x) { 0 => 1, else => 2 }; }");
+        plain.Arg2.ShouldBeNull();
+        var byRef = FirstNode<Zig.Prong>("fn f(u: *U) void { switch (u.*) { .a => |*p| { p.* = 1; }, else => {} } }");
+        byRef.Arg2.ShouldNotBeNull().Content.ShouldBeOfType<Zig.Payload>().Arg1.ShouldNotBeNull();
+        byRef.Arg3.Content.ShouldBeOfType<Zig.Block>();
+        var tagged = FirstNode<Zig.Payload>("fn f(u: U) void { switch (u) { inline else => |v, t| g(v, t) } }");
+        tagged.Arg1.ShouldBeNull();
+        tagged.Arg3.ShouldNotBeNull().Content.ShouldBeOfType<Zig.PayloadTag>();
+        // Jumps and `return` are the JumpExpr expressions; an else-less capture `if` is the IfExpr.
+        FirstNode<Zig.Prong>("fn f(x: u8) u8 { switch (x) { 0 => return 1, else => return } }").Arg3.Content.ShouldBeOfType<Zig.ReturnExpr>();
+        FirstNode<Zig.Prong>("fn f(x: E!u8) void { switch (x) { else => |e| if (e) |v| return v } }")
+            .Arg3.Content.ShouldBeOfType<Zig.IfExprCaptureNoElse>();
+        FirstNode<Zig.Prong>("fn f(n: u8) void { switch (n) { else => for (0..n) |_| { g(); } } }").Arg3.Content.ShouldBeOfType<Zig.ProngLoop>();
+        FirstNode<Zig.Prong>("fn f(comptime T: type) u8 { return switch (T) { u8 => comptime { return 1; }, else => 2 }; }")
+            .Arg3.Content.ShouldBeOfType<Zig.ProngComptimeBlock>();
     }
 
     [Fact]

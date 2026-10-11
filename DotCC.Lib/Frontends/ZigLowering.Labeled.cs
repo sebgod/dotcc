@@ -122,7 +122,7 @@ internal sealed partial class ZigLowering
         // `break :blk switch (d.digits[0]) { 5...9 => break, 0, 1 => 2, else => 1 }` (std.fmt.parse_float's convertSlow): a
         // switch whose prongs are not all values (a jump out of the loop here) cannot be a C# switch expression, so it is
         // the switch as a statement, its value prongs breaking to the same label, as a labeled switch's do.
-        if (valueItem.Content is Zig.SwitchExpr bs && Flatten(bs.Arg5).Any(p => p.Content is not Zig.ProngExpr))
+        if (valueItem.Content is Zig.SwitchExpr bs && Flatten(bs.Arg5).Any(p => !IsPlainValueProng(p)))
         {
             return LowerLabeledSwitchBody(label, bs.Arg2, bs.Arg5);
         }

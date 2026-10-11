@@ -977,52 +977,51 @@ internal sealed partial class ZigLowering
         return true;
     }
 
-    /// <summary>One decomposed <c>switch</c> prong: its case-value list, an optional payload capture,
-    /// and exactly one body form (a braced block, a bare value expression, or a <c>return</c>). The
-    /// shape the comptime fold needs in all three switch positions (statement, expression, and the
-    /// value-temp filler) without each re-deriving it from the eight capture productions.</summary>
+    /// <summary>One decomposed <c>switch</c> prong (zig's <c>SwitchCase =&gt; PtrIndexPayload? AssignExpr</c>): its case-value
+    /// list, an optional payload capture (by value or by reference, with an optional tag name), and exactly one body form: a
+    /// braced block (<see cref="Comptime"/> for <c>comptime { … }</c>), a value expression, a <c>return [v]</c>, a jump, an
+    /// assignment, or a statement loop. Every switch position reads prongs through this view.</summary>
     private sealed record ZigProng(Item CaseVals, string? CaptureName, Item? Block, Item? Expr, Item? Return, bool ReturnsVoid,
-        Item? Jump = null, Zig.ProngAssign? Assign = null, string? Cut = null, 
-        Zig.ProngIfCaptureReturn? IfCaptureReturn = null, Item? Loop = null);
+        Item? Jump = null, (Item Target, Item Op, Item Value)? Assign = null, string? Cut = null, Item? Loop = null,
+        bool ByRef = false, string? TagName = null, bool Comptime = false)
+    {
+        /// <summary>True for a prong with a payload capture that binds a name (<c>|_|</c> binds none).</summary>
+        public bool Captures => CaptureName is { } c && c != "_";
+    }
 
-    /// <summary>Decompose a prong into <see cref="ZigProng"/>. A by-reference capture
-    /// (<c>|*x|</c>) is rejected: a comptime <c>@typeInfo</c> value has no storage to point at.</summary>
+    /// <summary>Decompose a prong into <see cref="ZigProng"/>; an <c>inline</c> prong decomposes as the prong it wraps.</summary>
     private static ZigProng DecomposeProng(Item prong) => prong.Content switch
     {
-        Zig.Prong p                  => new ZigProng(p.Arg0, null,         p.Arg2, null,   null,   false),
-        Zig.ProngExpr p              => new ZigProng(p.Arg0, null,         null,   p.Arg2, null,   false),
-        Zig.ProngReturn p            => new ZigProng(p.Arg0, null,         null,   null,   p.Arg3, false),
-        Zig.ProngReturnVoid p        => new ZigProng(p.Arg0, null,         null,   null,   null,   true),
-        Zig.ProngCapture p           => new ZigProng(p.Arg0, Tok(p.Arg3),  p.Arg5, null,   null,   false),
-        Zig.ProngCaptureExpr p       => new ZigProng(p.Arg0, Tok(p.Arg3),  null,   p.Arg5, null,   false),
-        Zig.ProngCaptureReturn p     => new ZigProng(p.Arg0, Tok(p.Arg3),  null,   null,   p.Arg6, false),
-        Zig.ProngCaptureReturnVoid p => new ZigProng(p.Arg0, Tok(p.Arg3),  null,   null,   null,   true),
-        Zig.ProngJump p              => new ZigProng(p.Arg0, null,         null,   null,   null,   false, p.Arg2),
-        Zig.ProngAssign p            => new ZigProng(p.Arg0, null,         null,   null,   null,   false, Assign: p),
-        // A `comptime { … }` body is walked as a block: a comptime-selected prong runs at lowering time anyway.
-        Zig.ProngComptimeBlock p     => new ZigProng(p.Arg0, null,         p.Arg3, null,   null,   false),
-        Zig.ProngCaptureJump p       => new ZigProng(p.Arg0, Tok(p.Arg3),  null,   null,   null,   false, p.Arg5),
-        // `inline` only matters to a RUNTIME switch (one instantiated prong per case); a comptime-selected
-        // switch takes one prong anyway.
-        Zig.InlineProng p            => DecomposeProng(p.Arg1),
-        // `|val, tag|`: the payload capture folds as `|val|`; a use of the tag name stays unresolved (loud).
-        Zig.ProngCaptureTag p        => new ZigProng(p.Arg0, Tok(p.Arg3),  p.Arg7, null,   null,   false),
-        Zig.ProngCaptureTagExpr p    => new ZigProng(p.Arg0, Tok(p.Arg3),  null,   p.Arg7, null,   false),
-        Zig.ProngCaptureTagReturn p  => new ZigProng(p.Arg0, Tok(p.Arg3),  null,   null,   p.Arg8, false),
-        // A no-`else` capture `if` body: its case values are readable, so an unselected prong is fine; a
-        // comptime-SELECTED one is a loud cut (see SelectComptimeProng).
-        Zig.ProngIfCaptureReturn p   => new ZigProng(p.Arg0, null,         null,   null,   null,   false, IfCaptureReturn: p),
-        Zig.ProngLoop p              => new ZigProng(p.Arg0, null,         null,   null,   null,   false, Loop: p.Arg2),
-        // std.meta.FieldEnum's `.@"union" => |u| if (u.tag_type) |EnumTag| { … }` (task #108): it only has to parse while
-        // another prong is selected.
-        Zig.ProngCaptureIfCaptureBlock p => new ZigProng(p.Arg0, Tok(p.Arg3), null, null, null, false,
-            Cut: "zig switch prong `=> |x| if (y) |v| { … }` is not supported yet as a selected comptime prong"),
-        Zig.ProngCaptureRef or Zig.ProngCaptureRefExpr or Zig.ProngCaptureRefReturn or Zig.ProngCaptureRefReturnVoid
-            => throw new IrUnsupportedException(
-                "zig `switch (@typeInfo(T)) { … => |*x| … }`: a comptime `std.builtin.Type` value has no storage, so it "
-                + "cannot be captured by reference"),
+        Zig.InlineProng p => DecomposeProng(p.Arg1),
+        Zig.Prong p => ProngOf(p.Arg0, p.Arg2, p.Arg3),
         _ => throw new IrUnsupportedException("zig switch prong: " + (prong.Content?.GetType().Name ?? "null")),
     };
+
+    /// <summary>The <see cref="ZigProng"/> view of <c>caseVals =&gt; payload? body</c>, the body classified by what it is.</summary>
+    private static ZigProng ProngOf(Item caseVals, Item? payload, Item body)
+    {
+        string? capture = null, tag = null;
+        var byRef = false;
+        if (payload?.Content is Zig.Payload pl)
+        {
+            capture = Tok(pl.Arg2);
+            byRef = pl.Arg1 is not null;
+            tag = pl.Arg3?.Content is Zig.PayloadTag t ? Tok(t.Arg1) : null;
+        }
+        var view = new ZigProng(caseVals, capture, null, null, null, false, ByRef: byRef, TagName: tag);
+        return body.Content switch
+        {
+            Zig.Block => view with { Block = body },
+            Zig.ProngComptimeBlock c => view with { Block = c.Arg1, Comptime = true },
+            Zig.ProngAssign a => view with { Assign = (a.Arg0, a.Arg1, a.Arg2) },
+            Zig.ProngLoop l => view with { Loop = l.Arg0 },
+            Zig.ReturnExpr { Arg1: null } => view with { ReturnsVoid = true },
+            Zig.ReturnExpr r => view with { Return = r.Arg1 },
+            Zig.FbBreak or Zig.FbBreakLabel or Zig.FbBreakLabelValue or Zig.FbBreakValue
+                or Zig.FbContinue or Zig.FbContinueLabel or Zig.FbContinueLabelValue => view with { Jump = body },
+            _ => view with { Expr = body },
+        };
+    }
 
     /// <summary>Select the prong a <c>switch</c> over a COMPTIME TAG takes, or null when the subject
     /// is not comptime-known (the caller then lowers an ordinary runtime switch). The tag is matched
@@ -1107,6 +1106,12 @@ internal sealed partial class ZigLowering
         foreach (var prongItem in Flatten(prongsItem))
         {
             var prong = DecomposeProng(prongItem);
+            if (prong.ByRef)
+            {
+                throw new IrUnsupportedException(
+                    "zig `switch (@typeInfo(T)) { … => |*x| … }`: a comptime `std.builtin.Type` value has no storage, so it "
+                    + "cannot be captured by reference");
+            }
             if (prong.CaseVals.Content is Zig.CaseElse) { elseProng = prong; continue; }
             foreach (var (lo, hi) in WalkCaseValItems(prong.CaseVals))
             {

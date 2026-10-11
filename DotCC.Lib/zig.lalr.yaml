@@ -133,7 +133,7 @@ symbols:
   - 'switch'     # 86  `switch (x) { … }`
   - '=>'         # 87  switch-prong arrow
   - Prongs       # 88  prong list (left-recursive, clean trailing-comma handling)
-  - Prong        # 89  one prong: CaseVals '=>' Block
+  - Prong        # 89  one prong: CaseVals '=>' Payload? ProngBody (zig's SwitchProng)
   - CaseVals     # 90  prong case values: Expr (, Expr)* | else
   # --- range for (Milestone C3; appended — never reorder) ---
   - 'for'        # 91  `for (a..b) |i| …` range loop
@@ -261,9 +261,7 @@ symbols:
   - PtrAlign       # 169 `align(E)` inside a pointer / slice type (`*align(4) const T`, `[]align(a) T`):
                    #     561 uses in std, 548 of them the six shapes below. Parsed, and not tracked: C#
                    #     pointers carry no alignment, as `align` on a declaration is already a no-op.
-  - ProngJump      # 170 a JUMP prong body: `break [:l [v]]` / `continue [:l]` (`'{', '}' => break,` in
-                   #     Writer.print; about 330 in std). A separate symbol from FallbackArm, whose
-                   #     block and `switch` arms would compete with the Block / RhsExpr prongs.
+  - ProngJump      # 170 RETIRED (zig-grammar-peg P4): a jump prong body is a JumpExpr, through ProngBody's RhsExpr
   - NOALIAS        # 171 the `noalias` parameter qualifier (`noalias a: *T` in std.mem.swap), IGNORED by the
                    #     lexer: an aliasing promise to the optimizer, with no meaning for a C# pointer.
   - TypeArm        # 172 an inline `enum {…}` / `struct {…}` as an arm of a TYPE-choosing `if` (debug.zig's
@@ -316,6 +314,9 @@ symbols:
   - LABEL          # 214 a block / loop / switch label: an identifier the lexer sees followed by `: {`, `: for`, `: while`,
                    #     `: inline` or `: switch` (zig's BlockLabel)
   - FieldName      # 215 a container field's name: an IDENT, or a LABEL when the field's type is a `switch`
+  - Payload        # 216 a capture `|x|` / `|*x|` / `|x, i|` (zig's PtrIndexPayload)
+  - PayloadTag     # 217 the `, i` of a two-name capture
+  - ProngBody      # 218 a switch prong's body: a block, a value, an assignment, `comptime { … }` or a loop
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -1452,112 +1453,27 @@ productions:
       - { lhs: Prongs, rhs: [Prongs, ',', Prong], action: prongsCons }
       - { lhs: Prongs, rhs: [Prong],               action: prongsOne }
 
-  # A prong body is a braced Block, optionally preceded by a payload capture `|x|` (Milestone
-  # D3 — meaningful only when switching on a tagged union; rejected by the lowering otherwise).
-  # After `=>`, a `|` (capture) vs a `{` (block) is a clean shift decision.
+  # A prong, as zig's SwitchProng: `inline? SwitchCase => PtrIndexPayload? AssignExpr`. One rule: an optional payload
+  # capture (`|x|`, `|*x|`, `|x, tag|`) and one body. The body is a braced Block, any value (RhsExpr, which since
+  # zig-grammar-peg P1 and P3a includes `return [v]`, `break [:l] [v]`, `continue [:l] [v]` and an else-less `if`),
+  # an assignment, a `comptime { … }` block, or a statement loop. FOLLOW(Prong) is `,` / `}`, which ends every body.
+  # Lowering reads the prong through one view (DecomposeProng), classifying the body by what it is.
   - derivation: none
     rules:
-      - { lhs: Prong, rhs: [CaseVals, '=>', Block],                  action: prong }
-      - { lhs: Prong, rhs: [CaseVals, '=>', '|', IDENT, '|', Block], action: prongCapture }
-      # BY-REFERENCE payload capture `|*x|` (Milestone M, part 4): `x` is a `*T` into the matched
-      # tagged-union variant's payload field, so `x.* = …` writes through. After the capture `'|'`,
-      # a `'*'` lookahead selects this over the by-value `'|' IDENT '|'` capture — conflict-free.
-      - { lhs: Prong, rhs: [CaseVals, '=>', '|', '*', IDENT, '|', Block], action: prongCaptureRef }
-      # A value-position prong body (Milestone L; broadened in Milestone Y, part 1) — `v => RhsExpr`.
-      # `RhsExpr` (not just `Expr`) so a prong can yield ANY value-position form: a plain expression,
-      # an `if`/`switch` expression, or a labeled value-block `blk: { … break :blk v; }` (the
-      # idiomatic multi-statement switch arm). After `=>`, a `{` selects the Block prong and a `|` the
-      # capture prong, so a leading non-`{`/`|` token unambiguously starts this RhsExpr; an `IDENT ':'`
-      # selects the labeled block over a bare-identifier expression (a Primary is never followed by
-      # `:`), exactly as in the other RhsExpr positions. The Expr cascade has no top-level `,`, so the
-      # prong-separator `,` stays clean. The headline use is a switch EXPRESSION's value-yielding arm;
-      # in a statement switch it's an expression statement (`1 => doThing(),`).
-      - { lhs: Prong, rhs: [CaseVals, '=>', RhsExpr],                action: prongExpr }
-      # A CONTROL-FLOW prong body `v => return [expr]` (road-to-zig-std S9 — the `return` parse
-      # bucket). In Zig `return e` is a PrimaryExpr, so it can sit directly after `=>`; dotcc keeps
-      # `return` a statement, so it's admitted here as an explicit prong form (mirrors the
-      # `orElseReturn`/`catchReturn` control-flow tails). After `=>`, a `return` keyword lookahead
-      # selects these over `prong`(Block, `{`), the captures (`|`) and `prongExpr` (RhsExpr never
-      # starts with `return`) — conflict-free. Value (`return e`) vs void (`return`) split on the
-      # token after `return`, the same lookahead the statement-level `return Expr;`/`return;` uses.
-      # The headline use is the idiomatic statement-switch arm `.foo => return doThing(…),` that
-      # closes std's `switch (mode) { … => return … }` (e.g. std/Io/File/Writer.zig). Parse-only.
-      - { lhs: Prong, rhs: [CaseVals, '=>', 'return', RhsExpr],       action: prongReturn }
-      - { lhs: Prong, rhs: [CaseVals, '=>', 'return'],               action: prongReturnVoid }
-      # A CAPTURE prong with a VALUE / control-flow body — `v => |x| RhsExpr` / `v => |x| return [e]`
-      # (road-to-zig-std S9). The capture prongs above only admitted a braced Block; std pervasively
-      # writes the capture with a bare value body, e.g. `.a, .b => |s| return s,` (ConfigHeader.zig)
-      # or `.tag => |p| p.method(),`. This makes the capture prong SYMMETRIC with the non-capture one:
-      # after `| IDENT |` the body is a Block (`{`), a `return [e]` (control flow), or any other
-      # RhsExpr — the identical Block-vs-return-vs-RhsExpr decision `prong`/`prongReturn`/`prongExpr`
-      # already make conflict-free one token earlier, now just prefixed by the capture. Both the
-      # by-value `|x|` and by-reference `|*x|` captures get the value + return + void forms. Parse-only.
-      - { lhs: Prong, rhs: [CaseVals, '=>', '|', IDENT, '|', RhsExpr],           action: prongCaptureExpr }
-      - { lhs: Prong, rhs: [CaseVals, '=>', '|', IDENT, '|', 'return', RhsExpr], action: prongCaptureReturn }
-      - { lhs: Prong, rhs: [CaseVals, '=>', '|', IDENT, '|', 'return'],          action: prongCaptureReturnVoid }
-      - { lhs: Prong, rhs: [CaseVals, '=>', '|', '*', IDENT, '|', RhsExpr],           action: prongCaptureRefExpr }
-      - { lhs: Prong, rhs: [CaseVals, '=>', '|', '*', IDENT, '|', 'return', RhsExpr], action: prongCaptureRefReturn }
-      - { lhs: Prong, rhs: [CaseVals, '=>', '|', '*', IDENT, '|', 'return'],          action: prongCaptureRefReturnVoid }
-      # A JUMP prong body `v => break`, `v => continue :outer`, `v => |e| break :blk e` (road-to-zig-std
-      # G3). In zig `break`/`continue` are expressions, so they sit directly after `=>`; dotcc keeps them
-      # statements and admits them here as explicit prong forms, like `return`. `break`/`continue` are in
-      # no other prong body's FIRST set, so the choice is one token of lookahead.
-      - { lhs: Prong, rhs: [CaseVals, '=>', ProngJump],                  action: prongJump }
-      # An ASSIGNMENT prong body `v => lhs = rhs` (hash_map's `.stage2_llvm => _ = &dbHelper,`), or a compound one
-      # (`0 => hits += 1,`): no Prong is ever followed by an assignment operator, so after the body's `Expr` it shifts
-      # into this form, conflict-free (AssignOp is the continue-expression's operator set).
-      - { lhs: Prong, rhs: [CaseVals, '=>', Expr, AssignOp, RhsExpr],    action: prongAssign }
-      # Its capture twin (`.on => |v| total += v,`, task #109), split from prongCaptureExpr the same way.
-      - { lhs: Prong, rhs: [CaseVals, '=>', '|', IDENT, '|', Expr, AssignOp, RhsExpr], action: prongCaptureAssign }
-      # The by-reference twin (std's http.zig: `.content_length => |*len| len.* -= written + w.end,`).
-      - { lhs: Prong, rhs: [CaseVals, '=>', '|', '*', IDENT, '|', Expr, AssignOp, RhsExpr], action: prongCaptureRefAssign }
-      # A `comptime { … }` prong body (std.math.sqrt's `.comptime_int => comptime { … }`): after `comptime`,
-      # a `{` starts no Prefix (the `comptime` value operator's operand), so this is a clean shift.
-      - { lhs: Prong, rhs: [CaseVals, '=>', 'comptime', Block],          action: prongComptimeBlock }
-      - { lhs: Prong, rhs: [CaseVals, '=>', '|', IDENT, '|', ProngJump], action: prongCaptureJump }
-      # An `inline` prong (std.meta.eql's `inline else => |val, tag| …`, Target.zig's `inline else => |f|`):
-      # `inline` starts no CaseVals, so it is a clean shift wrapping any prong. A PAYLOAD + TAG capture
-      # `|val, tag|` splits from `|val|` on the `,` after the first name.
+      - { lhs: Prong, rhs: [CaseVals, '=>', Payload?, ProngBody], action: prong }
+      # An `inline` prong (std.meta.eql's `inline else => |val, tag| …`): `inline` starts no CaseVals, a clean shift.
       - { lhs: Prong, rhs: ['inline', Prong], action: inlineProng }
-      # A capture `if` with NO `else` as a (void) prong body — auto_hash's `.optional => if (key) |k| hash(…),`.
-      # Its body is a plain Expr ended by `,` / `}`, where an `else` would continue the if-EXPRESSION prong
-      # (whose arms are RhsExprs): a 1-token split, with no dangling else to resolve.
-      # An else-less `if` whose body is a switch statement (std.Io.Writer.printValue's
-      # `3 => if (fmt[0] == 'b' and …) switch (@typeInfo(T)) { … },`). Ended by `,` / `}` like the form above;
-      # an if-EXPRESSION prong would continue with `else`, and its arms are not SwitchExprs, so no conflict.
-      # An else-less `if` whose body is a BLOCK (std.crypto.sha2's `.x86_64 => if (… comptime cpu.hasAll(…)) { … },`).
-      # Ended by `,` / `}`; an if-EXPRESSION prong continues with `else`.
-      # An else-less `if` whose body is a plain expression (std.mem.ReverseIterator's `.one => if (@typeInfo(ptr.child)
-      # != .array) @compileError("…"),`, task #141). Ended by `,` / `}` like the capture form; an if-EXPRESSION prong
-      # continues with `else`, so the split is one token after the body.
-      # A capture prong whose body is a capture-`if` statement (std.meta.FieldEnum's `.@"union" => |u| if (u.tag_type)
-      # |EnumTag| { … }`, task #108). After the prong's `|x|`, `if` then `(` Expr `)` `|` distinguishes it from the
-      # value-if RhsExpr only at the `{` of its Block, which no RhsExpr's then-arm starts with.
-      - { lhs: Prong, rhs: [CaseVals, '=>', '|', IDENT, '|', 'if', '(', Expr, ')', '|', IDENT, '|', Block], action: prongCaptureIfCaptureBlock }
-      # A capture `if` whose body RETURNS (std.Io.Writer.printInt's
-      # `.signed => if (std.math.cast(isize, value)) |x| return printIntAny(w, x, …),`). `return` does not
-      # start an Expr, so after the capture it is a 1-token split from prongIfCapture.
-      - { lhs: Prong, rhs: [CaseVals, '=>', 'if', '(', Expr, ')', '|', IDENT, '|', JumpExpr], action: prongIfCaptureReturn }
-      # A loop STATEMENT as a prong body (std.Io.Writer.writeSplat's `else => for (0..splat) |_| { … },`).
-      - { lhs: Prong, rhs: [CaseVals, '=>', LoopStmt], action: prongLoop }
-      - { lhs: Prong, rhs: [CaseVals, '=>', '|', IDENT, ',', IDENT, '|', Block],             action: prongCaptureTag }
-      - { lhs: Prong, rhs: [CaseVals, '=>', '|', IDENT, ',', IDENT, '|', RhsExpr],           action: prongCaptureTagExpr }
-      - { lhs: Prong, rhs: [CaseVals, '=>', '|', IDENT, ',', IDENT, '|', 'return', RhsExpr], action: prongCaptureTagReturn }
-
-  # The jump forms. FOLLOW(Prong) is `,` / `}`, so a label after `:` and a value after the label are
-  # clean shift decisions (neither `,` nor `}` starts an RhsExpr).
-  - derivation: none
-    rules:
-      - { lhs: ProngJump, rhs: ['break'],                       action: pjBreak }
-      - { lhs: ProngJump, rhs: ['break', ':', IDENT],           action: pjBreakLabel }
-      - { lhs: ProngJump, rhs: ['break', ':', IDENT, RhsExpr],  action: pjBreakLabelValue }
-      - { lhs: ProngJump, rhs: ['continue'],                    action: pjContinue }
-      - { lhs: ProngJump, rhs: ['continue', ':', IDENT],        action: pjContinueLabel }
-      # `.raw => continue :sw .block_header,` (GH #286): a labeled switch's continue, with its new operand.
-      - { lhs: ProngJump, rhs: ['continue', ':', IDENT, RhsExpr], action: pjContinueLabelValue }
-      # An unlabeled `break v` (std's Io/Dispatch.zig: `.SUCCESS => break @intCast(rc),`) yields from the innermost value
-      # loop. After `break`, a token that starts a value shifts; `,` and `}` reduce the value-less form.
-      - { lhs: ProngJump, rhs: ['break', RhsExpr],                action: pjBreakValue }
+      - { lhs: ProngBody, rhs: [Block] }
+      - { lhs: ProngBody, rhs: [RhsExpr] }
+      # `0 => hits += 1,` / `.len => |*l| l.* -= n,` (std's http.zig): after the body's Expr an assignment operator shifts.
+      - { lhs: ProngBody, rhs: [Expr, AssignOp, RhsExpr], action: prongAssign }
+      # std.math.sqrt's `.comptime_int => comptime { … }`: after `comptime`, a `{` starts no Prefix, a clean shift.
+      - { lhs: ProngBody, rhs: ['comptime', Block], action: prongComptimeBlock }
+      # A loop STATEMENT (std.Io.Writer.writeSplat's `else => for (0..splat) |_| { … },`).
+      - { lhs: ProngBody, rhs: [LoopStmt], action: prongLoop }
+      # zig's PtrIndexPayload: `|x|`, `|*x|`, `|x, i|`, `|*x, i|`.
+      - { lhs: Payload, rhs: ['|', "*?", IDENT, PayloadTag?, '|'], action: payload }
+      - { lhs: PayloadTag, rhs: [',', IDENT], action: payloadTag }
 
   # Case values: a comma-list of value Exprs, or `else` (the default). The `,` here never
   # clashes with the prong-separator `,` because FOLLOW(CaseVals) = { '=>' } — after a value

@@ -51,23 +51,19 @@ internal sealed partial class ZigLowering
     /// prong whose value is itself a labeled value-block (<c>=&gt; blk: { … break :blk v; }</c>), or a <c>|v| expr</c>
     /// capture prong over a runtime <paramref name="subjectItem"/> (a union's payload).</summary>
     private static bool SwitchExprNeedsStmt(Item prongsItem, Item subjectItem) =>
-        Flatten(prongsItem).Any(p => p.Content switch
+        Flatten(prongsItem).Any(p =>
         {
-            Zig.Prong or Zig.ProngCapture or Zig.ProngCaptureRef => true,
-            Zig.ProngJump or Zig.ProngCaptureJump => true,   // a `break` / `continue` arm is a statement
-            // `.comptime_int => comptime { …; return result; }` (std.math.log2): the block returns from the function.
-            Zig.ProngComptimeBlock => true,
-            // `else => return error.InvalidCharacter` (std.fmt.charToDigit): a returning arm is a statement too.
-            Zig.ProngReturn or Zig.ProngReturnVoid or Zig.ProngCaptureReturn or Zig.ProngCaptureReturnVoid => true,
-            Zig.ProngExpr pe => IsLabeledValue(pe.Arg2),
-            // `.number => |v| v * 4` over a union: the capture binds a payload, which needs a statement. Over a
-            // comptime `@typeInfo(T)` the capture is folded where the expression lowers, so it stays one.
-            Zig.ProngCaptureExpr or Zig.ProngCaptureRefExpr or Zig.ProngCaptureTagExpr
-                => subjectItem.Content is not Zig.BuiltinCall { Arg2: not null, Arg0: var sb } || Tok(sb) != "@typeInfo",
-            // `inline .a, .b => |x| …` (task #212) unrolls into one prong per listed value, which needs statements for the
-            // same reason; over a comptime `@typeInfo(T)` the selected prong folds where the expression lowers.
-            Zig.InlineProng => subjectItem.Content is not Zig.BuiltinCall { Arg2: not null, Arg0: var ib } || Tok(ib) != "@typeInfo",
-            _ => false,
+            var view = DecomposeProng(p);
+            // `inline .a, .b => |x| …` (task #212) unrolls into one prong per listed value, and `.number => |v| v * 4` over a
+            // union binds a payload: both need statements. Over a comptime `@typeInfo(T)` the selected prong folds where
+            // the expression lowers, so it stays one.
+            if (p.Content is Zig.InlineProng || view.CaptureName is not null && view.Expr is not null)
+            {
+                return subjectItem.Content is not Zig.BuiltinCall { Arg2: not null, Arg0: var sb } || Tok(sb) != "@typeInfo";
+            }
+            // A value prong needs statements only for a labeled value block; every other body (a block, a `comptime { … }`
+            // block that returns, std.math.log2; a `return`, std.fmt.charToDigit; a jump; an assignment; a loop) is one.
+            return view.Expr is { } value ? IsLabeledValue(value) : true;
         });
     /// <summary>Lower a value-position control-flow form that needs statements to produce its value
     /// (see <see cref="IsValueControlFlowStmt"/>) as a C# STATEMENT, then hand the result temp to
@@ -330,8 +326,7 @@ internal sealed partial class ZigLowering
         // subject is read once into a temp when a capture needs it again (it may be a call).
         var pre = new List<CStmt>();
         var prongs = Flatten(prongsItem);
-        if (subject is not VarRef && prongs.Any(p => p.Content is Zig.ProngCaptureExpr or Zig.ProngCaptureReturn
-                                                              or Zig.ProngCaptureReturnVoid or Zig.ProngCaptureJump))
+        if (subject is not VarRef && prongs.Any(p => DecomposeProng(p) is { CaptureName: not null, ByRef: false, Block: null }))
         {
             var st = _symbols.Declare(new Symbol { Name = "__sw" + _blockLabelCounter++, Kind = SymKind.Var, Type = subject.Type });
             pre.Add(new DeclStmt(new List<LocalDecl> { new(st, subject) }));
@@ -342,24 +337,23 @@ internal sealed partial class ZigLowering
         {
             // Each prong either YIELDS the value (fill the temp) or JUMPS (`=> return v`), which is how
             // a value switch reports the cases it cannot answer — the prong never reaches the consumer.
-            var (caseVals, capture, body) = prongItem.Content switch
-            {
-                Zig.ProngExpr pe                => (pe.Arg0, (string?)null, (Func<CStmt>)(() => FillValueTemp(pe.Arg2, rt))),
-                Zig.ProngReturn pr              => (pr.Arg0, null, () => LowerReturn(pr.Arg3)),
-                Zig.ProngReturnVoid pv          => (pv.Arg0, null, () => LowerReturnVoid()),
-                Zig.ProngCaptureExpr ce         => (ce.Arg0, Tok(ce.Arg3), () => FillValueTemp(ce.Arg5, rt)),
-                Zig.ProngCaptureReturn cr       => (cr.Arg0, Tok(cr.Arg3), () => LowerReturn(cr.Arg6)),
-                Zig.ProngCaptureReturnVoid cv   => (cv.Arg0, Tok(cv.Arg3), () => LowerReturnVoid()),
-                Zig.ProngJump pj                => (pj.Arg0, null, () => LowerProngJump(pj.Arg2)),
-                Zig.ProngCaptureJump cj         => (cj.Arg0, Tok(cj.Arg3), () => LowerProngJump(cj.Arg5)),
-                // A block that always jumps (`error.OutOfMemory => { return; }` in std.PriorityQueue's `ensureTotalCapacity`,
-                // task #103) is `noreturn`, which a value switch accepts like `=> return`.
-                Zig.Prong pb                    => (pb.Arg0, null, () => LowerNoReturnProngBlock(pb.Arg2)),
-                Zig.ProngCapture pcb            => (pcb.Arg0, Tok(pcb.Arg3), () => LowerNoReturnProngBlock(pcb.Arg5)),
-                _ => throw new IrUnsupportedException(
-                    "a value-position switch prong must yield a value (`v => expr` or `v => blk: {… break :blk v;}`) "
-                    + "or jump (`v => return …`); a void block prong or a `|*x|` capture in a switch expression is not supported yet"),
-            };
+            var view = DecomposeProng(prongItem);
+            var (caseVals, capture) = (view.CaseVals, view.CaptureName);
+            Func<CStmt> body = prongItem.Content is Zig.InlineProng || view.ByRef || view.Comptime ? ThrowValueProng
+                : view switch
+                {
+                    { Expr: { } value } => () => FillValueTemp(value, rt),
+                    { Return: { } returned } => () => LowerReturn(returned),
+                    { ReturnsVoid: true } => () => LowerReturnVoid(),
+                    { Jump: { } jump } => () => LowerProngJump(jump),
+                    // A block that always jumps (`error.OutOfMemory => { return; }` in std.PriorityQueue's `ensureTotalCapacity`,
+                    // task #103) is `noreturn`, which a value switch accepts like `=> return`.
+                    { Block: { } block } => () => LowerNoReturnProngBlock(block),
+                    _ => ThrowValueProng,
+                };
+            static CStmt ThrowValueProng() => throw new IrUnsupportedException(
+                "a value-position switch prong must yield a value (`v => expr` or `v => blk: {… break :blk v;}`) "
+                + "or jump (`v => return …`); a void block prong or a `|*x|` capture in a switch expression is not supported yet");
             var labels = LowerCaseVals(caseVals, subject.Type);
             var stmts = new List<CStmt>();
             _symbols.EnterScope();
