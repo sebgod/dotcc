@@ -1761,7 +1761,7 @@ internal sealed partial class ZigLowering
                 // return type + body are one slot further right than the pre-CallConv layout.
                 case Zig.FnDef f:          AddFnEntry(Export(f.Arg1, DeclaredEarlyOr(f.Arg1, () => DeclareFn(f.Arg1, f.Arg3, f.Arg7, f.Arg8, errUnion: f.Arg6 is not null)))); break;   // `!T` return → ErrorUnion(T)
                 // Container decls were handled in pass 0 — skip here.
-                case Zig.StructDecl or Zig.ExternStructDecl or Zig.PackedStructDecl or Zig.PackedStructDeclBacked or Zig.EnumDecl or Zig.EnumDeclTyped or Zig.UnionDeclEnum or Zig.UnionDeclTagged or Zig.UnionDeclUntagged: break;
+                case Zig.StructDecl or Zig.ExternStructDecl or Zig.PackedStructDecl or Zig.PackedStructDeclBacked or Zig.EnumDecl or Zig.EnumDeclTyped or Zig.UnionDecl: break;
                 // A top-level `const`/`var` is either a comptime binding (an `@import`/allocator
                 // alias recorded in pass 0, which emits no decl) or a runtime global — both are
                 // resolved by the global pass below (LowerTopLevelGlobals), so skip them here.
@@ -2387,9 +2387,7 @@ internal sealed partial class ZigLowering
                 case Zig.PackedStructDeclBacked: _containerTypes[name] = new CType.Named(name); break;  // const IDENT = packed struct(T) { … } ;
                 case Zig.EnumDecl e:        foreach (var m in RegisterEnumZig(name, null, e.Arg5)) { methods.Add((name, m)); } break;       // const IDENT = enum { EnumFields } ;
                 case Zig.EnumDeclTyped e:   foreach (var m in RegisterEnumZig(name, e.Arg5, e.Arg8)) { methods.Add((name, m)); } break;     // const IDENT = enum ( Type ) { EnumFields } ;
-                case Zig.UnionDeclEnum:     _containerTypes[name] = new CType.Named(name); break;  // const IDENT = union(enum) { … } ;
-                case Zig.UnionDeclTagged:   _containerTypes[name] = new CType.Named(name); break;  // const IDENT = union(SomeEnum) { … } ;
-                case Zig.UnionDeclUntagged: _containerTypes[name] = new CType.Named(name); break;  // const IDENT = union { … } ;
+                case Zig.UnionDecl:         _containerTypes[name] = new CType.Named(name); break;  // const IDENT = [layout] union[(…)] { … } ;
             }
         }
     }
@@ -2444,9 +2442,7 @@ internal sealed partial class ZigLowering
                     foreach (var m in fnDefs) { methods.Add((name, m)); }
                     break;
                 }
-                case Zig.UnionDeclEnum u:   foreach (var m in RegisterUnion(name, u.Arg9, TagIntOf(u.Arg6))) { methods.Add((name, m)); } break;  // const IDENT = union(enum[(T)]) { UnionMembers } ;
-                case Zig.UnionDeclTagged u: foreach (var m in RegisterUnionTagged(name, Tok(u.Arg5), u.Arg8)) { methods.Add((name, m)); } break;  // const IDENT = union(SomeEnum) { UnionMembers } ;
-                case Zig.UnionDeclUntagged u: foreach (var m in RegisterUnionUntagged(name, u.Arg6)) { methods.Add((name, m)); } break;  // const IDENT = [extern|packed] union { UnionMembers } ;
+                case Zig.UnionDecl u:       foreach (var m in RegisterUnionHead(name, u.Arg3, u.Arg5)) { methods.Add((name, m)); } break;  // const IDENT = [layout] union[(…)] { UnionMembers } ;
             }
         }
     }
@@ -2523,9 +2519,7 @@ internal sealed partial class ZigLowering
         Zig.PackedStructDeclBacked s => Tok(s.Arg1),
         Zig.EnumDecl e          => Tok(e.Arg1),
         Zig.EnumDeclTyped e     => Tok(e.Arg1),
-        Zig.UnionDeclEnum u     => Tok(u.Arg1),
-        Zig.UnionDeclTagged u   => Tok(u.Arg1),
-        Zig.UnionDeclUntagged u => Tok(u.Arg1),
+        Zig.UnionDecl u         => Tok(u.Arg1),
         _ => null,
     };
 

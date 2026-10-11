@@ -215,7 +215,8 @@ public sealed class ZigGrammarTests
         FirstNode<Zig.BuiltinCall>("fn f() void { _ = @as(enum { x, y }, .y); }").ShouldNotBeNull();
         // The named declarations keep their own forms.
         FirstNode<Zig.EnumDecl>("const E = enum { a, b };").ShouldNotBeNull();
-        FirstNode<Zig.UnionDeclEnum>("const U = union(enum) { a: u8 };").ShouldNotBeNull();
+        FirstNode<Zig.UnionDecl>("const U = union(enum) { a: u8 };").Arg3.Content.ShouldBeOfType<Zig.UnionHead>()
+            .Arg2.ShouldNotBeNull().Content.ShouldBeOfType<Zig.UnionArgEnum>();
     }
 
     [Fact]
@@ -290,6 +291,18 @@ public sealed class ZigGrammarTests
         FirstNode<Zig.LabeledLoopExpr>("fn f(xs: []u8) u8 { return outer: for (xs) |x| { break :outer x; } else 0; }")
             .Arg2.Content.ShouldBeOfType<Zig.ForValue>();
         FirstNode<Zig.WhileValue>("fn f(it: ?*N) u8 { return while (it) |n| : (step()) { break n.v; } else 0; }").Arg5.ShouldNotBeNull();
+    }
+
+    [Fact]
+    public void A_union_has_one_head_for_its_layout_and_its_tag()
+    {
+        // zig's ContainerDeclType for a union: `ContainerLayout? union ( (enum (Expr)?) / Expr )?`, one head for the
+        // declaration and the inline type.
+        FirstNode<Zig.UnionArgTag>("const Op = union(fuzz.Op) { a: u8, b };").Arg1.Content.ShouldBeOfType<Zig.Field>();
+        FirstNode<Zig.UnionHead>("const N = packed union(u8) { a: u8, b: i8 };").Arg0.ShouldNotBeNull();
+        FirstNode<Zig.InlineUnion>("const S = struct { u: union(enum(u2)) { a, b: u8 } };").Arg0.Content.ShouldBeOfType<Zig.UnionHead>()
+            .Arg2.ShouldNotBeNull().Content.ShouldBeOfType<Zig.UnionArgEnum>().Arg2.ShouldNotBeNull();
+        FirstNode<Zig.InlineUnion>("const S = struct { r: extern union { a: u32, b: f32 } };").ShouldNotBeNull();
     }
 
     [Fact]

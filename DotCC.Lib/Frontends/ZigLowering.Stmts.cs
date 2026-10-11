@@ -129,9 +129,7 @@ internal sealed partial class ZigLowering
             case Zig.PackedStructDeclBacked s: return LowerLocalStruct(Tok(s.Arg1), s.Arg9, AggregateLayout.Packed);
             case Zig.EnumDecl d:          return LowerLocalEnumOrUnion(Tok(d.Arg1), d);
             case Zig.EnumDeclTyped d:     return LowerLocalEnumOrUnion(Tok(d.Arg1), d);
-            case Zig.UnionDeclEnum d:     return LowerLocalEnumOrUnion(Tok(d.Arg1), d);
-            case Zig.UnionDeclTagged d:   return LowerLocalEnumOrUnion(Tok(d.Arg1), d);
-            case Zig.UnionDeclUntagged d: return LowerLocalEnumOrUnion(Tok(d.Arg1), d);
+            case Zig.UnionDecl d:         return LowerLocalEnumOrUnion(Tok(d.Arg1), d);
             // `const/var x: T align(N)/linksection(".s") = e;` (Milestone R, part 5) — the modifiers
             // are a no-op on the managed target, so lower exactly like the unmodified typed decl
             // (the DeclMods arg is ignored). RhsExpr is one slot right of the Type (DeclMods between).

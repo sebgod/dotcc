@@ -795,9 +795,7 @@ internal sealed partial class ZigLowering
             {
                 Zig.EnumDecl e          => RegisterEnumZig(mangled, null, e.Arg5),
                 Zig.EnumDeclTyped e     => RegisterEnumZig(mangled, e.Arg5, e.Arg8),
-                Zig.UnionDeclEnum u     => RegisterUnion(mangled, u.Arg9, TagIntOf(u.Arg6)),
-                Zig.UnionDeclTagged u   => RegisterUnionTagged(mangled, Tok(u.Arg5), u.Arg8),
-                Zig.UnionDeclUntagged u => RegisterUnionUntagged(mangled, u.Arg6),
+                Zig.UnionDecl u         => RegisterUnionHead(mangled, u.Arg3, u.Arg5),
                 _ => throw new System.InvalidOperationException(),
             };
         }
@@ -914,9 +912,7 @@ internal sealed partial class ZigLowering
             Zig.PackedStructDeclBacked s => SplitMembers(s.Arg9).containers,
             Zig.EnumDecl e => FromBody(e.Arg5).ToList(),
             Zig.EnumDeclTyped e => FromBody(e.Arg8).ToList(),
-            Zig.UnionDeclEnum u => FromBody(u.Arg9).ToList(),
-            Zig.UnionDeclTagged u => FromBody(u.Arg8).ToList(),
-            Zig.UnionDeclUntagged u => FromBody(u.Arg6).ToList(),
+            Zig.UnionDecl u => FromBody(u.Arg5).ToList(),
             _ => System.Array.Empty<Item>(),
         };
     }
@@ -1020,6 +1016,31 @@ internal sealed partial class ZigLowering
     /// <summary>The integer type an <c>EnumTagInt</c> slot spells (<c>union(enum(u8))</c>), or null when the source left
     /// it out.</summary>
     private static Item? TagIntOf(Item? enumTagInt) => enumTagInt?.Content is Zig.EnumTagInt t ? t.Arg1 : null;
+    /// <summary>Register a union named <paramref name="name"/> from its head (<c>UnionHead</c>): <c>union(enum[(T)])</c>
+    /// synthesizes the tag enum, <c>union(Tag)</c> names a declared one, and a plain or <c>extern</c> / <c>packed</c> union is
+    /// untagged (on a layout union the argument is the backing integer). Returns the union's methods.</summary>
+    private List<Item> RegisterUnionHead(string name, Item head, Item variants) => UnionKindOf(head) switch
+    {
+        (UnionKind.Enum, var tagInt) => RegisterUnion(name, variants, tagInt),
+        (UnionKind.Tagged, { } tag) => RegisterUnionTagged(name, UnionTagName(tag), variants),
+        _ => RegisterUnionUntagged(name, variants),
+    };
+    /// <summary>How a union head tags it.</summary>
+    private enum UnionKind { Untagged, Enum, Tagged }
+    /// <summary>A union head's kind, with the tag integer (<see cref="UnionKind.Enum"/>) or the tag expression
+    /// (<see cref="UnionKind.Tagged"/>).</summary>
+    private static (UnionKind Kind, Item? Arg) UnionKindOf(Item head) => head.Content switch
+    {
+        Zig.UnionHead { Arg2.Content: Zig.UnionArgEnum e } => (UnionKind.Enum, TagIntOf(e.Arg2)),
+        Zig.UnionHead { Arg0: null, Arg2.Content: Zig.UnionArgTag t } => (UnionKind.Tagged, t.Arg1),
+        _ => (UnionKind.Untagged, null),
+    };
+    /// <summary>The declared enum a <c>union(Tag)</c> names: an identifier by name (it may be declared later in the
+    /// container), any other path through its type.</summary>
+    private string UnionTagName(Item tag) => tag.Content is Zig.Ident id
+        ? Tok(id.Arg0)
+        : LowerType(tag) is CType.Enum e ? e.Name
+        : throw new IrUnsupportedException("zig `union(Tag)`: the tag must name a declared enum type");
 
     /// <summary>Register a Zig <c>union(enum)</c> declaration as the faithful C tagged-union shape
     /// (see <see cref="ZigUnionInfo"/>): synthesize the tag enum <c>U_Tag</c> (a member per variant,

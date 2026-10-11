@@ -274,3 +274,11 @@ resolved-conflict diff has the same dangling-`else` and `inline` decisions on th
   statement `if`'s ThenExpr twin (std's zig/WindowsSdk.zig).
 zig reads `=> for (xs) |x| sum += x` as an assignment to the loop and rejects it ("invalid left-hand side to assignment");
 dotcc's grammar reads it the same way and now rejects it the same way. Probe 525 to 528.
+
+**One union head (2026-10-11).** zig's ContainerDeclType for a union is `ContainerLayout? union ( (enum (Expr)?) / Expr
+)?`; dotcc had six union rules (three named declarations, three inline types), each spelling one combination. They are
+`UnionHead -> ContainerLayout? union UnionArg?` plus `unionDecl` and `inlineUnion`. That gives a tag named by a path
+(`union(fuzz_probs.Op)`, std's heap/SafeAllocator.zig; `union(linux.LINUX_REBOOT.CMD)`, posix.zig), `packed union(u8)`
+(macho.zig, c/darwin.zig; on a layout union the argument is the backing integer) and an inline `union(enum(u2))`
+(testing/Smith.zig). Lowering reads the head through one helper (`UnionKindOf` / `RegisterUnionHead`). Probe 528 to 536.
+An inline `union(Tag) {…}` type is a loud cut. The struct / enum / opaque heads are the same factoring, still open.

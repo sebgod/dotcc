@@ -8033,6 +8033,58 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{} {}\\n\", .{ sumSkippingTwos(&a), five });\n" +
             "}\n", 0,
             "53 5" },
+        // One union head (zig's ContainerDeclType): a tag named by a path (`union(probs.Op)`, std's heap/SafeAllocator.zig), a
+        // `packed union(u8)` backing integer (macho.zig) and an inline `union(enum(u2))` field type (testing/Smith.zig).
+        new object[] { "union_heads",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "const probs = struct {\n" +
+            "    const Op = enum { add, neg, nop };\n" +
+            "};\n" +
+            "\n" +
+            "const Op = union(probs.Op) {\n" +
+            "    add: u32,\n" +
+            "    neg: i32,\n" +
+            "    nop,\n" +
+            "};\n" +
+            "\n" +
+            "fn apply(acc: i64, op: Op) i64 {\n" +
+            "    return switch (op) {\n" +
+            "        .add => |n| acc + n,\n" +
+            "        .neg => |n| acc - n,\n" +
+            "        .nop => acc,\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "const Bits = packed union(u8) {\n" +
+            "    raw: u8,\n" +
+            "    signed: i8,\n" +
+            "};\n" +
+            "\n" +
+            "const Holder = struct {\n" +
+            "    u: union(enum(u2)) { none, small: u8, big: u32 },\n" +
+            "};\n" +
+            "\n" +
+            "fn holderValue(h: Holder) u32 {\n" +
+            "    return switch (h.u) {\n" +
+            "        .none => 0,\n" +
+            "        .small => |s| s,\n" +
+            "        .big => |b| b,\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() void {\n" +
+            "    var acc: i64 = 10;\n" +
+            "    acc = apply(acc, .{ .add = 5 });\n" +
+            "    acc = apply(acc, .{ .neg = 3 });\n" +
+            "    acc = apply(acc, .nop);\n" +
+            "    const b = Bits{ .raw = 200 };\n" +
+            "    const h1 = Holder{ .u = .{ .small = 7 } };\n" +
+            "    const h2 = Holder{ .u = .{ .big = 70000 } };\n" +
+            "    std.debug.print(\"{} {}\\n\", .{ acc, b.raw });\n" +
+            "    std.debug.print(\"{} {} {}\\n\", .{ holderValue(h1), holderValue(h2), holderValue(.{ .u = .none }) });\n" +
+            "}\n", 0,
+            "12 200\n7 70000 0" },
         // zig-grammar-peg P5 loops: a value loop's optional `else` (an else-less `for` as a union prong body, a loop `else` in a value
         // switch prong), a `for … |*n, i| n.* = … else …` body ended by `else` (std's zig/WindowsSdk.zig) and a labeled `inline for`.
         new object[] { "loop_expressions",

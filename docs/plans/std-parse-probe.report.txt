@@ -1,70 +1,53 @@
 # dotcc Zig-std parse-probe (road-to-zig-std.md S0)
-generated: 2026-10-11T07:26:25Z (UTC)
+generated: 2026-10-11T08:08:38Z (UTC)
 std dir : C:/Users/SebastianGodelet/AppData/Local/Programs/Zig/lib\std  (found via DOTCC_ZIG_LIB_DIR=<lib>/std)
 grammar : DotCC.Lib/zig.lalr.yaml
 files   : 553
-parse-clean : 528 (95.5%)
-failing     : 25
+parse-clean : 536 (96.9%)
+failing     : 17
 
 ## Parse-failure buckets (ranked by file count) — the S9 worklist
 count  signature
-    3  parse: parse error: unexpected 'IDENT' (id=67) in state 336
-       e.g. std/Build/Configuration.zig
-       msg: parse error at line 482, column 45 (byte offset 18358): unexpected 'IDENT' (id=67) in state 336; expected one of: 'enum' (id=94)
-    3  parse: parse error: unexpected 'IDENT' (id=67) in state 565
+    3  parse: parse error: unexpected 'IDENT' (id=67) in state 564
        e.g. std/mem.zig
-       msg: parse error at line 383, column 18 (byte offset 12491): unexpected 'IDENT' (id=67) in state 565; expected one of: 'Block' (id=7), '{' (id=37)
-    2  parse: parse error: unexpected '.' (id=64) in state 659
-       e.g. std/heap/SafeAllocator.zig
-       msg: parse error at line 1823, column 36 (byte offset 65063): unexpected '.' (id=64) in state 659; expected one of: ')' (id=36)
+       msg: parse error at line 383, column 18 (byte offset 12491): unexpected 'IDENT' (id=67) in state 564; expected one of: 'Block' (id=7), '{' (id=37)
     2  parse: parse error: unexpected 'catch' (id=82) in state 651
        e.g. std/debug/SelfInfo/Elf.zig
-       msg: parse error at line 19, column 57 (byte offset 512): unexpected 'catch' (id=82) in state 651; expected one of: 'Type' (id=10), 'Expr' (id=11), 'BoolOr' (id=12), 'BoolAnd' (id=13), 'Compare' (id=14), 'Bitwise' (id=15), 'BitShift' (id=16), 'Add' (id=17), 'Mul' (id=18), 'Prefix' (id=19), 'ErrUnion' (id=20), 'Suffix' (id=21), 'Primary' (id=22), 'fn' (id=24), 'pub' (id=25), 'const' (id=26), 'var' (id=27), 'return' (id=28), 'if' (id=29), 'else' (id=30), 'while' (id=31), 'try' (id=34), '(' (id=35), ')' (id=36), '{' (id=37), '}' (id=38), '[' (id=39), ']' (id=40), ';' (id=41), ',' (id=42), ':' (id=43), '=' (id=44), '&' (id=51), '-' (id=57), '*' (id=58), '!' (id=61), '~' (id=62), '?' (id=63), '.' (id=64), 'IDENT' (id=67), 'INTEGER' (id=68), 'FLOAT' (id=69), 'STRING' (id=70), 'BUILTIN' (id=71), 'RhsExpr' (id=74), 'IfExpr' (id=75), 'extern' (id=76), '...' (id=77), '[*c]' (id=78), 'OrElse' (id=79), 'null' (id=81), 'error' (id=83), 'break' (id=84), 'continue' (id=85), 'switch' (id=86), '=>' (id=87), 'for' (id=91), '..' (id=92), 'struct' (id=93), 'enum' (id=94), 'CurlySuffix' (id=101), 'union' (id=103), 'undefined' (id=106), 'true' (id=114), 'false' (id=115), 'CHAR' (id=116), '+=' (id=117), '-=' (id=118), '*=' (id=119), '/=' (id=120), '%=' (id=121), '<<=' (id=122), '>>=' (id=123), '&=' (id=124), '|=' (id=125), '^=' (id=126), 'SwitchExpr' (id=127), 'LabeledBlock' (id=128), '[*]' (id=131), '[:0]' (id=132), '[*:0]' (id=133), '-%' (id=135), '+%=' (id=137), '-%=' (id=138), '*%=' (id=139), '+|=' (id=143), '-|=' (id=144), '*|=' (id=145), 'packed' (id=146), 'comptime' (id=153), 'inline' (id=154), 'LoopExpr' (id=155), 'threadlocal' (id=156), 'test' (id=161), '**' (id=164), 'asm' (id=176), 'volatile' (id=177), 'AsmExpr' (id=179), 'noinline' (id=192), 'ContainerLayout' (id=196), 'BoolOrO' (id=198), 'BoolAndO' (id=199), 'CompareO' (id=200), 'BitwiseO' (id=201), 'BitShiftO' (id=202), 'AddO' (id=203), 'MulO' (id=204), 'PrefixO' (id=205), 'OpenPrimary' (id=206), 'JumpExpr' (id=208), 'InlineStructTy' (id=209), 'LABEL' (id=214)
+       msg: parse error at line 19, column 57 (byte offset 512): unexpected 'catch' (id=82) in state 651; expected one of: 'Type' (id=10), 'Expr' (id=11), 'BoolOr' (id=12), 'BoolAnd' (id=13), 'Compare' (id=14), 'Bitwise' (id=15), 'BitShift' (id=16), 'Add' (id=17), 'Mul' (id=18), 'Prefix' (id=19), 'ErrUnion' (id=20), 'Suffix' (id=21), 'Primary' (id=22), 'fn' (id=24), 'pub' (id=25), 'const' (id=26), 'var' (id=27), 'return' (id=28), 'if' (id=29), 'else' (id=30), 'while' (id=31), 'try' (id=34), '(' (id=35), ')' (id=36), '{' (id=37), '}' (id=38), '[' (id=39), ']' (id=40), ';' (id=41), ',' (id=42), ':' (id=43), '=' (id=44), '&' (id=51), '-' (id=57), '*' (id=58), '!' (id=61), '~' (id=62), '?' (id=63), '.' (id=64), 'IDENT' (id=67), 'INTEGER' (id=68), 'FLOAT' (id=69), 'STRING' (id=70), 'BUILTIN' (id=71), 'RhsExpr' (id=74), 'IfExpr' (id=75), 'extern' (id=76), '...' (id=77), '[*c]' (id=78), 'OrElse' (id=79), 'null' (id=81), 'error' (id=83), 'break' (id=84), 'continue' (id=85), 'switch' (id=86), '=>' (id=87), 'for' (id=91), '..' (id=92), 'struct' (id=93), 'enum' (id=94), 'CurlySuffix' (id=101), 'union' (id=103), 'undefined' (id=106), 'true' (id=114), 'false' (id=115), 'CHAR' (id=116), '+=' (id=117), '-=' (id=118), '*=' (id=119), '/=' (id=120), '%=' (id=121), '<<=' (id=122), '>>=' (id=123), '&=' (id=124), '|=' (id=125), '^=' (id=126), 'SwitchExpr' (id=127), 'LabeledBlock' (id=128), '[*]' (id=131), '[:0]' (id=132), '[*:0]' (id=133), '-%' (id=135), '+%=' (id=137), '-%=' (id=138), '*%=' (id=139), '+|=' (id=143), '-|=' (id=144), '*|=' (id=145), 'packed' (id=146), 'comptime' (id=153), 'inline' (id=154), 'LoopExpr' (id=155), 'threadlocal' (id=156), 'test' (id=161), '**' (id=164), 'asm' (id=176), 'volatile' (id=177), 'AsmExpr' (id=179), 'noinline' (id=192), 'ContainerLayout' (id=196), 'BoolOrO' (id=198), 'BoolAndO' (id=199), 'CompareO' (id=200), 'BitwiseO' (id=201), 'BitShiftO' (id=202), 'AddO' (id=203), 'MulO' (id=204), 'PrefixO' (id=205), 'OpenPrimary' (id=206), 'JumpExpr' (id=208), 'InlineStructTy' (id=209), 'LABEL' (id=214), 'UnionHead' (id=222)
     2  parse: parse error: unexpected 'pub' (id=25) in state 229
        e.g. std/c/darwin/dispatch.zig
-       msg: parse error at line 16, column 5 (byte offset 518): unexpected 'pub' (id=25) in state 229; expected one of: 'Type' (id=10), 'Expr' (id=11), 'BoolOr' (id=12), 'BoolAnd' (id=13), 'Compare' (id=14), 'Bitwise' (id=15), 'BitShift' (id=16), 'Add' (id=17), 'Mul' (id=18), 'Prefix' (id=19), 'ErrUnion' (id=20), 'Suffix' (id=21), 'Primary' (id=22), 'fn' (id=24), 'return' (id=28), 'if' (id=29), 'while' (id=31), 'try' (id=34), '(' (id=35), '{' (id=37), '}' (id=38), '[' (id=39), '&' (id=51), '-' (id=57), '*' (id=58), '!' (id=61), '~' (id=62), '?' (id=63), '.' (id=64), 'IDENT' (id=67), 'INTEGER' (id=68), 'FLOAT' (id=69), 'STRING' (id=70), 'BUILTIN' (id=71), 'IfExpr' (id=75), 'extern' (id=76), '[*c]' (id=78), 'OrElse' (id=79), 'null' (id=81), 'error' (id=83), 'break' (id=84), 'continue' (id=85), 'switch' (id=86), 'for' (id=91), 'struct' (id=93), 'enum' (id=94), 'FieldInits' (id=99), 'FieldInit' (id=100), 'CurlySuffix' (id=101), 'union' (id=103), 'undefined' (id=106), 'true' (id=114), 'false' (id=115), 'CHAR' (id=116), 'SwitchExpr' (id=127), 'LabeledBlock' (id=128), '[*]' (id=131), '[:0]' (id=132), '[*:0]' (id=133), '-%' (id=135), 'packed' (id=146), 'comptime' (id=153), 'inline' (id=154), 'LoopExpr' (id=155), '**' (id=164), 'asm' (id=176), 'volatile' (id=177), 'AsmExpr' (id=179), 'VoidElem' (id=190), 'ContainerLayout' (id=196), 'BoolOrO' (id=198), 'BoolAndO' (id=199), 'CompareO' (id=200), 'BitwiseO' (id=201), 'BitShiftO' (id=202), 'AddO' (id=203), 'MulO' (id=204), 'PrefixO' (id=205), 'OpenPrimary' (id=206), 'JumpExpr' (id=208), 'InlineStructTy' (id=209), 'LABEL' (id=214)
-    2  parse: parse error: unexpected 'switch' (id=86) in state 615
+       msg: parse error at line 16, column 5 (byte offset 518): unexpected 'pub' (id=25) in state 229; expected one of: 'Type' (id=10), 'Expr' (id=11), 'BoolOr' (id=12), 'BoolAnd' (id=13), 'Compare' (id=14), 'Bitwise' (id=15), 'BitShift' (id=16), 'Add' (id=17), 'Mul' (id=18), 'Prefix' (id=19), 'ErrUnion' (id=20), 'Suffix' (id=21), 'Primary' (id=22), 'fn' (id=24), 'return' (id=28), 'if' (id=29), 'while' (id=31), 'try' (id=34), '(' (id=35), '{' (id=37), '}' (id=38), '[' (id=39), '&' (id=51), '-' (id=57), '*' (id=58), '!' (id=61), '~' (id=62), '?' (id=63), '.' (id=64), 'IDENT' (id=67), 'INTEGER' (id=68), 'FLOAT' (id=69), 'STRING' (id=70), 'BUILTIN' (id=71), 'IfExpr' (id=75), 'extern' (id=76), '[*c]' (id=78), 'OrElse' (id=79), 'null' (id=81), 'error' (id=83), 'break' (id=84), 'continue' (id=85), 'switch' (id=86), 'for' (id=91), 'struct' (id=93), 'enum' (id=94), 'FieldInits' (id=99), 'FieldInit' (id=100), 'CurlySuffix' (id=101), 'union' (id=103), 'undefined' (id=106), 'true' (id=114), 'false' (id=115), 'CHAR' (id=116), 'SwitchExpr' (id=127), 'LabeledBlock' (id=128), '[*]' (id=131), '[:0]' (id=132), '[*:0]' (id=133), '-%' (id=135), 'packed' (id=146), 'comptime' (id=153), 'inline' (id=154), 'LoopExpr' (id=155), '**' (id=164), 'asm' (id=176), 'volatile' (id=177), 'AsmExpr' (id=179), 'VoidElem' (id=190), 'ContainerLayout' (id=196), 'BoolOrO' (id=198), 'BoolAndO' (id=199), 'CompareO' (id=200), 'BitwiseO' (id=201), 'BitShiftO' (id=202), 'AddO' (id=203), 'MulO' (id=204), 'PrefixO' (id=205), 'OpenPrimary' (id=206), 'JumpExpr' (id=208), 'InlineStructTy' (id=209), 'LABEL' (id=214), 'UnionHead' (id=222)
+    2  parse: parse error: unexpected 'switch' (id=86) in state 605
        e.g. std/Thread.zig
-       msg: parse error at line 1173, column 42 (byte offset 44862): unexpected 'switch' (id=86) in state 615; expected one of: 'STRING' (id=70)
-    1  parse: parse error: unexpected '(' (id=35) in state 367
-       e.g. std/macho.zig
-       msg: parse error at line 854, column 25 (byte offset 30003): unexpected '(' (id=35) in state 367; expected one of: '{' (id=37)
-    1  parse: parse error: unexpected '(' (id=35) in state 409
-       e.g. std/c/darwin.zig
-       msg: parse error at line 439, column 43 (byte offset 15227): unexpected '(' (id=35) in state 409; expected one of: '{' (id=37)
-    1  parse: parse error: unexpected '(' (id=35) in state 585
-       e.g. std/testing/Smith.zig
-       msg: parse error at line 731, column 22 (byte offset 25126): unexpected '(' (id=35) in state 585; expected one of: ')' (id=36)
-    1  parse: parse error: unexpected '++' (id=163) in state 614
+       msg: parse error at line 1173, column 42 (byte offset 44862): unexpected 'switch' (id=86) in state 605; expected one of: 'STRING' (id=70)
+    1  parse: parse error: unexpected '++' (id=163) in state 604
        e.g. std/zig/system/linux.zig
-       msg: parse error at line 445, column 32 (byte offset 15386): unexpected '++' (id=163) in state 614; expected one of: ')' (id=36), ':' (id=43), 'AsmTail' (id=180)
-    1  parse: parse error: unexpected '=' (id=44) in state 920
+       msg: parse error at line 445, column 32 (byte offset 15386): unexpected '++' (id=163) in state 604; expected one of: ')' (id=36), ':' (id=43), 'AsmTail' (id=180)
+    1  parse: parse error: unexpected '=' (id=44) in state 931
        e.g. std/os/windows.zig
-       msg: parse error at line 927, column 37 (byte offset 34075): unexpected '=' (id=44) in state 920; expected one of: 'fn' (id=24), 'pub' (id=25), 'const' (id=26), 'var' (id=27), '}' (id=38), ',' (id=42), 'IDENT' (id=67), 'extern' (id=76), 'null' (id=81), 'undefined' (id=106), 'true' (id=114), 'false' (id=115), 'comptime' (id=153), 'inline' (id=154), 'threadlocal' (id=156), 'test' (id=161), 'noinline' (id=192), 'LABEL' (id=214)
-    1  parse: parse error: unexpected 'BUILTIN' (id=71) in state 690
+       msg: parse error at line 927, column 37 (byte offset 34075): unexpected '=' (id=44) in state 931; expected one of: 'fn' (id=24), 'pub' (id=25), 'const' (id=26), 'var' (id=27), '}' (id=38), ',' (id=42), 'IDENT' (id=67), 'extern' (id=76), 'null' (id=81), 'undefined' (id=106), 'true' (id=114), 'false' (id=115), 'comptime' (id=153), 'inline' (id=154), 'threadlocal' (id=156), 'test' (id=161), 'noinline' (id=192), 'LABEL' (id=214)
+    1  parse: parse error: unexpected 'BUILTIN' (id=71) in state 687
        e.g. std/gpu.zig
-       msg: parse error at line 3, column 52 (byte offset 84): unexpected 'BUILTIN' (id=71) in state 690; expected one of: 'fn' (id=24), 'pub' (id=25), 'const' (id=26), 'var' (id=27), 'else' (id=30), 'and' (id=32), 'or' (id=33), '(' (id=35), ')' (id=36), '{' (id=37), '}' (id=38), '[' (id=39), ']' (id=40), ';' (id=41), ',' (id=42), ':' (id=43), '=' (id=44), '==' (id=45), '!=' (id=46), '<' (id=47), '>' (id=48), '<=' (id=49), '>=' (id=50), '&' (id=51), '^' (id=52), '|' (id=53), '<<' (id=54), '>>' (id=55), '+' (id=56), '-' (id=57), '*' (id=58), '/' (id=59), '%' (id=60), '!' (id=61), '.' (id=64), '.*' (id=65), '.?' (id=66), 'IDENT' (id=67), 'extern' (id=76), '...' (id=77), 'orelse' (id=80), 'null' (id=81), 'catch' (id=82), '=>' (id=87), '..' (id=92), 'undefined' (id=106), 'true' (id=114), 'false' (id=115), '+=' (id=117), '-=' (id=118), '*=' (id=119), '/=' (id=120), '%=' (id=121), '<<=' (id=122), '>>=' (id=123), '&=' (id=124), '|=' (id=125), '^=' (id=126), '+%' (id=134), '-%' (id=135), '*%' (id=136), '+%=' (id=137), '-%=' (id=138), '*%=' (id=139), '+|' (id=140), '-|' (id=141), '*|' (id=142), '+|=' (id=143), '-|=' (id=144), '*|=' (id=145), 'align' (id=149), 'linksection' (id=150), 'comptime' (id=153), 'inline' (id=154), 'threadlocal' (id=156), 'test' (id=161), '||' (id=162), '++' (id=163), '**' (id=164), 'noinline' (id=192), 'LABEL' (id=214)
-    1  parse: parse error: unexpected 'STRING' (id=70) in state 780
+       msg: parse error at line 3, column 52 (byte offset 84): unexpected 'BUILTIN' (id=71) in state 687; expected one of: 'fn' (id=24), 'pub' (id=25), 'const' (id=26), 'var' (id=27), 'else' (id=30), 'and' (id=32), 'or' (id=33), '(' (id=35), ')' (id=36), '{' (id=37), '}' (id=38), '[' (id=39), ']' (id=40), ';' (id=41), ',' (id=42), ':' (id=43), '=' (id=44), '==' (id=45), '!=' (id=46), '<' (id=47), '>' (id=48), '<=' (id=49), '>=' (id=50), '&' (id=51), '^' (id=52), '|' (id=53), '<<' (id=54), '>>' (id=55), '+' (id=56), '-' (id=57), '*' (id=58), '/' (id=59), '%' (id=60), '!' (id=61), '.' (id=64), '.*' (id=65), '.?' (id=66), 'IDENT' (id=67), 'extern' (id=76), '...' (id=77), 'orelse' (id=80), 'null' (id=81), 'catch' (id=82), '=>' (id=87), '..' (id=92), 'undefined' (id=106), 'true' (id=114), 'false' (id=115), '+=' (id=117), '-=' (id=118), '*=' (id=119), '/=' (id=120), '%=' (id=121), '<<=' (id=122), '>>=' (id=123), '&=' (id=124), '|=' (id=125), '^=' (id=126), '+%' (id=134), '-%' (id=135), '*%' (id=136), '+%=' (id=137), '-%=' (id=138), '*%=' (id=139), '+|' (id=140), '-|' (id=141), '*|' (id=142), '+|=' (id=143), '-|=' (id=144), '*|=' (id=145), 'align' (id=149), 'linksection' (id=150), 'comptime' (id=153), 'inline' (id=154), 'threadlocal' (id=156), 'test' (id=161), '||' (id=162), '++' (id=163), '**' (id=164), 'noinline' (id=192), 'LABEL' (id=214)
+    1  parse: parse error: unexpected 'STRING' (id=70) in state 776
        e.g. std/pie.zig
-       msg: parse error at line 272, column 17 (byte offset 10353): unexpected 'STRING' (id=70) in state 780; expected one of: ')' (id=36), ':' (id=43), 'AsmTail' (id=180)
-    1  parse: parse error: unexpected 'if' (id=29) in state 615
+       msg: parse error at line 272, column 17 (byte offset 10353): unexpected 'STRING' (id=70) in state 776; expected one of: ')' (id=36), ':' (id=43), 'AsmTail' (id=180)
+    1  parse: parse error: unexpected 'if' (id=29) in state 605
        e.g. std/debug/cpu_context.zig
-       msg: parse error at line 767, column 23 (byte offset 26222): unexpected 'if' (id=29) in state 615; expected one of: 'STRING' (id=70)
-    1  parse: parse error: unexpected 'null' (id=81) in state 1106
+       msg: parse error at line 767, column 23 (byte offset 26222): unexpected 'if' (id=29) in state 605; expected one of: 'STRING' (id=70)
+    1  parse: parse error: unexpected 'null' (id=81) in state 1091
        e.g. std/compress/xz/Decompress.zig
-       msg: parse error at line 44, column 5 (byte offset 977): unexpected 'null' (id=81) in state 1106; expected one of: 'FnDef' (id=3), 'VarDecl' (id=6), 'fn' (id=24), 'pub' (id=25), 'const' (id=26), 'var' (id=27), 'IDENT' (id=67), 'extern' (id=76), 'FieldDecls' (id=95), 'FieldDecl' (id=96), 'Member' (id=102), 'comptime' (id=153), 'inline' (id=154), 'threadlocal' (id=156), 'ContainerDecl' (id=159), 'test' (id=161), 'TestBlock' (id=173), 'noinline' (id=192), 'ContainerDeclaration' (id=194), 'LABEL' (id=214), 'FieldName' (id=215)
-    1  parse: parse error: unexpected 'orelse' (id=80) in state 458
+       msg: parse error at line 44, column 5 (byte offset 977): unexpected 'null' (id=81) in state 1091; expected one of: 'FnDef' (id=3), 'VarDecl' (id=6), 'fn' (id=24), 'pub' (id=25), 'const' (id=26), 'var' (id=27), 'IDENT' (id=67), 'extern' (id=76), 'FieldDecls' (id=95), 'FieldDecl' (id=96), 'Member' (id=102), 'comptime' (id=153), 'inline' (id=154), 'threadlocal' (id=156), 'ContainerDecl' (id=159), 'test' (id=161), 'TestBlock' (id=173), 'noinline' (id=192), 'ContainerDeclaration' (id=194), 'LABEL' (id=214), 'FieldName' (id=215)
+    1  parse: parse error: unexpected 'orelse' (id=80) in state 457
        e.g. std/debug/SelfInfo/Windows.zig
-       msg: parse error at line 544, column 15 (byte offset 23279): unexpected 'orelse' (id=80) in state 458; expected one of: 'fn' (id=24), 'pub' (id=25), 'const' (id=26), 'var' (id=27), 'else' (id=30), ')' (id=36), '}' (id=38), ']' (id=40), ';' (id=41), ',' (id=42), ':' (id=43), '=' (id=44), 'IDENT' (id=67), 'extern' (id=76), '...' (id=77), 'null' (id=81), '=>' (id=87), '..' (id=92), 'undefined' (id=106), 'true' (id=114), 'false' (id=115), '+=' (id=117), '-=' (id=118), '*=' (id=119), '/=' (id=120), '%=' (id=121), '<<=' (id=122), '>>=' (id=123), '&=' (id=124), '|=' (id=125), '^=' (id=126), '+%=' (id=137), '-%=' (id=138), '*%=' (id=139), '+|=' (id=143), '-|=' (id=144), '*|=' (id=145), 'comptime' (id=153), 'inline' (id=154), 'threadlocal' (id=156), 'test' (id=161), 'noinline' (id=192), 'LABEL' (id=214)
+       msg: parse error at line 544, column 15 (byte offset 23279): unexpected 'orelse' (id=80) in state 457; expected one of: 'fn' (id=24), 'pub' (id=25), 'const' (id=26), 'var' (id=27), 'else' (id=30), ')' (id=36), '}' (id=38), ']' (id=40), ';' (id=41), ',' (id=42), ':' (id=43), '=' (id=44), 'IDENT' (id=67), 'extern' (id=76), '...' (id=77), 'null' (id=81), '=>' (id=87), '..' (id=92), 'undefined' (id=106), 'true' (id=114), 'false' (id=115), '+=' (id=117), '-=' (id=118), '*=' (id=119), '/=' (id=120), '%=' (id=121), '<<=' (id=122), '>>=' (id=123), '&=' (id=124), '|=' (id=125), '^=' (id=126), '+%=' (id=137), '-%=' (id=138), '*%=' (id=139), '+|=' (id=143), '-|=' (id=144), '*|=' (id=145), 'comptime' (id=153), 'inline' (id=154), 'threadlocal' (id=156), 'test' (id=161), 'noinline' (id=192), 'LABEL' (id=214)
     1  parse: parse error: unexpected '|=' (id=125) in state 262
        e.g. std/Io/Threaded.zig
-       msg: parse error at line 624, column 26 (byte offset 23840): unexpected '|=' (id=125) in state 262; expected one of: 'Type' (id=10), 'Add' (id=17), 'Mul' (id=18), 'Prefix' (id=19), 'ErrUnion' (id=20), 'Suffix' (id=21), 'Primary' (id=22), 'fn' (id=24), 'return' (id=28), 'if' (id=29), 'while' (id=31), 'try' (id=34), '(' (id=35), '[' (id=39), '&' (id=51), '-' (id=57), '*' (id=58), '!' (id=61), '~' (id=62), '?' (id=63), '.' (id=64), 'IDENT' (id=67), 'INTEGER' (id=68), 'FLOAT' (id=69), 'STRING' (id=70), 'BUILTIN' (id=71), 'IfExpr' (id=75), 'extern' (id=76), '[*c]' (id=78), 'null' (id=81), 'error' (id=83), 'break' (id=84), 'continue' (id=85), 'switch' (id=86), 'for' (id=91), 'struct' (id=93), 'enum' (id=94), 'CurlySuffix' (id=101), 'union' (id=103), 'undefined' (id=106), 'true' (id=114), 'false' (id=115), 'CHAR' (id=116), 'SwitchExpr' (id=127), 'LabeledBlock' (id=128), '[*]' (id=131), '[:0]' (id=132), '[*:0]' (id=133), '-%' (id=135), 'packed' (id=146), 'comptime' (id=153), 'inline' (id=154), 'LoopExpr' (id=155), '**' (id=164), 'asm' (id=176), 'volatile' (id=177), 'AsmExpr' (id=179), 'ContainerLayout' (id=196), 'AddO' (id=203), 'MulO' (id=204), 'PrefixO' (id=205), 'OpenPrimary' (id=206), 'JumpExpr' (id=208), 'InlineStructTy' (id=209), 'LABEL' (id=214)
+       msg: parse error at line 624, column 26 (byte offset 23840): unexpected '|=' (id=125) in state 262; expected one of: 'Type' (id=10), 'Add' (id=17), 'Mul' (id=18), 'Prefix' (id=19), 'ErrUnion' (id=20), 'Suffix' (id=21), 'Primary' (id=22), 'fn' (id=24), 'return' (id=28), 'if' (id=29), 'while' (id=31), 'try' (id=34), '(' (id=35), '[' (id=39), '&' (id=51), '-' (id=57), '*' (id=58), '!' (id=61), '~' (id=62), '?' (id=63), '.' (id=64), 'IDENT' (id=67), 'INTEGER' (id=68), 'FLOAT' (id=69), 'STRING' (id=70), 'BUILTIN' (id=71), 'IfExpr' (id=75), 'extern' (id=76), '[*c]' (id=78), 'null' (id=81), 'error' (id=83), 'break' (id=84), 'continue' (id=85), 'switch' (id=86), 'for' (id=91), 'struct' (id=93), 'enum' (id=94), 'CurlySuffix' (id=101), 'union' (id=103), 'undefined' (id=106), 'true' (id=114), 'false' (id=115), 'CHAR' (id=116), 'SwitchExpr' (id=127), 'LabeledBlock' (id=128), '[*]' (id=131), '[:0]' (id=132), '[*:0]' (id=133), '-%' (id=135), 'packed' (id=146), 'comptime' (id=153), 'inline' (id=154), 'LoopExpr' (id=155), '**' (id=164), 'asm' (id=176), 'volatile' (id=177), 'AsmExpr' (id=179), 'ContainerLayout' (id=196), 'AddO' (id=203), 'MulO' (id=204), 'PrefixO' (id=205), 'OpenPrimary' (id=206), 'JumpExpr' (id=208), 'InlineStructTy' (id=209), 'LABEL' (id=214), 'UnionHead' (id=222)
 
 ## Failing files
-std/Build/Configuration.zig
 std/Io/Threaded.zig
 std/Thread.zig
-std/c/darwin.zig
 std/c/darwin/dispatch.zig
 std/compress/xz/Decompress.zig
 std/debug/SelfInfo/Elf.zig
@@ -72,17 +55,11 @@ std/debug/SelfInfo/MachO.zig
 std/debug/SelfInfo/Windows.zig
 std/debug/cpu_context.zig
 std/gpu.zig
-std/heap/SafeAllocator.zig
-std/macho.zig
 std/mem.zig
 std/meta.zig
 std/os/windows.zig
 std/pie.zig
-std/posix.zig
 std/start.zig
-std/testing/Smith.zig
-std/zig/Zir.zig
-std/zig/llvm/BitcodeReader.zig
 std/zig/system/linux.zig
 std/zon/Serializer.zig
 std/zon/parse.zig
