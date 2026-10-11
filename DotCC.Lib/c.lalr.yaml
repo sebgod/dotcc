@@ -480,7 +480,7 @@ symbols:
   - FnPtrQuals     # 194 non-terminal: the qualifiers after a fn-ptr declarator's `*`
   - FnPtrArr       # 195 non-terminal: `(*name[N])` / `(*const name[N])`, a sized fn-ptr array
   - FnPtrArrOpen   # 196 non-terminal: `(*name[])` / `(*const name[])`, a size-from-init fn-ptr array
-  - Designation    # 197 non-terminal: a designator list `.v.Name.id` / `[2].x` before an initializer's `=`
+  - Designation    # 197 non-terminal: a designation, a DesignatorList and its `=` (`.v.Name.id =`, `[2].x =`)
   - Designator     # 198 non-terminal: one `.member` or `[index]` step of a Designation
   - ArrDeclarator  # 199 non-terminal: an array declarator `name[N]…`, `name[]`, `name[][N]…`, `(name[N])`
   - BraceInit      # 200 non-terminal: a brace-enclosed initializer `{ InitList }` / `{ }`
@@ -503,6 +503,9 @@ symbols:
   - AttrName       # 208 non-terminal: an attribute's name, `ID` or `ID :: ID`
   - AttrArgs       # 209 non-terminal: an attribute's argument clause, `( E? )`
   - EnumBase       # 210 non-terminal: a C23 enum's fixed underlying type, `: Type`
+  # C23 6.7.10's initializer and designator-list (see the InitElem group).
+  - Initializer    # 211 non-terminal: an initializer, an E or a BraceInit
+  - DesignatorList # 212 non-terminal: one or more Designators, a Designation before its `=`
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -1044,18 +1047,16 @@ productions:
   - derivation: none
     rules:
       - { lhs: DeclItem, rhs: [ID], action: declItem }
-      - { lhs: DeclItem, rhs: [ID, '=', E], action: declItemInit }
-      # A brace-enclosed initializer (C11 6.7.9) for a struct, union or scalar
-      # (`struct P o = { 1, .y = 2 };`, `int n = { 5 };`, C23 `T x = {};`). An E
-      # never starts with `{`, so the split after `=` is one token.
-      - { lhs: DeclItem, rhs: [ID, '=', BraceInit], action: declItemBraceInit }
+      # The Initializer is an expression or a brace-enclosed list (C11 6.7.9) for a
+      # struct, union or scalar (`struct P o = { 1, .y = 2 };`, `int n = { 5 };`,
+      # C23 `T x = {};`).
+      - { lhs: DeclItem, rhs: [ID, '=', Initializer], action: declItemInit }
       # An array declarator (see ArrDeclarator) in first or tail position, with no
       # initializer, a braced one, or an expression (a string literal `char s[] =
       # "…"`; any other expression is a binder error, C's constraint). After the
       # name, `[` is not in FOLLOW(DeclItem), so `ID` alone and `ID [` never compete.
-      - { lhs: DeclItem, rhs: [ArrDeclarator],                 action: declItemArr }
-      - { lhs: DeclItem, rhs: [ArrDeclarator, '=', E],         action: declItemArrInit }
-      - { lhs: DeclItem, rhs: [ArrDeclarator, '=', BraceInit], action: declItemArrBraceInit }
+      - { lhs: DeclItem, rhs: [ArrDeclarator],                   action: declItemArr }
+      - { lhs: DeclItem, rhs: [ArrDeclarator, '=', Initializer], action: declItemArrInit }
       # A bit-field declarator `name : width` and an unnamed one `: width`
       # (padding), C11 6.7.2.1. As DeclItems they take part in declarator lists
       # like any other (`signed int A: 1, B: 2;`, `int a: 3, b, *p;`); they mean
@@ -1123,25 +1124,28 @@ productions:
       - { lhs: InitList, rhs: [InitList, ',', InitElem], action: initListCons }
       - { lhs: InitList, rhs: [InitList, ','], action: initListTrail }
 
+  # One element (C23 6.7.10's `designation? initializer`): an optional
+  # designation, then an expression or a braced list. A braced element is a
+  # BraceInit like any other, so it may be the C23 empty `{ }` (`{ {}, 1 }`,
+  # `{ .p = {} }`; the binder gates it on -std=c23). A designated element (C99)
+  # works in ANY brace-initializer position, mixed with positional elements. A
+  # designation is a path to the subobject it initializes and its `=`: `.field =`,
+  # `[index] =`, or a chain (`.op.code = NOP`, `.v.Name.id = x`, `[3].x = 1`,
+  # `[i][j] = 0`); the next positional element continues after the designated
+  # subobject. Conflict-free: neither `[` nor `.` can begin an expression or a
+  # BraceInit, an E never starts with `{`, and after a Designator only another
+  # `[`/`.` or the `=` can follow.
   - derivation: none
     rules:
-      - { lhs: InitElem, rhs: [E],                  action: initElemExpr }
-      - { lhs: InitElem, rhs: ['{', InitList, '}'], action: initElemNest }
-      # A designated element (C99, C11 6.7.9): a designator list, `=`, then a value
-      # or a braced list, in ANY brace-initializer position and mixed with
-      # positional elements. A designation is a path to the subobject it
-      # initializes: `.field`, `[index]`, or a chain of them (`.op.code = NOP`,
-      # `.v.Name.id = x`, `[3].x = 1`, `[i][j] = 0`); the next positional element
-      # continues after the designated subobject. Conflict-free: neither `[` nor
-      # `.` can begin an expression, and after a Designator only another `[`/`.`
-      # or the `=` can follow.
-      - { lhs: InitElem, rhs: [Designation, '=', E],                  action: initElemDesig }
-      - { lhs: InitElem, rhs: [Designation, '=', '{', InitList, '}'], action: initElemDesigNest }
+      - { lhs: InitElem, rhs: [Designation?, Initializer], action: initElem }
+      - { lhs: Initializer, rhs: [E] }
+      - { lhs: Initializer, rhs: [BraceInit] }
+      - { lhs: Designation, rhs: [DesignatorList, '='],    action: designation }
 
   - derivation: leftmost
     rules:
-      - { lhs: Designation, rhs: [Designator],              action: designationOne }
-      - { lhs: Designation, rhs: [Designation, Designator], action: designationCons }
+      - { lhs: DesignatorList, rhs: [Designator],                 action: designatorListOne }
+      - { lhs: DesignatorList, rhs: [DesignatorList, Designator], action: designatorListCons }
 
   - derivation: none
     rules:

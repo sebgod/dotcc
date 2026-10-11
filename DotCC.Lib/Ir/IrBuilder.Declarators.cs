@@ -84,11 +84,10 @@ internal sealed partial class IrBuilder
             switch (it.Content)
             {
                 case C.DeclItem di: add(new(Tok(di.Arg0), t, null, di.Arg0)); break;
+                // An Initializer (Arg2) is an expression item or a BraceInit item.
                 case C.DeclItemInit di: add(new(Tok(di.Arg0), t, di.Arg2, di.Arg0)); break;
-                case C.DeclItemBraceInit di: add(new(Tok(di.Arg0), t, di.Arg2, di.Arg0)); break;
                 case C.DeclItemArr da: add(ArrayDeclarator(t, da.Arg0, null)); break;
                 case C.DeclItemArrInit da: add(ArrayDeclarator(t, da.Arg0, da.Arg2)); break;
-                case C.DeclItemArrBraceInit da: add(ArrayDeclarator(t, da.Arg0, da.Arg2)); break;
                 case C.DeclItemBitField bf: BitField(Tok(bf.Arg0), bf.Arg2, t, bf.Arg0); break;
                 case C.DeclItemAnonBitField ab: BitField("", ab.Arg1, t, ab.Arg0); break;
                 // `Ret (*name)(params) [= E]`: the declarator's base type is the RETURN type.

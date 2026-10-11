@@ -150,6 +150,7 @@ multidim-member
 named-nested-member
 narrowing-constant-expr-store
 narrowing-store
+nested-empty-initializer
 nested-init
 noreturn-specifier
 null-constant-fnptr-compare
