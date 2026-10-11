@@ -239,9 +239,7 @@ internal sealed partial class ZigLowering
                 // `const Op = enum { uninitialized, initialized, … };` (std.crypto.keccak_p's State, task #161).
                 case Zig.EnumDecl d:          BindTypeBodyLocalContainer(fnName, Tok(d.Arg1), d, typeShadows); break;
                 case Zig.EnumDeclTyped d:     BindTypeBodyLocalContainer(fnName, Tok(d.Arg1), d, typeShadows); break;
-                case Zig.UnionDeclEnum d:     BindTypeBodyLocalContainer(fnName, Tok(d.Arg1), d, typeShadows); break;
-                case Zig.UnionDeclTagged d:   BindTypeBodyLocalContainer(fnName, Tok(d.Arg1), d, typeShadows); break;
-                case Zig.UnionDeclUntagged d: BindTypeBodyLocalContainer(fnName, Tok(d.Arg1), d, typeShadows); break;
+                case Zig.UnionDecl d:         BindTypeBodyLocalContainer(fnName, Tok(d.Arg1), d, typeShadows); break;
                 // `var field_values = …;` (std.enums.EnumIndexer): a comptime variable the body then mutates in place.
                 case Zig.VarDecl vd:
                     BindTypeBodyComptimeVar(fnName, Tok(vd.Arg1), null, vd.Arg3);
@@ -566,9 +564,7 @@ internal sealed partial class ZigLowering
                 {
                     Zig.EnumDecl e          => RegisterEnumZig(mangled, null, e.Arg5),
                     Zig.EnumDeclTyped e     => RegisterEnumZig(mangled, e.Arg5, e.Arg8),
-                    Zig.UnionDeclEnum u     => RegisterUnion(mangled, u.Arg9, TagIntOf(u.Arg6)),
-                    Zig.UnionDeclTagged u   => RegisterUnionTagged(mangled, Tok(u.Arg5), u.Arg8),
-                    Zig.UnionDeclUntagged u => RegisterUnionUntagged(mangled, u.Arg6),
+                    Zig.UnionDecl u         => RegisterUnionHead(mangled, u.Arg3, u.Arg5),
                     _ => throw new System.InvalidOperationException(),
                 };
             }

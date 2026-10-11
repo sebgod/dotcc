@@ -320,6 +320,8 @@ symbols:
   - ElseStmt       # 219 a statement `if`'s `else Payload? Stmt` (zig's `KEYWORD_else Payload? Statement`)
   - WhileCont      # 220 a `while` continue clause `: (…)` (zig's WhileContinueExpr)
   - LoopElse       # 221 a value loop's `else Payload? IfArm`
+  - UnionHead      # 222 `extern|packed? union (arg)?` (zig's ContainerDeclType for a union)
+  - UnionArg       # 223 a union's `(enum)` / `(enum(T))` / `(Tag)` argument
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -447,9 +449,15 @@ productions:
       # (same-field read/write is faithful — see ZIG-SUPPORT.md). An `extern union` / `packed union` (a C union, std's
       # elf.zig) is the same overlapping layout, so the untagged form takes an optional ContainerLayout.
       # `union(enum(u8))` (std's lang.zig CallingConvention) spells the tag enum's integer type; EnumTagInt is optional.
-      - { lhs: ContainerDecl, rhs: ['const', IDENT, '=', 'union', '(', 'enum', EnumTagInt?, ')', '{', UnionVariants, '}', ';'], action: unionDeclEnum }
-      - { lhs: ContainerDecl, rhs: ['const', IDENT, '=', 'union', '(', IDENT, ')', '{', UnionVariants, '}', ';'], action: unionDeclTagged }
-      - { lhs: ContainerDecl, rhs: ['const', IDENT, '=', ContainerLayout?, 'union', '{', UnionVariants, '}', ';'], action: unionDeclUntagged }
+      # One union head for the declaration and the inline type, zig's ContainerDeclType for a union: `ContainerLayout?
+      # union ( ( enum ( Expr )? ) / Expr )?`. `union(enum)` / `union(enum(u8))` synthesize the tag enum; `union(Tag)` and
+      # `union(path.Tag)` (std's heap/SafeAllocator.zig) name it; on an `extern` / `packed` union the argument is the backing
+      # integer (`packed union(u8)`, std's macho.zig), so the union is untagged. After `union (`, `enum` starts both the
+      # tag form and an inline enum TYPE; the token after `enum` (or after its `( T )`) decides.
+      - { lhs: UnionHead, rhs: [ContainerLayout?, 'union', UnionArg?], action: unionHead }
+      - { lhs: UnionArg, rhs: ['(', 'enum', EnumTagInt?, ')'], action: unionArgEnum }
+      - { lhs: UnionArg, rhs: ['(', Expr, ')'],                action: unionArgTag }
+      - { lhs: ContainerDecl, rhs: ['const', IDENT, '=', UnionHead, '{', UnionVariants, '}', ';'], action: unionDecl }
 
   # FnProto (subset): `fn name(params) RetType Block`. RetType may carry the
   # inferred-error-set leading `!` (`fn f() !void`), distinct from ErrUnion's
@@ -1078,11 +1086,9 @@ productions:
       # it). The named declarations (`const E = enum {…};`) keep their own forms on `;`.
       - { lhs: Type, rhs: ['enum', '{', EnumFields?, '}'],   action: inlineEnumType }
       - { lhs: Type, rhs: ['enum', '(', Type, ')', '{', EnumFields?, '}'], action: inlineEnumTypeTyped }
-      - { lhs: Type, rhs: ['union', '(', 'enum', ')', '{', UnionVariants, '}'], action: inlineUnionEnumType }
-      - { lhs: Type, rhs: ['union', '{', UnionVariants, '}'],                   action: inlineUnionType }
+      - { lhs: Type, rhs: [UnionHead, '{', UnionVariants, '}'], action: inlineUnion }
       - { lhs: Type, rhs: [ContainerLayout, 'struct', '{', FieldDecls?, '}'],                   action: inlineLayoutStructType }
       - { lhs: Type, rhs: [ContainerLayout, 'struct', '(', Type, ')', '{', FieldDecls?, '}'],   action: inlineLayoutStructTypeBacked }
-      - { lhs: Type, rhs: [ContainerLayout, 'union', '{', UnionVariants, '}'],                  action: inlineLayoutUnionType }
       # Function-pointer TYPE `fn (Params) RetType` (Milestone W, part 1a) — at a Type position
       # (a const/var annotation, a param/return type), lowered to a managed `delegate*<…>` (a bare
       # `CType.Func`); `*const fn (…) R` / `?*const fn (…) R` compose for free through the existing

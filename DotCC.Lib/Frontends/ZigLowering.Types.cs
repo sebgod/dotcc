@@ -789,8 +789,7 @@ internal sealed partial class ZigLowering
         Zig.InlineStructType ist       => ReifyInlineStruct(type, ist.Arg2),
         Zig.InlineEnumType iet         => ReifyInlineEnum(type, iet.Arg2),
         Zig.InlineEnumTypeTyped iett   => ReifyInlineEnum(type, iett.Arg5, iett.Arg2),
-        Zig.InlineUnionEnumType iut    => ReifyInlineUnion(type, iut.Arg5, tagged: true),
-        Zig.InlineUnionType iuu        => ReifyInlineUnion(type, iuu.Arg2, tagged: false),
+        Zig.InlineUnion iu             => ReifyInlineUnion(type, iu.Arg0, iu.Arg2),
         // `extern struct {…}` / `packed struct {…}` as a field type: the same reified struct with the declared layout. A
         // backing integer (`packed struct(u8)`) is only zig's check that the fields fill it; the layout does the packing.
         Zig.InlineLayoutStructType ils => ReifyInlineStruct(type, ils.Arg3, LayoutOf(ils.Arg0)),
@@ -798,7 +797,6 @@ internal sealed partial class ZigLowering
         Zig.InlineLayoutStructTypeBacked => throw new IrUnsupportedException(
             "zig: only a `packed struct` takes a backing integer; `extern struct(T)` is not zig"),
         // An `extern union` / `packed union` field type overlaps its variants at offset 0, like any untagged union.
-        Zig.InlineLayoutUnionType ilu  => ReifyInlineUnion(type, ilu.Arg3, tagged: false),
         // A type chosen by a comptime switch in any type position (a parameter's, as well as a field's): the selected
         // prong's type (task #73).
         Zig.SwitchExpr => LowerSwitchType(type),
@@ -932,8 +930,14 @@ internal sealed partial class ZigLowering
     /// <c>fn f(x: union(enum) { a: u8, b: u16 })</c>): registered once per occurrence under an anonymous name, exactly as a
     /// named <c>const U = union(enum) { … };</c> is, so a switch over it and its capture prongs resolve the same way.
     /// Fields only, like the inline enum and struct: a method needs a named union.</summary>
-    private CType ReifyInlineUnion(Item occurrence, Item variants, bool tagged)
+    private CType ReifyInlineUnion(Item occurrence, Item head, Item variants)
     {
+        var (kind, tagArg) = UnionKindOf(head);
+        if (kind == UnionKind.Tagged)
+        {
+            throw new IrUnsupportedException(
+                "zig: an inline `union(Tag) {…}` type is not supported yet (use `union(enum)`, or a named union decl)");
+        }
         if (_inlineStructNames.TryGetValue(occurrence, out var existing)) { return _containerTypes[existing]; }
         var name = QualifyTypeName($"__AnonUnion{_inlineStructNames.Count}");   // shares the per-module counter
         _inlineStructNames[occurrence] = name;
@@ -945,7 +949,7 @@ internal sealed partial class ZigLowering
         List<Item> methods;
         using (EnterContainer(name))
         {
-            methods = tagged ? RegisterUnion(name, variants) : RegisterUnionUntagged(name, variants);
+            methods = kind == UnionKind.Enum ? RegisterUnion(name, variants, tagArg) : RegisterUnionUntagged(name, variants);
         }
         if (methods.Count > 0)
         {
