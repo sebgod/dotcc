@@ -31,13 +31,13 @@ internal sealed partial class ZigLowering
     /// expression lowering (the C# ternary / switch-expression).</summary>
     private static bool IsValueControlFlowStmt(Item rhs) => rhs.Content switch
     {
-        Zig.IfExpr e             => IsLabeledValue(e.Arg4) || IsLabeledValue(e.Arg6),
+        Zig.IfElseExpr { Arg4: null, Arg7: null } e             => IsLabeledValue(e.Arg5) || IsLabeledValue(e.Arg8),
         Zig.SwitchExpr s         => SwitchExprNeedsStmt(s.Arg5, s.Arg2),
         // `comptime switch` / `comptime if`: the inner form decides. The `comptime` asks zig to evaluate
         // it at compile time; dotcc's lowering already folds the arm whenever the subject is
         // comptime-known, and a runtime subject (which zig rejects here) keeps its runtime lowering.
         Zig.PreComptime { Arg1.Content: Zig.SwitchExpr } c => IsValueControlFlowStmt(c.Arg1),
-        Zig.PreComptime { Arg1.Content: Zig.IfExpr } c => IsValueControlFlowStmt(c.Arg1),
+        Zig.PreComptime { Arg1.Content: Zig.IfElseExpr } c => IsValueControlFlowStmt(c.Arg1),
         // A value-position loop (`while/for … else`, Milestone Y part 2) ALWAYS needs the statement
         // lowering — a loop that yields via `break v` / an `else` value can't be a C# expression.
         Zig.WhileElseExpr or Zig.ForElseExpr or Zig.LabeledWhileElseExpr or Zig.LabeledForElseExpr
@@ -72,9 +72,9 @@ internal sealed partial class ZigLowering
     /// value loop (part 2) to their builders.</summary>
     private CStmt LowerValueControlFlowStmt(Item rhs, CType? sink, Func<Symbol, CStmt> consume) => rhs.Content switch
     {
-        Zig.IfExpr or Zig.SwitchExpr => LowerValueIfSwitch(rhs, sink, consume),
+        Zig.IfElseExpr { Arg4: null, Arg7: null } or Zig.SwitchExpr => LowerValueIfSwitch(rhs, sink, consume),
         Zig.PreComptime { Arg1.Content: Zig.SwitchExpr } c => LowerValueControlFlowStmt(c.Arg1, sink, consume),
-        Zig.PreComptime { Arg1.Content: Zig.IfExpr } c => LowerValueControlFlowStmt(c.Arg1, sink, consume),
+        Zig.PreComptime { Arg1.Content: Zig.IfElseExpr } c => LowerValueControlFlowStmt(c.Arg1, sink, consume),
         Zig.WhileElseExpr or Zig.ForElseExpr or Zig.LabeledWhileElseExpr or Zig.LabeledForElseExpr
             or Zig.ForRefElseExpr or Zig.InlineForElseExpr or Zig.InlineForMultiElseExpr
             or Zig.WhileContAssignElseExpr or Zig.ForRangeElseExpr or Zig.ForMultiElseExpr or Zig.WhileCaptureElseExpr
@@ -98,10 +98,10 @@ internal sealed partial class ZigLowering
         // the first branch's FillValueTemp fixes rt.ResultType so a sink-less switch/if still types.
         CStmt filler = rhs.Content switch
         {
-            Zig.IfExpr e when TryFoldComptimeCondition(e.Arg2) is { } taken => FillValueTemp(taken ? e.Arg4 : e.Arg6, rt),
-            Zig.IfExpr e => new If(LowerExpr(e.Arg2),
-                                   new Block(new List<CStmt> { FillValueTemp(e.Arg4, rt) }),
-                                   new Block(new List<CStmt> { FillValueTemp(e.Arg6, rt) })),
+            Zig.IfElseExpr { Arg4: null, Arg7: null } e when TryFoldComptimeCondition(e.Arg2) is { } taken => FillValueTemp(taken ? e.Arg5 : e.Arg8, rt),
+            Zig.IfElseExpr { Arg4: null, Arg7: null } e => new If(LowerExpr(e.Arg2),
+                                   new Block(new List<CStmt> { FillValueTemp(e.Arg5, rt) }),
+                                   new Block(new List<CStmt> { FillValueTemp(e.Arg8, rt) })),
             Zig.SwitchExpr s         => BuildValueSwitch(s.Arg2, s.Arg5, rt),
             _ => throw new IrUnsupportedException(
                 "internal: value if/switch on " + (rhs.Content?.GetType().Name ?? "null")),

@@ -422,6 +422,19 @@ public sealed class ZigFrontendTests
         ex.Message.ShouldContain("need names");
     }
 
+    [Theory]
+    [InlineData("return if (get()) 1 else |_| 0;")]
+    [InlineData("if (get()) { return 1; } else |_| { return 0; }")]
+    public void Rejects_an_ignored_error_union_payload(string body)
+    {
+        // zig: `if (eu) a else |e| b` with no then-capture is legal only over `!void`; a payload needs at least `|_|`.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "fn get() error{Bad}!u8 { return 7; }\n" +
+            "fn f() u8 { " + body + " }\n" +
+            "pub fn main() u8 { return f(); }\n"));
+        ex.Message.ShouldContain("error union payload is ignored");
+    }
+
     [Fact]
     public void Folds_an_anon_init_concat_operand_borrowing_the_element_type()
     {

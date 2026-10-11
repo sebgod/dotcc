@@ -913,7 +913,10 @@ productions:
 
   - derivation: none
     rules:
-      - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', IfArm, 'else', IfArm], action: ifExpr }
+      # zig's IfExpr: `IfPrefix Expr (else Payload? Expr)?`, the prefix `if ( Expr ) PtrPayload?`. One rule for the plain
+      # `if (c) a else b`, the captured `if (opt) |x| a else b` / `|*x|` (S4a; a `|` after `)` starts no RhsExpr), the error
+      # union's `if (eu) |v| a else |e| b`, and `if (eu) a else |e| b` with no then-capture (std's crypto/tls/Client.zig).
+      - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', Payload?, IfArm, 'else', Payload?, IfArm], action: ifElseExpr }
       # An arm may be a jump (zig-grammar-peg P1b): `return if (self.hasLen(1)) return self.firstUnchecked() else null;`
       # (std.fmt.parse_float), `… else return error.OutOfMemory` (task #200), `if (x < 100) x else break` (GH #283) are this
       # rule with a JumpExpr arm, which lowering hoists ahead of the statement.
@@ -923,11 +926,6 @@ productions:
       # (`struct { … }.f`) and anything else ends the TypeArm, the same one-token split as the two-TypeArm form.
       # The captured form (std.mem.eqlBytes' `const Scan = if (std.simd.suggestVectorLength(u8)) |vec_size| struct {…}
       # else struct {…};`): after the capture, `struct` / `enum` starts a TypeArm, not a RhsExpr.
-      # Value-position captured `if` — `if (opt) |x| thenExpr else elseExpr` (S4a). The `|` after the
-      # `)` cannot start a RhsExpr (it is only an infix bitwise-or), so this is conflict-free with the
-      # plain ifExpr above. `else` is mandatory (an expression yields a value on both paths). Mirrors
-      # the statement forms `stmtIfCapture*`; the optional/pointer payload binds `x` in the then-branch.
-      - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', Payload, IfArm, 'else', Payload?, IfArm], action: ifExprCapture }
       # Over an error union, with the error captured too (std.Io.Writer.Allocating.sendFile:
       # `if (file_reader.getSize()) |size| size - pos else |_| std.atomic.cache_line`). `|` after `else` is a clean
       # shift, distinct from an RhsExpr start, as in the statement form.
@@ -1776,8 +1774,7 @@ productions:
   # dangling else binds to the nearest `if`), and where a statement form shares the prefix, the statement form wins.
   - derivation: rightmost
     rules:
-      - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', IfArm],                 action: ifExprNoElse }
-      - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', Payload, IfArm], action: ifExprCaptureNoElse }
+      - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', Payload?, IfArm], action: ifThenExpr }
       # The `;` that closes an `if` written as an expression statement whose arm is a block (`if (opt) |p| if (n > 0) { … };`,
       # std's Io/Writer.zig): the statement form takes the `if` and the block, so the `;` is an empty statement. zig only
       # allows it in that position; accepting it anywhere changes no program's meaning.

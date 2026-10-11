@@ -2055,22 +2055,22 @@ internal sealed partial class ZigLowering
             // An if-EXPRESSION carries the sink into both arms, so `if (c) .a else .b` resolves each enum
             // literal against the result type; a comptime condition selects one arm, as LowerExpr's does.
             // A value `if` with a returning / jumping arm at a typed sink (see LowerExpr's cases).
-            case Zig.IfExpr ir when sink is not null && ir.Arg4.Content is Zig.ReturnExpr { Arg1: { } thenReturned }:
-                return LowerIfReturnThen(ir.Arg2, thenReturned, ir.Arg6, sink);
-            case Zig.IfExpr er when sink is not null && er.Arg6.Content is Zig.ReturnExpr { Arg1: { } elseReturned }:
-                return LowerIfElseReturn(er.Arg2, er.Arg4, elseReturned, sink);
-            case Zig.IfExpr tj when sink is not null && IsJumpArm(tj.Arg4):
-                return LowerIfEarlyJump(tj.Arg2, jumpOnTrue: true, tj.Arg4, tj.Arg6, sink);
-            case Zig.IfExpr ej when sink is not null && IsJumpArm(ej.Arg6):
-                return LowerIfEarlyJump(ej.Arg2, jumpOnTrue: false, ej.Arg6, ej.Arg4, sink);
-            case Zig.IfExpr ie when sink is not null:
+            case Zig.IfElseExpr { Arg4: null, Arg7: null } ir when sink is not null && ir.Arg5.Content is Zig.ReturnExpr { Arg1: { } thenReturned }:
+                return LowerIfReturnThen(ir.Arg2, thenReturned, ir.Arg8, sink);
+            case Zig.IfElseExpr { Arg4: null, Arg7: null } er when sink is not null && er.Arg8.Content is Zig.ReturnExpr { Arg1: { } elseReturned }:
+                return LowerIfElseReturn(er.Arg2, er.Arg5, elseReturned, sink);
+            case Zig.IfElseExpr { Arg4: null, Arg7: null } tj when sink is not null && IsJumpArm(tj.Arg5):
+                return LowerIfEarlyJump(tj.Arg2, jumpOnTrue: true, tj.Arg5, tj.Arg8, sink);
+            case Zig.IfElseExpr { Arg4: null, Arg7: null } ej when sink is not null && IsJumpArm(ej.Arg8):
+                return LowerIfEarlyJump(ej.Arg2, jumpOnTrue: false, ej.Arg8, ej.Arg5, sink);
+            case Zig.IfElseExpr { Arg4: null, Arg7: null } ie when sink is not null:
             {
-                if (TryFoldComptimeCondition(ie.Arg2) is { } taken) { return LowerExprSink(taken ? ie.Arg4 : ie.Arg6, sink); }
+                if (TryFoldComptimeCondition(ie.Arg2) is { } taken) { return LowerExprSink(taken ? ie.Arg5 : ie.Arg8, sink); }
                 // The condition first, as zig evaluates it; each arm under its own hoist buffer (task #203).
                 var ifImpure = _hoistImpureSeen;
                 var ifCond = LowerExpr(ie.Arg2);
-                var (then, thenPre) = LowerArmIsolated(() => LowerExprSink(ie.Arg4, sink));
-                var (otherwise, elsePre) = LowerArmIsolated(() => LowerExprSink(ie.Arg6, sink));
+                var (then, thenPre) = LowerArmIsolated(() => LowerExprSink(ie.Arg5, sink));
+                var (otherwise, elsePre) = LowerArmIsolated(() => LowerExprSink(ie.Arg8, sink));
                 // `var acc: T = if (does_one_overflow) unreachable else 1;` (std.math.powi): an `unreachable` arm has
                 // no value type, so the ternary is the sink's type and the literal arm is cast to it.
                 var condType = IsUnreachableCallExpr(then) || IsUnreachableCallExpr(otherwise)
@@ -2088,9 +2088,9 @@ internal sealed partial class ZigLowering
             // subject already selects one arm at lowering time.
             case Zig.PreComptime { Arg1.Content: Zig.SwitchExpr } c: return LowerExprSink(c.Arg1, sink);
             case Zig.PreComptime { Arg1.Content: Zig.LabeledBlock or Zig.LabeledSwitch } clb: return ComptimeLabeledBlockValue(clb.Arg1, sink);
-            case Zig.PreComptime { Arg1.Content: Zig.IfExpr } c: return LowerExprSink(c.Arg1, sink);
+            case Zig.PreComptime { Arg1.Content: Zig.IfElseExpr } c: return LowerExprSink(c.Arg1, sink);
             // A value-position capture `if` with a result type (`const a: ?Alignment = if (x) |b| … else null;`).
-            case Zig.IfExprCapture ec when sink is not null:
+            case Zig.IfElseExpr ec when sink is not null:
                 return LowerIfCaptureExprOf(ec, sink);
             // `comptime e` keeps its result location (hash_map's `const max_align: Alignment = comptime
             // .fromByteUnits(…);`, a decl literal that needs the sink to resolve), then folds as LowerExpr's does.

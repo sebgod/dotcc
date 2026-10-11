@@ -11,7 +11,8 @@ Types too (probe 500 to 506). zig's IfTypeExpr, an `if` in a type position, took
 primaries, on a lexer LABEL token, and a value loop's body may be a brace-less expression (probe 518 to 522). **P4 step 1
 done** (2026-10-11): a switch prong is one rule, `CaseVals => Payload? ProngBody` (25 prong rules and the ProngJump group to 8).
 **Step 2 done:** one statement `if` with a payload on either side (13 rules to 3), and one capture value `if` (probe 523).
-Next: one value `if` (plain and capture as a single record) and the `while` / `for` payloads.
+**Step 3 done:** one value `if` (`ifElseExpr` / `ifThenExpr`, plain and captured alike; probe 524). Next: the `while` / `for`
+payloads.
 
 ## Why
 
@@ -239,3 +240,11 @@ ElseStmt). The capture value `if` is one rule with a Payload on each side, so `|
 (a by-reference capture on a value `if` is a loud lowering cut). The plain value `if` stays its own record for now:
 merging it moves the arm indices that about 45 lowering sites read, so it waits for a rename that makes every site a
 compile error. Probe 522 to 523 (debug.zig).
+
+**P4 step 3 as landed (2026-10-11): one value `if`.** `IfExpr -> if ( Expr ) Payload? IfArm else Payload? IfArm`
+(`ifElseExpr`) and `IfExpr -> if ( Expr ) Payload? IfArm` (`ifThenExpr`) replace ifExpr, ifExprCapture, ifExprNoElse and
+ifExprCaptureNoElse. Merging moves the arm indices about 45 lowering sites read, so the records were renamed: every old
+site became a compile error and was migrated by hand, a plain one keeping its meaning behind a `{ Arg4: null, Arg7: null
+}` guard (then Arg5, else Arg8) and the captured ones after it. That gave crypto/tls/Client.zig's `if (c) { … } else |err|
+switch …` (probe 523 to 524). The oracle row caught a missing rejection: zig refuses `if (eu) a else |e| b` over a
+non-void payload ("error union payload is ignored"), and so does dotcc now, as a value and as a statement.

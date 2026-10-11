@@ -1,10 +1,10 @@
 # dotcc Zig-std parse-probe (road-to-zig-std.md S0)
-generated: 2026-10-11T01:47:21Z (UTC)
+generated: 2026-10-11T02:06:50Z (UTC)
 std dir : C:/Users/SebastianGodelet/AppData/Local/Programs/Zig/lib\std  (found via DOTCC_ZIG_LIB_DIR=<lib>/std)
 grammar : DotCC.Lib/zig.lalr.yaml
 files   : 553
-parse-clean : 523 (94.6%)
-failing     : 30
+parse-clean : 524 (94.8%)
+failing     : 29
 
 ## Parse-failure buckets (ranked by file count) — the S9 worklist
 count  signature
@@ -41,9 +41,9 @@ count  signature
     1  parse: parse error: unexpected '++' (id=163) in state 612
        e.g. std/zig/system/linux.zig
        msg: parse error at line 445, column 32 (byte offset 15386): unexpected '++' (id=163) in state 612; expected one of: ')' (id=36), ':' (id=43), 'AsmTail' (id=180)
-    1  parse: parse error: unexpected ',' (id=42) in state 1245
+    1  parse: parse error: unexpected ',' (id=42) in state 1246
        e.g. std/zon/parse.zig
-       msg: parse error at line 442, column 10 (byte offset 14151): unexpected ',' (id=42) in state 1245; expected one of: 'else' (id=30)
+       msg: parse error at line 442, column 10 (byte offset 14151): unexpected ',' (id=42) in state 1246; expected one of: 'else' (id=30)
     1  parse: parse error: unexpected '=' (id=44) in state 930
        e.g. std/os/windows.zig
        msg: parse error at line 927, column 37 (byte offset 34075): unexpected '=' (id=44) in state 930; expected one of: 'fn' (id=24), 'pub' (id=25), 'const' (id=26), 'var' (id=27), '}' (id=38), ',' (id=42), 'IDENT' (id=67), 'extern' (id=76), 'null' (id=81), 'undefined' (id=106), 'true' (id=114), 'false' (id=115), 'comptime' (id=153), 'inline' (id=154), 'threadlocal' (id=156), 'test' (id=161), 'noinline' (id=192), 'LABEL' (id=214)
@@ -71,9 +71,6 @@ count  signature
     1  parse: parse error: unexpected 'orelse' (id=80) in state 457
        e.g. std/debug/SelfInfo/Windows.zig
        msg: parse error at line 544, column 15 (byte offset 23279): unexpected 'orelse' (id=80) in state 457; expected one of: 'fn' (id=24), 'pub' (id=25), 'const' (id=26), 'var' (id=27), 'else' (id=30), ')' (id=36), '}' (id=38), ']' (id=40), ';' (id=41), ',' (id=42), ':' (id=43), '=' (id=44), 'IDENT' (id=67), 'extern' (id=76), '...' (id=77), 'null' (id=81), '=>' (id=87), '..' (id=92), 'undefined' (id=106), 'true' (id=114), 'false' (id=115), '+=' (id=117), '-=' (id=118), '*=' (id=119), '/=' (id=120), '%=' (id=121), '<<=' (id=122), '>>=' (id=123), '&=' (id=124), '|=' (id=125), '^=' (id=126), '+%=' (id=137), '-%=' (id=138), '*%=' (id=139), '+|=' (id=143), '-|=' (id=144), '*|=' (id=145), 'comptime' (id=153), 'inline' (id=154), 'threadlocal' (id=156), 'test' (id=161), 'noinline' (id=192), 'LABEL' (id=214)
-    1  parse: parse error: unexpected '|' (id=53) in state 1034
-       e.g. std/crypto/tls/Client.zig
-       msg: parse error at line 676, column 40 (byte offset 34208): unexpected '|' (id=53) in state 1034; expected one of: 'Type' (id=10), 'Expr' (id=11), 'BoolOr' (id=12), 'BoolAnd' (id=13), 'Compare' (id=14), 'Bitwise' (id=15), 'BitShift' (id=16), 'Add' (id=17), 'Mul' (id=18), 'Prefix' (id=19), 'ErrUnion' (id=20), 'Suffix' (id=21), 'Primary' (id=22), 'fn' (id=24), 'return' (id=28), 'if' (id=29), 'while' (id=31), 'try' (id=34), '(' (id=35), '{' (id=37), '[' (id=39), '&' (id=51), '-' (id=57), '*' (id=58), '!' (id=61), '~' (id=62), '?' (id=63), '.' (id=64), 'IDENT' (id=67), 'INTEGER' (id=68), 'FLOAT' (id=69), 'STRING' (id=70), 'BUILTIN' (id=71), 'RhsExpr' (id=74), 'IfExpr' (id=75), 'extern' (id=76), '[*c]' (id=78), 'OrElse' (id=79), 'null' (id=81), 'error' (id=83), 'break' (id=84), 'continue' (id=85), 'switch' (id=86), 'for' (id=91), 'struct' (id=93), 'enum' (id=94), 'CurlySuffix' (id=101), 'union' (id=103), 'undefined' (id=106), 'true' (id=114), 'false' (id=115), 'CHAR' (id=116), 'SwitchExpr' (id=127), 'LabeledBlock' (id=128), '[*]' (id=131), '[:0]' (id=132), '[*:0]' (id=133), '-%' (id=135), 'packed' (id=146), 'comptime' (id=153), 'inline' (id=154), 'LoopExpr' (id=155), '**' (id=164), 'asm' (id=176), 'volatile' (id=177), 'AsmExpr' (id=179), 'ContainerLayout' (id=196), 'BoolOrO' (id=198), 'BoolAndO' (id=199), 'CompareO' (id=200), 'BitwiseO' (id=201), 'BitShiftO' (id=202), 'AddO' (id=203), 'MulO' (id=204), 'PrefixO' (id=205), 'OpenPrimary' (id=206), 'IfArm' (id=207), 'JumpExpr' (id=208), 'InlineStructTy' (id=209), 'LABEL' (id=214)
     1  parse: parse error: unexpected '|=' (id=125) in state 262
        e.g. std/Io/Threaded.zig
        msg: parse error at line 624, column 26 (byte offset 23840): unexpected '|=' (id=125) in state 262; expected one of: 'Type' (id=10), 'Add' (id=17), 'Mul' (id=18), 'Prefix' (id=19), 'ErrUnion' (id=20), 'Suffix' (id=21), 'Primary' (id=22), 'fn' (id=24), 'return' (id=28), 'if' (id=29), 'while' (id=31), 'try' (id=34), '(' (id=35), '[' (id=39), '&' (id=51), '-' (id=57), '*' (id=58), '!' (id=61), '~' (id=62), '?' (id=63), '.' (id=64), 'IDENT' (id=67), 'INTEGER' (id=68), 'FLOAT' (id=69), 'STRING' (id=70), 'BUILTIN' (id=71), 'IfExpr' (id=75), 'extern' (id=76), '[*c]' (id=78), 'null' (id=81), 'error' (id=83), 'break' (id=84), 'continue' (id=85), 'switch' (id=86), 'for' (id=91), 'struct' (id=93), 'enum' (id=94), 'CurlySuffix' (id=101), 'union' (id=103), 'undefined' (id=106), 'true' (id=114), 'false' (id=115), 'CHAR' (id=116), 'SwitchExpr' (id=127), 'LabeledBlock' (id=128), '[*]' (id=131), '[:0]' (id=132), '[*:0]' (id=133), '-%' (id=135), 'packed' (id=146), 'comptime' (id=153), 'inline' (id=154), 'LoopExpr' (id=155), '**' (id=164), 'asm' (id=176), 'volatile' (id=177), 'AsmExpr' (id=179), 'ContainerLayout' (id=196), 'AddO' (id=203), 'MulO' (id=204), 'PrefixO' (id=205), 'OpenPrimary' (id=206), 'JumpExpr' (id=208), 'InlineStructTy' (id=209), 'LABEL' (id=214)
@@ -87,7 +84,6 @@ std/Thread.zig
 std/c/darwin.zig
 std/c/darwin/dispatch.zig
 std/compress/xz/Decompress.zig
-std/crypto/tls/Client.zig
 std/debug/SelfInfo/Elf.zig
 std/debug/SelfInfo/MachO.zig
 std/debug/SelfInfo/Windows.zig

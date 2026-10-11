@@ -18,7 +18,7 @@ internal sealed partial class ZigLowering
     /// <c>x</c> points AT the payload in place (a value optional's through <c>ZigMem.OptionalPayload</c>, an optional
     /// pointer's own slot), so the condition is used as the lvalue it names rather than copied.</summary>
     private CStmt LowerIfCapture(Item condItem, string capName, Item thenItem, Item? elseItem, string? errCapName,
-        bool byRef = false)
+        bool byRef = false, bool thenCaptured = true)
     {
         // Comptime fold (S4b): a captured `if` on a comptime-known optional (a `comptime x: ?T` seed)
         // selects the taken branch at lowering time. `null` → the else (empty if absent); a known payload
@@ -51,6 +51,7 @@ internal sealed partial class ZigLowering
         }
 
         var cond = LowerExpr(condItem);
+        if (!thenCaptured) { RejectIgnoredErrorPayload(cond.Type); }
         var ct = cond.Type.Unqualified;
 
         // Hoist a side-effecting condition to a single-eval temp (a bare var is already re-readable).
@@ -299,17 +300,27 @@ internal sealed partial class ZigLowering
     }
     /// <summary>A value-position <c>if (x) |v| a else [|e|] b</c> (<c>ifExprCapture</c>): its payloads read, then
     /// <see cref="LowerIfCaptureExpr"/>. A by-reference capture there is a loud cut.</summary>
-    private CExpr LowerIfCaptureExprOf(Zig.IfExprCapture ec, CType? sink)
+    private CExpr LowerIfCaptureExprOf(Zig.IfElseExpr ec, CType? sink)
     {
         var (capture, byRef, _) = PayloadParts(ec.Arg4);
         if (byRef)
         {
             throw new IrUnsupportedException("zig value `if (x) |*v| …`: a by-reference capture in an `if` expression is not supported yet");
         }
-        return LowerIfCaptureExpr(ec.Arg2, capture ?? "_", ec.Arg5, ec.Arg8, sink, PayloadParts(ec.Arg7).Name);
+        return LowerIfCaptureExpr(ec.Arg2, capture ?? "_", ec.Arg5, ec.Arg8, sink, PayloadParts(ec.Arg7).Name,
+            thenCaptured: capture is not null);
+    }
+    /// <summary>zig's "error union payload is ignored": <c>if (eu) a else |e| b</c> with no then-capture is legal only over a
+    /// <c>!void</c>; a payload must be captured, if only as <c>|_|</c>.</summary>
+    private static void RejectIgnoredErrorPayload(CType condType)
+    {
+        if (condType.Unqualified is CType.ErrorUnion { Payload: var payload } && !payload.Unqualified.Equals(CType.Void))
+        {
+            throw new CompileException("zig: error union payload is ignored (capture it with `|_|`)");
+        }
     }
     private CExpr LowerIfCaptureExpr(Item condItem, string capName, Item thenItem, Item elseItem, CType? sink = null,
-        string? errCapName = null)
+        string? errCapName = null, bool thenCaptured = true)
     {
         // Comptime fold (S4b): if the condition is a comptime-known optional (a generic instance's
         // `comptime x: ?T` seed), select the taken branch NOW — no runtime test, no hoist. A comptime
@@ -328,6 +339,7 @@ internal sealed partial class ZigLowering
         var savedImpure = _hoistImpureSeen;
 
         var cond = LowerExpr(condItem);
+        if (!thenCaptured) { RejectIgnoredErrorPayload(cond.Type); }
         var ct = cond.Type.Unqualified;
 
         // Single-eval the condition (a bare var is already re-readable; anything else binds to a temp).

@@ -113,16 +113,16 @@ public sealed class ZigGrammarTests
         // `1 + if (c) 2 else 3 + 4` is `1 + (if (c) 2 else (3 + 4))`.
         var add = FirstNode<Zig.Add>("fn f(c: bool) i32 { return 1 + if (c) 2 else 3 + 4; }");
         add.Arg0.Content.ShouldBeOfType<Zig.IntLit>();
-        var ie = add.Arg2.Content.ShouldBeOfType<Zig.IfExpr>();
-        ie.Arg6.Content.ShouldBeOfType<Zig.Add>();
+        var ie = add.Arg2.Content.ShouldBeOfType<Zig.IfElseExpr>();
+        ie.Arg8.Content.ShouldBeOfType<Zig.Add>();
     }
 
     [Fact]
     public void Operator_precedence_holds_inside_an_if_arm()
     {
         // In the else arm, `b + d % e` is `b + (d % e)`: the arm's own cascade, not a precedence decision.
-        var ie = FirstNode<Zig.IfExpr>("fn f(c: bool, b: i32, d: i32, e: i32) i32 { return if (c) 0 else b + d % e; }");
-        var arm = ie.Arg6.Content.ShouldBeOfType<Zig.Add>();
+        var ie = FirstNode<Zig.IfElseExpr>("fn f(c: bool, b: i32, d: i32, e: i32) i32 { return if (c) 0 else b + d % e; }");
+        var arm = ie.Arg8.Content.ShouldBeOfType<Zig.Add>();
         arm.Arg2.Content.ShouldBeOfType<Zig.ModOp>();
         // And outside any `if`, unchanged.
         FirstNode<Zig.Add>("fn g(b: i32, d: i32, e: i32) i32 { return b + d % e; }").Arg2.Content.ShouldBeOfType<Zig.ModOp>();
@@ -138,8 +138,8 @@ public sealed class ZigGrammarTests
         // A labeled break takes its label and value; a bare one is a value-less jump.
         FirstNode<Zig.FbBreakLabelValue>("fn g(o: ?u8) u8 { const v = blk: { break :blk o orelse break :blk 3; }; return v; }")
             .Arg3.Content.ShouldNotBeNull();
-        FirstNode<Zig.IfExpr>("fn h(o: ?u8, c: bool) void { while (true) { _ = o orelse if (c) break else continue; } }")
-            .Arg4.Content.ShouldBeOfType<Zig.FbBreak>();
+        FirstNode<Zig.IfElseExpr>("fn h(o: ?u8, c: bool) void { while (true) { _ = o orelse if (c) break else continue; } }")
+            .Arg5.Content.ShouldBeOfType<Zig.FbBreak>();
     }
 
     [Fact]
@@ -156,16 +156,16 @@ public sealed class ZigGrammarTests
     public void An_if_may_drop_its_else_and_take_block_arms()
     {
         // zig-grammar-peg P3a: zig's IfExpr has an optional `else`, and a block is a PrimaryExpr.
-        var both = FirstNode<Zig.IfExpr>("fn f(c: bool) void { switch (0) { 0 => if (c) { g(); } else { h(); }, else => {} } }");
-        both.Arg4.Content.ShouldBeOfType<Zig.Block>();
-        both.Arg6.Content.ShouldBeOfType<Zig.Block>();
-        FirstNode<Zig.IfExprNoElse>("fn f(c: bool) bool { switch (0) { 0 => if (c) return true, else => {} } return false; }")
-            .Arg4.Content.ShouldBeOfType<Zig.ReturnExpr>();
+        var both = FirstNode<Zig.IfElseExpr>("fn f(c: bool) void { switch (0) { 0 => if (c) { g(); } else { h(); }, else => {} } }");
+        both.Arg5.Content.ShouldBeOfType<Zig.Block>();
+        both.Arg8.Content.ShouldBeOfType<Zig.Block>();
+        FirstNode<Zig.IfThenExpr>("fn f(c: bool) bool { switch (0) { 0 => if (c) return true, else => {} } return false; }")
+            .Arg5.Content.ShouldBeOfType<Zig.ReturnExpr>();
         // The `;` after a block-armed `if` written as an expression statement is an empty statement.
         TryParse("fn f(o: ?u8) void { if (o) |p| if (p > 0) { g(); }; }").ShouldBeTrue();
         // A dangling `else` still binds to the nearest `if`.
-        FirstNode<Zig.IfExpr>("fn f(a: bool, b: bool) u8 { return if (a) if (b) 1 else 2 else 3; }")
-            .Arg4.Content.ShouldBeOfType<Zig.IfExpr>();
+        FirstNode<Zig.IfElseExpr>("fn f(a: bool, b: bool) u8 { return if (a) if (b) 1 else 2 else 3; }")
+            .Arg5.Content.ShouldBeOfType<Zig.IfElseExpr>();
     }
 
     [Fact]
@@ -185,7 +185,7 @@ public sealed class ZigGrammarTests
         // `struct { … }` is a Type, so it nests under `[N]` / `*` / `?`, types an array literal, and is an argument.
         FirstNode<Zig.TyArray>("const T = struct { rows: [2]struct { a: u8 } };").Arg3.Content.ShouldBeOfType<Zig.InlineStructType>();
         FirstNode<Zig.StructFieldDefault>("const T = struct { link: if (c) void else [3]struct { v: u8 } = undefined };")
-            .Arg2.Content.ShouldBeOfType<Zig.IfExpr>();
+            .Arg2.Content.ShouldBeOfType<Zig.IfElseExpr>();
         TryParse("const T = struct { head: ?*const struct { n: u32 } = null };").ShouldBeTrue();
         TryParse("fn f() void { for ([_]struct { k: u8 }{ .{ .k = 1 } }) |e| { _ = e; } }").ShouldBeTrue();
         FirstNode<Zig.BuiltinCall>("fn f() void { _ = @as(struct { x: i32 }, .{ .x = 1 }); }").ShouldNotBeNull();
@@ -201,7 +201,7 @@ public sealed class ZigGrammarTests
         FirstNode<Zig.FnDef>("fn f(x: if (c) u64 else u32) if (c) u64 else u32 { return x; }").ShouldNotBeNull();
         FirstNode<Zig.EnumDeclTyped>("const E = enum(if (c) u16 else u8) { a, b };").Arg5.Content.ShouldBeOfType<Zig.TyIf>();
         // Where a value can stand, the same spelling is the value `if`.
-        FirstNode<Zig.IfExpr>("fn f() void { const v = if (c) a else b; _ = v; }").ShouldNotBeNull();
+        FirstNode<Zig.IfElseExpr>("fn f() void { const v = if (c) a else b; _ = v; }").ShouldNotBeNull();
     }
 
     [Fact]
@@ -211,7 +211,7 @@ public sealed class ZigGrammarTests
         FirstNode<Zig.TyArray>("const T = struct { f: [2]enum(u8) { off, on } };").Arg3.Content.ShouldBeOfType<Zig.InlineEnumTypeTyped>();
         TryParse("fn f(s: *const union(enum) { a: u32, b: u16 }) void { _ = s; }").ShouldBeTrue();
         // A type-choosing `if` arm and an argument reach the same records.
-        FirstNode<Zig.IfExpr>("const E = if (c) enum { a } else enum(u8) { b };").Arg4.Content.ShouldBeOfType<Zig.InlineEnumType>();
+        FirstNode<Zig.IfElseExpr>("const E = if (c) enum { a } else enum(u8) { b };").Arg5.Content.ShouldBeOfType<Zig.InlineEnumType>();
         FirstNode<Zig.BuiltinCall>("fn f() void { _ = @as(enum { x, y }, .y); }").ShouldNotBeNull();
         // The named declarations keep their own forms.
         FirstNode<Zig.EnumDecl>("const E = enum { a, b };").ShouldNotBeNull();
@@ -237,8 +237,8 @@ public sealed class ZigGrammarTests
         FirstNode<Zig.FbBreakValue>("fn f(k: u8) u8 { return while (true) { switch (k) { else => if (k > 1) break 0 } }; }").ShouldNotBeNull();
         FirstNode<Zig.WhileNoElseExpr>("fn f() u8 { const x: u8 = while (true) { break 3; }; return x; }").ShouldNotBeNull();
         // An `else` after the Block belongs to the value `while`, not to an enclosing `if`.
-        FirstNode<Zig.IfExprNoElse>("fn f(c: bool) void { _ = if (c) while (c) { break; } else 1; }")
-            .Arg4.Content.ShouldBeOfType<Zig.WhileElseExpr>();
+        FirstNode<Zig.IfThenExpr>("fn f(c: bool) void { _ = if (c) while (c) { break; } else 1; }")
+            .Arg5.Content.ShouldBeOfType<Zig.WhileElseExpr>();
         FirstNode<Zig.StmtForSliceRefElse>("fn f(xs: []u8) !void { for (xs) |*x| { x.* = 0; } else return error.E; }").ShouldNotBeNull();
         FirstNode<Zig.MemberExternFn>("const H = struct { pub extern fn g(x: u32) void; };").ShouldNotBeNull();
     }
@@ -286,9 +286,16 @@ public sealed class ZigGrammarTests
         FirstNode<Zig.StmtIfThen>("fn f(c: bool, i: *u8) void { if (c) i.* += 1 else i.* -= 1; }")
             .Arg5.Content.ShouldBeOfType<Zig.AssignArm>();
         // The value `if` with a capture, by reference too (std's Build/Configuration.zig), with or without `else |e|`.
-        FirstNode<Zig.IfExprCapture>("fn f(o: ?u8) u8 { return if (o) |*p| p.* else 0; }")
+        FirstNode<Zig.IfElseExpr>("fn f(o: ?u8) u8 { return if (o) |*p| p.* else 0; }")
             .Arg4.Content.ShouldBeOfType<Zig.Payload>().Arg1.ShouldNotBeNull();
-        FirstNode<Zig.IfExprCapture>("fn f(x: E!u8) u8 { return if (x) |v| v else |_| 0; }").Arg7.ShouldNotBeNull();
+        FirstNode<Zig.IfElseExpr>("fn f(x: E!u8) u8 { return if (x) |v| v else |_| 0; }").Arg7.ShouldNotBeNull();
+        // One value `if` record: the plain one has no payloads, and `if (eu) a else |e| b` carries only the else's.
+        var plainIf = FirstNode<Zig.IfElseExpr>("fn f(c: bool) u8 { return if (c) 1 else 2; }");
+        plainIf.Arg4.ShouldBeNull();
+        plainIf.Arg7.ShouldBeNull();
+        var elseOnly = FirstNode<Zig.IfElseExpr>("fn f(x: E!u8) u8 { return if (x) 1 else |_| 0; }");
+        elseOnly.Arg4.ShouldBeNull();
+        elseOnly.Arg7.ShouldNotBeNull();
         // The dangling `else` still binds to the nearest `if`.
         FirstNode<Zig.StmtIf>("fn f(a: bool, b: bool) void { if (a) if (b) g() else h(); }").Arg6.ShouldBeNull();
     }
@@ -308,7 +315,7 @@ public sealed class ZigGrammarTests
         // Jumps and `return` are the JumpExpr expressions; an else-less capture `if` is the IfExpr.
         FirstNode<Zig.Prong>("fn f(x: u8) u8 { switch (x) { 0 => return 1, else => return } }").Arg3.Content.ShouldBeOfType<Zig.ReturnExpr>();
         FirstNode<Zig.Prong>("fn f(x: E!u8) void { switch (x) { else => |e| if (e) |v| return v } }")
-            .Arg3.Content.ShouldBeOfType<Zig.IfExprCaptureNoElse>();
+            .Arg3.Content.ShouldBeOfType<Zig.IfThenExpr>();
         FirstNode<Zig.Prong>("fn f(n: u8) void { switch (n) { else => for (0..n) |_| { g(); } } }").Arg3.Content.ShouldBeOfType<Zig.ProngLoop>();
         FirstNode<Zig.Prong>("fn f(comptime T: type) u8 { return switch (T) { u8 => comptime { return 1; }, else => 2 }; }")
             .Arg3.Content.ShouldBeOfType<Zig.ProngComptimeBlock>();
@@ -347,7 +354,7 @@ public sealed class ZigGrammarTests
         FirstNode<Zig.ForElseExpr>("fn f(xs: []u8) u8 { return for (xs) |x| { break x; } else 0; }").Arg7.Content.ShouldBeOfType<Zig.Block>();
         // An `else` after an else-less `if` body binds to the `if` (the nearest), as in zig.
         FirstNode<Zig.ForElseExpr>("fn f(xs: []u8) u8 { return for (xs) |x| if (x > 0) break x else 2 else 3; }")
-            .Arg7.Content.ShouldBeOfType<Zig.LoopBodyExpr>().Arg0.Content.ShouldBeOfType<Zig.IfExpr>();
+            .Arg7.Content.ShouldBeOfType<Zig.LoopBodyExpr>().Arg0.Content.ShouldBeOfType<Zig.IfElseExpr>();
     }
 
     [Fact]
@@ -385,10 +392,10 @@ public sealed class ZigGrammarTests
     {
         // `x orelse if (c) a else b orelse d`: the else arm is `b orelse d` (zig's greedy reading).
         var oe = FirstNode<Zig.OrElse>("fn f(x: ?u8, y: ?u8, c: bool) u8 { return x orelse if (c) 1 else y orelse 2; }");
-        oe.Arg2.Content.ShouldBeOfType<Zig.IfExpr>().Arg6.Content.ShouldBeOfType<Zig.OrElse>();
-        FirstNode<Zig.CmpEq>("fn g(a: u8, c: bool) bool { return a == if (c) 1 else 2; }").Arg2.Content.ShouldBeOfType<Zig.IfExpr>();
+        oe.Arg2.Content.ShouldBeOfType<Zig.IfElseExpr>().Arg8.Content.ShouldBeOfType<Zig.OrElse>();
+        FirstNode<Zig.CmpEq>("fn g(a: u8, c: bool) bool { return a == if (c) 1 else 2; }").Arg2.Content.ShouldBeOfType<Zig.IfElseExpr>();
         // A nested `if` as an else arm, and `++` over an `if`.
-        FirstNode<Zig.IfExpr>("fn h(a: bool, b: bool) u8 { return if (a) 1 else if (b) 2 else 3; }").Arg6.Content.ShouldBeOfType<Zig.IfExpr>();
-        FirstNode<Zig.Concat>("const s = \"ab\" ++ if (true) \"c\" else \"d\";").Arg2.Content.ShouldBeOfType<Zig.IfExpr>();
+        FirstNode<Zig.IfElseExpr>("fn h(a: bool, b: bool) u8 { return if (a) 1 else if (b) 2 else 3; }").Arg8.Content.ShouldBeOfType<Zig.IfElseExpr>();
+        FirstNode<Zig.Concat>("const s = \"ab\" ++ if (true) \"c\" else \"d\";").Arg2.Content.ShouldBeOfType<Zig.IfElseExpr>();
     }
 }

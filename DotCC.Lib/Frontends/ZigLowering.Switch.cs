@@ -91,8 +91,8 @@ internal sealed partial class ZigLowering
     /// <summary>True for an <c>if</c> expression whose arms are statements rather than values (zig-grammar-peg P3a): an
     /// else-less one (zig's <c>else</c> is optional), or one with a non-empty <c>{ … }</c> block arm. Its value is void, so
     /// it has a meaning only where a statement stands (an expression statement, a prong body).</summary>
-    private static bool IsStatementIf(Item e) => e.Content is Zig.IfExprNoElse or Zig.IfExprCaptureNoElse
-        || e.Content is Zig.IfExpr ie && (ie.Arg4.Content is Zig.Block || ie.Arg6.Content is Zig.Block);
+    private static bool IsStatementIf(Item e) => e.Content is Zig.IfThenExpr
+        || e.Content is Zig.IfElseExpr { Arg4: null, Arg7: null } ie && (ie.Arg5.Content is Zig.Block || ie.Arg8.Content is Zig.Block);
 
     /// <summary>Lower an <see cref="IsStatementIf">statement <c>if</c></see>. A condition that folds at compile time keeps
     /// only the taken arm, so an untaken <c>@compileError</c> / switch / block is never analysed (what the retired
@@ -101,23 +101,23 @@ internal sealed partial class ZigLowering
     {
         switch (e.Content)
         {
-            case Zig.IfExprNoElse n:
+            case Zig.IfThenExpr { Arg4: null } n:
                 if ((TryFoldComptimeCondition(n.Arg2) ?? TryFoldTypeIfCondition(n.Arg2)) is { } takenThen)
                 {
-                    return takenThen ? LowerArmStmt(n.Arg4) : new Seq(new List<CStmt>());
+                    return takenThen ? LowerArmStmt(n.Arg5) : new Seq(new List<CStmt>());
                 }
-                return new If(LowerExpr(n.Arg2), LowerArmStmt(n.Arg4), null);
-            case Zig.IfExprCaptureNoElse c:
+                return new If(LowerExpr(n.Arg2), LowerArmStmt(n.Arg5), null);
+            case Zig.IfThenExpr c:
             {
                 var (capture, byRef, _) = PayloadParts(c.Arg4);
                 return LowerIfCapture(c.Arg2, capture ?? "_", c.Arg5, null, null, byRef);
             }
-            case Zig.IfExpr ie:
+            case Zig.IfElseExpr { Arg4: null, Arg7: null } ie:
                 if ((TryFoldComptimeCondition(ie.Arg2) ?? TryFoldTypeIfCondition(ie.Arg2)) is { } taken)
                 {
-                    return LowerArmStmt(taken ? ie.Arg4 : ie.Arg6);
+                    return LowerArmStmt(taken ? ie.Arg5 : ie.Arg8);
                 }
-                return new If(LowerExpr(ie.Arg2), LowerArmStmt(ie.Arg4), LowerArmStmt(ie.Arg6));
+                return new If(LowerExpr(ie.Arg2), LowerArmStmt(ie.Arg5), LowerArmStmt(ie.Arg8));
             default:
                 throw new IrUnsupportedException("internal: statement if " + (e.Content?.GetType().Name ?? "null"));
         }

@@ -851,7 +851,7 @@ internal sealed partial class ZigLowering
             return null;
         }
         var init = vc.rhs;
-        while (init.Content is Zig.IfExpr ie && TryFoldComptimeCondition(ie.Arg2) is { } taken) { init = taken ? ie.Arg4 : ie.Arg6; }
+        while (init.Content is Zig.IfElseExpr { Arg4: null, Arg7: null } ie && TryFoldComptimeCondition(ie.Arg2) is { } taken) { init = taken ? ie.Arg5 : ie.Arg8; }
         if (init.Content is not Zig.AnonStructInitEmpty) { return null; }
         var structName = QualifyTypeName(Tok(typeTok));
         if (!_structFieldDecls.TryGetValue((structName, fieldName), out var decl)

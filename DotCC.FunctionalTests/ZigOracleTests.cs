@@ -8033,6 +8033,70 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{} {}\\n\", .{ sumSkippingTwos(&a), five });\n" +
             "}\n", 0,
             "53 5" },
+        // zig-grammar-peg P4: one payload on each side of an `if` (value `if (eu) |v| … else |_| …`, a by-reference statement
+        // capture `if (o.*) |*p|`, `if (eu) |v| { … } else |e| { … }`, a no-`;` then-arm) and a by-reference prong capture.
+        new object[] { "payload_captures",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "const E = error{Bad};\n" +
+            "\n" +
+            "fn get(ok: bool) E!u8 {\n" +
+            "    return if (ok) 7 else error.Bad;\n" +
+            "}\n" +
+            "\n" +
+            "fn valueElseOnly(ok: bool) u8 {\n" +
+            "    return if (get(ok)) |_| 1 else |_| 0;\n" +
+            "}\n" +
+            "\n" +
+            "fn valueBoth(ok: bool) u8 {\n" +
+            "    return if (get(ok)) |v| v * 2 else |_| 99;\n" +
+            "}\n" +
+            "\n" +
+            "fn bump(o: *?u8) void {\n" +
+            "    if (o.*) |*p| {\n" +
+            "        p.* += 10;\n" +
+            "    }\n" +
+            "}\n" +
+            "\n" +
+            "fn stmtErr(ok: bool) u8 {\n" +
+            "    var r: u8 = 0;\n" +
+            "    if (get(ok)) |v| {\n" +
+            "        r = v;\n" +
+            "    } else |e| {\n" +
+            "        r = if (e == error.Bad) 50 else 51;\n" +
+            "    }\n" +
+            "    return r;\n" +
+            "}\n" +
+            "\n" +
+            "fn stmtThenExpr(c: bool) u8 {\n" +
+            "    var i: u8 = 3;\n" +
+            "    if (c) i += 4 else i -= 1;\n" +
+            "    return i;\n" +
+            "}\n" +
+            "\n" +
+            "const Shape = union(enum) { sq: u8, rect: struct { w: u8, h: u8 }, none };\n" +
+            "\n" +
+            "fn area(s: *Shape) u16 {\n" +
+            "    switch (s.*) {\n" +
+            "        .sq => |*n| {\n" +
+            "            n.* += 1;\n" +
+            "            return @as(u16, n.*) * n.*;\n" +
+            "        },\n" +
+            "        .rect => |r| return @as(u16, r.w) * r.h,\n" +
+            "        .none => return 0,\n" +
+            "    }\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() void {\n" +
+            "    var o: ?u8 = 5;\n" +
+            "    bump(&o);\n" +
+            "    var s = Shape{ .sq = 3 };\n" +
+            "    const a = area(&s);\n" +
+            "    std.debug.print(\"{} {} {} {}\\n\", .{ valueElseOnly(true), valueElseOnly(false), valueBoth(true), valueBoth(false) });\n" +
+            "    std.debug.print(\"{} {} {} {}\\n\", .{ o.?, stmtErr(true), stmtErr(false), stmtThenExpr(true) + stmtThenExpr(false) });\n" +
+            "    std.debug.print(\"{} {}\\n\", .{ a, s.sq });\n" +
+            "}\n", 0,
+            "1 0 14 99\n15 7 50 9\n16 4" },
         // Brace-less value-loop bodies (zig's `ForPrefix Expr else Expr`): a `switch` body (std's zig/AstGen.zig), a
         // parenthesized else-less `if` with a `break` (compress/flate/Compress.zig) and a `while : (…)` over a switch (debug.zig).
         new object[] { "brace_less_loop_bodies",

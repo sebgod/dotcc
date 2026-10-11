@@ -142,7 +142,7 @@ internal sealed partial class ZigLowering
                 // `const Slice = if (alignment) |a| … else []T;` — a TYPE alias; `const bits = @typeInfo(T).int.bits;`
                 // — a comptime VALUE (std.math.Log2Int computes its result width from one). Which it is
                 // is decided by the RHS's shape (IsTypeBodyTypeRhs), before anything is lowered.
-                case Zig.ConstDecl sel when UnwrapGrouped(sel.Arg3).Content is Zig.IfExpr selIf && IsTypeArm(selIf.Arg4) && IsTypeArm(selIf.Arg6):
+                case Zig.ConstDecl sel when UnwrapGrouped(sel.Arg3).Content is Zig.IfElseExpr { Arg4: null, Arg7: null } selIf && IsTypeArm(selIf.Arg5) && IsTypeArm(selIf.Arg8):
                     BindTypeBodySelectedType(fnName, Tok(sel.Arg1), sel.Arg3, typeShadows);
                     break;
                 case Zig.ConstDecl cd when IsTypeBodyTypeRhs(cd.Arg3):
@@ -382,12 +382,12 @@ internal sealed partial class ZigLowering
                     // `.one => if (@typeInfo(ptr.child) != .array) @compileError("…"),` (std.mem.ReverseIterator, task #147): the
                     // condition folds, and only a taken `@compileError` has an effect. (An else-less `if` expression since
                     // zig-grammar-peg P3a.)
-                    case Zig.IfExprNoElse guarded:
+                    case Zig.IfThenExpr { Arg4: null } guarded:
                     {
                         var taken = TryFoldComptimeCondition(guarded.Arg2) ?? TryFoldTypeIfCondition(guarded.Arg2)
                             ?? throw new IrUnsupportedException(
                                 $"type-returning generic '{fnName}': an `if` prong in a type body needs a comptime condition");
-                        if (taken && guarded.Arg4.Content is Zig.BuiltinCall { Arg2: not null, Arg0: var guardTok } guardCall
+                        if (taken && guarded.Arg5.Content is Zig.BuiltinCall { Arg2: not null, Arg0: var guardTok } guardCall
                             && Tok(guardTok) == "@compileError")
                         {
                             CompileErrorBuiltin(Flatten(guardCall.Arg2));
@@ -415,7 +415,7 @@ internal sealed partial class ZigLowering
     {
         var cur = rhs;
         while (cur.Content is Zig.Grouped g) { cur = g.Arg1; }
-        return cur.Content is Zig.IfExpr or Zig.IfExprCapture or Zig.SwitchExpr
+        return cur.Content is Zig.IfElseExpr or Zig.SwitchExpr
             || TryTypeAliasRhs(rhs, out _);
     }
 
@@ -485,8 +485,8 @@ internal sealed partial class ZigLowering
     private void BindTypeBodySelectedType(string fnName, string name, Item rhs,
         List<(string name, CType? prev, int? prevBits)> typeShadows)
     {
-        var arm = UnwrapGrouped(rhs).Content is Zig.IfExpr ta
-            ? (FoldTypeBodyCondition(fnName, ta.Arg2) ? ta.Arg4 : ta.Arg6)
+        var arm = UnwrapGrouped(rhs).Content is Zig.IfElseExpr { Arg4: null, Arg7: null } ta
+            ? (FoldTypeBodyCondition(fnName, ta.Arg2) ? ta.Arg5 : ta.Arg8)
             : throw new System.InvalidOperationException();
         if (arm.Content is Zig.InlineStructType s)
         {
@@ -654,9 +654,9 @@ internal sealed partial class ZigLowering
         while (cur.Content is Zig.Grouped g) { cur = g.Arg1; }
         switch (cur.Content)
         {
-            case Zig.IfExpr ie:
-                return LowerComptimeTypeExpr(fnName, FoldTypeBodyCondition(fnName, ie.Arg2) ? ie.Arg4 : ie.Arg6);
-            case Zig.IfExprCapture ic:
+            case Zig.IfElseExpr { Arg4: null, Arg7: null } ie:
+                return LowerComptimeTypeExpr(fnName, FoldTypeBodyCondition(fnName, ie.Arg2) ? ie.Arg5 : ie.Arg8);
+            case Zig.IfElseExpr ic:
             {
                 if (!TryComptimeOptionalCond(ic.Arg2, out var copt))
                 {

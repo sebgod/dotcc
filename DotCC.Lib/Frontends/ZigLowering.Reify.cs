@@ -551,7 +551,7 @@ internal sealed partial class ZigLowering
     {
         var cur = rhs;
         while (cur.Content is Zig.Grouped g) { cur = g.Arg1; }
-        if (cur.Content is not Zig.IfExprCapture ic || !IsComptimeNull(ic.Arg8)) { return false; }
+        if (cur.Content is not Zig.IfElseExpr { Arg4: not null } ic || !IsComptimeNull(ic.Arg8)) { return false; }
         var target = ic.Arg5;
         while (target.Content is Zig.Grouped tg) { target = tg.Arg1; }
         if (target.Content is Zig.BuiltinCall { Arg2: not null, Arg0: var castTok } cast && Tok(castTok) == "@ptrCast" && Flatten(cast.Arg2) is [var castArg])
