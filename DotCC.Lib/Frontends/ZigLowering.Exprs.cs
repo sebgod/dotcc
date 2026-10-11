@@ -267,7 +267,7 @@ internal sealed partial class ZigLowering
             case Zig.SwitchExpr s:         return LowerSwitchExpr(s.Arg2, s.Arg5, null);
             // `comptime switch` / `comptime if` in value position (see the LowerExprSink cases).
             case Zig.PreComptime { Arg1.Content: Zig.SwitchExpr } c: return LowerExpr(c.Arg1);
-            case Zig.ComptimeLabeledBlock clb: return ComptimeLabeledBlockValue(clb.Arg1, null);
+            case Zig.PreComptime { Arg1.Content: Zig.LabeledBlock or Zig.LabeledSwitch } clb: return ComptimeLabeledBlockValue(clb.Arg1, null);
             case Zig.PreComptime { Arg1.Content: Zig.IfExpr } c: return LowerExpr(c.Arg1);
 
             // A labeled value-block in a pure-expression position (an if/switch-expression arm, a

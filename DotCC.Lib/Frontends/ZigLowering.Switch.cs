@@ -122,6 +122,9 @@ internal sealed partial class ZigLowering
     {
         Zig.Block => LowerBlock(arm),
         Zig.VoidValue => new Seq(new List<CStmt>()),   // an empty `{}` arm
+        // A parenthesized arm (`for (xs) |x| (if (x <= 0) break false) else true`, std's compress/flate/Compress.zig): the
+        // parentheses group, so the arm inside is the statement.
+        Zig.Grouped g => LowerArmStmt(g.Arg1),
         _ when IsNoreturnArm(arm) => LowerExitArm(arm),
         _ when IsStatementIf(arm) => LowerStatementIf(arm),
         Zig.SwitchExpr s => LowerSwitchStmt(s.Arg2, s.Arg5),

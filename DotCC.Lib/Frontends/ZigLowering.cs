@@ -1475,8 +1475,11 @@ internal sealed partial class ZigLowering
         return code;
     }
 
-    private static string Tok(Item it) => NormalizeIdent(it.Content as string
-        ?? throw new IrUnsupportedException("expected a token lexeme"));
+    /// <summary>The lexeme of a token item. A one-token pass-through (a container field's FieldName, which is an IDENT or a
+    /// LABEL) stays a reduction in the trimmed tree, since only nonterminal pass-throughs are trimmed, so it is unwrapped.</summary>
+    private static string Tok(Item it) => it.Content is LALR.CC.Reduction { Children: [var only] }
+        ? Tok(only)
+        : NormalizeIdent(it.Content as string ?? throw new IrUnsupportedException("expected a token lexeme"));
 
     /// <summary>
     /// Normalizes a raw token lexeme into the name the rest of lowering uses. A Zig quoted

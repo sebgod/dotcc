@@ -8033,6 +8033,75 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{} {}\\n\", .{ sumSkippingTwos(&a), five });\n" +
             "}\n", 0,
             "53 5" },
+        // Brace-less value-loop bodies (zig's `ForPrefix Expr else Expr`): a `switch` body (std's zig/AstGen.zig), a
+        // parenthesized else-less `if` with a `break` (compress/flate/Compress.zig) and a `while : (…)` over a switch (debug.zig).
+        new object[] { "brace_less_loop_bodies",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "const Tok = enum { word, space, end };\n" +
+            "\n" +
+            "fn firstSpace(toks: []const Tok) usize {\n" +
+            "    return for (toks, 0..) |t, i| switch (t) {\n" +
+            "        .space => break i,\n" +
+            "        else => {},\n" +
+            "    } else toks.len;\n" +
+            "}\n" +
+            "\n" +
+            "fn allPositive(xs: []const i32) bool {\n" +
+            "    return for (xs) |x| (if (x <= 0) break false) else true;\n" +
+            "}\n" +
+            "\n" +
+            "fn countUntilEnd(toks: []const Tok) u32 {\n" +
+            "    var i: usize = 0;\n" +
+            "    var words: u32 = 0;\n" +
+            "    const n: u32 = while (i < toks.len) : (i += 1) switch (toks[i]) {\n" +
+            "        .end => break words,\n" +
+            "        .word => words += 1,\n" +
+            "        .space => {},\n" +
+            "    } else 99;\n" +
+            "    return n;\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() void {\n" +
+            "    const a = [_]Tok{ .word, .word, .space, .word, .end };\n" +
+            "    const b = [_]Tok{ .word, .word };\n" +
+            "    const p = [_]i32{ 1, 2, 3 };\n" +
+            "    const q = [_]i32{ 1, -2, 3 };\n" +
+            "    std.debug.print(\"{} {}\\n\", .{ firstSpace(&a), firstSpace(&b) });\n" +
+            "    std.debug.print(\"{} {}\\n\", .{ allPositive(&p), allPositive(&q) });\n" +
+            "    std.debug.print(\"{} {}\\n\", .{ countUntilEnd(&a), countUntilEnd(&b) });\n" +
+            "}\n", 0,
+            "2 2\ntrue false\n3 99" },
+        // A labeled block as an operand (std's zig/TokenSmith.zig: `blk: { … } + 1`), an `orelse` fallback and a `comptime`
+        // operand: the lexer's LABEL token (trailing context) keeps `len :0` and `[N:0]T` out of it.
+        new object[] { "labeled_blocks_as_operands",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "fn width(n: u32) u32 {\n" +
+            "    const total = blk: {\n" +
+            "        var m: u32 = 0;\n" +
+            "        var i: u32 = 0;\n" +
+            "        while (i < n) : (i += 1) m += 2;\n" +
+            "        break :blk m;\n" +
+            "    } + 1;\n" +
+            "    return total;\n" +
+            "}\n" +
+            "\n" +
+            "fn orDefault(x: ?u32) u32 {\n" +
+            "    return x orelse fallback: {\n" +
+            "        const d: u32 = 40;\n" +
+            "        break :fallback d + 2;\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() void {\n" +
+            "    const c = comptime blk: {\n" +
+            "        break :blk @as(u32, 7) * 6;\n" +
+            "    };\n" +
+            "    std.debug.print(\"{} {}\\n\", .{ width(3), c });\n" +
+            "    std.debug.print(\"{} {}\\n\", .{ orDefault(5), orDefault(null) });\n" +
+            "}\n", 0,
+            "7 42\n5 42" },
         // Task #140: std.crypto.blake3's shapes: a late-declared struct const in a field extent, `@intCast` slice bounds,
         // open slices of a many-item pointer, and an array local copied through a pointer.
         new object[] { "blake3_shapes",

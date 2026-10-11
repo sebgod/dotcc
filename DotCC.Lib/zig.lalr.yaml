@@ -311,6 +311,11 @@ symbols:
   - InlineStructTy # 209 `struct { … }` as the type of a typed struct literal (`struct { … }{ .keys = … }`)
   - 'allowzero'    # 210 the pointer attribute `*allowzero T` (a PtrAlign: like `align(N)`, no effect on the managed target)
   - ThenExpr       # 211 an expression then-arm of a statement `if` with an `else` (zig's `IfPrefix AssignExpr else …`)
+  - LoopBody       # 212 a value loop's body: a Block, or a brace-less expression (zig's `ForPrefix Expr else Expr`)
+  - LoopBodyExpr   # 213 a brace-less loop body expression (`for (xs) |x| switch (x) { … } else v`)
+  - LABEL          # 214 a block / loop / switch label: an identifier the lexer sees followed by `: {`, `: for`, `: while`,
+                   #     `: inline` or `: switch` (zig's BlockLabel)
+  - FieldName      # 215 a container field's name: an IDENT, or a LABEL when the field's type is a `switch`
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -320,6 +325,13 @@ productions:
       # A file with no declarations is an empty struct (std ships 0-byte `test.zig` stubs). The optional lives on
       # File, not Root: LALR.CC seeds the start state with production 0 only, so a second Root alternative is dead.
       - { lhs: File, rhs: [Decls?] }
+
+  # A container field's name. EARLY, so where a container member could also start with a labeled switch (a tuple-like
+  # field typed by one), `name: switch (…) {…}` reduces to a field name, as zig's ContainerField tries `IDENT :` first.
+  - derivation: none
+    rules:
+      - { lhs: FieldName, rhs: [IDENT] }
+      - { lhs: FieldName, rhs: [LABEL] }
 
   - derivation: leftmost
     rules:
@@ -752,7 +764,7 @@ productions:
       # any `Stmt`) keeps a labeled-block STATEMENT out (it stays value-only) and lets the lowering
       # assume a loop target for `break :lbl` / `continue :lbl`.
       - { lhs: Stmt, rhs: [LoopStmt] }
-      - { lhs: Stmt, rhs: [IDENT, ':', LoopStmt], action: labeledLoop }
+      - { lhs: Stmt, rhs: [LABEL, ':', LoopStmt], action: labeledLoop }
       # A labeled block as a STATEMENT, zig's `LabeledStatement <- BlockLabel? (Block / LoopStatement / SwitchExpr)`
       # (std.bit_set.DynamicBitSetUnmanaged.resize: `if (old_allocation.len != new_masks + 1) realloc: { … break
       # :realloc; … }`, task #130). Its value is void, so a `break :lbl;` leaves it. After `IDENT ':'`, a `{` or a
@@ -897,7 +909,6 @@ productions:
       # `arg_index orelse init: { const arg = self.next_arg; self.next_arg += 1; break :init arg; }`
       # (std.fmt.ArgState.nextArg): a labeled VALUE block runs only on the none / error path. `rightmost`
       # shifts the `:` after the label, as for `break :l` above.
-      - { lhs: FallbackArm, rhs: [LabeledBlock],                action: fbLabeled }
       - { lhs: CaptureArm,  rhs: [FallbackArm] }
       # The jump arms (`orelse break`, `catch |e| return v`, an `if` whose arms both jump, a jump as a value `if`'s arm,
       # GH #283 / #286) are JumpExprs since zig-grammar-peg P1b: see the jumps-as-expressions group at the end. What the
@@ -919,26 +930,8 @@ productions:
       - { lhs: RhsExpr, rhs: ['{', '}'], action: voidValue }
       # A value `switch` is a Primary since zig-grammar-peg P3 (an operand anywhere, `comptime switch` is preComptime),
       # so it needs no RhsExpr copy; its prongs YIELD a value (`v => e`).
-      # `const first = comptime first: { …; break :first a ++ b ++ c; };` (std.unicode's utf8ValidateSliceImpl, task #82):
-      # a labeled block run at compile time. After `comptime IDENT`, the `:` lookahead selects the label, as for a bare
-      # labeled block (a Primary is never followed by `:`).
-      - { lhs: RhsExpr, rhs: ['comptime', LabeledBlock], action: comptimeLabeledBlock }
-      # A labeled block as a VALUE (Milestone L, part 2) — `blk: { …; break :blk v; }`. Same
-      # structural trick as IfExpr/SwitchExpr: a RhsExpr alternative, NOT a Primary, so it never
-      # starts an Expr-cascade sub-operand. `blk:` is `IDENT ':'`; the RhsExpr cascade's other
-      # alternative (Expr) also starts with IDENT, but a Primary is never followed by `:` anywhere
-      # in the grammar, so the 1-token `:` lookahead cleanly selects this production over reducing
-      # IDENT to a Primary — conflict-free. The block YIELDS a value via `break :blk v` (a labeled
-      # break, below); the temp-fill lowering lives in ZigLowering (it only appears as a full
-      # `=`/`return`/assignment RHS — an if/switch-expr arm or sub-expression position errors).
-      - { lhs: RhsExpr, rhs: [LabeledBlock] }
-      # A value-position loop (Milestone Y, part 2) — a `while`/`for` with an `else` clause is an
-      # EXPRESSION: it yields a `break v` value, or the `else` value on normal completion (the
-      # idiomatic search loop `const found = for (xs) |x| { if (p(x)) break x; } else null;`). Same
-      # structural trick as IfExpr/SwitchExpr/LabeledBlock: a RhsExpr alternative, NOT a Primary, out
-      # of the operator cascade. `while`/`for` at statement start stay LoopStmt (a different context);
-      # the value form is reached only after `=`/`return`/an init — like the if/switch expressions.
-      - { lhs: RhsExpr, rhs: [LoopExpr] }
+      # A labeled block is a Primary too (below), so `comptime first: { …; break :first a ++ b; }` (std.unicode, task #82)
+      # is the ordinary `comptime` prefix over it.
 
   - derivation: none
     rules:
@@ -969,19 +962,25 @@ productions:
       - { lhs: SwitchExpr, rhs: ['switch', '(', Expr, ')', '{', '}'], action: switchExprEmpty }
       # `switch (if (from < 0) @max(…) else to) { … }` (std.math.IntFittingRange): a value `if` as the subject.
       # `if` is not in FIRST(Expr), so after `switch (` it is a clean shift; the record is the same.
-      - { lhs: LabeledBlock, rhs: [IDENT, ':', Block], action: labeledBlock }
+      # A labeled block `blk: { …; break :blk v; }`, its value yielded by the labeled break. The LABEL token is the
+      # lexer's: an identifier seen followed by `:` and a block, loop or switch, so `len :0` never starts one.
+      - { lhs: LabeledBlock, rhs: [LABEL, ':', Block], action: labeledBlock }
       # A labeled SWITCH as a value (std.math.shl: `casted_shift_amt: switch (@typeInfo(T)) { .int => |info| { …
-      # break :casted_shift_amt v; … }, … }`): the same value block, its body the switch. After `IDENT ':'`, a
+      # break :casted_shift_amt v; … }, … }`): the same value block, its body the switch. After `LABEL ':'`, a
       # `{` or a `switch` decides the form in one token.
-      - { lhs: LabeledBlock, rhs: [IDENT, ':', SwitchExpr], action: labeledSwitch }
-      # The value-position loops. A braced `Block` body (the value form runs statements and yields via
-      # `break v`); the `else RhsExpr` clause supplies the value on normal completion. The `while`-else
-      # and the most common `for (slice) |x|`-else forms, each optionally labeled (`lbl: … else …`,
-      # so `break :lbl v` targets it). A brace-less value-loop body is a cut.
-      - { lhs: LoopExpr, rhs: ['while', '(', Expr, ')', Block, 'else', IfArm],                          action: whileElseExpr }
-      - { lhs: LoopExpr, rhs: ['for', '(', Expr, ')', '|', IDENT, '|', Block, 'else', IfArm],           action: forElseExpr }
-      - { lhs: LoopExpr, rhs: [IDENT, ':', 'while', '(', Expr, ')', Block, 'else', IfArm],              action: labeledWhileElseExpr }
-      - { lhs: LoopExpr, rhs: [IDENT, ':', 'for', '(', Expr, ')', '|', IDENT, '|', Block, 'else', IfArm], action: labeledForElseExpr }
+      - { lhs: LabeledBlock, rhs: [LABEL, ':', SwitchExpr], action: labeledSwitch }
+      # The value-position loops. The body is a LoopBody: a braced Block (the value form runs statements and yields via
+      # `break v`) or, as zig's `ForPrefix Expr else Expr`, a brace-less expression (`for (xs) |x| switch (x) { … } else v`,
+      # std's zig/AstGen.zig; `while (i < n) switch (it.next()) { … } else .unknown`, debug.zig). The `else` clause supplies
+      # the value on normal completion. The `while`-else and the most common `for (slice) |x|`-else forms, each optionally
+      # labeled (`lbl: … else …`, so `break :lbl v` targets it).
+      - { lhs: LoopBody, rhs: [Block] }
+      - { lhs: LoopBody, rhs: [LoopBodyExpr] }
+      - { lhs: LoopBodyExpr, rhs: [Expr], action: loopBodyExpr }
+      - { lhs: LoopExpr, rhs: ['while', '(', Expr, ')', LoopBody, 'else', IfArm],                          action: whileElseExpr }
+      - { lhs: LoopExpr, rhs: ['for', '(', Expr, ')', '|', IDENT, '|', LoopBody, 'else', IfArm],           action: forElseExpr }
+      - { lhs: LoopExpr, rhs: [LABEL, ':', 'while', '(', Expr, ')', LoopBody, 'else', IfArm],              action: labeledWhileElseExpr }
+      - { lhs: LoopExpr, rhs: [LABEL, ':', 'for', '(', Expr, ')', '|', IDENT, '|', LoopBody, 'else', IfArm], action: labeledForElseExpr }
       # `const mask = for (self.masks) |mask| { if (mask != 0) break mask; … } else return null;`
       # (std.bit_set.ArrayBitSet.findFirstSet): the else RETURNS from the function instead of yielding, so the
       # loop's value comes from its `break`s alone. Since zig-grammar-peg P1b a `return` is an RhsExpr, so these are the
@@ -989,23 +988,28 @@ productions:
       # A value `while` with an assignment continue-expression (std.bit_set.ArrayBitSet.eql:
       # `return while (i < num_masks) : (i += 1) { … break false; } else true;`). After `)`, a `:` or a `{`
       # decides between this and the plain value `while` in one token.
-      - { lhs: LoopExpr, rhs: ['while', '(', Expr, ')', ':', '(', Expr, AssignOp, RhsExpr, ')', Block, 'else', IfArm], action: whileContAssignElseExpr }
+      - { lhs: LoopExpr, rhs: ['while', '(', Expr, ')', ':', '(', Expr, AssignOp, RhsExpr, ')', LoopBody, 'else', IfArm], action: whileContAssignElseExpr }
       # The by-ref capture (`for (&self.masks) |*mask| { … break mask; } else return null;`, toggleFirstSet): the
       # break yields the element POINTER. After `|`, a `*` or an IDENT decides the capture form in one token.
-      - { lhs: LoopExpr, rhs: ['for', '(', Expr, ')', '|', '*', IDENT, '|', Block, 'else', IfArm],    action: forRefElseExpr }
-      # The comptime-unrolled value loop (std.enums.tagName, task #131: `return inline for (field_names, field_values)
-      # |f_name, f_value| { if (@intFromEnum(e) == f_value) break f_name; } else null;`), over one comptime list or several
-      # in lockstep. `inline` is not in FIRST of any other RhsExpr form, so it decides the production in one token.
-      - { lhs: LoopExpr, rhs: ['inline', 'for', '(', Expr, ')', '|', IDENT, '|', Block, 'else', IfArm],       action: inlineForElseExpr }
-      - { lhs: LoopExpr, rhs: ['inline', 'for', '(', ForObjs, ",?", ')', '|', ForCaps, '|', Block, 'else', IfArm], action: inlineForMultiElseExpr }
+      - { lhs: LoopExpr, rhs: ['for', '(', Expr, ')', '|', '*', IDENT, '|', LoopBody, 'else', IfArm],    action: forRefElseExpr }
       # A range, multi-object or capture-`while` value loop (std's Io/Dispatch.zig: `const data = for (operation.data, 0..)
       # |buffer, data_index| { … } else break :result …;`, crypto/bcrypt.zig: `key_remainder -= for (0..amt) |i| { … } else 0;`,
       # heap/ArenaAllocator.zig: `const node: *Node = while (it) |node| { … } else { continue; };`). The `else` is an IfArm,
       # so a `{ … }` block (which never completes) or a jump stands there too. After `(`, the objects decide the `for`
       # form as the statement loops do; after `)`, a `|` versus a `{` or `:` decides the `while` form.
-      - { lhs: LoopExpr, rhs: ['for', '(', Expr, '..', Expr, ')', '|', IDENT, '|', Block, 'else', IfArm],        action: forRangeElseExpr }
-      - { lhs: LoopExpr, rhs: ['for', '(', ForObjs, ",?", ')', '|', ForCaps, '|', Block, 'else', IfArm],       action: forMultiElseExpr }
-      - { lhs: LoopExpr, rhs: ['while', '(', Expr, ')', '|', IDENT, '|', Block, 'else', IfArm],                 action: whileCaptureElseExpr }
+      - { lhs: LoopExpr, rhs: ['for', '(', Expr, '..', Expr, ')', '|', IDENT, '|', LoopBody, 'else', IfArm],        action: forRangeElseExpr }
+      - { lhs: LoopExpr, rhs: ['for', '(', ForObjs, ",?", ')', '|', ForCaps, '|', LoopBody, 'else', IfArm],       action: forMultiElseExpr }
+      - { lhs: LoopExpr, rhs: ['while', '(', Expr, ')', '|', IDENT, '|', LoopBody, 'else', IfArm],                 action: whileCaptureElseExpr }
+
+  # The comptime-unrolled value loop (std.enums.tagName, task #131: `return inline for (field_names, field_values)
+  # |f_name, f_value| { if (@intFromEnum(e) == f_value) break f_name; } else null;`), over one comptime list or several
+  # in lockstep, AFTER the plain loops. In a switch, `inline for (…) |x| b else y =>` reads two ways: an `inline`
+  # prong whose case value is a `for` expression, or a case value that is an `inline for`. zig's SwitchProng takes
+  # `KEYWORD_inline` first, so the plain `for` (the earlier group) wins the reduce/reduce.
+  - derivation: none
+    rules:
+      - { lhs: LoopExpr, rhs: ['inline', 'for', '(', Expr, ')', '|', IDENT, '|', LoopBody, 'else', IfArm],       action: inlineForElseExpr }
+      - { lhs: LoopExpr, rhs: ['inline', 'for', '(', ForObjs, ",?", ')', '|', ForCaps, '|', LoopBody, 'else', IfArm], action: inlineForMultiElseExpr }
 
   - derivation: leftmost
     rules:
@@ -1325,6 +1329,10 @@ productions:
       # CLOSED (an operator after it applies to it). At statement start the statement `switch` shares the prefix, and its
       # group is earlier, so the statement form wins there, as before.
       - { lhs: Primary, rhs: [SwitchExpr] }
+      # A labeled block or switch (zig's BlockExpr / LabeledSwitch in PrimaryExpr): closed, an operand anywhere
+      # (`blk: { … } + 1`, std's zig/TokenSmith.zig; `if (verify: { … })`, crypto/tls/Client.zig). The LABEL token keeps
+      # `len :0` and `[N:0]T` out of it.
+      - { lhs: Primary, rhs: [LabeledBlock] }
       - { lhs: Primary, rhs: [INTEGER],             action: intLit }
       - { lhs: Primary, rhs: [FLOAT],               action: floatLit }
       - { lhs: Primary, rhs: [STRING],              action: strLit }
@@ -1411,7 +1419,6 @@ productions:
       # And a labeled value-block (std.hash.XxHash3.final's `acc.digest(len, last_block: { … break :last_block p; })`,
       # task #178). `IDENT ':'` starts it where an Expr's IDENT would reduce to a Primary; no Primary is ever followed by
       # ':' (the invariant LabeledBlock already relies on as a RhsExpr), so the ':' lookahead decides.
-      - { lhs: Arg, rhs: [LabeledBlock] }
 
   - derivation: none
     rules:
@@ -1436,7 +1443,6 @@ productions:
       # RhsExpr's is. A value `if` is an Expr (P1).
       # A labeled value block (std's Build/Step.zig: `.debug_stack_trace = blk: { … break :blk v; },`). After IDENT, a
       # `:` selects the block as it does for an RhsExpr; lowering hoists it ahead of the enclosing statement.
-      - { lhs: FieldValue, rhs: [LabeledBlock] }
 
   # ===== switch prongs (Milestone C2) =====
   # LEFT-recursive prong list — the form that makes the optional trailing comma a clean
@@ -1642,26 +1648,26 @@ productions:
 
   - derivation: none
     rules:
-      - { lhs: FieldDecl, rhs: [IDENT, ':', AType], action: structField }
+      - { lhs: FieldDecl, rhs: [FieldName, ':', AType], action: structField }
       # A field with a DEFAULT value (`bit_len: usize = 0,` / `next: ?*Node = null,`) — 29 std files
       # fail first on the `=`, and it's a hard requirement for the file-is-a-struct idiom. After
       # `IDENT : Type` the `=` (default) vs `,`/`}` (bare field) decision is a clean 1-token split.
       # The default is materialized only for fields OMITTED from a `.{…}` literal (see BuildStructInit).
       # The default is a value-position RhsExpr, so an `if` may choose it (debug.zig's SafetyLock:
       # `state: State = if (runtime_safety) .unlocked else .unknown,`); `,` / `}` still end it.
-      - { lhs: FieldDecl, rhs: [IDENT, ':', AType, '=', RhsExpr], action: structFieldDefault }
+      - { lhs: FieldDecl, rhs: [FieldName, ':', AType, '=', RhsExpr], action: structFieldDefault }
       # A field with an alignment (std.crypto.sha2's `s: [8]u32 align(16),`). After the type, `align` is a 1-token shift
       # (it is never in FOLLOW(AType) inside a field list otherwise).
-      - { lhs: FieldDecl, rhs: [IDENT, ':', AType, 'align', '(', Expr, ')'],                  action: structFieldAligned }
-      - { lhs: FieldDecl, rhs: [IDENT, ':', AType, 'align', '(', Expr, ')', '=', RhsExpr], action: structFieldAlignedDefault }
+      - { lhs: FieldDecl, rhs: [FieldName, ':', AType, 'align', '(', Expr, ')'],                  action: structFieldAligned }
+      - { lhs: FieldDecl, rhs: [FieldName, ':', AType, 'align', '(', Expr, ')', '=', RhsExpr], action: structFieldAlignedDefault }
       # A field whose TYPE is a comptime `switch` (std.mem.SplitIterator's `delimiter: switch (delimiter_type) { … },`) is
       # the plain field rule since zig-grammar-peg P3 (a `switch` is a Primary, so a Type). A comptime `if`
       # (std's Io/Threaded.zig: `old_sig_io: if (have_sig_io) posix.Sigaction else void,`) needs its own rule: the condition
       # must fold, as in a type alias (LowerType folds it). A field slot only: as a general AType (a return type, followed by
       # `{`) an `if` would clash with a struct-literal arm. It shares the plain field records, with or without a default
       # (std's compress/flate/Decompress.zig: `linked: if (…) void else [alphabet_size]struct { … } = undefined,`).
-      - { lhs: FieldDecl, rhs: [IDENT, ':', IfExpr], action: structField }
-      - { lhs: FieldDecl, rhs: [IDENT, ':', IfExpr, '=', RhsExpr], action: structFieldDefault }
+      - { lhs: FieldDecl, rhs: [FieldName, ':', IfExpr], action: structField }
+      - { lhs: FieldDecl, rhs: [FieldName, ':', IfExpr, '=', RhsExpr], action: structFieldDefault }
 
   # Enum body as a MEMBER list (right-recursive over EnumMember, like struct's FieldDecls) — so
   # value members, methods (`fn`/`pub fn`), and consts (`const Self = @This();`) interleave. The
@@ -1731,10 +1737,10 @@ productions:
 
   - derivation: none
     rules:
-      - { lhs: UnionVariant, rhs: [IDENT, ':', AType], action: unionVariantPayload }
+      - { lhs: UnionVariant, rhs: [FieldName, ':', AType], action: unionVariantPayload }
       # A payload chosen by a comptime `if` (std's Progress.zig: `windows_api: if (is_windows) WindowsApi else noreturn,`): the
       # same record, whose type lowers through LowerType's `if` fold.
-      - { lhs: UnionVariant, rhs: [IDENT, ':', IfExpr], action: unionVariantPayload }
+      - { lhs: UnionVariant, rhs: [FieldName, ':', IfExpr], action: unionVariantPayload }
       - { lhs: UnionVariant, rhs: [IDENT],             action: unionVariantVoid }
       # `undefined,` / `null,` (std.builtin.Type's void variants): zig's primitive VALUES, but plain names in a
       # container's field list. dotcc lexes them as keywords, so the variant admits them by name.
@@ -1842,6 +1848,9 @@ productions:
       - { lhs: PrefixO, rhs: ['comptime', PrefixO], action: preComptime }
       - { lhs: PrefixO, rhs: [OpenPrimary] }
       - { lhs: OpenPrimary, rhs: [IfExpr] }
+      # A value loop (zig's ForExpr / WhileExpr are PrimaryExprs): open, since its `else` arm (or a brace-less body) is an
+      # expression that takes everything to its right. At statement start the statement loop wins.
+      - { lhs: OpenPrimary, rhs: [LoopExpr] }
       - { lhs: IfArm, rhs: [RhsExpr] }
       # A non-empty `{ … }` block arm (zig-grammar-peg P3a; zig's Block is a PrimaryExpr): `.linux => if (c) { … } else { … },`
       # (std's Thread.zig). Its record is the statement Block's. An empty `{}` arm stays the void value RhsExpr gives it.
@@ -2082,6 +2091,11 @@ lexer:
     - { symbol: INTEGER, match: '0o[0-7_]+' }
     - { symbol: INTEGER, match: '0b[01_]+' }
     - { symbol: INTEGER, match: '[0-9][0-9_]*' }
+    # A label (zig's BlockLabel): an identifier followed by `:` and a block, loop or switch. LALR(1) cannot tell `blk: {`
+    # from the `len :0` of a sentinel slice at the `:`, and zig's PEG backtracks out of a failed label, so the lexer
+    # decides with trailing context, which it does not consume (the `:` is lexed after it). In a container, `name:
+    # switch (…) {…}` is a field typed by a switch: FieldName takes a LABEL too.
+    - { symbol: LABEL,   match: '[a-zA-Z_][a-zA-Z_0-9]*', lookahead: '[ \t\r\n]*:[ \t\r\n]*(\{|(inline[ \t\r\n]+)?(for|while)[ \t\r\n(]|switch[ \t\r\n(])' }
     - { symbol: IDENT,   match: '[a-zA-Z_][a-zA-Z_0-9]*' }
 
     # Whitespace (incl. newlines) — ignored.

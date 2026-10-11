@@ -7,7 +7,8 @@ the else-less `if` expression and block arms (probe 443 to 452). P3 first step d
 primary (probe 466 to 473); labeled blocks and value loops as primaries remain. P5 started: an inline
 `struct { … }` is a Type anywhere (probe 473 to 486). Range, multi-object and capture-`while` value loops
 (still RhsExpr forms, not primaries) took the probe to 491. P5 step 2: `enum` / `union` / layout containers are
-Types too (probe 500 to 506). zig's IfTypeExpr, an `if` in a type position, took it to 510.
+Types too (probe 500 to 506). zig's IfTypeExpr, an `if` in a type position, took it to 510. **P3 done** (2026-10-11): labeled blocks and value loops are
+primaries, on a lexer LABEL token, and a value loop's body may be a brace-less expression (probe 518 to 522). Next: P4.
 
 ## Why
 
@@ -199,3 +200,19 @@ LALR(1) cannot. (`Primary -> LabeledBlock` is worse: Type reaches Primary, so a 
 becomes a labeled switch.) The dump diff hid it, because the `:` decision's text was already listed and the dump is
 deduplicated. That is why the probe report now lists every failing file. A real fix needs the lexer to see a block
 label (`IDENT : {` / `IDENT : switch`) as one token, which LALR.CC's lexer cannot express without lookahead today.
+
+**P3 as landed (2026-10-11): the lexer sees the label.** LALR.CC 4.11.0 gives a lexer rule trailing context
+(`lookahead:`, flex's `r/s`), and zig.lalr.yaml lexes an identifier followed by `: {`, `: for`, `: while`, `: inline` or
+`: switch` as LABEL (the lookahead is not consumed, so the `:` follows as its own token). Every labeled form takes
+`LABEL ':'`, and nothing else ever sees a LABEL, so `len :0` and `[N:0]T` are untouched. A container field typed by a
+switch (`name: switch (…) {…}`) lexes LABEL too: its name is a FieldName (IDENT or LABEL), in an early group so the
+field reduce wins at `:`, which is zig's ContainerField trying `IDENT :` first. With that, `Primary -> LabeledBlock`
+(closed) retires `fbLabeled`, `comptimeLabeledBlock` and the RhsExpr / Arg / FieldValue copies, and `OpenPrimary ->
+LoopExpr` makes value loops operands (`g(for … else true)`, `c and for … else true`). The value `inline for` forms move to
+a group after the plain loops: in a prong, `inline for (…) |x| b else y =>` reads as an `inline` prong over a `for` case
+value or as an `inline for` case value, and zig's SwitchProng takes `KEYWORD_inline` first. A value loop's body is a
+LoopBody (a Block or an expression, zig's `ForPrefix Expr else Expr`), so `for (xs) |x| switch (x) { … } else v` parses;
+an else-less brace-less loop is still not a value (it is zig's statement loop, whose `AssignExpr` body needs P4's
+factoring to avoid one rule per loop shape). The resolved-conflict diff: the statement labeled block winning at
+statement start (as `switch` does), the field-name reduce, and the `inline for` reduce/reduce; the probe's failing-file
+list lost four files (Progress.zig, compress/flate/Compress.zig, zig/AstGen.zig, zig/TokenSmith.zig) and gained none.
