@@ -185,6 +185,7 @@ sizeof-unsigned
 small-ops
 sprintf-snprintf
 static-address-order
+static-block-copy
 static-extern-same-name
 static-local-array
 static-locals
