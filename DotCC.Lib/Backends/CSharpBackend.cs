@@ -81,9 +81,13 @@ internal sealed partial class CSharpBackend
         var mainReturnsErrUnion = false;
         var mainErrPayloadIsVoid = false;
         var records = new List<LinkRecord>();
+        // A TU-local definition nothing reaches is left out, as a C compiler emits no code for
+        // an unused static function (IrModule.UnreachedTuLocals).
+        var unreached = unit.UnreachedTuLocals();
 
         foreach (var fn in unit.Functions)
         {
+            if (unreached.Contains(fn.Sym)) { continue; }
             cg._currentFnName = fn.Sym.Name;
             var fnText = cg.Func(fn);
             fns.Add(fnText);
@@ -154,6 +158,7 @@ internal sealed partial class CSharpBackend
         var globals = new StringBuilder();
         foreach (var g in unit.Globals)
         {
+            if (unreached.Contains(g.Sym)) { continue; }
             var storageStart = storage.Length;
             var globalStart = globals.Length;
             AppendGlobal(g);
@@ -2303,12 +2308,14 @@ internal sealed partial class CSharpBackend
             {
                 // .NET has no offsetof operator, and the address-through-a-null
                 // idiom (`&((T*)null)->m`) FAULTS — C#'s `->` null-checks the base.
-                // Compute it from a stack `default` instance instead: the member's
-                // address minus the base address, honoring the real .NET blittable
-                // layout (alignment included). `__t` lives inside the lambda (not
-                // captured), so `&__t` needs no `fixed`. A primitive `fixed`-buffer
-                // member's access already yields its address (no `&`); a scalar
-                // member uses `&`.
+                // Take the member's address through a pointer that is not null but is
+                // never read (`Libc.OffsetOfBase`) and subtract the base: the real .NET
+                // blittable layout (alignment included), with no instance. An instance
+                // (a `default` local) used to stand in, which zeroed a whole struct per
+                // offsetof, and one the size of CPython's runtime state (285 KB) is an
+                // initobj the browser's Mono interpreter cannot express. A primitive
+                // `fixed`-buffer member's access already yields its address (no `&`); a
+                // scalar member uses `&`.
                 // A flexible or zero-length array member has no C# field to measure (GH #246): its
                 // offset is the layout model's, the same one its accesses use.
                 if (o.MemberType?.Unqualified is CType.Array { } za && FlatCount(za) == 0
@@ -2321,8 +2328,9 @@ internal sealed partial class CSharpBackend
                 // A member that lowers to a C# `fixed` buffer (primitive-element
                 // array) already yields its own address — no `&` (would be CS0211).
                 var decays = o.MemberType?.Unqualified is CType.Array fa && IsFixedBufferType(Cs(fa.Element));
-                var memberAddr = decays ? $"(byte*)__t.{m}" : $"(byte*)&__t.{m}";
-                return ($"((System.Func<ulong>)(() => {{ {Cs(o.StructType)} __t = default; return (ulong)({memberAddr} - (byte*)&__t); }}))()", PPrimary);
+                var st = Cs(o.StructType);
+                var memberAddr = decays ? $"(byte*)(({st}*)Libc.OffsetOfBase)->{m}" : $"(byte*)&(({st}*)Libc.OffsetOfBase)->{m}";
+                return ($"((ulong)({memberAddr} - (byte*)Libc.OffsetOfBase))", PPrimary);
             }
             // A zero-size element read through a pointer loads nothing in zig (see the store above).
             case Index or Unary { Op: UnOp.Deref } when IsZeroSizeAccess(e):
@@ -3261,26 +3269,51 @@ internal sealed partial class CSharpBackend
         globals.Append($"    internal static readonly bool {mem}_filled = {mem}_init();\n");
     }
 
+    /// <summary>The most stores <see cref="InPlaceStructInit"/> puts in one method. A compiler's
+    /// cost grows faster than a method's size: CPython's runtime state, 13,000 stores in one
+    /// method (twice), took clang 25 GB when the browser build compiled it ahead of time.</summary>
+    private const int StoresPerInitPart = 512;
+
     /// <summary>A static struct or union object's initializer as stores into its storage: a
     /// helper that stores each member through a pointer to the object, called from a field in
     /// <paramref name="globals"/> so it runs at the object's place in the initialization order.
     /// The object's storage is zero before any initializer runs (C11 6.7.9p10), so a zero
-    /// member stores nothing.</summary>
+    /// member stores nothing. Past <see cref="StoresPerInitPart"/> stores the helper calls parts
+    /// <c>{name}__init1</c>, <c>{name}__init2</c>, ..., each storing a slice through the pointer
+    /// it is handed.</summary>
     private void InPlaceStructInit(string name, string fieldType, StructInit si, StringBuilder globals)
     {
+        var stores = new List<string>();
+        StoreMembers(stores, "__o->", si);
         globals.Append($"    private static unsafe bool {name}__init()\n    {{\n");
         globals.Append($"        var __o = ({fieldType}*)System.Runtime.CompilerServices.Unsafe.AsPointer(ref {name});\n");
-        StoreMembers(globals, "__o->", si);
-        globals.Append("        return true;\n    }\n");
+        if (stores.Count <= StoresPerInitPart)
+        {
+            foreach (var store in stores) { globals.Append($"        {store}\n"); }
+            globals.Append("        return true;\n    }\n");
+        }
+        else
+        {
+            var parts = (stores.Count + StoresPerInitPart - 1) / StoresPerInitPart;
+            for (var p = 1; p <= parts; p++) { globals.Append($"        {name}__init{p}(__o);\n"); }
+            globals.Append("        return true;\n    }\n");
+            for (var p = 1; p <= parts; p++)
+            {
+                globals.Append($"    private static unsafe void {name}__init{p}({fieldType}* __o)\n    {{\n");
+                foreach (var store in stores.Skip((p - 1) * StoresPerInitPart).Take(StoresPerInitPart)) { globals.Append($"        {store}\n"); }
+                globals.Append("    }\n");
+            }
+        }
         globals.Append($"    internal static readonly bool {name}__filled = {name}__init();\n");
     }
 
-    /// <summary>The stores <see cref="InPlaceStructInit"/> makes for one aggregate: each member of
+    /// <summary>The stores <see cref="InPlaceStructInit"/> makes for one aggregate, one statement each
+    /// into <paramref name="stores"/>: each member of
     /// <paramref name="si"/> is stored at <paramref name="prefix"/> plus its name, a nested
     /// struct or union member member by member, an array member element by element (a
     /// <c>fixed</c> buffer indexed directly, an <c>[InlineArray]</c> through its element
     /// pointer, as <see cref="ArrayMemberInitHelper"/> does).</summary>
-    private void StoreMembers(StringBuilder body, string prefix, StructInit si)
+    private void StoreMembers(List<string> stores, string prefix, StructInit si)
     {
         foreach (var m in si.Members)
         {
@@ -3289,7 +3322,7 @@ internal sealed partial class CSharpBackend
             switch (m.Value)
             {
                 case StructInit nested when m.FieldType.Unqualified is CType.Named:
-                    StoreMembers(body, at + ".", nested);
+                    StoreMembers(stores, at + ".", nested);
                     break;
                 case ArrayValue av:
                     if (FlatCount(m.FieldType) == 0)
@@ -3299,18 +3332,50 @@ internal sealed partial class CSharpBackend
                     }
                     var elemCs = Cs(av.Element);
                     var slot = IsFixedBufferType(elemCs) ? at : $"(({elemCs}*)&{at})";
+                    if (elemCs is "byte" or "sbyte" or "short" or "ushort" or "int" or "uint" or "long" or "ulong"
+                        && ConstantRun(av) is { } run)
+                    {
+                        // One copy from read-only data (`L` over a u8 literal or a constant array of a
+                        // C# primitive is the PE's own bytes) instead of a store per element: a string's
+                        // characters in CPython's static objects were 6,700 single-byte stores in one
+                        // method. A byte run that is ASCII is spelled as the string it is.
+                        var elems = av.Elems.Take(run).ToList();
+                        var source = av.Element.SizeOf == 1
+                            && DotCC.EmitHelpers.U8Literal(elems.Select(e => (int)((((LitInt)e).Value ?? 0) & 0xFF)).ToList()) is { } u8
+                                ? u8
+                                : $"new {elemCs}[] {{ {string.Join(", ", elems.Select(e => StaticInit(e, av.Element)))} }}";
+                        stores.Add($"System.Runtime.CompilerServices.Unsafe.CopyBlockUnaligned({slot}, L({source}), {run} * (uint)sizeof({elemCs}));");
+                        break;
+                    }
                     for (var i = 0; i < av.Elems.Count; i++)
                     {
                         var e = av.Elems[i];
-                        if (e is StructInit esi) { StoreMembers(body, $"{slot}[{i}].", esi); }
-                        else if (!IsZeroStore(e)) { body.Append($"        {slot}[{i}] = {StaticInit(e, av.Element)};\n"); }
+                        if (e is StructInit esi) { StoreMembers(stores, $"{slot}[{i}].", esi); }
+                        else if (!IsZeroStore(e)) { stores.Add($"{slot}[{i}] = {StaticInit(e, av.Element)};"); }
                     }
                     break;
                 default:
-                    if (!IsZeroStore(m.Value)) { body.Append($"        {at} = {StaticInit(m.Value, m.FieldType)};\n"); }
+                    if (!IsZeroStore(m.Value)) { stores.Add($"{at} = {StaticInit(m.Value, m.FieldType)};"); }
                     break;
             }
         }
+    }
+
+    /// <summary>The element count up to the last non-zero element of an integer array member whose
+    /// elements are all integer constants, when there are at least two (one copy reaches the member
+    /// once where each store walks its whole member path again); null otherwise. The zero tail past
+    /// it is left to the object's zeroed storage.</summary>
+    private static int? ConstantRun(ArrayValue av)
+    {
+        const int MinRun = 2;
+        if (av.Element.Unqualified is not CType.Prim { IsInteger: true } || av.Elems.Count < MinRun) { return null; }
+        var run = 0;
+        for (var i = 0; i < av.Elems.Count; i++)
+        {
+            if (av.Elems[i] is not LitInt li) { return null; }
+            if (li.Value != 0) { run = i + 1; }
+        }
+        return run >= MinRun ? run : null;
     }
 
     /// <summary>Whether a static member's value is an integer zero or a null pointer, which the

@@ -86,6 +86,68 @@ public sealed class StaticStructInitTests
     }
 
     [Fact]
+    public void a_constant_char_array_member_is_one_block_copy()
+    {
+        // A string's characters are one copy from read-only data, not a store per byte
+        // (CPython's static string objects were 6,700 of them in one method). The copy
+        // stops at the last non-zero element; a single element keeps its store.
+        var src = WriteTemp("""
+            struct S { int n; char name[24]; char tag[4]; char one[4]; };
+            static struct S s = { 3, "hello, block copy", "ab", "z" };
+            int main(void) { return s.name[0] + s.tag[1] + s.one[0]; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("System.Runtime.CompilerServices.Unsafe.CopyBlockUnaligned(__o->name, L(\"hello, block copy\"u8), 17 * (uint)sizeof(byte));");
+            emitted.ShouldContain("CopyBlockUnaligned(__o->tag, L(\"ab\"u8), 2 * (uint)sizeof(byte));");
+            emitted.ShouldContain("__o->one[0] = 122;");
+            emitted.ShouldNotContain("__o->name[0] =");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void a_block_copy_past_ascii_spells_its_bytes()
+    {
+        // A u8 literal would UTF-8-encode a byte past 0x7F as two, so such a run is a
+        // constant array (still read-only data, still one copy).
+        var src = WriteTemp("""
+            struct S { unsigned char b[12]; };
+            static struct S s = { { 1, 2, 3, 4, 5, 6, 7, 200, 9 } };
+            int main(void) { return s.b[7]; }
+            """);
+        try
+        {
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("CopyBlockUnaligned(__o->b, L(new byte[] { 1, 2, 3, 4, 5, 6, 7, 200, 9 }), 9 * (uint)sizeof(byte));");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void a_large_initializer_is_split_into_parts()
+    {
+        // 600 pointer stores (no block copy for addresses): past 512 the helper calls parts,
+        // so no one method holds them all (clang took 25 GB on CPython's 13,000 in one).
+        var ptrs = string.Join(", ", System.Linq.Enumerable.Repeat("&g", 600));
+        var src = WriteTemp($$"""
+            static int g;
+            struct S { int *p[600]; };
+            static struct S s = { { {{ptrs}} } };
+            int main(void) { return s.p[599] == &g ? 0 : 1; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("        s__init1(__o);\n        s__init2(__o);\n        return true;\n");
+            emitted.ShouldContain("private static unsafe void s__init1(S* __o)");
+            emitted.ShouldContain("private static unsafe void s__init2(S* __o)");
+            emitted.ShouldNotContain("s__init3");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void non_static_nested_struct_init_also_recurses()
     {
         // The DeclStructInit refactor: a non-static local nested aggregate init

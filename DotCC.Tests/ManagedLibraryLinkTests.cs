@@ -146,10 +146,15 @@ public sealed class ManagedLibraryLinkTests : IDisposable
             int main_like(void) { return 0; }
             """)), "mylib");
         program.ShouldContain("public static class DotCcLib_mylib_Exports\n");
-        program.ShouldContain("[UnmanagedCallersOnly(EntryPoint = \"twice\", CallConvs = new[] { typeof(CallConvCdecl) })]");
+        program.ShouldContain("[UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]\n    public static unsafe int __export_twice(int x)");
+        // No EntryPoint: dlsym reads the table, and a host that exports entry points (Mono's
+        // browser relink) would clash with the C library's own functions of the same name.
+        program.ShouldNotContain("UnmanagedCallersOnly(EntryPoint");
         program.ShouldContain("public static unsafe int __export_twice(int x) => twice(x);");
-        // A function-pointer parameter's type has a `, ` of its own.
-        program.ShouldContain("public static unsafe int __export_apply(delegate*<int, int> f, int x) => apply(f, x);");
+        // A function pointer crosses as the address it is: Mono cannot marshal a
+        // function-pointer parameter of an [UnmanagedCallersOnly] method.
+        program.ShouldContain("public static unsafe int __export_apply(void* f, int x) => apply((delegate*<int, int>)f, x);");
+        program.ShouldContain("(\"apply\", (nint)(delegate* unmanaged[Cdecl]<void*, int, int>)&__export_apply, (nint)(delegate*<delegate*<int, int>, int, int>)&apply),");
         program.ShouldContain("(\"twice\", (nint)(delegate* unmanaged[Cdecl]<int, int>)&__export_twice, (nint)(delegate*<int, int>)&twice),");
         program.ShouldContain("(\"main_like\", (nint)(delegate* unmanaged[Cdecl]<int>)&__export_main_like, (nint)(delegate*<int>)&main_like),");
         // A unit's static function is not the library's to export.

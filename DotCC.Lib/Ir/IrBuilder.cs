@@ -80,6 +80,11 @@ internal sealed partial class IrBuilder
     // The name of the function currently being built — the value of the C99
     // predefined identifier `__func__` inside its body.
     private string _currentFnName = "";
+    /// <summary>The definition whose body or initializer is being bound (null between
+    /// definitions): the owner every name it resolves is recorded under
+    /// (<see cref="NoteReference"/>), so the backends can leave out the TU-local
+    /// definitions nothing reaches.</summary>
+    private Symbol? _refOwner;
     // The declared return type of the function currently being built — lets a
     // `return <const T*>` from a `T*`-returning function trip the const-discard check.
     private CType? _currentRet;
@@ -502,7 +507,7 @@ internal sealed partial class IrBuilder
         FlexibleTail? flexible = null;
         if (d.Init is { } ii)
         {
-            gInit = BuildInitValue(sym.Type, ii);
+            gInit = Owned(sym, () => BuildInitValue(sym.Type, ii));
             CheckQualifierDiscard(gInit, sym.Type, SrcPos.From(ii), "initialization");
             (gInit, flexible) = SplitFlexibleInit(gInit, SrcPos.From(ii));
             if (flexible is not null && sym.IsThreadLocal)
@@ -940,7 +945,7 @@ internal sealed partial class IrBuilder
                 Storage = p.IsRegister ? Storage.Register : Storage.None,
             }));
         }
-        var built = BuildBlock(block);
+        var built = Owned(funcSym, () => BuildBlock(block));
         // Reject a setjmp in an unmodeled position BEFORE malloc-promote — it may re-clone
         // a stray call's containing expression and orphan the tracked reference.
         RejectStraySetjmp();
@@ -3273,6 +3278,7 @@ internal sealed partial class IrBuilder
         }
         if (sym is not null)
         {
+            NoteReference(sym);
             // Import-mode: a read/write through an extern DATA symbol is a candidate
             // native data import (resolved against another TU's definition, or — if
             // none — warned as unsupported by the emit pass).
@@ -3310,6 +3316,28 @@ internal sealed partial class IrBuilder
         return new NameRef(name) { Type = CType.Int };
     }
 
+    /// <summary>Record that the definition being bound (<see cref="_refOwner"/>) names
+    /// <paramref name="sym"/>, when that is a function or a file-scope object (a block-scope
+    /// static is one too): the module's reach from its external definitions
+    /// (<see cref="IrModule.UnreachedTuLocals"/>) follows these.</summary>
+    private void NoteReference(Symbol sym)
+    {
+        if (sym.Kind == SymKind.Func || sym is { Kind: SymKind.Var, IsGlobal: true })
+        {
+            Module.NoteReference(_refOwner, sym);
+        }
+    }
+
+    /// <summary>Bind <paramref name="build"/> with <paramref name="owner"/> as the definition
+    /// the names it resolves belong to.</summary>
+    private T Owned<T>(Symbol owner, Func<T> build)
+    {
+        var outer = _refOwner;
+        _refOwner = owner;
+        try { return build(); }
+        finally { _refOwner = outer; }
+    }
+
     /// <summary>The first identifier <see cref="BuildVar"/> could not resolve since a
     /// constant-expression context cleared it, so that context can report the
     /// undeclared name (gcc's diagnostic) rather than only "not constant".</summary>
@@ -3332,6 +3360,7 @@ internal sealed partial class IrBuilder
             // resolved symbol rides along so the backend emits its TargetName —
             // matters only when a same-named static was renamed (see BuildFuncDef).
             var sym = _symbols.Resolve(name);
+            if (sym is not null) { NoteReference(sym); }
             var fn = sym?.Type.Unqualified as CType.Func;
             if (sym is { Kind: SymKind.Var or SymKind.Param } && fn is null)
             {

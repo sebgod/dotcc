@@ -43,7 +43,8 @@ public sealed class EmissionModelTests
         // past FunctionsPerClass the functions continue in DotCcProgram2, surfaced alike.
         var n = Compiler.FunctionsPerClass + 1;
         var src = new System.Text.StringBuilder();
-        for (var i = 0; i < n; i++) { src.Append($"static int f{i}(void) {{ return {i % 7}; }}\n"); }
+        // External, so each one is emitted (an unused static function is left out).
+        for (var i = 0; i < n; i++) { src.Append($"int f{i}(void) {{ return {i % 7}; }}\n"); }
         src.Append($"int main(void) {{ return f0() + f{n - 1}(); }}\n");
         var emitted = Emit(src.ToString());
         emitted.ShouldContain("using static DotCcProgram;\nusing static DotCcProgram2;");

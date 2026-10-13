@@ -96,7 +96,7 @@ public sealed class VarargTests
                 va_end(ap);
                 return s;
             }
-            int main(void) { return 0; }
+            int main(void) { return first(1, "x") ? 0 : 1; }
             """);
         try
         {
