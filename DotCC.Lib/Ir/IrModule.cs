@@ -367,7 +367,7 @@ internal sealed partial class IrModule
     /// 600 of them per unit, most never called. Only the C binder marks a definition TU-local,
     /// and it records every name it resolves (<see cref="NoteReference"/>), so the walk sees all
     /// of a TU-local definition's uses; one it missed would be named but not defined, which the
-    /// C# build reports rather than miscompiling.</summary>
+    /// C# build reports rather than miscompiling. A constructor (<see cref="Constructors"/>) is a root.</summary>
     internal HashSet<Symbol> UnreachedTuLocals()
     {
         var reached = new HashSet<Symbol>();
@@ -379,6 +379,8 @@ internal sealed partial class IrModule
         foreach (var f in Functions) { if (!f.Sym.IsTuLocal) { Reach(f.Sym); } }
         foreach (var g in Globals) { if (!g.Sym.IsTuLocal) { Reach(g.Sym); } }
         foreach (var s in _referencedOutside) { Reach(s); }
+        // A constructor runs before main with no call naming it, so it counts as reached.
+        foreach (var s in Constructors) { Reach(s); }
         while (pending.TryPop(out var s))
         {
             if (_references.TryGetValue(s, out var targets))

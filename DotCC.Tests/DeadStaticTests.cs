@@ -40,6 +40,16 @@ public sealed class DeadStaticTests
     }
 
     [Fact]
+    public void A_static_constructor_is_emitted_though_nothing_calls_it()
+    {
+        var cs = Cs("""
+            [[gnu::constructor]] static void setup_fn(void) { }
+            int main(void) { return 0; }
+            """);
+        cs.ShouldContain("setup_fn(");
+    }
+
+    [Fact]
     public void A_static_function_reached_from_main_is_emitted_with_what_it_calls()
     {
         var cs = Cs("""
