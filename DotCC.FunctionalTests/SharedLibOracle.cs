@@ -44,6 +44,18 @@ internal static class SharedLibOracle
     /// <summary>The library-mode assembly name → the native lib is
     /// <c>&lt;name&gt;.so</c> (NativeAOT emits no <c>lib</c> prefix, so the consumer
     /// links it by full path).</summary>
+    /// <summary>Create <paramref name="workDir"/> and pin the .NET SDK its <c>dotnet publish</c> runs under to the one the
+    /// repo's <c>global.json</c> selects (the 10.0 SDK, any feature band). The work directory is outside the repo, so
+    /// without a pin of its own the newest SDK on the machine builds it; when that is a later major than the SDK this test
+    /// host runs under, MSBuild cannot start its task host (MSB4216, which failed every publish here the day the repo was
+    /// pinned on a runner that also carries the .NET 11 SDK).</summary>
+    private static void PinSdk(string workDir)
+    {
+        Directory.CreateDirectory(workDir);
+        File.WriteAllText(Path.Combine(workDir, "global.json"),
+            "{ \"sdk\": { \"version\": \"10.0.100\", \"rollForward\": \"latestFeature\" } }\n");
+    }
+
     private const string AsmName = "dotccsharedlib";
 
     /// <summary>Assembly name of the dotcc-emitted dlopen consumer (a plain managed
@@ -77,6 +89,7 @@ internal static class SharedLibOracle
         }
 
         var workDir = Path.Combine(Path.GetTempPath(), "dotcc-sharedlib-" + Guid.NewGuid().ToString("N"));
+        PinSdk(workDir);
         Directory.CreateDirectory(workDir);
 
         // ── in-process: emit the -shared program + its NativeAOT csproj ──
@@ -127,6 +140,7 @@ internal static class SharedLibOracle
         }
 
         var workDir = Path.Combine(Path.GetTempPath(), "dotcc-sharedlib-dl-" + Guid.NewGuid().ToString("N"));
+        PinSdk(workDir);
         var libDir = Path.Combine(workDir, "lib");
         var consDir = Path.Combine(workDir, "consumer");
         Directory.CreateDirectory(libDir);
@@ -183,6 +197,7 @@ internal static class SharedLibOracle
         if (!_available) { throw new InvalidOperationException("shared-lib oracle is not available on this host."); }
 
         var workDir = Path.Combine(Path.GetTempPath(), "dotcc-import-gcc-" + Guid.NewGuid().ToString("N"));
+        PinSdk(workDir);
         Directory.CreateDirectory(workDir);
 
         File.WriteAllText(Path.Combine(workDir, "mylib.c"), libCSource);
@@ -224,6 +239,7 @@ internal static class SharedLibOracle
         if (!_available) { throw new InvalidOperationException("shared-lib oracle is not available on this host."); }
 
         var workDir = Path.Combine(Path.GetTempPath(), "dotcc-import-dl-" + Guid.NewGuid().ToString("N"));
+        PinSdk(workDir);
         var libDir = Path.Combine(workDir, "lib");
         var consDir = Path.Combine(workDir, "consumer");
         Directory.CreateDirectory(libDir);
@@ -276,6 +292,7 @@ internal static class SharedLibOracle
         if (!_available) { throw new InvalidOperationException("shared-lib oracle is not available on this host."); }
 
         var workDir = Path.Combine(Path.GetTempPath(), "dotcc-import-static-" + Guid.NewGuid().ToString("N"));
+        PinSdk(workDir);
         Directory.CreateDirectory(workDir);
 
         File.WriteAllText(Path.Combine(workDir, "mylib.c"), libCSource);
