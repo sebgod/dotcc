@@ -40,7 +40,7 @@
 #   Rel     : < > <= >=
 #   Add     : + -
 #   Mul     : * /
-#   CastExpr: ( Type ) cast                     (right-associative)
+#   CastExpr: ( TypeName ) cast                 (right-associative)
 #   Unary   : unary * & - and sizeof ++ --      (right-associative)
 #   Postfix : function call                     (left-associative)
 #   Primary : ID, NUM, ( E )
@@ -172,13 +172,11 @@ symbols:
   - '!'           # 108 logical NOT (unary)
   - '?'           # 109 ternary conditional
   - CHAR          # 110 char literal — `'a'`, `'\n'` etc.
-  # DeclItemList / DeclItem — multi-declarator factoring. `Decl → Type
-  # DeclItemList` lets `int x, y, z;` and `int x = 1, y = 2;` parse with
-  # one Type and a comma-separated list of individual declarators. Array
-  # declarators stay in their own single-declarator rule because they
-  # lower to `T* arr = stackalloc T[N]` which doesn't compose with peers.
-  - DeclItemList  # 111
-  - DeclItem      # 112
+  # InitDeclaratorList / InitDeclarator: `Decl → Type InitDeclaratorList` lets
+  # `int x, y, z;` and `int x = 1, *p, a[3];` parse with one Type and a
+  # comma-separated list of init-declarators (C11 6.7).
+  - InitDeclaratorList  # 111
+  - InitDeclarator      # 112
   - 'enum'        # 113 keyword
   - EnumList      # 114 non-terminal: one or more enumerators in a body
   - EnumItem      # 115 non-terminal: single `ID` or `ID = E`
@@ -249,8 +247,8 @@ symbols:
   # correctness is a future feature; `const char *p` lowers like `char *p`.
   # `volatile` is NOT stripped: it's a leading Type PREFIX (`Type → 'volatile'
   # Type`) that carries a flag into faithful `Volatile.Read`/`Write` access-site
-  # lowering (see CSharpEmitter). `* volatile` (volatile pointer) is the separate
-  # typePtrQualVolatile production.
+  # lowering (see CSharpEmitter). `* volatile` (volatile pointer) is a Pointer's
+  # TypeQualList.
   - 'const'        # 141 type qualifier (C90)
   - 'volatile'     # 142 type qualifier (C90)
   # RETIRED: ForCond / ForPost were the nullable for-condition and for-update.
@@ -294,11 +292,10 @@ symbols:
   # decodes each segment's escapes independently and concatenates the bytes
   # (so a `\x…` escape never greedily eats the next segment's leading digit).
   - StringSeq      # 149
-  # ArrDims — the `[D1][D2]…` dimension list of an array declarator. One or more
-  # `[ E ]`; left-recursive so a multi-dimensional array folds into one list.
-  # dotcc flattens a multi-dim array to a 1-D `stackalloc` and rewrites
-  # `a[i][j]` to flat pointer arithmetic (C# stackalloc is 1-D).
-  - ArrDims        # 150
+  # Pointer: the `*`s of a declarator, each with its own qualifiers (C11 6.7.6).
+  # (Slot 150 was ArrDims, the `[D1][D2]…` list of the per-shape array declarators;
+  # an array bound is now a DirectDeclarator suffix.)
+  - Pointer        # 150
   # `restrict` (C99) — a pointer-only type qualifier (`int *restrict p`). dotcc
   # has no aliasing model, so it's parsed and DROPPED (like const/volatile); a
   # future optimization could map a `restrict` parameter to a by-ref / no-alias
@@ -356,7 +353,7 @@ symbols:
   # `sizeof`. va_start/va_end/va_copy take only expressions and stay ordinary
   # calls (rewritten by name in the emitter).
   - 'va_arg'       # 159 builtin (C99 <stdarg.h>) — `va_arg(ap, Type)`
-  - DeclItemTail   # 160 non-terminal: a non-first init-declarator (may have its own `*`s)
+  - Declarator     # 160 non-terminal: a declarator, `Pointer? DirectDeclarator` (was DeclItemTail)
   # `_Atomic` (C11) — type qualifier/specifier. Like `volatile`, a leading Type
   # PREFIX (`Type → '_Atomic' Type`) plus the C11 parenthesized type-specifier
   # form `_Atomic(T)`; carries an Atomic flag the emitter lowers to seq-cst
@@ -475,14 +472,17 @@ symbols:
   - U8STRING       # 189 char8_t string literal — u8"…"
   - U8CHAR         # 190 char8_t char constant — u8'x'
   - U8StringSeq    # 191 non-terminal: a run of adjacent u8"…" literals
-  - FnPtrTail      # 192 non-terminal: a raw fn-ptr declarator's `(params)` / `()` tail
-  - FnPtrName      # 193 non-terminal: `(*name)` / `(*const name)`, a fn-ptr DeclItem's name
-  - FnPtrQuals     # 194 non-terminal: the qualifiers after a fn-ptr declarator's `*`
-  - FnPtrArr       # 195 non-terminal: `(*name[N])` / `(*const name[N])`, a sized fn-ptr array
-  - FnPtrArrOpen   # 196 non-terminal: `(*name[])` / `(*const name[])`, a size-from-init fn-ptr array
+  # Slots 192 to 196 and 199 held the per-shape declarator helpers (FnPtrTail,
+  # FnPtrName, FnPtrQuals, FnPtrArr, FnPtrArrOpen, ArrDeclarator) before the
+  # grammar took C11 6.7.6's declarators.
+  - DirectDeclarator         # 192 non-terminal: a name, `( Declarator )`, or one followed by `[N]` / `(params)`
+  - AbstractDeclarator       # 193 non-terminal: a declarator with no name (C11 6.7.7), `*`, `(*)(int)`, `[3]`
+  - TypeQualList             # 194 non-terminal: the qualifiers after a declarator's `*`
+  - DirectAbstractDeclarator # 195 non-terminal: `( AbstractDeclarator )`, or an optional one followed by `[N]` / `(params)`
+  - TypeName                 # 196 non-terminal: a type name (C11 6.7.7), `Type AbstractDeclarator?`
   - Designation    # 197 non-terminal: a designation, a DesignatorList and its `=` (`.v.Name.id =`, `[2].x =`)
   - Designator     # 198 non-terminal: one `.member` or `[index]` step of a Designation
-  - ArrDeclarator  # 199 non-terminal: an array declarator `name[N]…`, `name[]`, `name[][N]…`, `(name[N])`
+  - TypeQual       # 199 non-terminal: one of a pointer's qualifiers, `const` / `volatile` / `restrict`
   - BraceInit      # 200 non-terminal: a brace-enclosed initializer `{ InitList }` / `{ }`
   - 'register'     # 201 keyword (C89): storage class, a DeclSpec
   - ExternalDecls  # 202 non-terminal: a translation unit's external declarations, possibly none
@@ -494,7 +494,7 @@ symbols:
   # preprocessing is an error in StrayTokenGuard. No lexer rule or production.
   - STRAY          # 204 terminal: a stray byte (see above)
   # CastExpr — C11 6.5.4's cast-expression tier, between Mul and Unary (see the
-  # cast group): a Unary, or `( Type ) CastExpr`.
+  # cast group): a Unary, or `( TypeName ) CastExpr`.
   - CastExpr       # 205 non-terminal: cast-expression
   # Helper nonterminals for grouped optionals (a `Helper?` slot stands for an
   # optional run of symbols, which `X?` alone cannot spell).
@@ -527,43 +527,28 @@ productions:
       - { lhs: FnList, rhs: [Fn, FnList], action: fnsCons }
       - { lhs: FnList, rhs: [Fn],          action: fnsOne }
 
-  # A function definition's signature (`Fn → FnSig Block`); a prototype is an
-  # ordinary declaration whose declarator is a function declarator (DeclItem). A
-  # storage class or function specifier is part of the Type (DeclSpec), so
-  # `static inline T f()`, `inline static T f()` and `extern T f()` are all this
-  # shape. `()` declares no parameter information (K&R), and `(void)` is a
-  # one-Param ParamList the binder reads as no parameters (C11 6.7.6.3p10), as in
-  # every parameter list. After the parameters, `{` selects a FnSig (a
-  # definition) and `;` / `,` a function declarator (FOLLOW(FnSig) is `{` alone).
-  # The parameter list is optional in every form (`ParamList?`, C11 6.7.6's
-  # `( parameter-type-list? )`), so `()` is the same rule with a null list.
+  # A function definition's signature (`Fn → FnSig Block`, C11 6.9.1's
+  # `declaration-specifiers declarator`); a prototype is an ordinary declaration
+  # whose declarator is a function declarator. A storage class or function
+  # specifier is part of the Type (DeclSpec), so `static inline T f()`, `inline
+  # static T f()` and `extern T f()` are all this shape. The declarator is any
+  # Declarator: `f(int)`, the parenthesized `(f)(int)`, a function returning a
+  # function pointer `(*signal(int, void (*)(int)))(int)`; the binder requires it
+  # to declare a function. After `Type Declarator`, `{` selects a FnSig (a
+  # definition) and `;` / `,` / `=` an init-declarator (FOLLOW(FnSig) is `{` alone).
   - derivation: none
     rules:
-      - { lhs: FnSig, rhs: [Type, ID, '(', ParamList?, ')'],     action: fnSig }
-      # Parenthesized function-name declarator: `T (name)(args)` ≡ `T name(args)`.
-      # The parens are pure grouping around the declarator name. Lua wraps every
-      # public API name this way in lua.h prototypes — `LUA_API lua_State
-      # *(lua_newstate)(...)` — to stop a same-named function-like macro from
-      # being expanded at the declaration. Strip the parens; same signature as the
-      # bare forms. Disjoint from the fn-pointer declarators (`Type ( * ID ) …`)
-      # by the `ID` vs `*` right after the first `(`. (The prototype `LUA_API
-      # lua_State *(lua_newstate)(…);` is the matching function declarator.)
-      - { lhs: FnSig, rhs: [Type, '(', ID, ')', '(', ParamList?, ')'], action: fnSigParen }
-      # Function returning a function pointer: `Type (*name(params))(trailing)`.
-      # The `(*name(params))` is the declarator; `(trailing)` is the parameter
-      # list of the returned function pointer. E.g. `void (*signal(int, void(*)(int)))(int)`.
-      # Disjoint from fnSigParen by `*` right after the first `(`.
-      - { lhs: FnSig, rhs: [Type, '(', '*', ID, '(', ParamList, ')', ')', '(', ParamList?, ')'], action: fnSigRetFnPtr }
+      - { lhs: FnSig, rhs: [Type, Declarator], action: fnSig }
 
   - derivation: none
     rules:
       # Function — split into FnSig (signature) and the body half. Since
       # FnSig reduces BEFORE Block in LALR bottom-up, the FnSig action can
       # set the visitor's "current function" state in time for any
-      # `__func__` inside the body to resolve directly (the FnSig forms are
-      # in the group above).
+      # `__func__` inside the body to resolve directly (FnSig is in the group
+      # above).
       # `Fn → FnSig Block` is a function definition; a prototype is a
-      # declaration (`Type DeclItemList ;`, its declarator a function declarator).
+      # declaration (`Type InitDeclaratorList ;`, its declarator a function declarator).
       - { lhs: Fn, rhs: [FnSig, Block], action: funcDef }
       # A declaration with no declarators (C11 6.7p2) declares what its type
       # specifier does: a tag (`struct Node { … };`, `union U { … };`, `enum E : T
@@ -577,33 +562,6 @@ productions:
       # declaration, followed by the caller's own `;`). Not an ISO C declaration;
       # gcc accepts it and warns under -pedantic, as dotcc does.
       - { lhs: Fn, rhs: [';'], action: fnEmpty }
-      # The parameter tail of a raw (un-typedef'd) function-pointer declarator,
-      # shared by the file-scope, array, static-local and array-member forms
-      # below. `(void)` arrives as a one-Param ParamList, as everywhere else.
-      - { lhs: FnPtrTail, rhs: ['(', ParamList?, ')'], action: fnPtrTail }
-      # A raw declarator's name part: `(*name)` / `(*const name)` (FnPtrName; a
-      # scalar fn-ptr is a DeclItem, so file-scope / static / extern / block-scope /
-      # static-local / struct-member fn-ptrs and COMMA LISTS of them all ride the
-      # ordinary `Type DeclItemList` productions), and the array forms
-      # `(*name[N])` / `(*name[])` (FnPtrArr / FnPtrArrOpen, optionally `*const`),
-      # used by the dispatch-table productions below. Conflict-free: after `( *` the
-      # abstract fn-ptr type takes `)`, the fn-returning-fn-ptr FnSig takes `ID (`,
-      # a qualifier or `ID )` / `ID [` selects these; FnPtrName reduces only before
-      # the FnPtrTail's `(`, where the pointer-to-array declarator needs `[`. The
-      # qualifiers after the `*` are optional (`FnPtrQuals?`, C11 6.7.6's
-      # `* type-qualifier-list?`), null when absent.
-      - { lhs: FnPtrName, rhs: ['(', '*', FnPtrQuals?, ID, ')'], action: fnPtrName }
-      # A pointer to a function pointer, `(**name)` (CPython's ceval_gil.c
-      # `int (**func)(void *)`). After `( *` a second `*` is taken by nothing else.
-      - { lhs: FnPtrName, rhs: ['(', '*', '*', ID, ')'],        action: fnPtrNamePtr }
-      - { lhs: FnPtrArr, rhs: ['(', '*', FnPtrQuals?, ID, ArrDims, ')'], action: fnPtrArr }
-      - { lhs: FnPtrArrOpen, rhs: ['(', '*', FnPtrQuals?, ID, '[', ']', ')'], action: fnPtrArrOpen }
-      - { lhs: FnPtrQuals, rhs: ['const'],                action: fnPtrQualConst }
-      - { lhs: FnPtrQuals, rhs: ['volatile'],             action: fnPtrQualVolatile }
-      - { lhs: FnPtrQuals, rhs: ['restrict'],             action: fnPtrQualRestrict }
-      - { lhs: FnPtrQuals, rhs: [FnPtrQuals, 'const'],    action: fnPtrQualsConst }
-      - { lhs: FnPtrQuals, rhs: [FnPtrQuals, 'volatile'], action: fnPtrQualsVolatile }
-      - { lhs: FnPtrQuals, rhs: [FnPtrQuals, 'restrict'], action: fnPtrQualsRestrict }
       # File-scope declarations: `Type` then any init-declarator list (`int x;`,
       # `int a = 1, *p, buf[N] = "…", (*fn)(int);`, `struct P o = { … };`, `Ret
       # (*tab[])(int) = { … };`). The storage class is part of the Type (DeclSpec),
@@ -614,9 +572,9 @@ productions:
       # another TU), and a plain or `static` object lowers to a `DotCcGlobals`
       # field (a scalar / struct as a `static unsafe T name [= init]`, an array as a
       # pinned, rooted managed array behind a `T*`, Libc.GlobalArray*). The same
-      # `DeclItemList` as block scope, struct members and `static` locals, so every
+      # `InitDeclaratorList` as block scope, struct members and `static` locals, so every
       # declarator works in every position.
-      - { lhs: Fn, rhs: [Type, DeclItemList, ';'], action: globalDeclList }
+      - { lhs: Fn, rhs: [Type, InitDeclaratorList, ';'], action: globalDeclList }
 
       # `_Static_assert(expr, "msg");` (C11) and `_Static_assert(expr);`
       # (C23, message optional), at file scope. The StaticAssert nonterminal is
@@ -639,34 +597,67 @@ productions:
 
   - derivation: none
     rules:
-      - { lhs: Param, rhs: [Type, ID], action: param }
-      # Unnamed (abstract) parameter — `int f(int, char*)`, and the params of a
-      # function-pointer type `int (*fp)(int, int)`. C allows a name-less
-      # parameter in declarations / function-pointer types; the visitor
-      # synthesizes a unique C# name (C# requires one). Disambiguated from the
-      # named form by lookahead: `Type ID` → named, `Type` then `,`/`)` → unnamed.
-      - { lhs: Param, rhs: [Type], action: paramUnnamed }
-      # C array-parameter decay (C99 §6.7.5.3p7): `T arr[]` and `T arr[N]`
-      # in a function-parameter position are equivalent to `T* arr` — the
-      # array silently decays to a pointer at the function-type boundary.
-      # The size in `T arr[N]` is informational only (clang/gcc don't even
-      # warn at the call site for size mismatches without `-Wstrict-prototypes`),
-      # so we drop it entirely and emit a pointer parameter.
-      - { lhs: Param, rhs: [Type, ID, '[', ']'],     action: paramArrayUnsized }
-      - { lhs: Param, rhs: [Type, ID, '[', E, ']'],  action: paramArraySized }
-      # Function-pointer parameter: `void qsort(…, int (*cmp)(const void*, const void*))`,
-      # through the same declarator name as every other raw fn-ptr (FnPtrName:
-      # `(*cmp)`, `(*const cmp)`, `(**cmp)`); lowers to a `delegate*<args…, ret>`
-      # parameter. (The typedef'd form `Comparator cmp` also works.)
-      - { lhs: Param, rhs: [Type, FnPtrName, FnPtrTail], action: paramFnPtrDecl }
-      # A parameter declared with a FUNCTION type is adjusted to a pointer to it
-      # (C11 6.7.6.3p8): `int siftup(PyListObject *, Py_ssize_t)` and the
-      # parenthesized `void *(func)(Parser *)` are `int (*siftup)(…)` and
-      # `void *(*func)(Parser *)`. After `Type ID`, the `(` selects the first form
-      # (FOLLOW(Param) has only `,` / `)`); after `Type (`, an `ID` the second (an
-      # abstract or named fn-ptr has `*` there).
-      - { lhs: Param, rhs: [Type, ID, FnPtrTail],          action: paramFnType }
-      - { lhs: Param, rhs: [Type, '(', ID, ')', FnPtrTail], action: paramParenFnType }
+      # A parameter (C11 6.7.6's parameter-declaration): specifiers and a
+      # declarator, or specifiers and an optional abstract declarator when it has
+      # no name (`int f(int, char *, int (*)(void))`; the binder gives it a name,
+      # which C# requires). Every declarator form is a parameter: an array one
+      # `T a[]` / `T a[N]` is adjusted to a pointer (C11 6.7.6.3p7), a function one
+      # `int cmp(int)` to a pointer to the function (6.7.6.3p8). After `Type (`, an
+      # ID or a `*` leading to one is the named form, and a `)`, a `[`, a
+      # type-starting token or a `*` leading to `)` the abstract one; the two share
+      # their Pointer, so nothing is decided before the name or its absence shows.
+      - { lhs: Param, rhs: [Type, Declarator],          action: param }
+      - { lhs: Param, rhs: [Type, AbstractDeclarator?], action: paramAbstract }
+
+  # A pointer declarator prefix (C11 6.7.6's `pointer: * type-qualifier-list?
+  # pointer?`), left-recursive so the stars apply in source order: `int *const *p`
+  # is a pointer to a const pointer to int. The qualifiers after a `*` are that
+  # pointer's own: `const` makes the pointer read-only; `volatile` and `restrict`
+  # have no C# model and are accepted. After a `*`, a qualifier shifts into the
+  # TypeQualList and anything else reduces the Pointer.
+  - derivation: leftmost
+    rules:
+      - { lhs: Pointer, rhs: ['*', TypeQualList?],          action: pointer }
+      - { lhs: Pointer, rhs: [Pointer, '*', TypeQualList?], action: pointerCons }
+      - { lhs: TypeQualList, rhs: [TypeQual] }
+      - { lhs: TypeQualList, rhs: [TypeQualList, TypeQual], action: typeQualListCons }
+      - { lhs: TypeQual, rhs: ['const'],    action: typeQualConst }
+      - { lhs: TypeQual, rhs: ['volatile'], action: typeQualVolatile }
+      - { lhs: TypeQual, rhs: ['restrict'], action: typeQualRestrict }
+
+  # Declarators (C11 6.7.6), in the standard's shape: a declarator is an optional
+  # Pointer and a direct declarator, which is a name, a parenthesized declarator,
+  # or a direct declarator followed by an array bound or a parameter list. The
+  # nesting gives every C declarator: `*p`, `a[2][3]`, `f(int)`, a function
+  # pointer `(*fp)(int)`, an array of them `(*tab[4])(void)`, a pointer to an
+  # array `(*row)[3]`, a function returning a function pointer `(*signal(int,
+  # void (*)(int)))(int)`, a parenthesized name `(lua_newstate)(…)` (which stops
+  # a same-named function-like macro from expanding at the declaration). The
+  # binder folds one into its type inside out (IrBuilder.DeclaratorType).
+  # An array bound is optional (`a[]`: sized by the initializer, an `extern`
+  # declaration, a flexible array member, a parameter), as is a parameter list
+  # (`()` declares no parameter information; `(void)` is a one-Param ParamList the
+  # binder reads as no parameters, C11 6.7.6.3p10).
+  # An abstract declarator is the same with no name (C11 6.7.7), so its direct
+  # form may be empty before a `[` or a `(`: `int [3]`, `int (*)(void)`, `char
+  # *(*)[4]`. After `(`, a `*`, `(` or `[` continues a parenthesized abstract
+  # declarator and a type-starting token or `)` a parameter list.
+  - derivation: leftmost
+    rules:
+      - { lhs: Declarator, rhs: [Pointer?, DirectDeclarator], action: declarator }
+      - { lhs: DirectDeclarator, rhs: [ID],                                     action: declaratorName }
+      - { lhs: DirectDeclarator, rhs: ['(', Declarator, ')'],                   action: declaratorParen }
+      - { lhs: DirectDeclarator, rhs: [DirectDeclarator, '[', E?, ']'],         action: declaratorArray }
+      - { lhs: DirectDeclarator, rhs: [DirectDeclarator, '(', ParamList?, ')'], action: declaratorFunction }
+      - { lhs: AbstractDeclarator, rhs: [Pointer],                            action: abstractPointer }
+      - { lhs: AbstractDeclarator, rhs: [Pointer?, DirectAbstractDeclarator], action: abstractDeclarator }
+      - { lhs: DirectAbstractDeclarator, rhs: ['(', AbstractDeclarator, ')'],                     action: abstractParen }
+      - { lhs: DirectAbstractDeclarator, rhs: [DirectAbstractDeclarator?, '[', E?, ']'],          action: abstractArray }
+      - { lhs: DirectAbstractDeclarator, rhs: [DirectAbstractDeclarator?, '(', ParamList?, ')'],  action: abstractFunction }
+      # A type name (C11 6.7.7): a specifier-qualifier-list and an optional abstract
+      # declarator, the operand of a cast, `sizeof`, `_Alignof`, `typeof`, `va_arg`,
+      # `offsetof`, a compound literal and a `_Generic` association.
+      - { lhs: TypeName, rhs: [Type, AbstractDeclarator?], action: typeNameOf }
 
   # Tag definitions are type specifiers (C11 6.7.2.1, 6.7.2.2): a struct, union
   # or enum body appears wherever a type can, so it combines with storage classes,
@@ -690,29 +681,17 @@ productions:
       - { lhs: Type, rhs: ['enum', ID?, EnumBase?, '{', EnumList, '}'], action: enumSpecifier }
       - { lhs: EnumBase, rhs: [':', Type],                             action: enumBase }
 
-  # Type — the "declarator type" non-terminal. Most C type forms reduce to
-  # this via TypeSpecList (the C-standard declaration-specifier sequence:
-  # any order, any combination of `signed/unsigned`, `short/long/long-long`,
-  # `char/int/float/double/void` keywords). Tag types (`struct`/`union`/
-  # `enum`/`TYPE_NAME`) don't combine with other specifiers — they're
-  # separate Type productions. Pointer depth composes left-recursively.
+  # Type: the declaration specifiers of a declaration (C11 6.7's
+  # declaration-specifiers), and the specifier-qualifier-list of a type name. Most
+  # C type forms reduce to this via TypeSpecList (the C-standard specifier
+  # sequence: any order, any combination of `signed/unsigned`,
+  # `short/long/long-long`, `char/int/float/double/void` keywords). Tag types
+  # (`struct`/`union`/`enum`/`TYPE_NAME`) don't combine with other specifiers;
+  # they're separate Type productions. A Type has no pointers, array bounds or
+  # parameters: those belong to the declarator after it (Declarator, or the
+  # AbstractDeclarator of a TypeName), so `int *a, b;` declares one pointer.
   - derivation: leftmost
     rules:
-      - { lhs: Type, rhs: [Type, '*'],   action: typePtr }
-      # Pointer qualifiers after `*` — `int * const p`, `int *restrict p`,
-      # `int * volatile p`. No C# equivalent (no readonly locals, no aliasing
-      # model), so they parse and are DROPPED: the pointer type is unchanged.
-      # Conflict-free: after `Type '*'`, only these qualifier tokens shift here;
-      # any other lookahead reduces the plain `Type '*'` pointer.
-      - { lhs: Type, rhs: [Type, '*', 'const'],    action: typePtrQualConst }
-      - { lhs: Type, rhs: [Type, '*', 'volatile'], action: typePtrQualVolatile }
-      - { lhs: Type, rhs: [Type, '*', 'restrict'], action: typePtrQualRestrict }
-      # Abstract function-pointer type — `Type (*)(params)`, used in casts and
-      # sizeof. No identifier between `*` and `)` distinguishes these from the
-      # FnSig declarator forms (`Type (*ID)(params)`). `(void)` is the one-Param
-      # ParamList the binder reads as no parameters (C11 6.7.6.3p10), and `()` the
-      # absent (null) list.
-      - { lhs: Type, rhs: [Type, '(', '*', ')', '(', ParamList?, ')'], action: typeFnPtr }
       - { lhs: Type, rhs: [TypeSpecList], action: typeFromSpec }
       # `struct ID` as a type reference — used in declarations, parameters,
       # casts, sizeof. The visitor emits just `ID` since C# doesn't require
@@ -765,15 +744,15 @@ productions:
       # with the prefix — the `(` lookahead splits them (a Type never starts with
       # `(`), like `sizeof`/`typeof`.
       - { lhs: Type, rhs: ['_Atomic', Type], action: typeAtomic }
-      - { lhs: Type, rhs: ['_Atomic', '(', Type, ')'], action: typeAtomicParen }
+      - { lhs: Type, rhs: ['_Atomic', '(', TypeName, ')'], action: typeAtomicParen }
       # `_Alignas(Type) T` / `_Alignas(constexpr) T` (C11 §6.7.5) — alignment
       # specifier, leading-Type-prefix shape like `_Atomic`. ACCEPTED + IGNORED
       # (a C# field/local has no controllable alignment — the same no-op
-      # treatment as Zig's `align(N)` decl modifier); gated C11. The `( Type )`
+      # treatment as Zig's `align(N)` decl modifier); gated C11. The `( TypeName )`
       # vs `( E )` operand split is the cast rule's TYPE_NAME disambiguation.
       # V1: leading position only (`int _Alignas(16) x;` interleaved among the
       # specifiers is deferred).
-      - { lhs: Type, rhs: ['_Alignas', '(', Type, ')', Type], action: typeAlignasType }
+      - { lhs: Type, rhs: ['_Alignas', '(', TypeName, ')', Type], action: typeAlignasType }
       - { lhs: Type, rhs: ['_Alignas', '(', E, ')', Type],    action: typeAlignasExpr }
       # `enum ID` as a type reference. Lowers to plain `int` in C# since
       # enumerators are emitted as `const int` constants (not a C# enum).
@@ -789,7 +768,7 @@ productions:
       # `typeof_unqual`, which dotcc treats identically since it drops qualifiers)
       # is rule-2 promoted onto this terminal under c23.
       - { lhs: Type, rhs: ['typeof', '(', E, ')'],    action: typeofExpr }
-      - { lhs: Type, rhs: ['typeof', '(', Type, ')'], action: typeofType }
+      - { lhs: Type, rhs: ['typeof', '(', TypeName, ')'], action: typeofType }
 
   # TypeSpecList — accumulator of declaration-specifier keywords. Free
   # order: `long unsigned int` and `unsigned int long` and `int unsigned
@@ -943,22 +922,22 @@ productions:
   - derivation: none
     rules:
       # A plain member is a full multi-declarator list: `int x;`, `int a, b;`,
-      # `struct CallInfo *previous, *next;` (per-declarator `*`s via DeclItemTail),
+      # `struct CallInfo *previous, *next;` (each declarator's own `*`s),
       # bit-fields (`signed int A: 1, B: 2;`, `unsigned : 4, x : 4;`), arrays
       # (`char rawmode[6], *m;`, multi-dimensional `T grid[N][M]`, the C99 flexible
       # array member `T name[];`), function pointers and arrays of them. Reuses the
-      # same DeclItemList as block/file-scope declarations; a declarator that makes
+      # same InitDeclaratorList as block/file-scope declarations; a declarator that makes
       # no sense in a member (an initializer) is a binder error. An array member
       # lowers to a C# `fixed` buffer (primitive element) or an [InlineArray]
       # wrapper, multi-dim flattened with `s.grid[i][j]` striding; a FAM uses [1]
       # (the `malloc(sizeof(S)+n*sizeof(T))` idiom over-allocates by one element).
-      - { lhs: Member, rhs: [Type, DeclItemList, ';'], action: structMemberList }
+      - { lhs: Member, rhs: [Type, InitDeclaratorList, ';'], action: structMemberList }
       # A member declaration with no declarators: a C11 anonymous struct or union
       # (`union { … };`, its members promoted into the parent's namespace, `s.x`), or
       # a nested tag definition (`struct Tag { … };`, which in C declares the tag at
       # file scope). A NAMED nested aggregate (`struct { … } name;`, `union Tag { … }
       # name;`, Lua's `union Node { struct NodeKey { … } u; }`) is the plain
-      # `Type DeclItemList ;` member with a tag-definition Type.
+      # `Type InitDeclaratorList ;` member with a tag-definition Type.
       - { lhs: Member, rhs: [Type, ';'], action: memberTagDecl }
 
   # Storage-class specifiers (C11 6.7.1, C23 `constexpr`) and function specifiers
@@ -1010,98 +989,40 @@ productions:
       # prefix is shared across all comma-separated items, matching real C (where
       # `int x, y;` declares two `int`s). A scalar lowers to a C# local, an array to
       # a `stackalloc` (a runtime extent too, VLA-style), a struct to `new T { … }`.
-      - { lhs: Decl, rhs: [Type, DeclItemList], action: decl }
+      - { lhs: Decl, rhs: [Type, InitDeclaratorList], action: decl }
       # C23 type inference `auto x = E;` → C# `var` (a plain ID after `auto`). The
       # storage-class `auto int x …` is the plain declaration above with an `auto`
       # DeclSpec. Disjoint via the lexer hack (ID vs TYPE_NAME) + the fact that a
       # Type never starts with a plain ID: after `auto`, an ID shifts here and a
       # Type keyword or TYPE_NAME reduces the DeclSpec.
       - { lhs: Decl, rhs: ['auto', ID, '=', E],       action: declAutoInfer }
-      # Pointer-to-array declarator: `int (*p)[3] [= E];` — p is a pointer to an
-      # array of 3 (e.g. a row pointer into a 2-D array). Same `( * ID )` shape as
-      # the fn-ptr declarator but with `[dims]` instead of `(params)` after the
-      # `)`, so the `[` vs `(` lookahead keeps them disjoint. Lowers to a flat C#
-      # pointer that subscripts with the array's stride (reuses the multi-dim
-      # machinery); `sizeof` of it is the pointer size.
-      - { lhs: Decl, rhs: [Type, '(', '*', ID, ')', ArrDims],          action: declPtrToArr }
-      - { lhs: Decl, rhs: [Type, '(', '*', ID, ')', ArrDims, '=', E],  action: declPtrToArrInit }
-
-  # ArrDims — one or more `[ E ]` array dimensions, left-recursive.
+  # InitDeclaratorList: the comma-separated init-declarators of a declaration (C11
+  # 6.7's init-declarator-list). Each has its own pointers, array bounds and
+  # parameters over the declaration's specifiers (`int *a, b, c[3], (*f)(int);`
+  # declares a pointer, an int, an array and a function pointer).
   - derivation: leftmost
     rules:
-      - { lhs: ArrDims, rhs: [ArrDims, '[', E, ']'], action: arrDimsCons }
-      - { lhs: ArrDims, rhs: ['[', E, ']'],          action: arrDimsOne }
-
-  # DeclItemList: comma-separated list of declarators sharing a leading Type.
-  - derivation: leftmost
-    rules:
-      - { lhs: DeclItemList, rhs: [DeclItem], action: declItemListOne }
-      # SUBSEQUENT (post-comma) declarators are `DeclItemTail`, which may carry
-      # its OWN leading `*`s (`int *a, *b;` → `b` is a pointer too). This is
-      # conflict-free where a first-position `*` would not be: after a `,` there
-      # is no `Type` non-terminal in scope to extend, so a `*` there is
-      # unambiguously a per-declarator pointer (the FIRST declarator's `*`s were
-      # already absorbed into the declaration's Type by `Type → Type *`).
-      - { lhs: DeclItemList, rhs: [DeclItemList, ',', DeclItemTail], action: declItemListCons }
+      - { lhs: InitDeclaratorList, rhs: [InitDeclarator], action: initDeclaratorListOne }
+      - { lhs: InitDeclaratorList, rhs: [InitDeclaratorList, ',', InitDeclarator], action: initDeclaratorListCons }
 
   - derivation: none
     rules:
-      - { lhs: DeclItem, rhs: [ID], action: declItem }
-      # The Initializer is an expression or a brace-enclosed list (C11 6.7.9) for a
-      # struct, union or scalar (`struct P o = { 1, .y = 2 };`, `int n = { 5 };`,
-      # C23 `T x = {};`).
-      - { lhs: DeclItem, rhs: [ID, '=', Initializer], action: declItemInit }
-      # An array declarator (see ArrDeclarator) in first or tail position, with no
-      # initializer, a braced one, or an expression (a string literal `char s[] =
-      # "…"`; any other expression is a binder error, C's constraint). After the
-      # name, `[` is not in FOLLOW(DeclItem), so `ID` alone and `ID [` never compete.
-      - { lhs: DeclItem, rhs: [ArrDeclarator],                   action: declItemArr }
-      - { lhs: DeclItem, rhs: [ArrDeclarator, '=', Initializer], action: declItemArrInit }
-      # A bit-field declarator `name : width` and an unnamed one `: width`
-      # (padding), C11 6.7.2.1. As DeclItems they take part in declarator lists
-      # like any other (`signed int A: 1, B: 2;`, `int a: 3, b, *p;`); they mean
-      # something only in a struct or union member list, and the binder rejects
-      # one anywhere else. After `ID`, `:` selects the bit-field (it is not in
-      # FOLLOW(DeclItem)); a `:` right after the list's Type starts the unnamed form.
-      - { lhs: DeclItem, rhs: [ID, ':', E], action: declItemBitField }
-      - { lhs: DeclItem, rhs: [':', E], action: declItemAnonBitField }
-      # A function-pointer declarator `(*name)(params)` [= E] (also `(*const name)…`)
-      # in first or tail position, at every scope (see FnPtrName).
-      - { lhs: DeclItem, rhs: [FnPtrName, FnPtrTail],         action: declItemFnPtr }
-      - { lhs: DeclItem, rhs: [FnPtrName, FnPtrTail, '=', E], action: declItemFnPtrInit }
-      # A function declarator (C11 6.7.6.3): a prototype `int f(int), g(void);` at
-      # file or block scope, and the name of a function TYPE in a typedef
-      # (`typedef int _Py_once_fn_t(void *arg);`). The parenthesized name `(f)(…)`
-      # and a function returning a function pointer `(*f(params))(…)` (spelled
-      # like fnSigRetFnPtr) are the other two FnSig shapes. After the parameter
-      # list a `{` selects the definition's FnSig, `;` / `,` this.
-      - { lhs: DeclItem, rhs: [ID, FnPtrTail],                                   action: declItemFn }
-      - { lhs: DeclItem, rhs: ['(', ID, ')', FnPtrTail],                         action: declItemParenFn }
-      - { lhs: DeclItem, rhs: ['(', '*', ID, '(', ParamList, ')', ')', FnPtrTail], action: declItemFnRetFnPtr }
-      # An array of function pointers (a callback / dispatch table): `Ret
-      # (*name[N])(params) [= {…}]`, `Ret (*name[])(params) = {…}`. After `( * ID`,
-      # `)` selects FnPtrName and `[` these.
-      - { lhs: DeclItem, rhs: [FnPtrArr, FnPtrTail],                     action: declItemFnPtrArr }
-      - { lhs: DeclItem, rhs: [FnPtrArr, FnPtrTail, '=', BraceInit],     action: declItemFnPtrArrInit }
-      - { lhs: DeclItem, rhs: [FnPtrArrOpen, FnPtrTail, '=', BraceInit], action: declItemFnPtrArrOpenInit }
-      # A tail (non-first) init-declarator: a plain DeclItem, or one or more `*`
-      # prefixes adding pointer levels onto the shared base type. The emitter
-      # computes the tail's type as stripStars(Type) + Stars*'*'.
-      - { lhs: DeclItemTail, rhs: [DeclItem],          action: declItemTailPlain }
-      - { lhs: DeclItemTail, rhs: ['*', DeclItemTail], action: declItemTailPtr }
-
-  # An array declarator: `name[N]…` (constant bounds, or a runtime extent that
-  # block scope lowers VLA-style), `name[]` (sized from the initializer, an `extern`
-  # declaration, a flexible array member), `name[][N]…` (only the outermost bound
-  # omitted, C11 6.7.6.2), and a parenthesized one `(name[N])` (CPython's
-  # `PyObject *(values[N])`). After `name [`, a `]` selects the open forms and an
-  # E the sized one; after `name [ ]`, a `[` continues into the inner bounds.
-  - derivation: none
-    rules:
-      - { lhs: ArrDeclarator, rhs: [ID, ArrDims],           action: arrDeclSized }
-      - { lhs: ArrDeclarator, rhs: [ID, '[', ']'],          action: arrDeclOpen }
-      - { lhs: ArrDeclarator, rhs: [ID, '[', ']', ArrDims], action: arrDeclOpenRows }
-      - { lhs: ArrDeclarator, rhs: ['(', ArrDeclarator, ')'], action: arrDeclParen }
+      # An init-declarator (C11 6.7): a declarator, alone or with an Initializer,
+      # which is an expression or a brace-enclosed list (C11 6.7.9) for a struct,
+      # union, array or scalar (`struct P o = { 1, .y = 2 };`, `char s[] = "…";`,
+      # `int n = { 5 };`, C23 `T x = {};`). The binder checks the initializer
+      # against the declared type (an array takes a braced list or a string
+      # literal, a function none).
+      - { lhs: InitDeclarator, rhs: [Declarator], action: initDeclarator }
+      - { lhs: InitDeclarator, rhs: [Declarator, '=', Initializer], action: initDeclaratorInit }
+      # A bit-field (C11 6.7.2.1's struct-declarator `declarator? : width`): a
+      # named one `name : width`, or an unnamed one `: width` (padding, a null
+      # Declarator). It takes part in declarator lists like any other (`signed int
+      # A: 1, B: 2;`, `int a: 3, b, *p;`); it means something only in a struct or
+      # union member list, and the binder rejects one anywhere else. After a
+      # Declarator, `:` selects the bit-field (it is not in FOLLOW(InitDeclarator));
+      # a `:` right after the list's Type starts the unnamed form.
+      - { lhs: InitDeclarator, rhs: [Declarator?, ':', E], action: bitFieldDeclarator }
 
   # A brace-enclosed initializer, `{ … }` or the C23 empty `{ }` (C23 6.7.10's
   # `{ }`, a null InitList; the binder gates it on -std=c23).
@@ -1256,7 +1177,7 @@ productions:
   # cast-expression`), and the unary operators `& * + - ~ !` take a cast-expression
   # while `sizeof`, `++` and `--` take a unary-expression. That split is what lets
   # `sizeof(T) * x` reduce `sizeof(T)` before the `*`: a Unary can no longer be a
-  # cast, so after `sizeof ( Type )` nothing is open that a `*`, `-`, `&` or `+`
+  # cast, so after `sizeof ( TypeName )` nothing is open that a `*`, `-`, `&` or `+`
   # could continue (the old shape parsed it as `sizeof((T)*x)`, and the folder
   # had to parenthesize the sizeof). It also rejects `sizeof (T) x` and
   # `++(T)x`, which C does too. A cast disambiguates from the `( Expr )` primary by
@@ -1264,7 +1185,7 @@ productions:
   # operators are right-associative: `--x` is `-(-x)`, `**p` is `*(*p)`.
   - derivation: rightmost
     rules:
-      - { lhs: CastExpr, rhs: ['(', Type, ')', CastExpr], action: cast }
+      - { lhs: CastExpr, rhs: ['(', TypeName, ')', CastExpr], action: cast }
       - { lhs: CastExpr, rhs: [Unary] }
       - { lhs: Unary, rhs: ['*',  CastExpr], action: deref }
       - { lhs: Unary, rhs: ['&',  CastExpr], action: addrOf }
@@ -1284,10 +1205,9 @@ productions:
       - { lhs: Unary, rhs: ['--', Unary], action: preDec }
       # Compound literal (C99) — `(Type){ init }`. An unnamed object of `Type`
       # initialized by the brace list, usable in any expression position. Lowers
-      # to a C# object-creation `new Type { field = val, … }` (struct/union only —
-      # the Type grammar has no abstract array declarator, so `(int[]){…}` is out
-      # of scope and fails loudly). Conflict-free with the cast above: after
-      # `( Type )` the `{` lookahead is not in FIRST(CastExpr), so the parser shifts
+      # to a C# object-creation `new Type { field = val, … }` for a struct or
+      # union. Conflict-free with the cast above: after
+      # `( TypeName )` the `{` lookahead is not in FIRST(CastExpr), so the parser shifts
       # into the compound literal; with anything else it's a cast. It is a
       # POSTFIX expression (C11 6.5.2), so `(struct S){…}.field`, `(int[]){…}[i]`
       # and `(T){…}->…` chain like any other postfix operand. Member designators
@@ -1295,22 +1215,18 @@ productions:
       # optional: the empty compound literal `(Type){}` (C23) is a zero-valued
       # unnamed object, lowered to `default(Type)` (scalar, struct, union, pointer)
       # and gated on -std=c23 by the binder.
-      - { lhs: Postfix, rhs: ['(', Type, ')', '{', InitList?, '}'],    action: compoundLit }
-      # Array compound literal (C99) — `(int[]){1,2,3}` / `(int[3]){1,2}`. The
-      # abstract array declarator is scoped to this context (not the general Type)
-      # to avoid grammar conflicts. Conflict-free with the cast / struct-compound
-      # forms above: after `( Type`, a `[` lookahead selects these. Lowers to
-      # `stackalloc T[]{ … }`, which is a valid expression in initializer position
-      # (`T* p = (int[]){…}`); other positions (call arg, return) can't escape a
-      # stackalloc to a pointer in C# and surface as a Roslyn error (documented).
-      - { lhs: Postfix, rhs: ['(', Type, ArrDims, ')', '{', InitList, '}'], action: compoundLitArr }
-      - { lhs: Postfix, rhs: ['(', Type, '[', ']', ')', '{', InitList, '}'], action: compoundLitArrImplicit }
+      # The type name is any type name, so an array one is the array compound
+      # literal `(int[]){1,2,3}` / `(int[3]){1,2}`, which lowers to `stackalloc
+      # T[]{ … }`: a valid expression in initializer position (`T* p = (int[]){…}`);
+      # other positions (call arg, return) can't escape a stackalloc to a pointer
+      # in C# and surface as a Roslyn error (documented).
+      - { lhs: Postfix, rhs: ['(', TypeName, ')', '{', InitList?, '}'], action: compoundLit }
       # `sizeof(Type)` — emits C# `sizeof(T)` which works for unmanaged types
       # in unsafe context. All dotcc structs are unmanaged (only primitive
       # and pointer fields) so this is always valid.
-      - { lhs: Unary, rhs: ['sizeof', '(', Type, ')'], action: sizeofType }
+      - { lhs: Unary, rhs: ['sizeof', '(', TypeName, ')'], action: sizeofType }
       # `sizeof expr` — the operand's synthesized CType (propagated up through
-      # EmitContent) gives the size. Conflict-free with `sizeof ( Type )`: the
+      # EmitContent) gives the size. Conflict-free with `sizeof ( TypeName )`: the
       # TypeNameRewriter has already split `sizeof ( ID )` (parenthesized expr,
       # ID is not a TYPE_NAME) from `sizeof ( int )` / `sizeof ( typedefName )`
       # before the parser ever sees them — same lexer hack the cast rule relies on.
@@ -1320,7 +1236,7 @@ productions:
       # constant expression, so it composes with _Static_assert / array bounds /
       # case labels). Type-name operand only — the GNU `_Alignof expr` extension
       # is not provided (dotcc implements no GNU extensions).
-      - { lhs: Unary, rhs: ['_Alignof', '(', Type, ')'], action: alignofType }
+      - { lhs: Unary, rhs: ['_Alignof', '(', TypeName, ')'], action: alignofType }
       - { lhs: Unary, rhs: [Postfix] }
 
   - derivation: leftmost
@@ -1331,14 +1247,14 @@ productions:
       # operand is a TYPE (same reason `sizeof(Type)` has its own rule). Starts
       # with the unique `va_arg` terminal, so it's conflict-free with the call
       # rules above. Lowered to `(Type)ap.Next()` / `(Type)ap.NextPtr()`.
-      - { lhs: Postfix, rhs: ['va_arg', '(', E, ',', Type, ')'], action: vaArgExpr }
+      - { lhs: Postfix, rhs: ['va_arg', '(', E, ',', TypeName, ')'], action: vaArgExpr }
       # `offsetof(Type, member-designator)` — the byte offset of the member in
       # `Type`. The TYPE_NAME lexer hack lets the first operand be a Type (so a
       # bare typedef-name there is fine, unlike a value arg). The designator is
       # a dotted path into nested members (C99 7.17) — a single ID is the
       # common form, `value.type.f` walks nested structs/unions (chibi's
       # sexp_offsetof). Array designators (`m[2]`) aren't supported.
-      - { lhs: Postfix, rhs: ['offsetof', '(', Type, ',', OffsetofPath, ')'], action: offsetofExpr }
+      - { lhs: Postfix, rhs: ['offsetof', '(', TypeName, ',', OffsetofPath, ')'], action: offsetofExpr }
       - { lhs: OffsetofPath, rhs: [ID], action: offsetofPathOne }
       - { lhs: OffsetofPath, rhs: [OffsetofPath, '.', ID], action: offsetofPathCons }
       # Postfix ++/-- — left-associative (chained `x++` then `++` is illegal
@@ -1416,7 +1332,7 @@ productions:
       - { lhs: Primary, rhs: ['_Generic', '(', E, ',', GenericAssocList, ')'], action: genericSelect }
       - { lhs: GenericAssocList, rhs: [GenericAssoc] }
       - { lhs: GenericAssocList, rhs: [GenericAssocList, ',', GenericAssoc], action: genericAssocCons }
-      - { lhs: GenericAssoc, rhs: [Type, ':', E],       action: genericAssocType }
+      - { lhs: GenericAssoc, rhs: [TypeName, ':', E],       action: genericAssocType }
       - { lhs: GenericAssoc, rhs: ['default', ':', E],  action: genericAssocDefault }
       # C23 `#embed`. The EMBED terminal is synthetic — only the onEmbed
       # preprocessor handler produces it (no lexer rule), carrying a content-hash
@@ -1432,7 +1348,7 @@ productions:
       # other expression position is rejected loudly in the IR.
       - { lhs: Primary, rhs: ['EMBED'],     action: embed }
       # Parenthesized expression uses the full `Expr` tier, so `( a, b )` is the
-      # comma operator. (Cast `( Type ) CastExpr` still disambiguates by the first
+      # comma operator. (Cast `( TypeName ) CastExpr` still disambiguates by the first
       # token after `(`; function calls use `ArgList`, not `Expr`.)
       - { lhs: Primary, rhs: ['(', Expr, ')'], action: paren }
 

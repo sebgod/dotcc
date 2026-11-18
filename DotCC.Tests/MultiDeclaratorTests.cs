@@ -10,8 +10,8 @@ namespace DotCC.Tests;
 /// <summary>
 /// Unit tests for multi-declarator lists with per-declarator pointers —
 /// <c>int *a, *b;</c> / <c>int *c, d;</c> — at block scope and as struct members
-/// (the per-declarator <c>*</c> rides <c>DeclItemTail</c>; the first declarator's
-/// <c>*</c>s are absorbed into Type). A uniform list stays one C# multi-declarator;
+/// (each declarator carries its own <c>Pointer</c>; a Type is the specifiers
+/// alone). A uniform list stays one C# multi-declarator;
 /// a mixed one splits. End-to-end in the <c>multi-declarator/</c> fixture.
 /// </summary>
 [Collection("MultiDeclarator")]

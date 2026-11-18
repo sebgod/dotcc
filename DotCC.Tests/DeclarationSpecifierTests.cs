@@ -144,7 +144,9 @@ public sealed class DeclarationSpecifierTests
     [InlineData("int main(void) { static int extern y; return 0; }", "multiple storage classes in declaration specifiers")]
     [InlineData("static static int x;\nint main(void) { return 0; }", "duplicate 'static'")]
     [InlineData("typedef _Thread_local int T;\nint main(void) { return 0; }", "'_Thread_local' used with 'typedef'")]
-    [InlineData("int *static p;\nint main(void) { return 0; }", "expected identifier or '(' before 'static'")]
+    // A specifier after a `*` is no declarator (gcc: "expected identifier or '(' before 'static'"):
+    // a pointer's qualifiers are its only specifiers, so it is a syntax error at the `static`.
+    [InlineData("int *static p;\nint main(void) { return 0; }", "parse error at line 1, column 6")]
     [InlineData("int main(void) { return (int)(static int)3; }", "storage class specifier in cast")]
     [InlineData("int main(void) { return (int)sizeof(static int); }", "storage class specifier in 'sizeof'")]
     [InlineData("int main(void) { return (int)_Alignof(extern int); }", "storage class specifier in '_Alignof'")]
