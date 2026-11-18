@@ -292,6 +292,7 @@ internal sealed partial class ZigLowering
             case Zig.AddSat a:  return SatBin("SatAdd", a.Arg0, a.Arg2);
             case Zig.SubSat a:  return SatBin("SatSub", a.Arg0, a.Arg2);
             case Zig.MulSat a:  return SatBin("SatMul", a.Arg0, a.Arg2);
+            case Zig.ShlSat a:  return SatShl(a.Arg0, a.Arg2);
             case Zig.DivOp a:   return RejectRuntimeSignedDivision(Bin(BinOp.Div, a.Arg0, a.Arg2), PeerZigType(a.Arg0, a.Arg2));
             case Zig.ModOp a:   return RejectRuntimeSignedDivision(Bin(BinOp.Mod, a.Arg0, a.Arg2), PeerZigType(a.Arg0, a.Arg2));
             // comparison (non-associative in the grammar)
@@ -811,10 +812,10 @@ internal sealed partial class ZigLowering
             // An empty `asm volatile ("" : : [x] "r" (x))` (std.hash.XxHash3's disableAutoVectorization, task #174) emits no
             // instruction and writes nothing; it only keeps the optimizer from vectorizing across it, so it lowers to nothing.
             // Only with no outputs and inputs that are plain names (nothing to evaluate); every other `asm` stays cut.
-            case Zig.AsmVolatileExpr { Arg3: var asmTemplate, Arg4.Content: Zig.AsmTailIn { Arg1.Content: Zig.AsmItemsNone, Arg3: var asmInputs } }
+            case Zig.AsmExpr { Arg1: not null, Arg3.Content: Zig.StrLit { Arg0: var asmTemplate }, Arg4.Content: Zig.AsmTailIn { Arg1.Content: Zig.AsmItemsNone, Arg3: var asmInputs } }
                 when Tok(asmTemplate) == "\"\"" && AsmInputsArePlainNames(asmInputs):
                 return new DefaultLit { Type = CType.Void };
-            case Zig.AsmExpr or Zig.AsmVolatileExpr:
+            case Zig.AsmExpr:
                 throw new IrUnsupportedException(
                     "zig inline assembly (`asm`) is out of scope: dotcc targets .NET, so a reached `asm` has no lowering "
                     + "(std guards its assembly paths behind comptime target checks, which fold away when dotcc's target lacks the feature)");
@@ -3106,6 +3107,24 @@ internal sealed partial class ZigLowering
         return new Call($"ZigMath.{helper}", args) { Type = t };
     }
 
+    /// <summary>Lower zig's saturating shift left (<c>a &lt;&lt;| n</c>) to <c>ZigMath.SatShl</c>. Unlike the other
+    /// saturating operators its operands are not peers: the result has the LEFT operand's type and the shift amount
+    /// keeps its own (zig takes any unsigned integer there).</summary>
+    private CExpr SatShl(Item l, Item r)
+    {
+        var left = LowerExpr(l);
+        var right = LowerExpr(r);
+        var t = left.Type.Unqualified;
+        GuardNo128Saturation(t);
+        if (TryFoldSaturating("SatShl", left, right, t, DeclaredBitsOfValue(l)) is { } folded) { return folded; }
+        if (left is LitInt)
+        {
+            throw new IrUnsupportedException(
+                "zig: the left operand of `<<|` must have a fixed-width integer type when the shift amount is not known at compile time");
+        }
+        return new Call("ZigMath.SatShl", new List<CExpr> { left, right }) { Type = t };
+    }
+
     /// <summary>Fold a saturating op over two comptime-known operands (std.meta.FieldEnum's
     /// <c>IntFittingRange(0, field_names.len -| 1)</c>, task #108): the exact result clamped to the peer type's range (its
     /// declared width when the source spells one), or left unclamped when both are untyped literals, a comptime_int being
@@ -3113,7 +3132,15 @@ internal sealed partial class ZigLowering
     private CExpr? TryFoldSaturating(string helper, CExpr left, CExpr right, CType t, int? declaredBits)
     {
         if (_ir.ConstEval128(left) is not { } a || _ir.ConstEval128(right) is not { } b) { return null; }
-        System.Int128 v = helper switch { "SatAdd" => a + b, "SatSub" => a - b, _ => a * b };
+        System.Int128 v = helper switch
+        {
+            "SatAdd" => a + b,
+            "SatSub" => a - b,
+            // A value the lowering holds is at most 64 bits wide, so a shift below 60 is exact here; a larger one
+            // of a non-zero value is past every integer type's range.
+            "SatShl" => a == 0 || (b >= 0 && b < 60) ? a << (int)b : a > 0 ? System.Int128.MaxValue : System.Int128.MinValue,
+            _ => a * b,
+        };
         if (!(left is LitInt && right is LitInt) && t.Unqualified is CType.Prim { Integer: true, Signed: var signed, Bytes: var bytes })
         {
             var (min, max) = IntRange(signed, declaredBits is { } db and > 0 ? db : bytes * 8);
@@ -3303,6 +3330,7 @@ internal sealed partial class ZigLowering
         Zig.AddSat a => IsComptimeUntypedNumeric(a.Arg0) && IsComptimeUntypedNumeric(a.Arg2),
         Zig.SubSat a => IsComptimeUntypedNumeric(a.Arg0) && IsComptimeUntypedNumeric(a.Arg2),
         Zig.MulSat a => IsComptimeUntypedNumeric(a.Arg0) && IsComptimeUntypedNumeric(a.Arg2),
+        Zig.ShlSat a => IsComptimeUntypedNumeric(a.Arg0) && IsComptimeUntypedNumeric(a.Arg2),
         _ => false,
     };
 

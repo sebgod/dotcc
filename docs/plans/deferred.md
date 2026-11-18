@@ -223,8 +223,9 @@ CPU). Segment status: `docs/plans/road-to-zig-std.md`, "The target-identity segm
 ## Zig — the big open parse buckets (not cuts; just next)
 
 These are ranked live in [`std-parse-probe.report.txt`](std-parse-probe.report.txt) — the
-report *is* the worklist. Current head (2026-10-11, 536 of 553 files, 96.9% parse-clean): a tail of 1-to-2-file
-buckets: `catch` after a value-less `break`, `union(T)` with a field-path tag, a capture prong with an `inline for` body.
+report *is* the worklist. **It is empty since 2026-11-18: 553 of 553 files of the pinned std parse.** What the last
+batch parses but does not lower yet (each a loud cut): a `comptime` field, a tuple field with a default, an explicit
+tag value on a union field, an `opaque { … }` type.
 A container-member `extern fn` parses and is dropped (a call to one is an unresolved name). `comptime for … ;`
 parses, but the comptime executor runs only `while` loops, so it is a loud cut.
 The 2026-08 head (file-is-a-struct fields, `)`-in-440, `(`-in-276, statement-position `if`/`switch`)

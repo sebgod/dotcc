@@ -566,85 +566,70 @@ internal sealed partial class ZigLowering
         // Every defaulted field's type and default ASTs, recorded BEFORE any field type lowers: a struct whose
         // registration fails part-way (std.Options, on `ScopeLevel`'s `@EnumLiteral()`) can still answer a
         // read of one field of its default value (`std.options.fmt_max_depth`, see LowerDefaultedConstField).
-        foreach (var fd in fieldItems)
+        var parts = new List<FieldParts>(fieldItems.Count);
+        foreach (var fd in fieldItems) { parts.Add(FieldPartsOf(fd)); }
+        foreach (var f in parts)
         {
-            if (fd.Content is Zig.StructFieldDefault pre) { _structFieldDecls[(name, Tok(pre.Arg0))] = (pre.Arg2, pre.Arg4); }
-            if (fd.Content is Zig.StructFieldAlignedDefault preAligned) { _structFieldDecls[(name, Tok(preAligned.Arg0))] = (preAligned.Arg2, preAligned.Arg8); }
+            if (f.Default is { } preDefault) { _structFieldDecls[(name, f.Name)] = (f.Type, preDefault); }
         }
         // Each field's declared integer width (`value: u21`), which the lowered carrier type loses (task #121). Only a type
         // SPELLED as an integer (`u21`, `i32`) is read, off the spelling: resolving any other field type here would lower it
         // ahead of its turn (std.Io.Limit's `math.maxInt` before math's functions are declared).
-        foreach (var fd in fieldItems)
+        foreach (var f in parts)
         {
-            var (bitsField, bitsType) = fd.Content switch
-            {
-                Zig.StructField f => (Tok(f.Arg0), f.Arg2),
-                Zig.StructFieldDefault f => (Tok(f.Arg0), f.Arg2),
-                Zig.StructFieldAligned f => (Tok(f.Arg0), f.Arg2),
-                Zig.StructFieldAlignedDefault f => (Tok(f.Arg0), f.Arg2),
-                _ => ((string?)null, (Item?)null),
-            };
-            if (bitsField is not null && bitsType is { Content: Zig.Ident { Arg0: var bitsTok } }
+            if (f.Type is { Content: Zig.Ident { Arg0: var bitsTok } }
                 && Tok(bitsTok) is var spelled && spelled.Length > 1 && spelled[0] is 'u' or 'i'
                 && int.TryParse(spelled.AsSpan(1), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var declaredFieldBits))
             {
-                _structFieldBits[(name, bitsField)] = declaredFieldBits;
+                _structFieldBits[(name, f.Name)] = declaredFieldBits;
             }
         }
-        // Each field's `field_attrs` entry: its spelled alignment and whether it has a default (task #108).
-        foreach (var fd in fieldItems)
+        foreach (var f in parts)
         {
-            var attr = fd.Content switch
-            {
-                Zig.StructField f => (Tok(f.Arg0), (Item?)null, false),
-                Zig.StructFieldDefault f => (Tok(f.Arg0), null, true),
-                Zig.StructFieldAligned f => (Tok(f.Arg0), f.Arg5, false),
-                Zig.StructFieldAlignedDefault f => (Tok(f.Arg0), f.Arg5, true),
-                _ => ((string?)null, null, false),
-            };
-            if (attr.Item1 is { } attrField) { _shared.StructFieldAttrs[(name, attrField)] = (attr.Item2, attr.Item3, this); }
+            // Its `field_attrs` entry: its spelled alignment and whether it has a default (task #108).
+            _shared.StructFieldAttrs[(name, f.Name)] = (f.Align, f.Default is not null, this);
             // Its spelled sentinel, for `field_types` (task #213): the lowered type erases it.
-            var spelled = fd.Content switch
+            if (SentinelOfTypeArg(f.Type) is { } fieldSentinel)
             {
-                Zig.StructField f => (Tok(f.Arg0), f.Arg2),
-                Zig.StructFieldDefault f => (Tok(f.Arg0), f.Arg2),
-                Zig.StructFieldAligned f => (Tok(f.Arg0), f.Arg2),
-                Zig.StructFieldAlignedDefault f => (Tok(f.Arg0), f.Arg2),
-                _ => ((string?)null, (Item?)null),
-            };
-            if (spelled is ({ } sentinelField, { } fieldType) && SentinelOfTypeArg(fieldType) is { } fieldSentinel)
-            {
-                _shared.StructFieldSentinels[(name, sentinelField)] = fieldSentinel;
+                _shared.StructFieldSentinels[(name, f.Name)] = fieldSentinel;
             }
         }
         var fields = new List<StructField>();
-        foreach (var fd in fieldItems)
+        foreach (var f in parts)
         {
-            switch (fd.Content)
+            if (f.IsComptime)
             {
-                case Zig.StructField f:          // FieldDecl -> IDENT ':' Type
-                    fields.Add(PackedAwareField(Tok(f.Arg0), f.Arg2, layout));
-                    break;
-                case Zig.StructFieldDefault f:   // FieldDecl -> IDENT ':' Type '=' RhsExpr
-                    var fname = Tok(f.Arg0);
-                    fields.Add(PackedAwareField(fname, f.Arg2, layout));
-                    _structFieldDefaults[(name, fname)] = f.Arg4;   // raw default AST — lowered lazily on omission
-                    break;
-                // `s: [8]u32 align(16)` (std.crypto.sha2): the alignment only places the field in memory, which C#'s own
-                // layout decides; the field itself is as unaligned. (A leniency: `@alignOf` / `@sizeOf` may differ from zig.)
-                case Zig.StructFieldAligned f:
-                    fields.Add(PackedAwareField(Tok(f.Arg0), f.Arg2, layout));
-                    break;
-                case Zig.StructFieldAlignedDefault f:
-                    var alignedName = Tok(f.Arg0);
-                    fields.Add(PackedAwareField(alignedName, f.Arg2, layout));
-                    _structFieldDefaults[(name, alignedName)] = f.Arg8;
-                    break;
-                default:
-                    throw new IrUnsupportedException("zig struct field: " + (fd.Content?.GetType().Name ?? "null"));
+                throw new IrUnsupportedException(
+                    $"zig: a `comptime` field ('{f.Name}' of '{name}') is not supported yet: its value is its default, known at compile time");
             }
+            // `s: [8]u32 align(16)` (std.crypto.sha2): the alignment only places the field in memory, which C#'s own
+            // layout decides; the field itself is as unaligned. (A leniency: `@alignOf` / `@sizeOf` may differ from zig.)
+            fields.Add(PackedAwareField(f.Name, f.Type, layout));
+            // The raw default AST, lowered lazily when a literal omits the field.
+            if (f.Default is { } fieldDefault) { _structFieldDefaults[(name, f.Name)] = fieldDefault; }
         }
         RegisterAggregate(name, fields, isUnion: false, layout);
+    }
+
+    /// <summary>A container field's parts (zig's ContainerField: <c>comptime? name : Type ByteAlign? (= Expr)?</c>).</summary>
+    /// <param name="Name">The field's name.</param>
+    /// <param name="Type">Its type item (an <c>if</c> expression for a type a comptime <c>if</c> chooses).</param>
+    /// <param name="Align">The <c>align(E)</c> operand, or null.</param>
+    /// <param name="Default">The <c>= value</c> item, or null.</param>
+    /// <param name="IsComptime">Whether the field is declared <c>comptime</c>.</param>
+    private readonly record struct FieldParts(string Name, Item Type, Item? Align, Item? Default, bool IsComptime);
+
+    /// <summary>Read a struct field declaration into its <see cref="FieldParts"/>.</summary>
+    private static FieldParts FieldPartsOf(Item fd)
+    {
+        static Item? AlignOf(Item? a) => a is { Content: Zig.FieldAlign fa } ? fa.Arg2 : null;
+        static Item? DefaultOf(Item? d) => d is { Content: Zig.FieldDefault fd } ? fd.Arg1 : null;
+        return fd.Content switch
+        {
+            Zig.StructField f => new(Tok(f.Arg1), f.Arg3, AlignOf(f.Arg4), DefaultOf(f.Arg5), f.Arg0 is not null),
+            Zig.StructFieldIf f => new(Tok(f.Arg1), f.Arg3, null, DefaultOf(f.Arg4), f.Arg0 is not null),
+            _ => throw new IrUnsupportedException("zig struct field: " + (fd.Content?.GetType().Name ?? "null")),
+        };
     }
 
     /// <summary>The TYPE a comptime <c>switch</c> selects (std.mem.SplitIterator's
@@ -1124,6 +1109,9 @@ internal sealed partial class ZigLowering
         {
             switch (v.Content)
             {
+                // `Character: CHAR = 1,` in a `union(enum(T))`: the field's tag value, which the generated tag does not take.
+                case Zig.UnionVariantPayload { Arg3: not null } vp:
+                    throw new IrUnsupportedException($"zig: an explicit tag value on the union field '{Tok(vp.Arg0)}' is not supported yet");
                 case Zig.UnionVariantPayload vp: variants.Add((Tok(vp.Arg0), LowerType(vp.Arg2))); break;  // IDENT ':' Type
                 case Zig.UnionVariantVoid vv:    variants.Add((Tok(vv.Arg0), null)); break;                 // IDENT
                 default: throw new IrUnsupportedException("zig union variant: " + (v.Content?.GetType().Name ?? "null"));
@@ -3513,6 +3501,7 @@ internal sealed partial class ZigLowering
             case Zig.BitXor a:  return PeerZigType(a.Arg0, a.Arg2);
             case Zig.Shl a:     return ZigIntOperandType(a.Arg0);   // a shift keeps its LEFT operand's type
             case Zig.Shr a:     return ZigIntOperandType(a.Arg0);
+            case Zig.ShlSat a:  return ZigIntOperandType(a.Arg0);
             case Zig.Ident id:  return _symbols.Resolve(Tok(id.Arg0))?.Type?.Unqualified;
             // An element, field or pointee READ is its declared type, unpromoted (task #136: `(out[1] & 0xff) % 10` over a
             // `[16]u16` is a `u16` remainder, and `(e[1] - '0') % 10` over a `[]const u8` a `u8` one, both legal in zig).

@@ -271,6 +271,7 @@ internal sealed partial class ZigLowering
         Zig.BitOr a => PeerDeclaredBits(a.Arg0, a.Arg2),
         Zig.Shl s => DeclaredBitsOfValue(s.Arg0),
         Zig.Shr s => DeclaredBitsOfValue(s.Arg0),
+        Zig.ShlSat s => DeclaredBitsOfValue(s.Arg0),
         // Negation / complement / `try` keep their operand's type (zig has no C integer promotion).
         Zig.PreNeg n => DeclaredBitsOfValue(n.Arg1),
         Zig.PreBitNot n => DeclaredBitsOfValue(n.Arg1),
@@ -304,6 +305,7 @@ internal sealed partial class ZigLowering
             Zig.Ident => Operand(e),
             Zig.Shl s => Operand(s.Arg0),
             Zig.Shr s => Operand(s.Arg0),
+            Zig.ShlSat s => Operand(s.Arg0),
             Zig.Add a => Peer(a.Arg0, a.Arg2),
             Zig.Sub a => Peer(a.Arg0, a.Arg2),
             Zig.Mul a => Peer(a.Arg0, a.Arg2),

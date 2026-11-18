@@ -322,6 +322,14 @@ symbols:
   - LoopElse       # 221 a value loop's `else Payload? IfArm`
   - UnionHead      # 222 `extern|packed? union (arg)?` (zig's ContainerDeclType for a union)
   - UnionArg       # 223 a union's `(enum)` / `(enum(T))` / `(Tag)` argument
+  - '<<|'          # 224 saturating shift left
+  - '<<|='         # 225 saturating shift-left assign
+  - 'opaque'       # 226 `opaque { … }`: a type of unknown size and layout, its body declarations only
+  - 'addrspace'    # 227 the pointer attribute `*addrspace(.x) T` (a PtrAlign: no effect on the managed target)
+  - FieldAlign     # 228 a container field's `align(E)` (zig's ByteAlign)
+  - FieldDefault   # 229 a container field's `= value` (a struct field's default, a union field's tag value)
+  - DeclMod        # 230 one of a declaration's `align(E)` / `addrspace(E)` / `linksection(E)` attributes
+  - TupleField     # 231 a tuple type's field: a Type, with an optional `= value` (zig's ContainerField with no name)
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -338,6 +346,12 @@ productions:
     rules:
       - { lhs: FieldName, rhs: [IDENT] }
       - { lhs: FieldName, rhs: [LABEL] }
+      # `null: u8 = 0,` (std's compress/xz/Decompress.zig): zig's primitive VALUES are plain names in a field list, as
+      # in an enum's or a union's. dotcc lexes them as keywords, so a field name admits them by name.
+      - { lhs: FieldName, rhs: ['null'] }
+      - { lhs: FieldName, rhs: ['undefined'] }
+      - { lhs: FieldName, rhs: ['true'] }
+      - { lhs: FieldName, rhs: ['false'] }
 
   - derivation: leftmost
     rules:
@@ -408,10 +422,10 @@ productions:
       # `extern var` (PEG: `KEYWORD_extern STRINGLITERALSINGLE? KEYWORD_threadlocal? GlobalVarDecl`): data a linked
       # library defines, always typed and never initialized. After `extern STRING?`, `fn` versus `threadlocal`/`var`
       # is one token. dotcc binds extern functions but not extern data, so lowering rejects a reference to one.
-      - { lhs: Decl, rhs: [pub?, 'extern', STRING?, threadlocal?, 'var', IDENT, ':', AType, ';'], action: externVar }
+      - { lhs: Decl, rhs: [pub?, 'extern', STRING?, threadlocal?, 'var', IDENT, ':', AType, DeclMods?, ';'], action: externVar }
       # An extern CONSTANT (std's os/plan9.zig: `pub extern const etext: anyopaque;`, a linker symbol). Rejected by name on
       # read, as an extern var is.
-      - { lhs: Decl, rhs: [pub?, 'extern', STRING?, 'const', IDENT, ':', AType, ';'], action: externConst }
+      - { lhs: Decl, rhs: [pub?, 'extern', STRING?, 'const', IDENT, ':', AType, DeclMods?, ';'], action: externConst }
       # Container decls — Zig binds a struct/enum TYPE to a `const` name (types are
       # values). A struct/enum RHS isn't an `RhsExpr`, so these are distinct Decl forms,
       # NOT VarDecl: the `struct`/`enum` keyword right after `=` is a clean 1-token shift
@@ -470,12 +484,16 @@ productions:
       # Params and the error-union `!` are optional: Arg3 / Arg6 are null without them (Arg7 return type, Arg8 body).
       - { lhs: FnDef, rhs: ['fn', IDENT, '(', Params?, ')', CallConv, "!?", AType, Block], action: fnDef }
 
-  # An optional `callconv(Expr)` between `)` and the return type (Milestone R, part 5). Epsilon when
-  # absent — `callconv` ∉ FIRST(Type) ∪ {`!`}, so the reduce-ε vs shift-`callconv` decision after `)`
-  # is conflict-free. ACCEPTED + IGNORED (no-op on the managed target); the arg Expr is never read.
+  # A function's attributes between `)` and the return type, zig's `ByteAlign? AddrSpace? LinkSection? CallConv?`
+  # (Milestone R, part 5; std's Io/Threaded.zig: `) align(apc_align) callconv(.winapi) void {`). Epsilon when there is
+  # none: no attribute keyword is in FIRST(Type) ∪ {`!`}, so the reduce-ε vs shift decision after `)` is conflict-free.
+  # Each of `align` / `addrspace` / `linksection` wraps what follows it, so the slot stays one symbol and a `callconv`
+  # is its innermost item. ACCEPTED + IGNORED (no-op on the managed target); only a fn-POINTER type reads the
+  # `callconv`. The order is not checked.
   - derivation: none
     rules:
       - { lhs: CallConv, rhs: ['callconv', '(', Expr, ')'], action: callConv }
+      - { lhs: CallConv, rhs: [DeclMod, CallConv],          action: fnAttr }
       - { lhs: CallConv, rhs: [] }
 
   - derivation: leftmost
@@ -534,13 +552,17 @@ productions:
       - { lhs: VarDecl, rhs: ['const', IDENT, DeclMods, '=', RhsExpr, ';'], action: constDeclMods }
       - { lhs: VarDecl, rhs: ['var',   IDENT, DeclMods, '=', RhsExpr, ';'], action: varDeclMods }
 
-  # The `align(Expr)` / `linksection(Expr)` modifier(s) on a typed const/var (Milestone R, part 5),
-  # in Zig's order (align then linksection). Non-empty; the arg Exprs are never read. Also on an untyped one.
-  - derivation: none
+  # A declaration's attributes, zig's `ByteAlign? AddrSpace? LinkSection?` (Milestone R, part 5): one or more of
+  # `align(Expr)`, `addrspace(Expr)` (std's gpu.zig: `pub extern const frag_coord: @Vector(4, f32) addrspace(.input);`)
+  # and `linksection(Expr)`, on a typed or an untyped const/var and on an `extern` one. The arg Exprs are never read,
+  # and the order is not checked.
+  - derivation: leftmost
     rules:
-      - { lhs: DeclMods, rhs: ['align', '(', Expr, ')'],                              action: declModAlign }
-      - { lhs: DeclMods, rhs: ['linksection', '(', Expr, ')'],                        action: declModLinksection }
-      - { lhs: DeclMods, rhs: ['align', '(', Expr, ')', 'linksection', '(', Expr, ')'], action: declModAlignLink }
+      - { lhs: DeclMods, rhs: [DeclMod] }
+      - { lhs: DeclMods, rhs: [DeclMods, DeclMod], action: declModsCons }
+      - { lhs: DeclMod, rhs: ['align', '(', Expr, ')'],       action: declModAlign }
+      - { lhs: DeclMod, rhs: ['addrspace', '(', Expr, ')'],   action: declModAddrspace }
+      - { lhs: DeclMod, rhs: ['linksection', '(', Expr, ')'], action: declModLinksection }
 
   - derivation: none
     rules:
@@ -634,6 +656,7 @@ productions:
       - { lhs: AssignOp, rhs: ['+|='], action: aopAddSat }
       - { lhs: AssignOp, rhs: ['-|='], action: aopSubSat }
       - { lhs: AssignOp, rhs: ['*|='], action: aopMulSat }
+      - { lhs: AssignOp, rhs: ['<<|='], action: aopShlSat }
       - { lhs: Stmt, rhs: ['break', ';'],    action: stmtBreak }
       - { lhs: Stmt, rhs: ['continue', ';'], action: stmtContinue }
       # `break v;` — an UNLABELED break carrying a VALUE (Milestone Y, part 2), yielding `v` from the
@@ -796,27 +819,27 @@ productions:
   # cascade it had to be an OrElse-level result: as a plain Bitwise one, `return a == b` would have been followed by
   # every operator that can follow a Bitwise, and the merged LALR states resolved `a == b & c` as `(a == b) & c`.
   # BitwiseO is only ever the rightmost operand, so nothing at an outer level follows it (pinned in ZigGrammarTests).
-  # The statement-shaped arms (a block, a `switch`, a labeled block) stay OrElse-level until P3.
   # `a catch |e| b` (Milestone N, part 3) binds the error to `e` for the fallback `b` (after `'catch'`, a `'|'`
   # lookahead selects the capture form; no value expression starts with `'|'`). A control-flow fallback (`orelse return
   # [v]`, `catch break`, `catch |e| return switch (e) {…}`) is the same `orElse` / `catchOp` / `catchCapture` with a
   # noreturn right operand since zig-grammar-peg P1b made the jumps expressions; lowering recognizes it
-  # (IsControlFlowFallback). Only the statement-shaped arms that are not expressions yet (a block, a `switch`, a labeled
-  # block: P3) keep the FallbackArm forms below.
+  # (IsControlFlowFallback). A `switch` or a labeled block is a Primary (P3), so it is the plain operand; a `{ … }`
+  # block is the FallbackArm below.
   - derivation: leftmost
     rules:
       - { lhs: Bitwise, rhs: [Bitwise, 'orelse', BitShift], action: orElse }
       - { lhs: Bitwise, rhs: [Bitwise, 'catch', BitShift],  action: catchOp }
       - { lhs: Bitwise, rhs: [Bitwise, 'catch', '|', IDENT, '|', BitShift], action: catchCapture }
-      # STATEMENT-shaped fallbacks (road-to-zig-std: `catch |err| switch (err) {…}` alone is 498 sites in the pinned std,
-      # `catch {…}` 150, `orelse {…}` 105): a braced block, a `switch` whose prongs yield the payload type or jump, or a
-      # labeled block. Each opens with `{` / `switch` / a label, none in FIRST(BoolOr), so it is one token of lookahead.
-      - { lhs: OrElse, rhs: [Bitwise, 'orelse', FallbackArm],                  action: orElseArm }
-      - { lhs: OrElse, rhs: [Bitwise, 'catch', FallbackArm],                   action: catchArm }
-      - { lhs: OrElse, rhs: [Bitwise, 'catch', '|', IDENT, '|', CaptureArm],   action: catchCaptureArm }
+      # A BLOCK fallback (`catch {…}` 150 sites in the pinned std, `orelse {…}` 105): zig's Block is a PrimaryExpr, so the
+      # fallback is an operand like any other and the result takes the operators after it (std's
+      # debug/SelfInfo/Windows.zig: `getPdbPath() catch { return error.InvalidDebugInfo; } orelse { … }`). A `{` is not in
+      # FIRST(BitShift), so it is one token of lookahead; the block ends in `}`, so it needs no open twin.
+      - { lhs: Bitwise, rhs: [Bitwise, 'orelse', FallbackArm],                 action: orElseArm }
+      - { lhs: Bitwise, rhs: [Bitwise, 'catch', FallbackArm],                  action: catchArm }
+      - { lhs: Bitwise, rhs: [Bitwise, 'catch', '|', IDENT, '|', CaptureArm],  action: catchCaptureArm }
       - { lhs: OrElse, rhs: [BoolOr] }
 
-  # The statement-shaped fallback arms. `rightmost` so the `:` after a labeled block's label shifts.
+  # The block fallback arm.
   - derivation: rightmost
     rules:
       - { lhs: FallbackArm, rhs: [Block],                       action: fbBlock }
@@ -927,6 +950,7 @@ productions:
     rules:
       - { lhs: BitShift, rhs: [BitShift, '<<', Add], action: shl }
       - { lhs: BitShift, rhs: [BitShift, '>>', Add], action: shr }
+      - { lhs: BitShift, rhs: [BitShift, '<<|', Add], action: shlSat }
       - { lhs: BitShift, rhs: [Add] }
 
   - derivation: leftmost
@@ -1084,6 +1108,10 @@ productions:
       # a prong value or `if` arm, and the layout forms (`extern struct {…}` / `extern union {…}` C-ABI records, `packed
       # struct(u8) {…}` / `packed union {…}` bit fields; a backing integer is allowed after either layout and only `packed` uses
       # it). The named declarations (`const E = enum {…};`) keep their own forms on `;`.
+      # `opaque { … }` (zig's ContainerDeclType): a type of unknown size, whose body holds declarations only (std's
+      # c/darwin/dispatch.zig: `opaque { pub const retain = dispatch_retain; … }`). The body is the struct body's member
+      # list; a field in it is zig's error, which lowering reports.
+      - { lhs: Type, rhs: ['opaque', '{', FieldDecls?, '}'], action: opaqueType }
       - { lhs: Type, rhs: ['enum', '{', EnumFields?, '}'],   action: inlineEnumType }
       - { lhs: Type, rhs: ['enum', '(', Type, ')', '{', EnumFields?, '}'], action: inlineEnumTypeTyped }
       - { lhs: Type, rhs: [UnionHead, '{', UnionVariants, '}'], action: inlineUnion }
@@ -1140,14 +1168,20 @@ productions:
       - { lhs: ErrUnion, rhs: [Suffix, '!', Type], action: errUnion }
       - { lhs: ErrUnion, rhs: [Suffix] }
 
-  # Tuple-TYPE element list (Milestone G) — comma-separated bare Types, clean trailing comma
+  # Tuple-TYPE element list (Milestone G) — comma-separated fields, clean trailing comma
   # (same shape as FieldInits). Nested tuple types compose (a `Type` element may itself be a
-  # tuple); arity is bounded in lowering, not here.
+  # tuple); arity is bounded in lowering, not here. A field is zig's ContainerField with no name: `comptime? Type
+  # (= Expr)?` (std's zon/parse.zig: `struct { f32, comptime f32 = 1.5 }`). A plain Type is the element itself, so the
+  # existing tuple lowering sees what it always did. After `struct {`, `comptime` starts a named field or a tuple
+  # field alike, and the `:` after the name decides.
   - derivation: leftmost
     rules:
-      - { lhs: TupleTypes, rhs: [TupleTypes, ',', Type], action: tupleTypesCons }
-      - { lhs: TupleTypes, rhs: [Type],                  action: tupleTypesOne }
-      - { lhs: TupleTypes, rhs: [TupleTypes, ','],       action: tupleTypesTrail }
+      - { lhs: TupleTypes, rhs: [TupleTypes, ',', TupleField], action: tupleTypesCons }
+      - { lhs: TupleTypes, rhs: [TupleField],                  action: tupleTypesOne }
+      - { lhs: TupleTypes, rhs: [TupleTypes, ','],             action: tupleTypesTrail }
+      - { lhs: TupleField, rhs: [Type] }
+      - { lhs: TupleField, rhs: [Type, FieldDefault],          action: tupleFieldDefault }
+      - { lhs: TupleField, rhs: ['comptime', Type, FieldDefault?], action: tupleFieldComptime }
 
   # Function-pointer-TYPE param list — each param is OPTIONALLY named: a bare `Type` (the common
   # unnamed form `fn (i32) i32`) or `IDENT : Type` (named, the name ignored). Distinct from a fn-DEF
@@ -1289,6 +1323,9 @@ productions:
       # `*allowzero anyopaque` (std's c/netbsd.zig): address 0 is allowed. Dotcc's pointers are raw, so it is a no-op attribute
       # in the same slot as an alignment.
       - { lhs: PtrAlign, rhs: ['allowzero'], action: ptrAllowzero }
+      # `*addrspace(.input) @Vector(4, f32)` (std's gpu.zig): the address space a pointer lives in, which a managed target
+      # does not have. A no-op attribute in the same slot.
+      - { lhs: PtrAlign, rhs: ['addrspace', '(', Expr, ')'], action: ptrAddrspace }
 
   - derivation: none
     rules:
@@ -1410,8 +1447,8 @@ productions:
       # top-level `externFnProto`'s shape. Parsed and dropped: a call to one is an unresolved name, loudly.
       - { lhs: ContainerDeclaration, rhs: [pub?, 'extern', STRING?, 'fn', IDENT, '(', Params?, ')', CallConv, Type, ';'], action: memberExternFn }
       # The `extern var` member twin (std's c.zig: `extern threadlocal var errno: c_int;` in a container), dropped the same way.
-      - { lhs: ContainerDeclaration, rhs: [pub?, 'extern', STRING?, threadlocal?, 'var', IDENT, ':', AType, ';'], action: memberExternVar }
-      - { lhs: ContainerDeclaration, rhs: [pub?, 'extern', STRING?, 'const', IDENT, ':', AType, ';'], action: memberExternConst }
+      - { lhs: ContainerDeclaration, rhs: [pub?, 'extern', STRING?, threadlocal?, 'var', IDENT, ':', AType, DeclMods?, ';'], action: memberExternVar }
+      - { lhs: ContainerDeclaration, rhs: [pub?, 'extern', STRING?, 'const', IDENT, ':', AType, DeclMods?, ';'], action: memberExternConst }
       # A container-level `comptime { … }` block (hash_map.zig's `comptime { assert(@sizeOf(Metadata) == 1); }`):
       # analysis-only, dropped like the top-level form (topComptime). `comptime` starts no other member.
       - { lhs: ContainerDeclaration, rhs: ['comptime', Block],      action: memberComptime }
@@ -1443,26 +1480,25 @@ productions:
 
   - derivation: none
     rules:
-      - { lhs: FieldDecl, rhs: [FieldName, ':', AType], action: structField }
-      # A field with a DEFAULT value (`bit_len: usize = 0,` / `next: ?*Node = null,`) — 29 std files
-      # fail first on the `=`, and it's a hard requirement for the file-is-a-struct idiom. After
-      # `IDENT : Type` the `=` (default) vs `,`/`}` (bare field) decision is a clean 1-token split.
-      # The default is materialized only for fields OMITTED from a `.{…}` literal (see BuildStructInit).
-      # The default is a value-position RhsExpr, so an `if` may choose it (debug.zig's SafetyLock:
-      # `state: State = if (runtime_safety) .unlocked else .unknown,`); `,` / `}` still end it.
-      - { lhs: FieldDecl, rhs: [FieldName, ':', AType, '=', RhsExpr], action: structFieldDefault }
-      # A field with an alignment (std.crypto.sha2's `s: [8]u32 align(16),`). After the type, `align` is a 1-token shift
-      # (it is never in FOLLOW(AType) inside a field list otherwise).
-      - { lhs: FieldDecl, rhs: [FieldName, ':', AType, 'align', '(', Expr, ')'],                  action: structFieldAligned }
-      - { lhs: FieldDecl, rhs: [FieldName, ':', AType, 'align', '(', Expr, ')', '=', RhsExpr], action: structFieldAlignedDefault }
+      # A container field, zig's ContainerField: `comptime? name : Type ByteAlign? (= Expr)?`.
+      # - `comptime` (std.mem's `comptime comptime_field: u8 = 5,`): a field whose value is its default, known at
+      #   compile time. After `comptime`, a name and `:` is a field and `{` the member `comptime { … }` block.
+      # - The alignment (std.crypto.sha2's `s: [8]u32 align(16),`): after the type, `align` is a 1-token shift (it is
+      #   never in FOLLOW(AType) inside a field list otherwise).
+      # - The default (`bit_len: usize = 0,` / `next: ?*Node = null,`), materialized only for a field OMITTED from a
+      #   `.{…}` literal (see BuildStructInit). It is a value-position RhsExpr, so an `if` may choose it (debug.zig's
+      #   SafetyLock: `state: State = if (runtime_safety) .unlocked else .unknown,`); `,` / `}` still end it.
+      # Each optional part is null when absent, so a field is one record.
+      - { lhs: FieldDecl, rhs: [comptime?, FieldName, ':', AType, FieldAlign?, FieldDefault?], action: structField }
       # A field whose TYPE is a comptime `switch` (std.mem.SplitIterator's `delimiter: switch (delimiter_type) { … },`) is
       # the plain field rule since zig-grammar-peg P3 (a `switch` is a Primary, so a Type). A comptime `if`
       # (std's Io/Threaded.zig: `old_sig_io: if (have_sig_io) posix.Sigaction else void,`) needs its own rule: the condition
       # must fold, as in a type alias (LowerType folds it). A field slot only: as a general AType (a return type, followed by
-      # `{`) an `if` would clash with a struct-literal arm. It shares the plain field records, with or without a default
+      # `{`) an `if` would clash with a struct-literal arm. It is the same record
       # (std's compress/flate/Decompress.zig: `linked: if (…) void else [alphabet_size]struct { … } = undefined,`).
-      - { lhs: FieldDecl, rhs: [FieldName, ':', IfExpr], action: structField }
-      - { lhs: FieldDecl, rhs: [FieldName, ':', IfExpr, '=', RhsExpr], action: structFieldDefault }
+      - { lhs: FieldDecl, rhs: [comptime?, FieldName, ':', IfExpr, FieldDefault?], action: structFieldIf }
+      - { lhs: FieldAlign, rhs: ['align', '(', Expr, ')'], action: fieldAlign }
+      - { lhs: FieldDefault, rhs: ['=', RhsExpr], action: fieldDefault }
 
   # Enum body as a MEMBER list (right-recursive over EnumMember, like struct's FieldDecls) — so
   # value members, methods (`fn`/`pub fn`), and consts (`const Self = @This();`) interleave. The
@@ -1532,10 +1568,12 @@ productions:
 
   - derivation: none
     rules:
-      - { lhs: UnionVariant, rhs: [FieldName, ':', AType], action: unionVariantPayload }
+      # A field may carry `= value`, the tag's value in a `union(enum(T))` (std's os/windows.zig: `Character: CHAR = 1,`),
+      # zig's ContainerField again. Null when absent.
+      - { lhs: UnionVariant, rhs: [FieldName, ':', AType, FieldDefault?], action: unionVariantPayload }
       # A payload chosen by a comptime `if` (std's Progress.zig: `windows_api: if (is_windows) WindowsApi else noreturn,`): the
       # same record, whose type lowers through LowerType's `if` fold.
-      - { lhs: UnionVariant, rhs: [FieldName, ':', IfExpr], action: unionVariantPayload }
+      - { lhs: UnionVariant, rhs: [FieldName, ':', IfExpr, FieldDefault?], action: unionVariantPayload }
       - { lhs: UnionVariant, rhs: [IDENT],             action: unionVariantVoid }
       # `undefined,` / `null,` (std.builtin.Type's void variants): zig's primitive VALUES, but plain names in a
       # container's field list. dotcc lexes them as keywords, so the variant admits them by name.
@@ -1570,12 +1608,13 @@ productions:
       - { lhs: FieldInit, rhs: [VoidElem], action: fieldInitPositional }
       - { lhs: VoidElem, rhs: ['{', '}'], action: voidValue }
 
-  # Inline assembly (std.crypto.sha2's SHA-NI / ARMv8 paths). The template is a STRING (zig allows any comptime
-  # string; std always writes a literal), so an Expr is never followed by `:` here, keeping the label invariant.
+  # Inline assembly (std.crypto.sha2's SHA-NI / ARMv8 paths), zig's `asm volatile? ( Expr AsmOutput? )`. The template
+  # is any comptime string expression: a literal, a concatenation (`"mrs %[ret], " ++ feat_reg`, std's
+  # zig/system/linux.zig), a `switch` or an `if` over the target (Thread.zig, debug/cpu_context.zig). After it, `:`
+  # opens the operand sections; a label is a LABEL token, so an Expr followed by `:` starts nothing else.
   - derivation: none
     rules:
-      - { lhs: AsmExpr, rhs: ['asm', '(', STRING, AsmTail, ')'],             action: asmExpr }
-      - { lhs: AsmExpr, rhs: ['asm', 'volatile', '(', STRING, AsmTail, ')'], action: asmVolatileExpr }
+      - { lhs: AsmExpr, rhs: ['asm', volatile?, '(', Expr, AsmTail, ')'],    action: asmExpr }
       - { lhs: AsmTail, rhs: [],                                              action: asmTailNone }
       - { lhs: AsmTail, rhs: [':', AsmItems],                                 action: asmTailOut }
       - { lhs: AsmTail, rhs: [':', AsmItems, ':', AsmItems],                  action: asmTailIn }
@@ -1617,6 +1656,7 @@ productions:
       - { lhs: BitwiseO, rhs: [BitShiftO] }
       - { lhs: BitShiftO, rhs: [BitShift, '<<', AddO], action: shl }
       - { lhs: BitShiftO, rhs: [BitShift, '>>', AddO], action: shr }
+      - { lhs: BitShiftO, rhs: [BitShift, '<<|', AddO], action: shlSat }
       - { lhs: BitShiftO, rhs: [AddO] }
       - { lhs: AddO, rhs: [Add, '+', MulO], action: add }
       - { lhs: AddO, rhs: [Add, '-', MulO], action: sub }
@@ -1664,13 +1704,18 @@ productions:
     rules:
       - { lhs: OpenPrimary, rhs: [JumpExpr] }
       - { lhs: JumpExpr, rhs: ['return', RhsExpr?],            action: returnExpr }
-      - { lhs: JumpExpr, rhs: ['break'],                       action: fbBreak }
-      - { lhs: JumpExpr, rhs: ['break', ':', IDENT],           action: fbBreakLabel }
       - { lhs: JumpExpr, rhs: ['break', ':', IDENT, RhsExpr],  action: fbBreakLabelValue }
       - { lhs: JumpExpr, rhs: ['break', RhsExpr],              action: fbBreakValue }
-      - { lhs: JumpExpr, rhs: ['continue'],                    action: fbContinue }
-      - { lhs: JumpExpr, rhs: ['continue', ':', IDENT],        action: fbContinueLabel }
       - { lhs: JumpExpr, rhs: ['continue', ':', IDENT, RhsExpr], action: fbContinueLabelValue }
+      # A `break` / `continue` with NO value ends where it stands, so it is a CLOSED primary and an operator may follow
+      # it: `mod.unwind orelse break :unwind catch break :unwind` (std's debug/SelfInfo/Elf.zig), where zig's `Expr?`
+      # after `break :unwind` finds no expression at `catch`. In this LAST group for the reason above: where a value can
+      # start (`break :blk -1`, `break (x)`, `break :blk .{ … }`), shifting it outranks reducing the value-less form,
+      # which is zig's greedy `Expr?`.
+      - { lhs: Primary, rhs: ['break'],                        action: fbBreak }
+      - { lhs: Primary, rhs: ['break', ':', IDENT],            action: fbBreakLabel }
+      - { lhs: Primary, rhs: ['continue'],                     action: fbContinue }
+      - { lhs: Primary, rhs: ['continue', ':', IDENT],         action: fbContinueLabel }
 
   # ===== the else-less `if` expression (zig-grammar-peg P3a) =====
   # zig's IfExpr has an optional `else`: `if (opt) |p| if (n > 0) { … };` (std's Io/Writer.zig), `=> |lib| if (c) return true,`
@@ -1751,6 +1796,8 @@ lexer:
     - { symbol: 'callconv', match: 'callconv' }
     - { symbol: 'align',    match: 'align' }
     - { symbol: 'allowzero', match: 'allowzero' }
+    - { symbol: 'addrspace', match: 'addrspace' }
+    - { symbol: 'opaque',   match: 'opaque' }
     - { symbol: 'asm',      match: 'asm' }
     - { symbol: 'volatile', match: 'volatile' }
     - { symbol: 'linksection', match: 'linksection' }
@@ -1796,6 +1843,9 @@ lexer:
     - { symbol: '/=',  match: '/=' }
     - { symbol: '%=',  match: '%=' }
     - { symbol: '<<=', match: '<<=' }
+    # Saturating shift left (`<<|`, `<<|=`): longest-match picks them over `<<` / `<<=`.
+    - { symbol: '<<|=', match: '<<\|=' }
+    - { symbol: '<<|',  match: '<<\|' }
     - { symbol: '>>=', match: '>>=' }
     - { symbol: '&=',  match: '&=' }
     - { symbol: '|=',  match: '\|=' }
@@ -1875,8 +1925,9 @@ lexer:
     # multiline strings process NO escapes). Backslash leads no other Zig token, so a `\\`-led
     # lexeme is unambiguous; disjoint lead from the quoted form (`"`), order vs it is moot. A
     # trailing CRLF `\r` is absorbed by `[^\n]*` (which excludes only `\n`) and stripped in the
-    # decoder, so the line separator is a bare `\n`.
-    - { symbol: STRING,  match: '\\\\[^\n]*([\n][ \t]*\\\\[^\n]*)*' }
+    # decoder, so the line separator is a bare `\n`. Comment lines may sit between its lines (std's pie.zig
+    # comments an `asm` template line by line); they are no part of the string, and the decoder skips them.
+    - { symbol: STRING,  match: '\\\\[^\n]*([\n][ \t]*(//[^\n]*[\n][ \t]*)*\\\\[^\n]*)*' }
     # Quoted string: a backslash escape (`\n` `\t` `\\` `\"` `\xNN` `\u{…}` …) or any
     # non-quote/non-backslash char. The `\\.` arm makes `\"` an escaped quote (not a terminator)
     # — fixing the old `"[^"]*"` which truncated at the first `\"`. `\u{…}` rides the `\\.`+chars.
@@ -1886,8 +1937,10 @@ lexer:
     - { symbol: CHAR,    match: '''(\\u\{[0-9a-fA-F_]+\}|\\x[0-9a-fA-F][0-9a-fA-F]|\\.|[^''\\])''' }
     # Numeric literals — Zig radix prefixes `0x`/`0o`/`0b` and `_` digit separators (UNLIKE C's
     # bare-`0` octal and `'` separator; decoded Zig-side in DecodeZigInt). FLOAT before INTEGER so
-    # `0x1.8p3` / `1.5` win over the integer prefix. Hex float uses a `p`/`P` binary exponent.
-    - { symbol: FLOAT,   match: '0x[0-9a-fA-F_]+(\.[0-9a-fA-F_]+)?[pP][+\-]?[0-9_]+' }
+    # `0x1.8p3` / `1.5` win over the integer prefix. Hex float uses a `p`/`P` binary exponent, which is optional after
+    # a fraction (`0x103.70`, std's zon/parse.zig) and what makes it a float without one (`0x1p3`).
+    - { symbol: FLOAT,   match: '0x[0-9a-fA-F_]+\.[0-9a-fA-F_]+([pP][+\-]?[0-9_]+)?' }
+    - { symbol: FLOAT,   match: '0x[0-9a-fA-F_]+[pP][+\-]?[0-9_]+' }
     - { symbol: FLOAT,   match: '[0-9][0-9_]*\.[0-9_]+([eE][+\-]?[0-9_]+)?' }
     # Exponent-only decimal float `1e10` / `4E2` — a decimal exponent with NO fraction dot (Zig allows
     # it; genuinely common). Longest-match keeps `0x1e5` a hex INTEGER (the hex rule matches through

@@ -250,6 +250,7 @@ internal sealed partial class ZigLowering
         Zig.ModOp a => IsPureNumericShape(a.Arg0) && IsPureNumericShape(a.Arg2),
         Zig.Shl a => IsPureNumericShape(a.Arg0) && IsPureNumericShape(a.Arg2),
         Zig.Shr a => IsPureNumericShape(a.Arg0) && IsPureNumericShape(a.Arg2),
+        Zig.ShlSat a => IsPureNumericShape(a.Arg0) && IsPureNumericShape(a.Arg2),
         Zig.BuiltinCall { Arg0: var bTok, Arg2: { } bArgs } => Tok(bTok) is "@log2" or "@log10" or "@log" or "@sqrt" or "@exp"
                 or "@floor" or "@ceil" or "@trunc" or "@typeInfo" or "@bitSizeOf" or "@sizeOf" or "@TypeOf"
             && Flatten(bArgs).All(IsPureNumericShape),

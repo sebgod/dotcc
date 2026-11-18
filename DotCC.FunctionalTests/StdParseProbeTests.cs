@@ -101,7 +101,7 @@ public sealed class StdParseProbeTests
             }
             bucket.Count++;
             bucket.Example ??= Relative(stdDir, file);
-            failingFiles.Add(Relative(stdDir, file));
+            failingFiles.Add(Relative(stdDir, file) + Where(result.Message));
         }
 
         var report = BuildReport(stdDir, how, files.Count, ok, buckets, failingFiles);
@@ -163,6 +163,14 @@ public sealed class StdParseProbeTests
         }
     }
 
+    /// <summary>Where a diagnostic fired, as a <c>:line:column</c> suffix (empty when the
+    /// message carries no position).</summary>
+    private static string Where(string? message)
+    {
+        var m = Regex.Match(message ?? "", @"at line (\d+), column (\d+)");
+        return m.Success ? $":{m.Groups[1].Value}:{m.Groups[2].Value}" : "";
+    }
+
     private static string Relative(string root, string file)
     {
         var rel = Path.GetRelativePath(root, file);
@@ -199,8 +207,9 @@ public sealed class StdParseProbeTests
             // the bucket key drops — invaluable when picking the next brick.
             sb.Append($"       msg: {b.ExampleMessage}\n");
         }
-        // Every failing file, sorted: a grammar change can fix some files and break others while the count still rises,
-        // and the buckets show one example each. In the committed report, a `git diff` of this list shows both.
+        // Every failing file, sorted, with where its first error is (`:line:column`): a grammar change can fix some files
+        // and break others while the count still rises, and the buckets show one example each. In the committed report,
+        // a `git diff` of this list shows both, and a file whose first error moved further down.
         sb.Append('\n');
         sb.Append("## Failing files\n");
         foreach (var f in failingFiles.OrderBy(f => f, StringComparer.Ordinal)) { sb.Append($"std/{f}\n"); }
