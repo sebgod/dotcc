@@ -72,6 +72,7 @@ cs-keyword-idents
 ctype-predicates
 declaration-specifiers
 declarator-lists
+declarators
 deref-incr-decr
 designated-paths
 digit-separators
