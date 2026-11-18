@@ -139,7 +139,9 @@ public sealed class GccWslOracleTests
             includeDirs: new[] { dir },
             defines: null,
             emit: EmitMode.Csproj,
-            dialect: CDialect.Parse(match.std));
+            dialect: CDialect.Parse(match.std),
+            // The same build FixtureTests gives it (a `posix-paths.txt` fixture is -fposix-paths).
+            posixPaths: match.posixPaths);
         var dotccOut = FixtureRunner.CompileAndRun(emitted, Array.Empty<string>())
             .ReplaceLineEndings("\n").TrimEnd('\n');
 
