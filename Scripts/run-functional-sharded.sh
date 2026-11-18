@@ -51,13 +51,15 @@ PREFIX="DotCC."
 
 # The data-driven theories: sharded by ROW inside every host (TestShard.Rows). Each needs at least N rows
 # (TestShard refuses fewer, since a host would get none); the 4-row Dotcc_matches_zig_mixed is left whole.
+# EVERY theory whose data goes through TestShard.Rows must be listed here: one left out is dealt to a single
+# host like any other method, which then runs only that host's slice of its rows, and the rest never run.
 SHARDED=()
 for s in \
   DotCC.FunctionalTests.FixtureTests.Fixture_emits_csharp_runnable_with_matching_stdout \
   DotCC.FunctionalTests.ZigOracleTests.Dotcc_matches_zig \
   DotCC.FunctionalTests.ZigOracleTests.Dotcc_matches_zig_multifile \
   DotCC.FunctionalTests.GccWslOracleTests.Dotcc_matches_gcc_output \
-  DotCC.FunctionalTests.MsvcOracleTests.Dotcc_matches_msvc_output
+  DotCC.FunctionalTests.MsvcOracleTests.Dotcc_matches_msvc_output   DotCC.FunctionalTests.WatFixtureTests.A_fixture_is_listed_exactly_when_wat_compiles_it   DotCC.FunctionalTests.WatFixtureTests.A_listed_fixture_runs_under_wasm_like_the_csharp_build
 do
   [[ $s == "$PREFIX"* ]] && SHARDED+=("$s")
 done
