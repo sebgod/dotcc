@@ -664,39 +664,13 @@ internal sealed partial class IrBuilder
         return t;
     }
 
-    /// <summary>A pointer-to-array declaration <c>T (*p)[N]…</c> — a pointer whose
-    /// pointee is an array (a row pointer into a 2-D array). Lowered to a flat
-    /// pointer that strides by the array's extent; the type carries the nested array
-    /// pointee so subscript striding and <c>sizeof</c> resolve.</summary>
-    private DeclStmt BuildPtrToArr(Item typeItem, Item nameItem, Item dimsItem, Item? initItem)
-    {
-        var elem = ResolveType(typeItem);
-        var dims = TryConstDims(dimsItem) ?? throw new IrUnsupportedException("pointer-to-array needs constant dimensions");
-        var type = new CType.Pointer(MakeArrayType(elem, dims));
-        var sym = _symbols.Declare(new Symbol { Name = Tok(nameItem), Kind = SymKind.Var, Type = type, Storage = Storage.Auto });
-        return new DeclStmt(new[] { new LocalDecl(sym, initItem is { } ii ? BuildExpr(ii) : null) });
-    }
-
-    /// <summary>The constant dimension sizes of an <c>ArrDims</c> node, or null when
-    /// any dimension isn't an integer constant expression (a VLA-ish extent).</summary>
-    private List<int>? TryConstDims(Item arrDims)
-    {
-        var outp = new List<int>();
-        foreach (var d in BuildArrDims(arrDims))
-        {
-            if (ConstEval(d) is { } n) { outp.Add((int)n); }
-            else { return null; }
-        }
-        return outp;
-    }
-
     // ---- compound literals (C99 / C23) -----------------------------------
 
-    /// <summary>A compound literal's type name. C23 lets it take a storage class
+    /// <summary>Check a compound literal's specifiers. C23 lets it take a storage class
     /// (<c>static</c>, <c>constexpr</c>, <c>register</c>, 6.5.2.5p5), which would give
     /// the object a lifetime dotcc does not model yet: a loud cut. A function specifier
     /// is gcc's parse error.</summary>
-    private Item CompoundLitType(Item typeItem)
+    private void CompoundLitType(Item typeItem)
     {
         if (FirstDeclSpec(typeItem) is { } s)
         {
@@ -710,16 +684,14 @@ internal sealed partial class IrBuilder
                 throw new IrUnsupportedException($"a compound literal declared '{Spelling(s.Kw)}' (C23 6.5.2.5)");
             }
         }
-        return typeItem;
     }
 
     /// <summary>A struct/union (or scalar) compound literal <c>(T){ … }</c> — an
     /// unnamed object usable in any expression position. A struct lowers to a
     /// <see cref="StructInit"/> (<c>new T { … }</c>); a scalar/pointer/enum to a
     /// single-value cast (<c>(T)(v)</c>).</summary>
-    private CExpr BuildCompoundLit(Item typeItem, Item initListItem)
+    private CExpr BuildCompoundLit(CType type, Item initListItem)
     {
-        var type = ResolveType(typeItem);
         if ((type.Unqualified as CType.Named)?.Name is { } canonical && _structFields.ContainsKey(canonical))
         {
             var lit = BuildStructPositional(type, ParseInitList(initListItem));
@@ -731,16 +703,41 @@ internal sealed partial class IrBuilder
         throw new IrUnsupportedException($"compound literal of non-aggregate type '{type.Describe()}' needs exactly one value");
     }
 
-    private CExpr BuildCompoundLitEmpty(Item typeItem) =>
-        new DefaultLit { Type = ResolveType(typeItem) };
+    /// <summary>A compound literal <c>(T){ … }</c> (C99 6.5.2.5): an array type name
+    /// gives the array literal, any other the struct / union / scalar one, and a null
+    /// InitList the C23 empty <c>(T){}</c>.</summary>
+    private CExpr BuildCompoundLiteral(C.CompoundLit c)
+    {
+        if (c.Arg1.Content is not C.TypeNameOf tn) { throw new IrUnsupportedException(TypeName(c.Arg1.Content)); }
+        CompoundLitType(tn.Arg0);
+        var type = AbstractType(tn);
+        if (c.Arg4 is not { } init)
+        {
+            if (type.Unqualified is CType.Array) { throw new IrUnsupportedException("an empty array compound literal"); }
+            return Gated(2023, "empty initializer", c.Arg1, new DefaultLit { Type = type });
+        }
+        return Gated(1999, "compound literals", c.Arg1,
+            type.Unqualified is CType.Array arr ? BuildArrayCompoundLit(arr, init) : BuildCompoundLit(type, init));
+    }
 
     /// <summary>An array compound literal <c>(T[]){…}</c> / <c>(T[N]){…}</c> — a
     /// <see cref="StackArray"/> value (codegen: a <c>stackalloc</c>, valid in
     /// initializer position).</summary>
-    private CExpr BuildArrayCompoundLit(Item elemTypeItem, Item? dimsItem, Item initListItem)
+    private CExpr BuildArrayCompoundLit(CType.Array arr, Item initListItem)
     {
-        var elem = ResolveType(elemTypeItem);
-        var dims = dimsItem is { } di ? TryConstDims(di) : null;
+        // The element the flat storage holds, and the constant bounds over it (none
+        // for `(T[]){…}`, which the initializer sizes).
+        List<int>? dims = null;
+        CType elem = arr.Element;
+        if (arr.Count is { } outer)
+        {
+            dims = new List<int> { outer };
+            while (elem is CType.Array { Count: { } n } inner) { dims.Add(n); elem = inner.Element; }
+        }
+        else if (elem is CType.Array)
+        {
+            throw new IrUnsupportedException("an array compound literal with an open bound over array rows");
+        }
         var elems = BuildArrayElems(elem, dims, ParseInitList(initListItem));
         return new StackArray(elem, elems) { Type = new CType.Array(elem, elems.Count) };
     }

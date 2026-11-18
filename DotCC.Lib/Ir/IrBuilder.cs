@@ -1046,22 +1046,28 @@ internal sealed partial class IrBuilder
 
     private readonly record struct FnSig(CType Return, string Name, List<ParamInfo> Params, bool Variadic, bool IsStatic);
 
-    private FnSig ExtractFnSig(Item it) => it.Content switch
+    /// <summary>A function definition's signature: its declarator must be a function
+    /// declarator (<c>f(int a)</c>, <c>(f)(int a)</c>, a function returning a function
+    /// pointer <c>(*signal(int, void (*)(int)))(int)</c>), whose parameter list
+    /// (the one after the name) names the parameters and whose type gives the
+    /// return type.</summary>
+    private FnSig ExtractFnSig(Item it)
     {
-        // A null param list (Arg3 / Arg5 / Arg9) is `()`, the optional ParamList absent.
-        C.FnSig n => new(ResolveType(n.Arg0), Tok(n.Arg1), BuildParams(n.Arg3, out var v0), v0, DeclaresStatic(n.Arg0)),
-        // Parenthesized declarator name `T (name)(args)` — identical to
-        // `T name(args)`; the parens are pure grouping around the name (public
-        // headers wrap API names so a same-named function-like macro can't expand
-        // at the declaration). Name is Arg2, the param list Arg5.
-        C.FnSigParen n => new(ResolveType(n.Arg0), Tok(n.Arg2), BuildParams(n.Arg5, out var vp), vp, DeclaresStatic(n.Arg0)),
-        // Function returning a function pointer: `Ret (*name(params))(fnPtrParams)`
-        // (e.g. <signal.h>'s `void (*signal(int, void(*)(int)))(int)`). The result
-        // type is the function-pointer `Ret (*)(fnPtrParams)`; name + params are the
-        // outer declarator's.
-        C.FnSigRetFnPtr n => new(FnPtrType(n.Arg0, n.Arg9), Tok(n.Arg3), BuildParams(n.Arg5, out var vr), vr, DeclaresStatic(n.Arg0)),
-        _ => throw new IrUnsupportedException(TypeName(it.Content)),
-    };
+        if (it.Content is not C.FnSig n) { throw new IrUnsupportedException(TypeName(it.Content)); }
+        var d = DeclaratorType(ResolveType(n.Arg0), n.Arg1);
+        if (d.Name is not { } name) { throw new IrUnsupportedException(TypeName(n.Arg1.Content)); }
+        if (d.Params is not { } ps || d.Type is not CType.Func { IsFunctionType: true } fn)
+        {
+            // `int x { … }`: a body after a declarator that declares no function. gcc's
+            // wording; reported, then bound as a function of no parameters so the rest
+            // of the unit still binds.
+            Diagnostics.Add(new Diagnostic(Severity.Error,
+                $"expected '=', ',' or ';' before '{{' token (a function body after '{Tok(name)}', which is not a function declarator)",
+                SrcPos.From(name), _file));
+            return new(d.Type, Tok(name), new List<ParamInfo>(), false, DeclaresStatic(n.Arg0));
+        }
+        return new(fn.Return, Tok(name), ps, d.Variadic, DeclaresStatic(n.Arg0));
+    }
 
     /// <summary>The parameters of a <c>ParamList</c>, with <paramref name="variadic"/>
     /// set by a trailing <c>...</c>. A null list (the optional ParamList of an empty
@@ -1079,30 +1085,30 @@ internal sealed partial class IrBuilder
                 case C.ParamsCons c: Walk(c.Arg0); Walk(c.Arg2); break;
                 case C.ParamsOne o: Walk(o.Arg0); break;
                 case C.ParamsVararg v: Walk(v.Arg0); vararg = true; break;
-                // A param whose TYPE resolves to an array (an array-typedef
-                // alias like chibi's `sexp_abi_identifier_t`) decays to a
-                // pointer exactly like the explicit `T name[]` forms below
-                // (C99 §6.7.5.3p7 applies through a typedef too).
+                // A parameter of any declarator form (C11 6.7.6.3). One that declares
+                // an array is adjusted to a pointer to its element (p7: the explicit
+                // `T a[]` / `T a[N]`, whose bound is informational, and an
+                // array-typedef alias like chibi's `sexp_abi_identifier_t` alike), one
+                // that declares a function to a pointer to it (p8: `int cmp(int)`,
+                // `void *(func)(Parser *)`).
                 case C.Param p:
-                    CheckParamSpecs(p.Arg0, Tok(p.Arg1));
-                    acc.Add(new(DecayParam(ResolveType(p.Arg0)), Tok(p.Arg1)) { IsRegister = DeclaresRegister(p.Arg0) });
-                    break;
-                case C.ParamUnnamed p: CheckParamSpecs(p.Arg0, null); acc.Add(new(DecayParam(ResolveType(p.Arg0)), "_p" + unnamed++)); break;
-                case C.ParamArrayUnsized p: CheckParamSpecs(p.Arg0, Tok(p.Arg1)); acc.Add(new(new CType.Pointer(ResolveType(p.Arg0)), Tok(p.Arg1))); break;
-                case C.ParamArraySized p: CheckParamSpecs(p.Arg0, Tok(p.Arg1)); acc.Add(new(new CType.Pointer(ResolveType(p.Arg0)), Tok(p.Arg1))); break;
-                // Function-pointer parameter: `Ret (*name)(paramTypes)` and its
-                // `(*const name)` / `(**name)` forms.
-                case C.ParamFnPtrDecl p:
                 {
-                    var (name, type) = FnPtrDeclarator(ResolveType(p.Arg0), p.Arg1, p.Arg2);
+                    var name = Tok(DeclaredName(p.Arg1) ?? throw new IrUnsupportedException(TypeName(p.Arg1.Content)));
                     CheckParamSpecs(p.Arg0, name);
-                    acc.Add(new(type, name));
+                    var declared = DeclaratorType(ResolveType(p.Arg0), p.Arg1);
+                    acc.Add(new(DecayParam(declared.Type), name) { IsRegister = DeclaresRegister(p.Arg0) });
                     break;
                 }
-                // A parameter of function type is a pointer to that function
-                // (C11 6.7.6.3p8): `Ret name(paramTypes)`, `Ret (name)(paramTypes)`.
-                case C.ParamFnType p: CheckParamSpecs(p.Arg0, Tok(p.Arg1)); acc.Add(new(FnPtrTailType(ResolveType(p.Arg0), p.Arg2), Tok(p.Arg1))); break;
-                case C.ParamParenFnType p: CheckParamSpecs(p.Arg0, Tok(p.Arg2)); acc.Add(new(FnPtrTailType(ResolveType(p.Arg0), p.Arg4), Tok(p.Arg2))); break;
+                // An unnamed parameter (`int f(int, char *, int (*)(void))`): a type
+                // name, adjusted the same way; C# requires a name, so it gets one.
+                case C.ParamAbstract p:
+                {
+                    CheckParamSpecs(p.Arg0, null);
+                    var type = ResolveType(p.Arg0);
+                    if (p.Arg1 is { } declarator) { type = DeclaratorType(type, declarator).Type; }
+                    acc.Add(new(DecayParam(type), "_p" + unnamed++));
+                    break;
+                }
                 default: throw new IrUnsupportedException(TypeName(it.Content));
             }
         }
@@ -1317,64 +1323,6 @@ internal sealed partial class IrBuilder
         return CType.Int;
     }
 
-    /// <summary>Build a function-pointer type <c>Ret (*)(params)</c> →
-    /// <see cref="CType.Func"/> (codegen lowers it to <c>delegate*&lt;params, Ret&gt;</c>).
-    /// A lone <c>void</c> parameter list means no parameters.</summary>
-    /// <summary>The fn-ptr type of a raw declarator <c>Ret (*name…)FnPtrTail</c>.</summary>
-    private CType.Func FnPtrTailType(Item retItem, Item tailItem) => FnPtrTailType(ResolveType(retItem), tailItem);
-
-    /// <summary>The fn-ptr type of a raw declarator over an already-resolved return
-    /// type (a DeclItem's return type is the list's base / star-wrapped element).</summary>
-    private CType.Func FnPtrTailType(CType ret, Item tailItem) => tailItem.Content switch
-    {
-        C.FnPtrTail t => FnPtrType(ret, t.Arg1),
-        _ => throw new IrUnsupportedException(TypeName(tailItem.Content)),
-    };
-
-    /// <summary>Whether a <c>FnPtrQuals</c> run (the qualifiers after a declarator's
-    /// <c>*</c>) includes <c>const</c> (the pointer itself is then read-only).
-    /// <c>volatile</c> / <c>restrict</c> have no C# model and are accepted. A null run
-    /// (the optional FnPtrQuals absent) has none.</summary>
-    private static bool QualsHaveConst(Item? quals) => quals?.Content switch
-    {
-        null => false,
-        C.FnPtrQualConst or C.FnPtrQualsConst => true,
-        C.FnPtrQualVolatile or C.FnPtrQualRestrict => false,
-        C.FnPtrQualsVolatile q => QualsHaveConst(q.Arg0),
-        C.FnPtrQualsRestrict q => QualsHaveConst(q.Arg0),
-        { } other => throw new IrUnsupportedException(TypeName(other)),
-    };
-
-    /// <summary>A <c>FnPtrName</c> (<c>(*name)</c> / <c>(*quals name)</c> /
-    /// <c>(**name)</c>) as the fn-ptr type over <paramref name="ret"/>
-    /// (const-qualified for <c>*const</c>, a pointer to it for <c>**</c>).</summary>
-    private (string Name, CType Type) FnPtrDeclarator(CType ret, Item nameItem, Item tailItem)
-    {
-        CType type = FnPtrTailType(ret, tailItem);
-        return nameItem.Content switch
-        {
-            C.FnPtrName n => (Tok(n.Arg3), QualsHaveConst(n.Arg2) ? type.WithQuals(TypeQual.Const) : type),
-            // `(**name)`: a pointer to the function pointer.
-            C.FnPtrNamePtr n => (Tok(n.Arg3), new CType.Pointer(type)),
-            _ => throw new IrUnsupportedException(TypeName(nameItem.Content)),
-        };
-    }
-
-    /// <summary>A fn-ptr array declarator (<c>FnPtrArr</c> / <c>FnPtrArrOpen</c>) over the
-    /// return type and tail: its name, its dimensions (null for <c>[]</c>), and the
-    /// element type (const-qualified for <c>*const</c>).</summary>
-    private (Item Name, Item? Dims, CType Elem) FnPtrArrParts(CType ret, Item arrItem, Item tailItem)
-    {
-        CType elem = FnPtrTailType(ret, tailItem);
-        CType Q(Item? quals) => QualsHaveConst(quals) ? elem.WithQuals(TypeQual.Const) : elem;
-        return arrItem.Content switch
-        {
-            C.FnPtrArr a => (a.Arg3, a.Arg4, Q(a.Arg2)),
-            C.FnPtrArrOpen a => (a.Arg3, null, Q(a.Arg2)),
-            _ => throw new IrUnsupportedException(TypeName(arrItem.Content)),
-        };
-    }
-
     /// <summary>C's dlsym idiom, <c>int (*fn)(int) = (int(*)(int))dlsym(h, "add");</c>:
     /// a native-convention initializer (<c>CType.Func.IsNativeCallConv</c>, set at the
     /// cast of a dlsym call) makes the declared fn-ptr native too, so calls through it
@@ -1388,35 +1336,11 @@ internal sealed partial class IrBuilder
         }
     }
 
-    private CType.Func FnPtrType(Item retItem, Item? paramListItem) => FnPtrType(ResolveType(retItem), paramListItem);
-
-    private CType.Func FnPtrType(CType ret, Item? paramListItem)
-    {
-        var ptypes = new List<CType>();
-        var variadic = false;
-        if (paramListItem is { } pl)
-        {
-            var ps = BuildParams(pl, out variadic);
-            if (!(ps.Count == 1 && ps[0].Type is CType.VoidType))
-            {
-                foreach (var p in ps) { ptypes.Add(p.Type); }
-            }
-        }
-        return new CType.Func(ret, ptypes, variadic);
-    }
-
     // ---- types -----------------------------------------------------------
 
     private CType ResolveType(Item it) => it.Content switch
     {
         C.TypeFromSpec t => ResolveSpecs(CollectSpecs(t.Arg0), SrcPos.From(it)),
-        C.TypePtr t => PointerTo(ResolveType(t.Arg0)),
-        // `int * const p` — the POINTER is const (can't repoint); the pointee is
-        // unchanged. Flag the Pointer so `p = q` trips the const check while
-        // `*p = v` (pointee write) does not. `* volatile` / `* restrict` have no
-        // C# model, so they stay plain pointers (dropped).
-        C.TypePtrQualConst t => PointerTo(ResolveType(t.Arg0)).WithQuals(TypeQual.Const),
-        C.TypePtrQualVolatile t => PointerTo(ResolveType(t.Arg0)),
         // `const T` / `T const` — leading or trailing const qualifier. Carries the
         // flag on the type; drives the const-correctness check + read-only-array RVA.
         C.TypeConstPre t => ResolveType(t.Arg1).WithQuals(TypeQual.Const),
@@ -1436,7 +1360,6 @@ internal sealed partial class IrBuilder
         // Gated C11; the operand is validated but never read.
         C.TypeAlignasType t => AlignasType(t.Arg2, t.Arg4, it),
         C.TypeAlignasExpr t => AlignasExpr(t.Arg2, t.Arg4, it),
-        C.TypePtrQualRestrict t => PointerTo(ResolveType(t.Arg0)),
         C.TypeName t => ResolveTypeName(Tok(t.Arg0)),
         // `enum Tag` as a type — the registered real C# enum, or plain int if the
         // tag is unknown (forward/opaque) or names an anonymous int-constant enum.
@@ -1464,9 +1387,6 @@ internal sealed partial class IrBuilder
         // form unwraps to that type. The expr isn't evaluated (only its type taken).
         C.TypeofExpr t => BuildExpr(t.Arg2).Type.Unqualified,
         C.TypeofType t => TypeNameType(t.Arg2, TypeNameSite.Typeof),
-        // A function-pointer type `Ret (*)(params)` — abstract declarator (a cast
-        // target, a typedef target, a sizeof operand): lowers to CType.Func.
-        C.TypeFnPtr t => FnPtrType(t.Arg0, t.Arg5),
         _ => throw new IrUnsupportedException(TypeName(it.Content)),
     };
 
@@ -1563,35 +1483,24 @@ internal sealed partial class IrBuilder
     private static bool IsStorageClass(SpecKw kw) =>
         kw is SpecKw.Typedef or SpecKw.Extern or SpecKw.Static or SpecKw.Auto or SpecKw.Register;
 
-    /// <summary>One specifier on a declaration's Type spine. <c>AfterPointer</c>: a
-    /// <c>*</c> precedes it (<c>int *static p</c>), which C's grammar does not allow
-    /// (the qualifiers of a pointer are its only specifiers).</summary>
-    private readonly record struct SpecSite(SpecKw Kw, Item At, bool AfterPointer);
+    /// <summary>One specifier on a declaration's Type spine.</summary>
+    private readonly record struct SpecSite(SpecKw Kw, Item At);
 
     /// <summary>The storage-class and function specifiers of a declaration's Type, in
     /// source order, read structurally: each is a DeclSpec prefix or suffix anywhere in
-    /// the qualifier chain, and since the Type group reduces a prefix before a
-    /// following <c>*</c>, a declaration's specifiers sit below its pointers
-    /// (<c>static int *p</c> is <c>(static int) *</c>). An abstract function-pointer
-    /// type carries its return type's (<c>static int (*)(void)</c>).</summary>
+    /// the qualifier chain. A declaration's pointers belong to its declarators, so a
+    /// Type holds every specifier there is (<c>static int *p</c> is <c>static int</c>
+    /// and the declarator <c>*p</c>).</summary>
     private static List<SpecSite> DeclSpecsOf(Item typeItem)
     {
         var acc = new List<SpecSite>();
-        void MarkAfterPointer()
-        {
-            for (var i = 0; i < acc.Count; i++) { acc[i] = acc[i] with { AfterPointer = true }; }
-        }
         var it = typeItem;
         while (true)
         {
             switch (it.Content)
             {
-                case C.TypeDeclSpec t: acc.Add(new(SpecOf(t.Arg0), t.Arg0, false)); it = t.Arg1; break;
-                case C.TypeDeclSpecPost t: acc.Add(new(SpecOf(t.Arg1), t.Arg1, false)); it = t.Arg0; break;
-                case C.TypePtr t: MarkAfterPointer(); it = t.Arg0; break;
-                case C.TypePtrQualConst t: MarkAfterPointer(); it = t.Arg0; break;
-                case C.TypePtrQualVolatile t: MarkAfterPointer(); it = t.Arg0; break;
-                case C.TypePtrQualRestrict t: MarkAfterPointer(); it = t.Arg0; break;
+                case C.TypeDeclSpec t: acc.Add(new(SpecOf(t.Arg0), t.Arg0)); it = t.Arg1; break;
+                case C.TypeDeclSpecPost t: acc.Add(new(SpecOf(t.Arg1), t.Arg1)); it = t.Arg0; break;
                 case C.TypeConstPost t: it = t.Arg0; break;
                 case C.TypeVolatilePost t: it = t.Arg0; break;
                 case C.TypeConstPre t: it = t.Arg1; break;
@@ -1599,7 +1508,6 @@ internal sealed partial class IrBuilder
                 case C.TypeAtomic t: it = t.Arg1; break;
                 case C.TypeAlignasType t: it = t.Arg4; break;
                 case C.TypeAlignasExpr t: it = t.Arg4; break;
-                case C.TypeFnPtr t: it = t.Arg0; break;
                 default:
                     acc.Sort((a, b) => SrcPos.From(a.At).Line != SrcPos.From(b.At).Line
                         ? SrcPos.From(a.At).Line.CompareTo(SrcPos.From(b.At).Line)
@@ -1649,12 +1557,6 @@ internal sealed partial class IrBuilder
         multiple = false;
         foreach (var s in DeclSpecsOf(typeItem))
         {
-            if (s.AfterPointer)
-            {
-                Diagnostics.Add(new Diagnostic(Severity.Error,
-                    $"expected identifier or '(' before '{Spelling(s.Kw)}'", SrcPos.From(s.At), _file));
-                continue;
-            }
             if (!seen.Add(s.Kw))
             {
                 if (s.Kw is not (SpecKw.Inline or SpecKw.Noreturn))
@@ -1724,13 +1626,15 @@ internal sealed partial class IrBuilder
     /// carries a storage class or function specifier.</summary>
     private enum TypeNameSite { Cast, Sizeof, Alignof, Typeof, SpecifierQualifierList }
 
-    /// <summary>Resolve a type name (C11 6.7.7): it takes a specifier-qualifier list, so
-    /// a storage class or function specifier in it is gcc's error for the
-    /// <paramref name="site"/> (a storage class in a cast, <c>sizeof</c> or
-    /// <c>_Alignof</c> is named as such; anything else is a parse error there).</summary>
-    private CType TypeNameType(Item typeItem, TypeNameSite site)
+    /// <summary>Resolve a type name (C11 6.7.7), a specifier-qualifier list and an
+    /// optional abstract declarator. A storage class or function specifier in it is
+    /// gcc's error for the <paramref name="site"/> (a storage class in a cast,
+    /// <c>sizeof</c> or <c>_Alignof</c> is named as such; anything else is a parse error
+    /// there).</summary>
+    private CType TypeNameType(Item typeName, TypeNameSite site)
     {
-        if (FirstDeclSpec(typeItem) is { } s)
+        if (typeName.Content is not C.TypeNameOf tn) { throw new IrUnsupportedException(TypeName(typeName.Content)); }
+        if (FirstDeclSpec(tn.Arg0) is { } s)
         {
             var kw = Spelling(s.Kw);
             var fnSpec = s.Kw is SpecKw.Inline or SpecKw.Noreturn;
@@ -1744,7 +1648,19 @@ internal sealed partial class IrBuilder
             };
             Diagnostics.Add(new Diagnostic(Severity.Error, msg, SrcPos.From(s.At), _file));
         }
-        return ResolveType(typeItem);
+        return AbstractType(tn);
+    }
+
+    /// <summary>The type a type name denotes: its specifiers with its abstract
+    /// declarator applied. A variably modified one (<c>int[n]</c>) is not supported.</summary>
+    private CType AbstractType(C.TypeNameOf tn)
+    {
+        var t = ResolveType(tn.Arg0);
+        if (tn.Arg1 is not { } declarator) { return t; }
+        var parts = DeclaratorType(t, declarator);
+        return parts.VlaDims is null
+            ? parts.Type
+            : throw new IrUnsupportedException("a variably modified type name (an array type with a non-constant bound)");
     }
 
     /// <summary>A function declared with a storage class it cannot have
@@ -1757,8 +1673,6 @@ internal sealed partial class IrBuilder
     private static Item FnSigType(Item fnSig) => fnSig.Content switch
     {
         C.FnSig n => n.Arg0,
-        C.FnSigParen n => n.Arg0,
-        C.FnSigRetFnPtr n => n.Arg0,
         _ => throw new IrUnsupportedException(TypeName(fnSig.Content)),
     };
 
@@ -2489,9 +2403,6 @@ internal sealed partial class IrBuilder
         C.Decl d => BuildBlockDecl(d.Arg0, d.Arg1, forInit: false),
         // `auto x = E;` (C23 type inference). See BuildDeclAutoInfer.
         C.DeclAutoInfer d => BuildDeclAutoInfer(d),
-        // Pointer-to-array `T (*p)[N]` [= init] — a row pointer (multi-dim machinery).
-        C.DeclPtrToArr d => BuildPtrToArr(d.Arg0, d.Arg3, d.Arg5, null),
-        C.DeclPtrToArrInit d => BuildPtrToArr(d.Arg0, d.Arg3, d.Arg5, d.Arg7),
         _ => throw new IrUnsupportedException(TypeName(it.Content)),
     };
 
@@ -2573,7 +2484,7 @@ internal sealed partial class IrBuilder
         return BuildBlockDecl(decl.Arg0, decl.Arg1, forInit: true);
     }
 
-    /// <summary>Build a <c>Type DeclItemList</c> block-scope declaration of automatic
+    /// <summary>Build a <c>Type InitDeclaratorList</c> block-scope declaration of automatic
     /// objects (<c>int x, y;</c>, <c>auto int z;</c>, <c>register int r;</c>) into a
     /// <see cref="DeclStmt"/>.</summary>
     private CStmt BuildDeclList(Item typeItem, Item listItem)
@@ -2651,56 +2562,11 @@ internal sealed partial class IrBuilder
         return new DeclStmt(new[] { new LocalDecl(sym, init) });
     }
 
-    private static CType WrapPtr(CType t, int stars)
-    {
-        for (var i = 0; i < stars; i++) { t = PointerTo(t); }
-        return t;
-    }
-
     /// <summary>The type a pointer declarator gives over <paramref name="t"/>: a
     /// pointer, except over a function type, where it is the function-pointer type
     /// (dotcc represents a fn-ptr as the bare <see cref="CType.Func"/>).</summary>
     private static CType PointerTo(CType t)
         => t is CType.Func { IsFunctionType: true } f ? f with { IsFunctionType = false } : new CType.Pointer(t);
-
-    /// <summary>Count the literal trailing <c>*</c>s on a type node (the
-    /// <c>Type → Type *</c> pointer-qualifier chain). Distinguishes a pointer
-    /// written with <c>*</c> in the source (binds to the first declarator only)
-    /// from one a typedef base contributes (binds to every declarator).</summary>
-    private static int CountLiteralStars(Item typeItem)
-    {
-        var n = 0;
-        var it = typeItem;
-        while (true)
-        {
-            switch (it.Content)
-            {
-                case C.TypePtr t: n++; it = t.Arg0; break;
-                case C.TypePtrQualConst t: n++; it = t.Arg0; break;
-                case C.TypePtrQualVolatile t: n++; it = t.Arg0; break;
-                case C.TypePtrQualRestrict t: n++; it = t.Arg0; break;
-                default: return n;
-            }
-        }
-    }
-
-    /// <summary>Collect the dimension expressions of an <c>ArrDims</c> node,
-    /// outer→inner.</summary>
-    private List<CExpr> BuildArrDims(Item it)
-    {
-        var dims = new List<CExpr>();
-        void Walk(Item n)
-        {
-            switch (n.Content)
-            {
-                case C.ArrDimsCons c: Walk(c.Arg0); dims.Add(BuildExpr(c.Arg2)); break;
-                case C.ArrDimsOne o: dims.Add(BuildExpr(o.Arg1)); break;
-                default: throw new IrUnsupportedException(TypeName(n.Content));
-            }
-        }
-        Walk(it);
-        return dims;
-    }
 
     /// <summary>Reject a <c>#embed</c> that reached a scalar / non-brace-array
     /// position. The carrier is only consumed (expanded to bytes) inside an
@@ -2842,12 +2708,9 @@ internal sealed partial class IrBuilder
             C.VaArgExpr v => BuildVaArg(v),
             // A null ArgList (Arg2) is `f()`.
             C.Call c => BuildCall(c.Arg0, c.Arg2),
-            // C99/C23 compound literals — (T){…} struct/scalar, (T[]){…} array,
+            // C99/C23 compound literals: (T){…} struct/scalar, (T[]){…} array,
             // designated, and the C23 empty form (a null InitList, Arg4).
-            C.CompoundLit { Arg4: null } c => Gated(2023, "empty initializer", c.Arg1, BuildCompoundLitEmpty(CompoundLitType(c.Arg1))),
-            C.CompoundLit { Arg4: { } init } c => Gated(1999, "compound literals", c.Arg1, BuildCompoundLit(CompoundLitType(c.Arg1), init)),
-            C.CompoundLitArr c => Gated(1999, "compound literals", c.Arg1, BuildArrayCompoundLit(CompoundLitType(c.Arg1), c.Arg2, c.Arg5)),
-            C.CompoundLitArrImplicit c => Gated(1999, "compound literals", c.Arg1, BuildArrayCompoundLit(CompoundLitType(c.Arg1), null, c.Arg6)),
+            C.CompoundLit c => BuildCompoundLiteral(c),
             C.CommaOp => BuildCommaOp(it),
             _ => throw new IrUnsupportedException(TypeName(it.Content)),
         };

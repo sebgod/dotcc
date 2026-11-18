@@ -12,7 +12,7 @@ namespace DotCC.Ir;
 /// list of declarators, and every declarator form (a plain name, pointers, an array,
 /// a function pointer, an array of them, a bit-field) takes part in every list at
 /// every scope, with an expression or a brace-enclosed initializer. The grammar
-/// parses them as <c>DeclItem</c>s; <see cref="WalkDeclList"/> turns each into a
+/// parses them as <c>InitDeclarator</c>s; <see cref="WalkDeclList"/> turns each into a
 /// <see cref="Declarator"/> (name, full type, initializer), and each scope decides
 /// the storage: a block-scope local (<see cref="BuildLocalArray"/> for an array), a
 /// <c>DotCcGlobals</c> field for file scope and <c>static</c> locals
@@ -30,21 +30,206 @@ internal sealed partial class IrBuilder
     /// item (<see cref="C.BraceInit"/>, a null InitList for the C23 empty <c>{ }</c>); null when there
     /// is none.</param>
     /// <param name="At">The declarator's name token, for diagnostics.</param>
-    /// <param name="VlaDims">An array declarator's bounds when one is not an integer
-    /// constant expression (the type then has a null outer extent); block scope lowers
-    /// a one-dimensional one VLA-style, every other scope rejects it.</param>
-    private sealed record Declarator(string Name, CType Type, Item? Init, Item At, Item? VlaDims = null);
+    /// <param name="VlaDims">An array declarator's bound expressions, outermost first,
+    /// when one is not an integer constant expression (the type then has a null outer
+    /// extent); block scope lowers a one-dimensional one VLA-style, every other scope
+    /// rejects it.</param>
+    private sealed record Declarator(string Name, CType Type, Item? Init, Item At, IReadOnlyList<Item>? VlaDims = null);
+
+    /// <summary>What a declarator (C11 6.7.6) or an abstract declarator (6.7.7) gives
+    /// over a base type.</summary>
+    /// <param name="Name">The declared identifier's token; null for an abstract
+    /// declarator.</param>
+    /// <param name="Type">The base type with the declarator's pointers, array bounds and
+    /// function parameters applied.</param>
+    /// <param name="Params">The parameters of a function declarator, the one whose
+    /// parameter list follows the name itself (<c>f(int a)</c>, <c>(f)(int a)</c>,
+    /// <c>(*f(int a))(int)</c>); null for any other declarator. A function definition
+    /// takes its parameter names from it.</param>
+    /// <param name="Variadic">Whether <paramref name="Params"/> ends in <c>...</c>.</param>
+    /// <param name="VlaDims">See <see cref="Declarator.VlaDims"/>.</param>
+    private readonly record struct DeclaratorParts(
+        Item? Name, CType Type, List<ParamInfo>? Params = null, bool Variadic = false, IReadOnlyList<Item>? VlaDims = null);
+
+    /// <summary>
+    /// Fold a declarator into the type it declares, inside out (C11 6.7.6): a pointer
+    /// applies to what is left of it, an array bound or a parameter list to the direct
+    /// declarator before it, so <c>*a[3]</c> is an array of pointers and
+    /// <c>(*a)[3]</c> a pointer to an array. <paramref name="t"/> is the type the
+    /// declarator is applied to: the declaration's specifiers at the top, then each
+    /// derived type on the way in. One fold serves every declarator in every position
+    /// (a declaration, a member, a parameter, a function definition) and the abstract
+    /// ones of a type name.
+    /// </summary>
+    private DeclaratorParts DeclaratorType(CType t, Item it)
+    {
+        switch (it.Content)
+        {
+            case C.Declarator d: return DeclaratorType(PointerOver(t, d.Arg0), d.Arg1);
+            case C.DeclaratorName n: return new(n.Arg0, t);
+            case C.DeclaratorParen p: return DeclaratorType(t, p.Arg1);
+            case C.DeclaratorFunction f:
+            {
+                var fn = FunctionOver(t, f.Arg2, out var ps, out var variadic);
+                var inner = DeclaratorType(fn, f.Arg0);
+                return IsBareName(f.Arg0) ? inner with { Params = ps, Variadic = variadic } : inner;
+            }
+            case C.DeclaratorArray:
+            {
+                // `a[2][3]` is ((a [2]) [3]): the bounds from here inwards are the
+                // array's, innermost first.
+                var bounds = new List<Item?>();
+                var of = it;
+                while (of.Content is C.DeclaratorArray a) { bounds.Insert(0, a.Arg2); of = a.Arg0; }
+                var arr = ArrayOver(t, bounds, it, out var vla);
+                var inner = DeclaratorType(arr, of);
+                if (vla is null) { return inner; }
+                return IsBareName(of)
+                    ? inner with { VlaDims = vla }
+                    : throw new IrUnsupportedException("a pointer to (or function returning) an array needs constant bounds");
+            }
+            case C.AbstractPointer a: return new(null, PointerOver(t, a.Arg0));
+            case C.AbstractDeclarator a: return DeclaratorType(PointerOver(t, a.Arg0), a.Arg1);
+            case C.AbstractParen p: return DeclaratorType(t, p.Arg1);
+            case C.AbstractFunction f:
+            {
+                var fn = FunctionOver(t, f.Arg2, out _, out _);
+                return f.Arg0 is { } of ? DeclaratorType(fn, of) : new(null, fn);
+            }
+            case C.AbstractArray:
+            {
+                var bounds = new List<Item?>();
+                Item? of = it;
+                while (of is { Content: C.AbstractArray a }) { bounds.Insert(0, a.Arg2); of = a.Arg0; }
+                var arr = ArrayOver(t, bounds, it, out var vla);
+                if (of is null) { return new(null, arr, VlaDims: vla); }
+                return vla is null
+                    ? DeclaratorType(arr, of)
+                    : throw new IrUnsupportedException("a pointer to (or function returning) an array needs constant bounds");
+            }
+            default: throw new IrUnsupportedException(TypeName(it.Content));
+        }
+    }
+
+    /// <summary>The type a Pointer (<c>*</c>, <c>*const</c>, <c>**</c>, …) gives over
+    /// <paramref name="t"/>, its stars applied in source order; <paramref name="t"/>
+    /// itself for a null Pointer (the optional one absent). A <c>const</c> after a
+    /// <c>*</c> makes that pointer read-only (<c>p = q</c> trips the const check,
+    /// <c>*p = v</c> does not); <c>volatile</c> and <c>restrict</c> have no C# model
+    /// and are accepted.</summary>
+    private static CType PointerOver(CType t, Item? pointer)
+    {
+        static CType Qualified(CType p, Item? quals) => QualsHaveConst(quals) ? p.WithQuals(TypeQual.Const) : p;
+        return pointer?.Content switch
+        {
+            null => t,
+            C.Pointer p => Qualified(PointerTo(t), p.Arg1),
+            C.PointerCons p => Qualified(PointerTo(PointerOver(t, p.Arg0)), p.Arg2),
+            { } other => throw new IrUnsupportedException(TypeName(other)),
+        };
+    }
+
+    /// <summary>Whether a TypeQualList (the qualifiers after a declarator's <c>*</c>)
+    /// includes <c>const</c>. A null list (the optional one absent) has none.</summary>
+    private static bool QualsHaveConst(Item? quals) => quals?.Content switch
+    {
+        null => false,
+        C.TypeQualConst => true,
+        C.TypeQualVolatile or C.TypeQualRestrict => false,
+        C.TypeQualListCons q => QualsHaveConst(q.Arg0) || QualsHaveConst(q.Arg1),
+        { } other => throw new IrUnsupportedException(TypeName(other)),
+    };
+
+    /// <summary>The function type a parameter list gives over return type
+    /// <paramref name="ret"/>, with the parameters as declared (names included). A
+    /// null list (<c>()</c>) and <c>(void)</c> both declare no parameters.</summary>
+    private CType.Func FunctionOver(CType ret, Item? paramList, out List<ParamInfo> ps, out bool variadic)
+    {
+        ps = BuildParams(paramList, out variadic);
+        var types = new List<CType>(ps.Count);
+        foreach (var p in ps) { types.Add(p.Type); }
+        return new CType.Func(ret, types, variadic) { IsFunctionType = true };
+    }
+
+    /// <summary>The array type a run of bounds gives over element type
+    /// <paramref name="elem"/>, outermost bound first; a null bound is <c>[]</c>. Only
+    /// the outermost may be omitted (C11 6.7.6.2p1 via 6.2.5p22: the element type must
+    /// be complete), which leaves a null outer extent (sized by the initializer, an
+    /// <c>extern</c> declaration, a flexible array member, a parameter); an inner one
+    /// omitted is gcc's error, reported at <paramref name="at"/> (the declarator). When
+    /// a bound is not an integer constant expression the type has a null outer extent
+    /// and <paramref name="vla"/> carries the bound expressions.</summary>
+    private CType ArrayOver(CType elem, List<Item?> bounds, Item at, out IReadOnlyList<Item>? vla)
+    {
+        vla = null;
+        var who = DeclaredName(at) is { } name ? $"'{Tok(name)}': " : "";
+        var open = bounds[0] is null;
+        var sized = new List<Item>(bounds.Count);
+        for (var i = open ? 1 : 0; i < bounds.Count; i++)
+        {
+            if (bounds[i] is { } bound) { sized.Add(bound); continue; }
+            // Reported, then left out so the rest of the declaration still binds.
+            Diagnostics.Add(new Diagnostic(Severity.Error,
+                DeclaredName(at) is { } n ? $"array type has incomplete element type in '{Tok(n)}'" : "array type has incomplete element type",
+                SrcPos.From(at), _file));
+        }
+        var dims = new List<int>(sized.Count);
+        foreach (var b in sized)
+        {
+            if (ConstEval(BuildExpr(b)) is { } n) { dims.Add((int)n); continue; }
+            if (open)
+            {
+                throw new IrUnsupportedException($"{who}the inner bounds of an array declared with `[]` must be constant");
+            }
+            vla = sized;
+            return new CType.Array(elem, null);
+        }
+        var rows = MakeArrayType(elem, dims);
+        return open ? new CType.Array(rows, null) : rows;
+    }
+
+    /// <summary>The name token a declarator declares, or null for an abstract one.</summary>
+    private static Item? DeclaredName(Item declarator) => declarator.Content switch
+    {
+        C.Declarator d => DeclaredName(d.Arg1),
+        C.DeclaratorName n => n.Arg0,
+        C.DeclaratorParen p => DeclaredName(p.Arg1),
+        C.DeclaratorArray a => DeclaredName(a.Arg0),
+        C.DeclaratorFunction f => DeclaredName(f.Arg0),
+        _ => null,
+    };
+
+    /// <summary>Whether a direct declarator is the declared name itself, alone or in
+    /// grouping parentheses (<c>f</c>, <c>(f)</c>): what an array bound or a parameter
+    /// list right after it applies to.</summary>
+    private static bool IsBareName(Item direct) => direct.Content switch
+    {
+        C.DeclaratorName => true,
+        C.DeclaratorParen { Arg1.Content: C.Declarator { Arg0: null } d } => IsBareName(d.Arg1),
+        _ => false,
+    };
+
+    /// <summary>Whether a declarator is a function declarator: a parameter list
+    /// follows the name itself, so it declares a function (<c>f(int)</c>,
+    /// <c>*f(int)</c>, <c>(f)(int)</c>, <c>(*f(int))(int)</c>), where
+    /// <c>(*fp)(int)</c> declares a pointer.</summary>
+    private static bool IsFunctionDeclarator(Item declarator) => declarator.Content switch
+    {
+        C.Declarator d => IsFunctionDeclarator(d.Arg1),
+        C.DeclaratorParen p => IsFunctionDeclarator(p.Arg1),
+        C.DeclaratorArray a => IsFunctionDeclarator(a.Arg0),
+        C.DeclaratorFunction f => IsBareName(f.Arg0) || IsFunctionDeclarator(f.Arg0),
+        _ => false,
+    };
 
     /// <summary>
     /// Walk a comma-separated init-declarator list, invoking <paramref name="add"/>
-    /// with each declarator in source order. The FIRST declarator's <c>*</c>s were
-    /// greedily folded into the declaration's type by the grammar's
-    /// <c>Type → Type *</c> rule; each later declarator rebuilds its type from the
-    /// pointer-stripped element plus its own <c>*</c>s (so <c>int *a, b;</c> declares
-    /// a:int*, b:int). Shared by block-scope, file-scope and <c>static</c>-local
-    /// declarations and by struct / union member lists, which alone pass
-    /// <paramref name="addBitField"/> (name, type, width item; the name is empty for an
-    /// unnamed bit-field): a bit-field declarator anywhere else is an error.
+    /// with each declarator in source order. Each declarator applies its own pointers,
+    /// array bounds and parameters to the declaration's specifiers (so
+    /// <c>int *a, b;</c> declares a:int*, b:int). Shared by block-scope, file-scope and
+    /// <c>static</c>-local declarations and by struct / union member lists, which alone
+    /// pass <paramref name="addBitField"/> (name, type, width item; the name is empty
+    /// for an unnamed bit-field): a bit-field declarator anywhere else is an error.
     /// </summary>
     private void WalkDeclList(Item typeItem, Item listItem, Action<Declarator> add,
         Action<string, CType, Item>? addBitField = null)
@@ -53,18 +238,6 @@ internal sealed partial class IrBuilder
         // A typedef's naming hint belongs to its own type specifier only, never to
         // a type its declarators resolve (a parameter's anonymous struct).
         _anonTagHint = null;
-        // Peel only the LITERAL trailing `*`s: they bind to the first declarator alone.
-        // Pointer-ness a typedef base contributes (`BoxPtr p, q` ⇒ both Box*) is not a
-        // literal star and stays in `element`, so every declarator keeps it.
-        var litStars = CountLiteralStars(typeItem);
-        var element = baseType;
-        for (var i = 0; i < litStars; i++)
-        {
-            // A literal star made a pointer, or the fn-ptr of a function type.
-            if (element is CType.Pointer p) { element = p.Pointee; }
-            else if (element is CType.Func { IsFunctionType: false } f) { element = f with { IsFunctionType = true }; }
-            else { break; }
-        }
 
         void BitField(string name, Item width, CType type, Item at)
         {
@@ -78,43 +251,28 @@ internal sealed partial class IrBuilder
             addBitField(name, type, width);
         }
 
-        // One declarator over the type `t` its own pointers leave for it.
-        void Declare(Item it, CType t)
+        Declarator Declared(Item declarator, Item? init)
         {
-            switch (it.Content)
-            {
-                case C.DeclItem di: add(new(Tok(di.Arg0), t, null, di.Arg0)); break;
-                // An Initializer (Arg2) is an expression item or a BraceInit item.
-                case C.DeclItemInit di: add(new(Tok(di.Arg0), t, di.Arg2, di.Arg0)); break;
-                case C.DeclItemArr da: add(ArrayDeclarator(t, da.Arg0, null)); break;
-                case C.DeclItemArrInit da: add(ArrayDeclarator(t, da.Arg0, da.Arg2)); break;
-                case C.DeclItemBitField bf: BitField(Tok(bf.Arg0), bf.Arg2, t, bf.Arg0); break;
-                case C.DeclItemAnonBitField ab: BitField("", ab.Arg1, t, ab.Arg0); break;
-                // `Ret (*name)(params) [= E]`: the declarator's base type is the RETURN type.
-                case C.DeclItemFnPtr fp: { var (n, ft) = FnPtrDeclarator(t, fp.Arg0, fp.Arg1); add(new(n, ft, null, fp.Arg0)); break; }
-                case C.DeclItemFnPtrInit fp: { var (n, ft) = FnPtrDeclarator(t, fp.Arg0, fp.Arg1); add(new(n, ft, fp.Arg3, fp.Arg0)); break; }
-                // A function declarator declares a function (or, in a typedef, names
-                // a function type): its type is the function type, not the fn-ptr.
-                case C.DeclItemFn f: add(new(Tok(f.Arg0), FunctionType(t, f.Arg1), null, f.Arg0)); break;
-                case C.DeclItemParenFn f: add(new(Tok(f.Arg1), FunctionType(t, f.Arg3), null, f.Arg1)); break;
-                case C.DeclItemFnRetFnPtr f:
-                    add(new(Tok(f.Arg2), FnPtrType(FnPtrTailType(t, f.Arg7), f.Arg4) with { IsFunctionType = true }, null, f.Arg2));
-                    break;
-                case C.DeclItemFnPtrArr fa: add(FnPtrArrDeclarator(t, fa.Arg0, fa.Arg1, null)); break;
-                case C.DeclItemFnPtrArrInit fa: add(FnPtrArrDeclarator(t, fa.Arg0, fa.Arg1, fa.Arg3)); break;
-                case C.DeclItemFnPtrArrOpenInit fa: add(FnPtrArrDeclarator(t, fa.Arg0, fa.Arg1, fa.Arg3)); break;
-                default: throw new IrUnsupportedException(TypeName(it.Content));
-            }
+            var p = DeclaratorType(baseType, declarator);
+            var name = p.Name ?? throw new IrUnsupportedException(TypeName(declarator.Content));
+            return new(Tok(name), p.Type, init, name, p.VlaDims);
         }
 
-        // A post-comma declarator: `DeclItemTail → * DeclItemTail` adds a pointer
-        // level onto the stripped element (`int *a, *b;` → b:int*).
-        void WalkTail(Item it, int stars)
+        void Declare(Item it)
         {
             switch (it.Content)
             {
-                case C.DeclItemTailPtr p: WalkTail(p.Arg1, stars + 1); break;
-                case C.DeclItemTailPlain t: Declare(t.Arg0, WrapPtr(element, stars)); break;
+                case C.InitDeclarator d: add(Declared(d.Arg0, null)); break;
+                // An Initializer (Arg2) is an expression item or a BraceInit item.
+                case C.InitDeclaratorInit d: add(Declared(d.Arg0, d.Arg2)); break;
+                // An unnamed bit-field `: width` has a null Declarator.
+                case C.BitFieldDeclarator { Arg0: null } bf: BitField("", bf.Arg2, baseType, bf.Arg1); break;
+                case C.BitFieldDeclarator { Arg0: { } declarator } bf:
+                {
+                    var d = Declared(declarator, null);
+                    BitField(d.Name, bf.Arg2, d.Type, d.At);
+                    break;
+                }
                 default: throw new IrUnsupportedException(TypeName(it.Content));
             }
         }
@@ -123,57 +281,23 @@ internal sealed partial class IrBuilder
         {
             switch (it.Content)
             {
-                case C.DeclItemListCons c: Walk(c.Arg0); WalkTail(c.Arg2, 0); break;
-                case C.DeclItemListOne o: Declare(o.Arg0, baseType); break;
-                default: Declare(it, baseType); break;
+                case C.InitDeclaratorListCons c: Walk(c.Arg0); Declare(c.Arg2); break;
+                case C.InitDeclaratorListOne o: Declare(o.Arg0); break;
+                default: Declare(it); break;
             }
         }
         Walk(listItem);
     }
-
-    /// <summary>An array declarator over element type <paramref name="elem"/>: its name
-    /// and array type (a null outer extent for <c>name[]</c> / <c>name[][N]</c>), with
-    /// non-constant bounds carried as <see cref="Declarator.VlaDims"/>. A parenthesized
-    /// declarator <c>(name[N])</c> is the same declarator.</summary>
-    private Declarator ArrayDeclarator(CType elem, Item arrDecl, Item? init)
-    {
-        switch (arrDecl.Content)
-        {
-            case C.ArrDeclParen p:
-                return ArrayDeclarator(elem, p.Arg1, init);
-            case C.ArrDeclOpen o:
-                return new(Tok(o.Arg0), new CType.Array(elem, null), init, o.Arg0);
-            case C.ArrDeclOpenRows o:
-            {
-                // Only the outermost bound may be omitted (C11 6.7.6.2p1 via 6.2.5p22:
-                // the element type must be complete).
-                var rows = TryConstDims(o.Arg3)
-                    ?? throw new IrUnsupportedException($"'{Tok(o.Arg0)}': the inner bounds of an array declared with `[]` must be constant");
-                return new(Tok(o.Arg0), new CType.Array(MakeArrayType(elem, rows), null), init, o.Arg0);
-            }
-            case C.ArrDeclSized s:
-                return TryConstDims(s.Arg1) is { } dims
-                    ? new(Tok(s.Arg0), MakeArrayType(elem, dims), init, s.Arg0)
-                    : new(Tok(s.Arg0), new CType.Array(elem, null), init, s.Arg0, s.Arg1);
-            default:
-                throw new IrUnsupportedException(TypeName(arrDecl.Content));
-        }
-    }
-
-    /// <summary>The function type a function declarator's parameter tail gives over
-    /// return type <paramref name="ret"/>.</summary>
-    private CType.Func FunctionType(CType ret, Item tail) => FnPtrTailType(ret, tail) with { IsFunctionType = true };
 
     /// <summary>Whether a declarator list declares a function (such a declaration is
     /// a prototype, which a re-included header repeats harmlessly, so it is never
     /// deduplicated as a header-defined variable is).</summary>
     private static bool DeclaresFunction(Item listItem) => listItem.Content switch
     {
-        C.DeclItemListCons c => DeclaresFunction(c.Arg0) || DeclaresFunction(c.Arg2),
-        C.DeclItemListOne o => DeclaresFunction(o.Arg0),
-        C.DeclItemTailPtr t => DeclaresFunction(t.Arg1),
-        C.DeclItemTailPlain t => DeclaresFunction(t.Arg0),
-        C.DeclItemFn or C.DeclItemParenFn or C.DeclItemFnRetFnPtr => true,
+        C.InitDeclaratorListCons c => DeclaresFunction(c.Arg0) || DeclaresFunction(c.Arg2),
+        C.InitDeclaratorListOne o => DeclaresFunction(o.Arg0),
+        C.InitDeclarator d => IsFunctionDeclarator(d.Arg0),
+        C.InitDeclaratorInit d => IsFunctionDeclarator(d.Arg0),
         _ => false,
     };
 
@@ -228,18 +352,6 @@ internal sealed partial class IrBuilder
                 TargetName = _symbols.Escape(d.Name),
             });
         });
-    }
-
-    /// <summary>An array-of-function-pointers declarator <c>Ret (*name[N])(params)</c> /
-    /// <c>Ret (*name[])(params)</c> (also <c>*const</c>) over return type
-    /// <paramref name="ret"/>.</summary>
-    private Declarator FnPtrArrDeclarator(CType ret, Item arrItem, Item tailItem, Item? init)
-    {
-        var (nameItem, dimsItem, elem) = FnPtrArrParts(ret, arrItem, tailItem);
-        if (dimsItem is null) { return new(Tok(nameItem), new CType.Array(elem, null), init, nameItem); }
-        var dims = TryConstDims(dimsItem)
-            ?? throw new IrUnsupportedException($"'{Tok(nameItem)}': an array of function pointers needs constant bounds");
-        return new(Tok(nameItem), MakeArrayType(elem, dims), init, nameItem);
     }
 
     // ---- initializer values ---------------------------------------------
@@ -350,7 +462,8 @@ internal sealed partial class IrBuilder
             {
                 throw new IrUnsupportedException($"variable-sized object '{d.Name}' may not be initialized");
             }
-            var extents = BuildArrDims(vla);
+            var extents = new List<CExpr>(vla.Count);
+            foreach (var bound in vla) { extents.Add(BuildExpr(bound)); }
             if (extents.Count != 1)
             {
                 throw new IrUnsupportedException("multi-dimensional array with a non-constant dimension");
@@ -532,7 +645,7 @@ internal sealed partial class IrBuilder
     /// named after the first declarator when that is a plain name.</summary>
     private void BuildTypedefs(Item typeItem, Item listItem, bool forInit = false)
     {
-        _anonTagHint = CountLiteralStars(typeItem) == 0 ? FirstPlainDeclarator(listItem) : null;
+        _anonTagHint = FirstPlainDeclarator(listItem);
         try
         {
             WalkDeclList(typeItem, listItem, d =>
@@ -558,9 +671,9 @@ internal sealed partial class IrBuilder
     /// identifier (no pointer, array or function part), else null.</summary>
     private static string? FirstPlainDeclarator(Item listItem) => listItem.Content switch
     {
-        C.DeclItemListCons c => FirstPlainDeclarator(c.Arg0),
-        C.DeclItemListOne o => o.Arg0.Content is C.DeclItem di ? Tok(di.Arg0) : null,
-        C.DeclItem di => Tok(di.Arg0),
+        C.InitDeclaratorListCons c => FirstPlainDeclarator(c.Arg0),
+        C.InitDeclaratorListOne o => FirstPlainDeclarator(o.Arg0),
+        C.InitDeclarator { Arg0.Content: C.Declarator { Arg0: null, Arg1.Content: C.DeclaratorName n } } => Tok(n.Arg0),
         _ => null,
     };
 
