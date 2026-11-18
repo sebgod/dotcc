@@ -184,13 +184,86 @@ public sealed class ZigGrammarTests
     {
         // `struct { … }` is a Type, so it nests under `[N]` / `*` / `?`, types an array literal, and is an argument.
         FirstNode<Zig.TyArray>("const T = struct { rows: [2]struct { a: u8 } };").Arg3.Content.ShouldBeOfType<Zig.InlineStructType>();
-        FirstNode<Zig.StructFieldDefault>("const T = struct { link: if (c) void else [3]struct { v: u8 } = undefined };")
-            .Arg2.Content.ShouldBeOfType<Zig.IfElseExpr>();
+        FirstNode<Zig.StructFieldIf>("const T = struct { link: if (c) void else [3]struct { v: u8 } = undefined };")
+            .Arg3.Content.ShouldBeOfType<Zig.IfElseExpr>();
         TryParse("const T = struct { head: ?*const struct { n: u32 } = null };").ShouldBeTrue();
         TryParse("fn f() void { for ([_]struct { k: u8 }{ .{ .k = 1 } }) |e| { _ = e; } }").ShouldBeTrue();
         FirstNode<Zig.BuiltinCall>("fn f() void { _ = @as(struct { x: i32 }, .{ .x = 1 }); }").ShouldNotBeNull();
         // The named declaration keeps its own form.
         FirstNode<Zig.StructDecl>("const P = struct { x: u32 };").ShouldNotBeNull();
+    }
+
+    [Fact]
+    public void A_container_field_is_one_rule()
+    {
+        // zig's ContainerField: `comptime? name : Type ByteAlign? (= Expr)?`, each optional part null when absent.
+        var plain = FirstNode<Zig.StructField>("const T = struct { a: u8 };");
+        (plain.Arg0, plain.Arg4, plain.Arg5).ShouldBe((null, null, null));
+        var full = FirstNode<Zig.StructField>("const T = struct { comptime a: u8 align(4) = 5 };");
+        full.Arg0.ShouldNotBeNull();
+        full.Arg4.ShouldNotBeNull().Content.ShouldBeOfType<Zig.FieldAlign>();
+        full.Arg5.ShouldNotBeNull().Content.ShouldBeOfType<Zig.FieldDefault>();
+        // A primitive value's name is a plain field name; a member `comptime { … }` block is still a block.
+        TryParse("const T = packed struct(u16) { null: u8 = 0, true: u8 = 1 };").ShouldBeTrue();
+        FirstNode<Zig.MemberComptime>("const T = struct { a: u8, comptime { _ = 1; } };").ShouldNotBeNull();
+        // A tuple field is the same with no name; a union field's `= value` is its tag's value.
+        FirstNode<Zig.TupleFieldComptime>("const V = struct { f32, comptime f32 = 1.5 };").Arg2.ShouldNotBeNull();
+        FirstNode<Zig.UnionVariantPayload>("const U = union(enum(u32)) { a: u8 = 1, b: u16 };").Arg3.ShouldNotBeNull();
+    }
+
+    [Fact]
+    public void A_value_less_jump_is_closed()
+    {
+        // `break :l` with no value ends where it stands, so `catch` applies to the whole `orelse`: zig's `Expr?` after the
+        // label finds no expression there (std's debug/SelfInfo/Elf.zig).
+        var chain = FirstNode<Zig.CatchOp>("fn f(m: anytype) void { u: { const p = &(m.x orelse break :u catch break :u); _ = p; } }");
+        chain.Arg0.Content.ShouldBeOfType<Zig.OrElse>().Arg2.Content.ShouldBeOfType<Zig.FbBreakLabel>();
+        chain.Arg2.Content.ShouldBeOfType<Zig.FbBreakLabel>();
+        // Where a value can start, it is the break's value (zig's greedy `Expr?`), never an operator on the jump.
+        FirstNode<Zig.FbBreakLabelValue>("fn f(o: ?i32) i32 { return b: { const v = o orelse break :b -1; break :b v; }; }")
+            .Arg3.Content.ShouldBeOfType<Zig.PreNeg>();
+        FirstNode<Zig.FbBreakLabelValue>("fn f(o: ?i32) i32 { return b: { const v = o orelse break :b (2); break :b v; }; }").ShouldNotBeNull();
+        FirstNode<Zig.FbBreakValue>("fn f(o: ?i32) i32 { return while (true) { const v = o orelse break .{ 1 }; _ = v; }; }").ShouldNotBeNull();
+    }
+
+    [Fact]
+    public void A_block_fallback_is_an_operand()
+    {
+        // `catch { … }` is a Bitwise operand like any fallback, so an `orelse` after it takes the result (std's
+        // debug/SelfInfo/Windows.zig).
+        var orElse = FirstNode<Zig.OrElseArm>("fn f() void { const p = g() catch { return; } orelse { return; }; _ = p; }");
+        orElse.Arg0.Content.ShouldBeOfType<Zig.CatchArm>();
+        FirstNode<Zig.CmpEq>("fn f() bool { return g() catch { return false; } == 1; }").Arg0.Content.ShouldBeOfType<Zig.CatchArm>();
+    }
+
+    [Fact]
+    public void An_asm_template_is_an_expression()
+    {
+        FirstNode<Zig.AsmExpr>("fn f(r: []const u8) u64 { return asm (\"mrs %[ret], \" ++ r : [ret] \"=r\" (-> u64)); }")
+            .Arg3.Content.ShouldBeOfType<Zig.Concat>();
+        FirstNode<Zig.AsmExpr>("fn f() void { asm volatile (switch (a) { .x => \"nop\", else => \"hlt\" }); }")
+            .Arg1.ShouldNotBeNull();
+        FirstNode<Zig.AsmExpr>("fn f() void { asm (if (c) \"nop\" else \"hlt\"); }").Arg1.ShouldBeNull();
+        // Comment lines between a multiline string's lines are no part of it: one STRING.
+        FirstNode<Zig.AsmExpr>("fn f() void {\n asm volatile (\n  \\\\ nop\n  // why\n  \\\\ hlt\n ); }")
+            .Arg3.Content.ShouldBeOfType<Zig.StrLit>();
+    }
+
+    [Fact]
+    public void Declaration_attributes_parse_where_zig_has_them()
+    {
+        // FnProto: `ByteAlign? AddrSpace? LinkSection? CallConv?`; VarDeclProto: `ByteAlign? AddrSpace? LinkSection?`.
+        TryParse("fn f(x: u8) align(16) callconv(.c) void { _ = x; }").ShouldBeTrue();
+        TryParse("fn f() align(4) linksection(\".text\") void {}").ShouldBeTrue();
+        TryParse("pub extern const frag: @Vector(4, f32) addrspace(.input);").ShouldBeTrue();
+        TryParse("var buf: [4]u8 align(8) addrspace(.generic) linksection(\".d\") = undefined;").ShouldBeTrue();
+        TryParse("const p = @extern(*addrspace(.input) @Vector(4, f32), .{ .name = \"p\" });").ShouldBeTrue();
+        // An `opaque` holds declarations.
+        FirstNode<Zig.OpaqueType>("const O = opaque { pub const retain = r; pub fn a() void {} };").ShouldNotBeNull();
+        // A hex float with a fraction needs no exponent; a saturating shift and its assignment.
+        TryParse("const h = 0x103.70; const k = -0x1.8p3;").ShouldBeTrue();
+        FirstNode<Zig.ShlSat>("fn f(a: u8) u8 { return a <<| 3; }").ShouldNotBeNull();
+        FirstNode<Zig.AopShlSat>("fn f(a: *u64) void { a.* <<|= 1; }").ShouldNotBeNull();
     }
 
     [Fact]

@@ -66,6 +66,23 @@ public static class ZigMath
             ? ClampSigned<T>(System.Int128.CreateTruncating(a) * System.Int128.CreateTruncating(b))
             : ClampUnsigned<T>(System.UInt128.CreateTruncating(a) * System.UInt128.CreateTruncating(b));
 
+    /// <summary>Saturating shift left — <c>a &lt;&lt;| n</c> clamped to <typeparamref name="T"/>'s range: the exact
+    /// <c>a * 2^n</c> where it fits, else the maximum (the minimum for a negative <paramref name="a"/>). The shift
+    /// amount has a type of its own, as in zig (any unsigned integer).</summary>
+    public static T SatShl<T, TShift>(T a, TShift n)
+        where T : System.Numerics.IBinaryInteger<T>, System.Numerics.IMinMaxValue<T>
+        where TShift : System.Numerics.IBinaryInteger<TShift>
+    {
+        if (T.IsZero(a) || TShift.IsZero(n)) { return a; }
+        // An operand is at most 64 bits wide, so a shift of 64 or more leaves none of a non-zero one in range, and
+        // any smaller one is exact in the 128-bit accumulator.
+        var count = int.CreateSaturating(n);
+        if (count >= 64) { return T.IsNegative(a) ? T.MinValue : T.MaxValue; }
+        return T.IsNegative(T.MinValue)
+            ? ClampSigned<T>(System.Int128.CreateTruncating(a) << count)
+            : ClampUnsigned<T>(System.UInt128.CreateTruncating(a) << count);
+    }
+
     // ---- Overflow-detecting arithmetic (road-to-zig-std B3) — @addWithOverflow & friends.
     // Each returns Zig's `struct { T, u1 }` as a C# `(T, byte)` ValueTuple: the WRAPPED result
     // (truncated to T, exactly like `+%`/`-%`/`*%`) plus a 0/1 overflow flag. Computed EXACTLY in a

@@ -501,6 +501,7 @@ internal sealed partial class ZigLowering
         Zig.AopAddSat  => SatCompoundAssignExpr(lhsItem, "SatAdd", rhsItem),
         Zig.AopSubSat  => SatCompoundAssignExpr(lhsItem, "SatSub", rhsItem),
         Zig.AopMulSat  => SatCompoundAssignExpr(lhsItem, "SatMul", rhsItem),
+        Zig.AopShlSat  => SatCompoundAssignExpr(lhsItem, "SatShl", rhsItem),
         _ => throw new IrUnsupportedException(
             $"unexpected while-continue assignment operator: {opItem.Content?.GetType().Name ?? "null"}"),
     };
@@ -720,6 +721,7 @@ internal sealed partial class ZigLowering
         Zig.AopAddSat => SatCompoundAssign(lhs, "SatAdd", rhs),
         Zig.AopSubSat => SatCompoundAssign(lhs, "SatSub", rhs),
         Zig.AopMulSat => SatCompoundAssign(lhs, "SatMul", rhs),
+        Zig.AopShlSat => SatCompoundAssign(lhs, "SatShl", rhs),
         _ when CompoundOpOf(opItem) is { } op => CompoundAssign(lhs, op, rhs),
         _ => throw new IrUnsupportedException("zig: assignment operator " + (opItem.Content?.GetType().Name ?? "null")),
     };

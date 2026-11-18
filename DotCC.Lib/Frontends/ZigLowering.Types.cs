@@ -814,6 +814,10 @@ internal sealed partial class ZigLowering
         // written, since "CallArgs" alone gave no way to find which of a std module's calls it was.
         Zig.CallArgs { Arg2: not null } uca => throw UnevaluatedTypeCall(uca.Arg0),
         Zig.CallArgs { Arg2: null } ucn => throw UnevaluatedTypeCall(ucn.Arg0),
+        // Parsed so the std files that hold them parse; none has a lowering yet.
+        Zig.OpaqueType => throw new IrUnsupportedException("zig: an `opaque { … }` type is not supported yet"),
+        Zig.TupleFieldDefault or Zig.TupleFieldComptime => throw new IrUnsupportedException(
+            "zig: a tuple type's field with a default value or `comptime` is not supported yet"),
         _ => throw new IrUnsupportedException("zig type: " + (type.Content?.GetType().Name ?? "null")),
     };
 
@@ -1520,10 +1524,14 @@ internal sealed partial class ZigLowering
     /// The absent (epsilon) <c>CallConv</c> — a null <c>Content</c> — and every other convention
     /// return false (managed). Real Zig 0.17 spells it lowercase <c>.c</c>; <c>.C</c> is accepted
     /// for the older spelling.</summary>
-    private static bool IsCCallConv(Item callConv) =>
-        callConv.Content is Zig.CallConv cc
-        && cc.Arg2.Content is Zig.EnumLit e
-        && Tok(e.Arg1) is "c" or "C";
+    private static bool IsCCallConv(Item callConv)
+    {
+        // An `align` / `addrspace` / `linksection` attribute wraps the rest of the slot.
+        while (callConv.Content is Zig.FnAttr attr) { callConv = attr.Arg1; }
+        return callConv.Content is Zig.CallConv cc
+            && cc.Arg2.Content is Zig.EnumLit e
+            && Tok(e.Arg1) is "c" or "C";
+    }
 
     /// <summary>The compile-time sentinel value of a <c>[N:s]T</c> array type (Milestone Z lifts the
     /// earlier zero-only restriction). V1 requires a literal sentinel; it is materialized into the
@@ -1682,6 +1690,8 @@ internal sealed partial class ZigLowering
     {
         var t = raw.Replace("_", "");
         if (!(t.Length > 2 && t[0] == '0' && t[1] is 'x' or 'X')) { return t; }
+        // A hex float with a fraction may leave its exponent out (`0x103.70`): it is `p0`.
+        if (t.IndexOfAny(['p', 'P']) < 0) { t += "p0"; }
         return Binary128Literal.TryParseHex(t, out var m, out var e2) && !Binary128Literal.FitsDouble(m, e2)
             ? Binary128Literal.ExactDecimal(m, e2)
             : EmitHelpers.LowerHexFloat(t);

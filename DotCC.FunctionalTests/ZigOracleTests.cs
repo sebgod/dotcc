@@ -1588,6 +1588,42 @@ public sealed class ZigOracleTests
             "    return base +| 2;\n" + // 42 (no saturation)
             "}\n", 42, "" },
 
+        // The saturating shift (`<<|`, `<<|=`): `a * 2^n` clamped to `a`'s type, the minimum for a negative `a`; the
+        // shift amount has a type of its own, and a shift past the width of a non-zero value saturates outright.
+        new object[] { "sat_shl",
+            "pub fn main() u8 {\n" +
+            "    var x: u8 = 3;\n" +
+            "    x <<|= 7;\n" +
+            "    if (x != 255) return 1;\n" +
+            "    var y: u8 = 5;\n" +
+            "    _ = &y;\n" +
+            "    const z: u8 = y <<| 2;\n" +
+            "    if (z != 20) return 2;\n" +
+            "    var s: i8 = -3;\n" +
+            "    s <<|= 6;\n" +
+            "    if (s != -128) return 3;\n" +
+            "    var p: i8 = 3;\n" +
+            "    p <<|= 6;\n" +
+            "    if (p != 127) return 4;\n" +
+            "    var n: u32 = 9;\n" +
+            "    _ = &n;\n" +
+            "    var big: u64 = 1;\n" +
+            "    _ = &big;\n" +
+            "    const w: u64 = big <<| n;\n" +
+            "    if (w != 512) return 5;\n" +
+            "    var h: u16 = 0x8000;\n" +
+            "    h <<|= 1;\n" +
+            "    if (h != 0xffff) return 6;\n" +
+            "    var far: u32 = 200;\n" +
+            "    _ = &far;\n" +
+            "    const gone: u64 = big <<| far;\n" +
+            "    if (gone != 0xffff_ffff_ffff_ffff) return 7;\n" +
+            "    var zero: u8 = 0;\n" +
+            "    _ = &zero;\n" +
+            "    if (zero <<| far != 0) return 8;\n" +
+            "    return z +| 22;\n" +
+            "}\n", 42, "" },
+
         // Destructuring completeness (Milestone S): assign-to-existing lvalues, mixed new+existing,
         // typed binders, and the `_` discard. Zig destructuring is SEQUENTIAL — for a tuple-literal
         // RHS an existing-lvalue write is visible to a later element's read, so `a, b = .{ b, a }` is

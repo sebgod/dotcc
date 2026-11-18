@@ -4541,6 +4541,37 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lowers_a_saturating_shift_to_a_zigmath_call()
+    {
+        // `a <<| n` keeps the LEFT operand's type and the shift amount its own, so nothing is cast to a peer.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    var a: u8 = 3;\n" +
+            "    _ = &a;\n" +
+            "    var n: u32 = 7;\n" +
+            "    _ = &n;\n" +
+            "    var b: u8 = a <<| n;\n" +
+            "    b <<|= 1;\n" +
+            "    return b;\n" +
+            "}\n");
+        cs.ShouldContain("ZigMath.SatShl(a, n)");
+        cs.ShouldContain("b = ZigMath.SatShl(b, (byte)1)");
+    }
+
+    [Fact]
+    public void Folds_a_saturating_shift_of_comptime_operands()
+    {
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const a: u8 = 3;\n" +
+            "    const b: u8 = a <<| 7;\n" + // 384 clamps to 255
+            "    return b;\n" +
+            "}\n");
+        cs.ShouldNotContain("ZigMath.SatShl");
+        cs.ShouldContain("255");
+    }
+
+    [Fact]
     public void Casts_a_literal_saturating_operand_so_csharp_infers_the_peer_type()
     {
         // `a +| 5` — `a` is `u8`, the literal yields to its concrete peer (`byte`); the literal is

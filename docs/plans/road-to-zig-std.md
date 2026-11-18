@@ -1265,6 +1265,15 @@ zig-grammar-peg P3's (a `switch` or loop as an operand):
 |---|---|---|
 | 2 | **`catch` after a value-less labeled `break`** | `mod.unwind orelse break :unwind catch break :unwind` (`debug/SelfInfo/Elf.zig`) |
 
+**2026-11-18: the tail is gone, 553 of 553 files parse.** The last 17 files were ten shapes, each taken the way
+zig's grammar has it rather than as a rule of its own: zig's one ContainerField (`comptime? name : Type ByteAlign?
+(= Expr)?`, which also gave field names `null` / `true` / …, tuple fields with a default and a union field's tag
+value), value-less `break` / `continue` as closed primaries (so `orelse break :l catch …` chains), a block fallback
+as a Bitwise operand (`catch { … } orelse { … }`), `asm`'s template as an Expr, FnProto's and VarDeclProto's
+`align` / `addrspace` / `linksection` attributes, `opaque { … }` with declarations, `<<|` / `<<|=` (lowered, with
+its runtime), a hex float without an exponent, and comment lines inside a multiline string. The S9 parse work is
+done; what is left of the campaign is lowering (S4 `TypeVal`, S8, G2/G3/G5).
+
 The historical ranking below is kept for the record.
 
 **Measured ranking (first S0 run, 2026-07-07 — 5.8% baseline).** The parse
