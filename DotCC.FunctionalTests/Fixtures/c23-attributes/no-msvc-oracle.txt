@@ -1,0 +1,1 @@
+cl.exe on the win25-vs2026 runner image 20261116 rejects `[[deprecated("use answer")]] [[maybe_unused]] int old_answer(void)` with C3751 ("maybe_unused: unexpected identifier in attribute specifier"), which the image before it (20261103) accepted under /std:clatest. The gcc oracle still checks this fixture.
