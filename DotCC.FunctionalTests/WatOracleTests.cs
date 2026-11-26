@@ -156,115 +156,115 @@ public sealed class WatOracleTests
     // and assert the exact bytes. The node shim provides the fd_write import and reads
     // the iovecs out of the module's exported memory.
     [Theory]
-    [InlineData("int main(void){ puts(\"hello\"); return 0; }", "hello\n")]
-    [InlineData("int main(void){ putchar('A'); putchar('B'); putchar('\\n'); return 0; }", "AB\n")]
-    [InlineData("int main(void){ puts(\"line1\"); puts(\"line2\"); return 0; }", "line1\nline2\n")]
-    [InlineData("int main(void){ puts(\"hi\"); putchar('!'); return 0; }", "hi\n!")]
-    [InlineData("void greet(char *s){ puts(s); } int main(void){ greet(\"hi\"); greet(\"yo\"); return 0; }", "hi\nyo\n")]
-    [InlineData("int main(void){ char *s = \"abc\"; while(*s) putchar(*s++); return 0; }", "abc")]
-    [InlineData("int main(void){ for(int i=0;i<3;i++) putchar('0'+i); return 0; }", "012")]
+    [InlineData("#include <stdio.h>\nint main(void){ puts(\"hello\"); return 0; }", "hello\n")]
+    [InlineData("#include <stdio.h>\nint main(void){ putchar('A'); putchar('B'); putchar('\\n'); return 0; }", "AB\n")]
+    [InlineData("#include <stdio.h>\nint main(void){ puts(\"line1\"); puts(\"line2\"); return 0; }", "line1\nline2\n")]
+    [InlineData("#include <stdio.h>\nint main(void){ puts(\"hi\"); putchar('!'); return 0; }", "hi\n!")]
+    [InlineData("#include <stdio.h>\nvoid greet(char *s){ puts(s); } int main(void){ greet(\"hi\"); greet(\"yo\"); return 0; }", "hi\nyo\n")]
+    [InlineData("#include <stdio.h>\nint main(void){ char *s = \"abc\"; while(*s) putchar(*s++); return 0; }", "abc")]
+    [InlineData("#include <stdio.h>\nint main(void){ for(int i=0;i<3;i++) putchar('0'+i); return 0; }", "012")]
     // switch fall-through, observed by what each iteration prints
-    [InlineData("int main(void){ for(int i=0;i<4;i++){ switch(i){ case 0: putchar('a'); case 1: putchar('b'); break; default: putchar('x'); } } return 0; }", "abbxx")]
+    [InlineData("#include <stdio.h>\nint main(void){ for(int i=0;i<4;i++){ switch(i){ case 0: putchar('a'); case 1: putchar('b'); break; default: putchar('x'); } } return 0; }", "abbxx")]
     // goto loop, observed by what it prints
-    [InlineData("int main(void){ int i=0; again: putchar('0'+i); i++; if(i<3) goto again; putchar('\\n'); return 0; }", "012\n")]
+    [InlineData("#include <stdio.h>\nint main(void){ int i=0; again: putchar('0'+i); i++; if(i<3) goto again; putchar('\\n'); return 0; }", "012\n")]
     // printf — string-literal format expanded at compile time
-    [InlineData("int main(void){ printf(\"hello\\n\"); return 0; }", "hello\n")]
-    [InlineData("int main(void){ printf(\"n=%d\\n\", 42); return 0; }", "n=42\n")]
-    [InlineData("int main(void){ printf(\"%d+%d=%d\\n\", 2, 3, 2+3); return 0; }", "2+3=5\n")]
-    [InlineData("int main(void){ printf(\"%d\\n\", -7); return 0; }", "-7\n")]
-    [InlineData("int main(void){ printf(\"%u\\n\", 4000000000u); return 0; }", "4000000000\n")]
-    [InlineData("int main(void){ printf(\"hex=%x cap=%X oct=%o\\n\", 255, 255, 64); return 0; }", "hex=ff cap=FF oct=100\n")]
-    [InlineData("int main(void){ printf(\"%s %s%c\\n\", \"hello\", \"world\", '!'); return 0; }", "hello world!\n")]
-    [InlineData("int main(void){ printf(\"100%% done\\n\"); return 0; }", "100% done\n")]
-    [InlineData("int main(void){ long n = 10000000000; printf(\"%ld\\n\", n); return 0; }", "10000000000\n")]
-    [InlineData("int main(void){ for(int i=1;i<=3;i++) printf(\"[%d]\", i*i); return 0; }", "[1][4][9]")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"hello\\n\"); return 0; }", "hello\n")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"n=%d\\n\", 42); return 0; }", "n=42\n")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%d+%d=%d\\n\", 2, 3, 2+3); return 0; }", "2+3=5\n")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%d\\n\", -7); return 0; }", "-7\n")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%u\\n\", 4000000000u); return 0; }", "4000000000\n")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"hex=%x cap=%X oct=%o\\n\", 255, 255, 64); return 0; }", "hex=ff cap=FF oct=100\n")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%s %s%c\\n\", \"hello\", \"world\", '!'); return 0; }", "hello world!\n")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"100%% done\\n\"); return 0; }", "100% done\n")]
+    [InlineData("#include <stdio.h>\nint main(void){ long n = 10000000000; printf(\"%ld\\n\", n); return 0; }", "10000000000\n")]
+    [InlineData("#include <stdio.h>\nint main(void){ for(int i=1;i<=3;i++) printf(\"[%d]\", i*i); return 0; }", "[1][4][9]")]
     // printf field formatting — width / precision / flags (compile-time constants)
-    [InlineData("int main(void){ printf(\"[%5d][%-5d]\", 42, 42); return 0; }", "[   42][42   ]")]
-    [InlineData("int main(void){ printf(\"[%05d][%05d]\", 42, -42); return 0; }", "[00042][-0042]")]
-    [InlineData("int main(void){ printf(\"[%+d][% d]\", 7, 7); return 0; }", "[+7][ 7]")]
-    [InlineData("int main(void){ printf(\"[%.3d][%5.3d][%05.3d]\", 42, 42, 42); return 0; }", "[042][  042][  042]")]
-    [InlineData("int main(void){ printf(\"[%8x][%08x]\", 255, 255); return 0; }", "[      ff][000000ff]")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"[%5d][%-5d]\", 42, 42); return 0; }", "[   42][42   ]")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"[%05d][%05d]\", 42, -42); return 0; }", "[00042][-0042]")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"[%+d][% d]\", 7, 7); return 0; }", "[+7][ 7]")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"[%.3d][%5.3d][%05.3d]\", 42, 42, 42); return 0; }", "[042][  042][  042]")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"[%8x][%08x]\", 255, 255); return 0; }", "[      ff][000000ff]")]
     // '#' alternate form on hex / octal: a 0x/0X prefix (suppressed for a zero value),
     // a forced leading 0 for octal; the prefix sits before the zero-padding.
-    [InlineData("int main(void){ printf(\"%#x %#X %#o\", 255, 255, 64); return 0; }", "0xff 0XFF 0100")]
-    [InlineData("int main(void){ printf(\"%#x %#o\", 0, 0); return 0; }", "0 0")]
-    [InlineData("int main(void){ printf(\"[%#08x][%#8x][%-#8x]\", 255, 255, 255); return 0; }", "[0x0000ff][    0xff][0xff    ]")]
-    [InlineData("int main(void){ printf(\"[%#.4x][%#o]\", 255, 8); return 0; }", "[0x00ff][010]")]
-    [InlineData("int main(void){ printf(\"[%10s][%-10s][%.3s]\", \"hi\", \"hi\", \"hello\"); return 0; }", "[        hi][hi        ][hel]")]
-    [InlineData("int main(void){ printf(\"[%3c][%-3c]\", 'x', 'x'); return 0; }", "[  x][x  ]")]
-    [InlineData("int main(void){ printf(\"[%.0d][%.0d]\", 0, 5); return 0; }", "[][5]")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%#x %#X %#o\", 255, 255, 64); return 0; }", "0xff 0XFF 0100")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%#x %#o\", 0, 0); return 0; }", "0 0")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"[%#08x][%#8x][%-#8x]\", 255, 255, 255); return 0; }", "[0x0000ff][    0xff][0xff    ]")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"[%#.4x][%#o]\", 255, 8); return 0; }", "[0x00ff][010]")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"[%10s][%-10s][%.3s]\", \"hi\", \"hi\", \"hello\"); return 0; }", "[        hi][hi        ][hel]")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"[%3c][%-3c]\", 'x', 'x'); return 0; }", "[  x][x  ]")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"[%.0d][%.0d]\", 0, 5); return 0; }", "[][5]")]
     // sprintf / snprintf — same expansion, into a buffer instead of fd 1
-    [InlineData("int main(void){ char b[32]; int n = sprintf(b, \"%d-%s\", 7, \"ok\"); printf(\"%s|%d\\n\", b, n); return 0; }", "7-ok|4\n")]
-    [InlineData("int main(void){ char b[32]; sprintf(b, \"[%5d]\", 3); printf(\"%s\\n\", b); return 0; }", "[    3]\n")]
-    [InlineData("int main(void){ char b[8]; int n = snprintf(b, 5, \"%d\", 123456); printf(\"%s,%d\\n\", b, n); return 0; }", "1234,6\n")]
-    [InlineData("int main(void){ char z[1]; int q = snprintf(z, 0, \"abc\"); printf(\"q=%d\\n\", q); return 0; }", "q=3\n")]
+    [InlineData("#include <stdio.h>\nint main(void){ char b[32]; int n = sprintf(b, \"%d-%s\", 7, \"ok\"); printf(\"%s|%d\\n\", b, n); return 0; }", "7-ok|4\n")]
+    [InlineData("#include <stdio.h>\nint main(void){ char b[32]; sprintf(b, \"[%5d]\", 3); printf(\"%s\\n\", b); return 0; }", "[    3]\n")]
+    [InlineData("#include <stdio.h>\nint main(void){ char b[8]; int n = snprintf(b, 5, \"%d\", 123456); printf(\"%s,%d\\n\", b, n); return 0; }", "1234,6\n")]
+    [InlineData("#include <stdio.h>\nint main(void){ char z[1]; int q = snprintf(z, 0, \"abc\"); printf(\"q=%d\\n\", q); return 0; }", "q=3\n")]
     // heap + I/O together: both runtimes coexist (bump pointer global, exported memory,
     // the WASI import) in one module.
-    [InlineData("#include <stdlib.h>\nint main(void){ int *a=malloc(3*sizeof(int)); a[0]=1; a[1]=2; a[2]=3; printf(\"%d%d%d\\n\", a[0], a[1], a[2]); return 0; }", "123\n")]
+    [InlineData("#include <stdio.h>\n#include <stdlib.h>\nint main(void){ int *a=malloc(3*sizeof(int)); a[0]=1; a[1]=2; a[2]=3; printf(\"%d%d%d\\n\", a[0], a[1], a[2]); return 0; }", "123\n")]
     // printf %f — a correctly-rounded (round-half-to-even) formatter over exact
     // big-integer arithmetic. Expected strings are glibc/Python references; the digits
     // match because the conversion never goes through lossy f64 math.
-    [InlineData("int main(void){ printf(\"%f\\n\", 1.5); return 0; }", "1.500000\n")]
-    [InlineData("int main(void){ printf(\"[%.2f]\", 3.14159); return 0; }", "[3.14]")]
-    [InlineData("int main(void){ printf(\"%.0f %.0f\", 2.5, 3.5); return 0; }", "2 4")]          // round half to even
-    [InlineData("int main(void){ printf(\"%.1f %.1f\", 0.25, 0.35); return 0; }", "0.2 0.3")]   // 0.35 is < 0.35 exactly
-    [InlineData("int main(void){ printf(\"[%8.2f][%-8.2f][%08.2f]\", 3.14, 3.14, -3.14); return 0; }", "[    3.14][3.14    ][-0003.14]")]
-    [InlineData("int main(void){ printf(\"%+.2f % .2f\", 3.0, 3.0); return 0; }", "+3.00  3.00")]
-    [InlineData("int main(void){ printf(\"%.3f\", 2.0/3.0); return 0; }", "0.667")]
-    [InlineData("int main(void){ printf(\"%f\", -0.0); return 0; }", "-0.000000")]
-    [InlineData("int main(void){ printf(\"%.0f\", 0.0); return 0; }", "0")]
-    [InlineData("int main(void){ printf(\"%#.0f\", 5.0); return 0; }", "5.")]
-    [InlineData("int main(void){ double x=10.0, y=3.0; printf(\"%.4f\", x/y); return 0; }", "3.3333")]
-    [InlineData("int main(void){ printf(\"%.1f\", 1.0e20); return 0; }", "100000000000000000000.0")]
-    [InlineData("int main(void){ printf(\"%.10f\", 0.1); return 0; }", "0.1000000000")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%f\\n\", 1.5); return 0; }", "1.500000\n")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"[%.2f]\", 3.14159); return 0; }", "[3.14]")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%.0f %.0f\", 2.5, 3.5); return 0; }", "2 4")]          // round half to even
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%.1f %.1f\", 0.25, 0.35); return 0; }", "0.2 0.3")]   // 0.35 is < 0.35 exactly
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"[%8.2f][%-8.2f][%08.2f]\", 3.14, 3.14, -3.14); return 0; }", "[    3.14][3.14    ][-0003.14]")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%+.2f % .2f\", 3.0, 3.0); return 0; }", "+3.00  3.00")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%.3f\", 2.0/3.0); return 0; }", "0.667")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%f\", -0.0); return 0; }", "-0.000000")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%.0f\", 0.0); return 0; }", "0")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%#.0f\", 5.0); return 0; }", "5.")]
+    [InlineData("#include <stdio.h>\nint main(void){ double x=10.0, y=3.0; printf(\"%.4f\", x/y); return 0; }", "3.3333")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%.1f\", 1.0e20); return 0; }", "100000000000000000000.0")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%.10f\", 0.1); return 0; }", "0.1000000000")]
     // point-free / dangling-dot literal spellings flow through to the formatter
-    [InlineData("int main(void){ printf(\"%.1f %.8f %.1f %.1f\", 1e10, 1e-7, .5, 1.); return 0; }", "10000000000.0 0.00000010 0.5 1.0")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%.1f %.8f %.1f %.1f\", 1e10, 1e-7, .5, 1.); return 0; }", "10000000000.0 0.00000010 0.5 1.0")]
     // printf %e / %g — the scaled-Dragon formatter (significant digits + exponent),
     // also correctly rounded against glibc/Python references.
-    [InlineData("int main(void){ printf(\"%e\", 1.5); return 0; }", "1.500000e+00")]
-    [InlineData("int main(void){ printf(\"%.2e\", 3.14159); return 0; }", "3.14e+00")]
-    [InlineData("int main(void){ printf(\"%.0e\", 9.99); return 0; }", "1e+01")]            // carry bumps the exponent
-    [InlineData("int main(void){ printf(\"%e\", -0.0); return 0; }", "-0.000000e+00")]
-    [InlineData("int main(void){ printf(\"%.3e\", 0.000123456); return 0; }", "1.235e-04")]
-    [InlineData("int main(void){ printf(\"%.0e\", 2.5); return 0; }", "2e+00")]              // round half to even
-    [InlineData("int main(void){ printf(\"%+.2e\", 3.14); return 0; }", "+3.14e+00")]
-    [InlineData("int main(void){ printf(\"%e\", 0.0); return 0; }", "0.000000e+00")]
-    [InlineData("int main(void){ printf(\"%g\", 1.5); return 0; }", "1.5")]
-    [InlineData("int main(void){ printf(\"%g\", 100.0); return 0; }", "100")]               // trailing zeros stripped
-    [InlineData("int main(void){ printf(\"%g %g\", 0.0001, 0.00001); return 0; }", "0.0001 1e-05")]   // %f/%e boundary
-    [InlineData("int main(void){ printf(\"%g\", 1234567.0); return 0; }", "1.23457e+06")]
-    [InlineData("int main(void){ printf(\"%.14g\", 2.0/3.0); return 0; }", "0.66666666666667")]   // Lua's default
-    [InlineData("int main(void){ printf(\"%#.3g\", 1.0); return 0; }", "1.00")]             // '#' keeps trailing zeros
-    [InlineData("int main(void){ printf(\"%g\", 0.0); return 0; }", "0")]
-    [InlineData("int main(void){ printf(\"%.3g\", 3.14159); return 0; }", "3.14")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%e\", 1.5); return 0; }", "1.500000e+00")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%.2e\", 3.14159); return 0; }", "3.14e+00")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%.0e\", 9.99); return 0; }", "1e+01")]            // carry bumps the exponent
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%e\", -0.0); return 0; }", "-0.000000e+00")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%.3e\", 0.000123456); return 0; }", "1.235e-04")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%.0e\", 2.5); return 0; }", "2e+00")]              // round half to even
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%+.2e\", 3.14); return 0; }", "+3.14e+00")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%e\", 0.0); return 0; }", "0.000000e+00")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%g\", 1.5); return 0; }", "1.5")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%g\", 100.0); return 0; }", "100")]               // trailing zeros stripped
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%g %g\", 0.0001, 0.00001); return 0; }", "0.0001 1e-05")]   // %f/%e boundary
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%g\", 1234567.0); return 0; }", "1.23457e+06")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%.14g\", 2.0/3.0); return 0; }", "0.66666666666667")]   // Lua's default
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%#.3g\", 1.0); return 0; }", "1.00")]             // '#' keeps trailing zeros
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%g\", 0.0); return 0; }", "0")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%.3g\", 3.14159); return 0; }", "3.14")]
     // uppercase float conversions — same digits as %e/%f/%g, an uppercase 'E'
     // exponent and uppercase INF/NAN.
-    [InlineData("int main(void){ printf(\"%E\", 1.5); return 0; }", "1.500000E+00")]
-    [InlineData("int main(void){ printf(\"%.2E\", 31415.9); return 0; }", "3.14E+04")]
-    [InlineData("int main(void){ printf(\"%G\", 1234567.0); return 0; }", "1.23457E+06")]
-    [InlineData("int main(void){ printf(\"%G\", 100.0); return 0; }", "100")]
-    [InlineData("int main(void){ printf(\"%F\", 3.5); return 0; }", "3.500000")]
-    [InlineData("int main(void){ printf(\"%e|%E\", 1.0, 1.0); return 0; }", "1.000000e+00|1.000000E+00")]
-    [InlineData("int main(void){ double z=0.0; printf(\"%e %f %g\", 1.0/z, 1.0/z, 1.0/z); return 0; }", "inf inf inf")]
-    [InlineData("int main(void){ double z=0.0; printf(\"%E %F %G\", 1.0/z, 1.0/z, 1.0/z); return 0; }", "INF INF INF")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%E\", 1.5); return 0; }", "1.500000E+00")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%.2E\", 31415.9); return 0; }", "3.14E+04")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%G\", 1234567.0); return 0; }", "1.23457E+06")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%G\", 100.0); return 0; }", "100")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%F\", 3.5); return 0; }", "3.500000")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%e|%E\", 1.0, 1.0); return 0; }", "1.000000e+00|1.000000E+00")]
+    [InlineData("#include <stdio.h>\nint main(void){ double z=0.0; printf(\"%e %f %g\", 1.0/z, 1.0/z, 1.0/z); return 0; }", "inf inf inf")]
+    [InlineData("#include <stdio.h>\nint main(void){ double z=0.0; printf(\"%E %F %G\", 1.0/z, 1.0/z, 1.0/z); return 0; }", "INF INF INF")]
     // %a / %A — exact hexadecimal float (a direct IEEE-754 bit dump). Default precision
     // emits every significant nibble (round-trippable); an explicit one rounds
     // half-to-even, with the carry able to bump the leading digit / exponent.
-    [InlineData("int main(void){ printf(\"%a %a %a\", 1.0, 2.0, 0.5); return 0; }", "0x1p+0 0x1p+1 0x1p-1")]
-    [InlineData("int main(void){ printf(\"%a %a\", 3.0, -2.5); return 0; }", "0x1.8p+1 -0x1.4p+1")]
-    [InlineData("int main(void){ printf(\"%a\", 0.1); return 0; }", "0x1.999999999999ap-4")]
-    [InlineData("int main(void){ printf(\"%a %a\", 0.0, -0.0); return 0; }", "0x0p+0 -0x0p+0")]
-    [InlineData("int main(void){ printf(\"%A %A\", 1.0, 0.1); return 0; }", "0X1P+0 0X1.999999999999AP-4")]
-    [InlineData("int main(void){ printf(\"%.2a\", 3.14159); return 0; }", "0x1.92p+1")]
-    [InlineData("int main(void){ printf(\"%.0a %.0a\", 1.5, 2.5); return 0; }", "0x2p+0 0x1p+1")]   // round half to even
-    [InlineData("int main(void){ printf(\"%.1a\", 1.984375); return 0; }", "0x2.0p+0")]            // carry bumps the leading digit
-    [InlineData("int main(void){ printf(\"%#.0a\", 1.0); return 0; }", "0x1.p+0")]                 // '#' forces the point
-    [InlineData("int main(void){ printf(\"[%12a][%-12a]\", 1.0, 1.0); return 0; }", "[      0x1p+0][0x1p+0      ]")]
-    [InlineData("int main(void){ printf(\"%a\", 5e-324); return 0; }", "0x0.0000000000001p-1022")] // smallest subnormal
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%a %a %a\", 1.0, 2.0, 0.5); return 0; }", "0x1p+0 0x1p+1 0x1p-1")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%a %a\", 3.0, -2.5); return 0; }", "0x1.8p+1 -0x1.4p+1")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%a\", 0.1); return 0; }", "0x1.999999999999ap-4")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%a %a\", 0.0, -0.0); return 0; }", "0x0p+0 -0x0p+0")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%A %A\", 1.0, 0.1); return 0; }", "0X1P+0 0X1.999999999999AP-4")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%.2a\", 3.14159); return 0; }", "0x1.92p+1")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%.0a %.0a\", 1.5, 2.5); return 0; }", "0x2p+0 0x1p+1")]   // round half to even
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%.1a\", 1.984375); return 0; }", "0x2.0p+0")]            // carry bumps the leading digit
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%#.0a\", 1.0); return 0; }", "0x1.p+0")]                 // '#' forces the point
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"[%12a][%-12a]\", 1.0, 1.0); return 0; }", "[      0x1p+0][0x1p+0      ]")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%a\", 5e-324); return 0; }", "0x0.0000000000001p-1022")] // smallest subnormal
     // %p — glibc-shaped pointer (deterministic via integer-cast pointers): "0x"+lowercase
     // hex for a nonzero address, "(nil)" for null; width / left-justify apply.
-    [InlineData("int main(void){ printf(\"%p %p %p\", (void*)255, (void*)0, (void*)0x1234); return 0; }", "0xff (nil) 0x1234")]
-    [InlineData("int main(void){ printf(\"[%10p][%-10p]\", (void*)255, (void*)255); return 0; }", "[      0xff][0xff      ]")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"%p %p %p\", (void*)255, (void*)0, (void*)0x1234); return 0; }", "0xff (nil) 0x1234")]
+    [InlineData("#include <stdio.h>\nint main(void){ printf(\"[%10p][%-10p]\", (void*)255, (void*)255); return 0; }", "[      0xff][0xff      ]")]
     // the wat libc, compiled from C with the program (string, ctype, stdlib), the bulk-memory
     // intrinsics, and exit ending the run with what was printed so far.
     [InlineData("#include <stdio.h>\n#include <string.h>\n#include <stdlib.h>\n#include <ctype.h>\n"
@@ -496,7 +496,7 @@ public sealed class WatOracleTests
         "if=1 in=2 -1 3 4 7 9\n")]
     // A void function's implicit end inside the goto dispatch returns rather than running into
     // the next block (dlmalloc's free ran on into its own error path).
-    [InlineData("int putchar(int);\n"
+    [InlineData("#include <stdio.h>\nint putchar(int);\n"
         + "static void f(int a, int b) {\n"
         + "  if (a) {\n"
         + "    if (b) {\n"
