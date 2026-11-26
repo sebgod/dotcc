@@ -70,11 +70,45 @@ public sealed unsafe class LibcGooseRuntimeTests
     }
 
     [Fact]
-    public void mmap_without_MAP_ANONYMOUS_on_a_closed_descriptor_fails()
+    public void mmap_of_a_descriptor_dotcc_has_not_opened_fails_EBADF()
     {
+        // 99 is no dotcc descriptor, whatever host descriptor 99 the test process has open: the
+        // number must never reach the host's mmap as it is (CI's Linux host had one open).
         var p = mmap(null, 4096, PROT_READ, MAP_PRIVATE, 99, 0);
         ((nint)p).ShouldBe((nint)(-1));
-        errno.ShouldNotBe(0);
+        errno.ShouldBe(EBADF);
+    }
+
+    [Fact]
+    public void mmap_of_a_file_maps_its_bytes_where_the_host_can()
+    {
+        var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"dotcc-mmap-{Guid.NewGuid():N}.bin");
+        var pathBytes = System.Text.Encoding.UTF8.GetBytes(path + "\0");
+        fixed (byte* cpath = pathBytes)
+        {
+            var f = fopen(cpath, L("w+b\0"u8));
+            try
+            {
+                fputs(L("mapped!\0"u8), f);
+                var p = (byte*)mmap(null, 7, PROT_READ, MAP_PRIVATE, fileno(f), 0);
+                if (OperatingSystem.IsWindows())
+                {
+                    ((nint)p).ShouldBe((nint)(-1));
+                    errno.ShouldBe(ENODEV);
+                }
+                else
+                {
+                    ((nint)p).ShouldNotBe((nint)(-1));
+                    new ReadOnlySpan<byte>(p, 7).SequenceEqual("mapped!"u8).ShouldBeTrue();
+                    munmap(p, 7).ShouldBe(0);
+                }
+            }
+            finally
+            {
+                fclose(f);
+                System.IO.File.Delete(path);
+            }
+        }
     }
 
     [Fact]

@@ -51,6 +51,8 @@ one() {
   fi
   (cd "$SAMPLES" && timeout 300 "${ref[@]}" < "$stdin" > "$OUT/$n.expected.txt" 2> "$OUT/$n.expected.err") \
     || { echo "$n FAIL the reference run failed"; return 1; }
+  # Every sample prints; an empty reference would let an empty dotcc run pass.
+  [ -s "$OUT/$n.expected.txt" ] || { echo "$n FAIL the reference printed nothing"; return 1; }
   rm -rf "${OUT:?}/build_$n"
   if ! dotnet "$DOTCC" --emit=build -I "$SAMPLES" "$OUT/$n.c" -o "$OUT/build_$n" > "$OUT/$n.dotcc.log" 2>&1; then
     echo "$n FAIL dotcc: $(grep -m1 -o 'error[^[]\{0,200\}' "$OUT/$n.dotcc.log")"; return 1
