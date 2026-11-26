@@ -32,6 +32,7 @@ internal static class RuntimeTypeNames
     private static readonly HashSet<string> ShellNames = new(System.StringComparer.Ordinal)
     {
         "Cond", "DotCcProgram", "DotCcGlobals", "DotCcExports", "DotCcImports", "DotCcStaticImports", "DotCcLib",
+        "DotCcUser",
     };
 
     /// <summary>The C aggregates the runtime OWNS: C# structs nested in <c>Libc</c> (<c>Libc.tm</c>,

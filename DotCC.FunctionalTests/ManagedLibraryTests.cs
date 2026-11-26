@@ -49,8 +49,8 @@ public sealed class ManagedLibraryTests : IDisposable
         var (program, _) = Compiler.LinkAssembly(new[] { a, b }, "mylib");
         var asm = LibraryModeTests.CompileLibrary(program);
 
-        var fns = asm.GetType("DotCcLib_mylib_Program").ShouldNotBeNull();
-        var globals = asm.GetType("DotCcLib_mylib_Globals").ShouldNotBeNull();
+        var fns = asm.GetType("DotCcLib_mylib.DotCcLib_mylib_Program").ShouldNotBeNull();
+        var globals = asm.GetType("DotCcLib_mylib.DotCcLib_mylib_Globals").ShouldNotBeNull();
         fns.IsPublic.ShouldBeTrue();
         globals.IsPublic.ShouldBeTrue();
 

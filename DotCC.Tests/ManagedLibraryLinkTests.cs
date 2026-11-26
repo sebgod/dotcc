@@ -90,8 +90,8 @@ public sealed class ManagedLibraryLinkTests : IDisposable
         var lines = manifest.Split('\n');
         lines[0].ShouldStartWith("//!dotcc library 1");
         lines.ShouldContain("//!!dotcc-lib assembly:mylib");
-        lines.ShouldContain("//!!dotcc-lib class:DotCcLib_mylib_Globals");
-        lines.ShouldContain("//!!dotcc-lib class:DotCcLib_mylib_Program");
+        lines.ShouldContain("//!!dotcc-lib class:DotCcLib_mylib.DotCcLib_mylib_Globals");
+        lines.ShouldContain("//!!dotcc-lib class:DotCcLib_mylib.DotCcLib_mylib_Program");
         var defs = lines.Where(l => l.StartsWith("//!!dotcc-lib def:", StringComparison.Ordinal))
             .Select(l => l["//!!dotcc-lib def:".Length..]).Order(StringComparer.Ordinal);
         // The unit-local `bump` and `hidden` are not the library's to export.
@@ -205,8 +205,8 @@ public sealed class ManagedLibraryLinkTests : IDisposable
             int bump(int x);
             int plugin_twice(int x) { return bump(x) * 2; }
             """)), "plugin", core);
-        program.ShouldContain("using static DotCcLib_core_Program;");
-        program.ShouldContain("using static DotCcLib_core_Globals;");
+        program.ShouldContain("using static DotCcLib_core.DotCcLib_core_Program;");
+        program.ShouldContain("using static DotCcLib_core.DotCcLib_core_Globals;");
         program.ShouldNotContain("partial class Libc");
         program.ShouldNotContain("int bump(");
         program.ShouldContain("public static unsafe int __export_plugin_twice(int x) => plugin_twice(x);");
@@ -256,8 +256,8 @@ public sealed class ManagedLibraryLinkTests : IDisposable
     {
         var lib = Library("mylib", ("a.c", LibA));
         var program = Compiler.LinkObjects(Objects(("main.c", Main)), EmitMode.Csproj, imports: lib);
-        program.ShouldContain("using static DotCcLib_mylib_Globals;");
-        program.ShouldContain("using static DotCcLib_mylib_Program;");
+        program.ShouldContain("using static DotCcLib_mylib.DotCcLib_mylib_Globals;");
+        program.ShouldContain("using static DotCcLib_mylib.DotCcLib_mylib_Program;");
         // The library's own type, runtime and names: none of them a second time.
         program.ShouldNotContain("struct point");
         program.ShouldNotContain("partial class Libc");
