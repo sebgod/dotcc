@@ -626,7 +626,7 @@ public static unsafe partial class Libc
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static SprintfBuilder snprintf(byte* dst, ulong n, byte* fmt) =>
-        new(dst, fmt, capacity: n == 0 ? 0 : (int)Math.Min(n - 1, int.MaxValue));
+        new(dst, fmt, capacity: n == 0 ? SprintfBuilder.NoStore : (int)Math.Min(n - 1, int.MaxValue));
 
     /// <summary>
     /// <c>fscanf(stream, fmt)</c> — start a fluent scan chain reading from
