@@ -267,6 +267,12 @@ internal sealed partial class IrBuilder
     /// </summary>
     internal string? ObjectKey { get; init; }
 
+    /// <summary>The program's <c>-std=</c> dialect, for the rules that changed between
+    /// standards rather than added a feature (which <see cref="Gate(int, string, Item)"/>
+    /// checks only under <c>-pedantic</c>): a call to an undeclared function is C90's
+    /// implicit declaration, and an error from C99 on.</summary>
+    internal CDialect Dialect { get; init; } = CDialect.Default;
+
     /// <summary>Give every name only this unit can reach its <paramref name="key"/>: the
     /// functions and objects it defines with internal linkage and its static locals. Every
     /// reference holds the symbol, so they print the qualified name too.</summary>
@@ -3281,6 +3287,7 @@ internal sealed partial class IrBuilder
             // matters only when a same-named static was renamed (see BuildFuncDef).
             var sym = _symbols.Resolve(name);
             if (sym is not null) { NoteReference(sym); }
+            else if (GenericBuiltinResult(name, args) is null) { ImplicitDeclaration(name, SrcPos.From(calleeItem)); }
             var fn = sym?.Type.Unqualified as CType.Func;
             if (sym is { Kind: SymKind.Var or SymKind.Param } && fn is null)
             {
@@ -3339,6 +3346,15 @@ internal sealed partial class IrBuilder
         // coercion as a direct call's (GH #230: `s.fn(0)` passes `null`).
         return new IndirectCall(callee, args, calleeFn?.Params) { Type = calleeFn?.Return ?? CType.Int };
     }
+
+    /// <summary>A call to <paramref name="name"/>, which no declaration in scope names (and no
+    /// builtin the binder recognizes by name): C90's implicit declaration of a function returning
+    /// <c>int</c>, which C99 removed (6.5.1p2: an identifier must be declared). gcc's diagnostic,
+    /// an error from C99 on as gcc 14 and clang 16 make it, and a warning under <c>-std=c90</c>,
+    /// where the program may still define the function later.</summary>
+    private void ImplicitDeclaration(string name, SrcPos pos) =>
+        Diagnostics.Add(new Diagnostic(Dialect.Version >= 1999 ? Severity.Error : Severity.Warning,
+            $"implicit declaration of function '{name}'", pos, _file));
 
     /// <summary>The result type of a C11 <c>&lt;stdatomic.h&gt;</c> generic function (7.17):
     /// the atomic object's non-atomic type for a load, an exchange or a fetch-and-modify,

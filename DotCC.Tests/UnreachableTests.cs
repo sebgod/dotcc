@@ -75,22 +75,17 @@ public sealed class UnreachableTests
     }
 
     [Fact]
-    public void Unreachable_is_c23_only_bare_call_survives_before_c23()
+    public void Unreachable_is_c23_only_an_undeclared_call_before_c23()
     {
-        // Pre-C23 the <stddef.h> macro is not defined, so `unreachable()` stays an
-        // ordinary (undeclared) call at the site — the throw rewrite (which matches
-        // the expanded `__dotcc_unreachable`) does NOT fire, so the bare `unreachable();`
-        // call survives (and fails downstream at the C# stage, exactly as it would at
-        // gcc's link step). A POSITIVE assertion, since a ShouldNotContain on the throw
-        // would collide with the always-spliced runtime helper's own throw body.
+        // Pre-C23 the <stddef.h> macro is not defined, so `unreachable()` is an ordinary
+        // identifier no declaration names: a call to an undeclared function, which C99
+        // removed. gcc 14 rejects it, and so does dotcc (it used to emit the call, which
+        // then failed at the C# stage).
         var src = WriteTemp(ValueFn);
         try
         {
-            var emitted = Emit(src, "c17");
-            // The bare call is present verbatim; the throw form contains no
-            // `unreachable();`, and the helper definition is `__dotcc_unreachable() =>`
-            // (no semicolon), so this uniquely identifies the un-rewritten call site.
-            emitted.ShouldContain("unreachable();");
+            Should.Throw<CompileException>(() => Emit(src, "c17"))
+                .Message.ShouldContain("implicit declaration of function 'unreachable'");
         }
         finally { File.Delete(src); }
     }

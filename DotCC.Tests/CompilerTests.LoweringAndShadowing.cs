@@ -222,7 +222,9 @@ public sealed partial class CompilerTests
         // Pre-C23 with no <assert.h> macro, `static_assert` is an ordinary
         // identifier: `static_assert(1, "x")` parses as a function-call
         // expression statement, NOT the keyword declaration. The gate didn't
-        // promote it, so it is emitted verbatim as a call (not the comment).
+        // promote it, so it is a call to an undeclared function: an error from C99
+        // on (gcc 14's too), where it used to be emitted as a call the C# could not
+        // build. Under -std=c90 it is C90's implicit declaration, a warning.
         var src = WriteTemp("""
             int main() {
                 static_assert(1, "x");
@@ -231,7 +233,9 @@ public sealed partial class CompilerTests
             """);
         try
         {
-            var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17"));
+            Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17")))
+                .Message.ShouldContain("implicit declaration of function 'static_assert'");
+            var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c90"));
             emitted.ShouldContain("static_assert");
             emitted.ShouldNotContain("compile-time, not evaluated");
         }
@@ -260,6 +264,7 @@ public sealed partial class CompilerTests
     public void Malloc_struct_used_only_via_arrow_and_freed_is_promoted()
     {
         var src = WriteTemp("""
+            #include <stdlib.h>
             struct Point { int x; int y; };
             int main() {
                 struct Point* p = (struct Point*)malloc(sizeof(struct Point));
@@ -292,6 +297,7 @@ public sealed partial class CompilerTests
         // `p` is returned (escapes the function), so the stack-value rewrite
         // would dangle — dotcc must keep the low-level heap form.
         var src = WriteTemp("""
+            #include <stdlib.h>
             struct Node { int v; struct Node* next; };
             struct Node* make(int v) {
                 struct Node* p = (struct Node*)malloc(sizeof(struct Node));
@@ -339,6 +345,7 @@ public sealed partial class CompilerTests
         // Without it we keep the heap form (changing lifetime silently would be
         // surprising), so no promotion.
         var src = WriteTemp("""
+            #include <stdlib.h>
             struct Box { int n; };
             int main() {
                 struct Box* b = (struct Box*)malloc(sizeof(struct Box));
@@ -651,6 +658,7 @@ public sealed partial class CompilerTests
         // promoted decl, the `.` accesses, and the dropped free must all agree
         // on the @-escaped name — the peephole maps are keyed by the raw name.
         var src = WriteTemp("""
+            #include <stdlib.h>
             struct S { int x; };
             int main() {
                 struct S* new = (struct S*)malloc(sizeof(struct S));
@@ -717,7 +725,7 @@ public sealed partial class CompilerTests
         // in the shell, exactly like whole-program emit. The link semantics
         // (shared types once, internal names per unit) are pinned in ObjectLinkTests.
         var a = WriteTemp("struct P { int x; }; int side(void) { struct P p; p.x = 1; return p.x; }");
-        var b = WriteTemp("struct P { int x; }; int main(void) { return side(); }");
+        var b = WriteTemp("struct P { int x; }; int side(void); int main(void) { return side(); }");
         var objA = Path.Combine(Path.GetTempPath(), $"dotcc-obj-{System.Guid.NewGuid():N}.cs");
         var objB = Path.Combine(Path.GetTempPath(), $"dotcc-obj-{System.Guid.NewGuid():N}.cs");
         try
@@ -727,7 +735,8 @@ public sealed partial class CompilerTests
             var program = Compiler.LinkObjects(new[] { objA, objB });
             // Both functions present and entry-point wired.
             program.ShouldContain("side(");
-            program.ShouldContain("static int main(");
+            // (unsafe: main calls side through the prototype, an import candidate until linked)
+            program.ShouldMatch(@"static (unsafe )?int main\(");
             program.ShouldContain("return main();");  // arity-0 entry dispatch
         }
         finally { File.Delete(a); File.Delete(b); File.Delete(objA); File.Delete(objB); }
