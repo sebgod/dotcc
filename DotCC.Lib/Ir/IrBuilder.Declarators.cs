@@ -532,24 +532,35 @@ internal sealed partial class IrBuilder
         // declaration's own type, never an anonymous aggregate nested inside it.
         var hint = TakeAnonTagHint();
         var synthetic = typeItem.Position.Line >= SrcPos.SyntheticLineBase;
+        var pack = PackOfDefinition(typeItem);
         CType type;
         if (tag is not null)
         {
-            BuildStructDef(tag, members, null, isUnion, synthetic);
+            BuildStructDef(tag, members, null, isUnion, synthetic, pack);
             type = new CType.Named(tag);
         }
         else if (hint is { } alias)
         {
-            BuildStructDef(null, members, alias, isUnion, synthetic);
+            BuildStructDef(null, members, alias, isUnion, synthetic, pack);
             type = new CType.Named(alias);
         }
         else
         {
-            type = ResolveAnonAggregate(members, isUnion);
+            type = ResolveAnonAggregate(members, isUnion, pack);
         }
         _tagDefs[typeItem] = type;
         return type;
     }
+
+    /// <summary>The <c>#pragma pack</c> cap a struct or union definition was written
+    /// under: the one <see cref="PragmaPackRewriter"/> stamped on its keyword, 0 for
+    /// natural alignment.</summary>
+    private static int PackOfDefinition(Item typeItem) => typeItem.Content switch
+    {
+        C.TypeStructDef t => PackedTagKeyword.Of(t.Arg0),
+        C.TypeUnionDef t => PackedTagKeyword.Of(t.Arg0),
+        _ => 0,
+    };
 
     /// <summary>An enum definition used as a type: a real C# enum named by its tag or
     /// by the typedef name an anonymous one is given, else (untagged, un-typedef'd)
@@ -626,11 +637,11 @@ internal sealed partial class IrBuilder
             // An untagged definition (a null tag) is a C11 anonymous member.
             case C.TypeStructDef { Arg1: null } a:
                 Gate(2011, "anonymous struct/union member", member);
-                AddAnonMember(a.Arg3, owner, fields, isUnion: false);
+                AddAnonMember(a.Arg3, owner, fields, isUnion: false, PackedTagKeyword.Of(a.Arg0));
                 return;
             case C.TypeUnionDef { Arg1: null } a:
                 Gate(2011, "anonymous struct/union member", member);
-                AddAnonMember(a.Arg3, owner, fields, isUnion: true);
+                AddAnonMember(a.Arg3, owner, fields, isUnion: true, PackedTagKeyword.Of(a.Arg0));
                 return;
         }
         ResolveType(typeItem);

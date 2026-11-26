@@ -329,7 +329,16 @@ internal sealed partial class CSharpBackend
         var size = !t.IsUnion && t.Fields.Any(f => f.Type.Unqualified is CType.Array za && FlatCount(za) == 0)
             && _module?.SizeOfConst(new CType.Named(t.Name)) is long n and > 0
             ? $", Size = {n}" : "";
-        if (t.IsUnion)
+        if (t.Pack > 0)
+        {
+            // C's `#pragma pack(N)`: no member aligned beyond N, nor the aggregate. The
+            // layout model sizes it the same way, and `Size =` pins that size (a union's
+            // explicit layout would otherwise round it up to its widest member's alignment).
+            var packedSize = _module?.SizeOfConst(new CType.Named(t.Name)) is long ps and > 0 ? $", Size = {ps}" : "";
+            sb.Append("[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.")
+              .Append(t.IsUnion ? "Explicit" : "Sequential").Append($", Pack = {t.Pack}{packedSize})]\n");
+        }
+        else if (t.IsUnion)
         {
             sb.Append("[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Explicit)]\n");
         }

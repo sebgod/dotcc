@@ -97,10 +97,14 @@ internal sealed class CFrontend : IFrontend
             // (a function-like invocation needs lookahead for its `(` and
             // arguments), after the preprocessor populated the macro table.
             using var macroExp = new MacroExpander(preproc, pre);
+            // PragmaPackRewriter: applies `#pragma pack` in token order, stamping the
+            // cap in force on each `struct`/`union` keyword (the carrier tokens
+            // OnPragma left where the directives stood are consumed here).
+            using var packRewriter = new PragmaPackRewriter(macroExp);
             // StrayTokenGuard: a byte no lexer rule matched (a lone `'`, `@`) is a
             // STRAY token, harmless in a skipped #if group or an unused macro body
             // (C11 6.4p1); one that reaches here is gcc's "stray '@' in program".
-            using var strayGuard = new StrayTokenGuard(macroExp, unitPath);
+            using var strayGuard = new StrayTokenGuard(packRewriter, unitPath);
             // DialectKeywordRewriter: dialect-aware keyword promotion (rule 2
             // of the gating model). Promotes identifier-spelled keywords
             // (e.g. C23 `bool`) onto their grammar terminal only when the

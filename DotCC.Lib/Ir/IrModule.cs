@@ -29,6 +29,10 @@ internal sealed partial class IrModule
     // inter-field padding + aligns to 1 for these, so `@sizeOf`/`offsetof` match the
     // emitted [StructLayout(Sequential, Pack=1)] runtime layout. (Zig front-end only.)
     internal HashSet<string> PackedStructs { get; } = new(StringComparer.Ordinal);
+    // C aggregates defined under `#pragma pack(N)`: name → N, the cap on every
+    // member's alignment and on the aggregate's own, as the emitted
+    // [StructLayout(Pack = N)] has it. Absent for natural alignment.
+    internal Dictionary<string, int> StructPack { get; } = new(StringComparer.Ordinal);
     // Enum tag → its resolved CType.Enum, so `enum Tag` as a type resolves to the
     // real enum (not plain int). Anonymous-but-typedef'd enums are reached through
     // _typedefs instead (the alias maps to the same CType.Enum).
@@ -161,6 +165,7 @@ internal sealed partial class IrModule
         if (!StructFields.TryGetValue(name, out var fields)) { return (0, 1); } // opaque/unknown
         var isUnion = StructIsUnion.GetValueOrDefault(name);
         var packed = PackedStructs.Contains(name);   // byte-packed: no inter-field padding, align 1
+        var cap = StructPack.GetValueOrDefault(name);   // #pragma pack(N): no alignment beyond N
         int align = 1, size = 0, off = 0;
         // Consecutive bit-fields share a storage unit of their type's size while they fit, as the C# backend packs them
         // (CSharpBackend.PackBitFieldRun): zig's `packed struct(u8) { a: bool, … }` is ONE byte (task #156), not one per
@@ -181,6 +186,7 @@ internal sealed partial class IrModule
                 unitBytes = -1;
             }
             if (packed) { fa = 1; }
+            if (cap > 0 && fa > cap) { fa = cap; }
             if (fa > align) { align = fa; }
             if (isUnion) { if (fs > size) { size = fs; } }
             else { off = RoundUp(off, fa) + fs; }
@@ -247,12 +253,14 @@ internal sealed partial class IrModule
         if (!StructFields.TryGetValue(structName, out var fields)) { return null; }
         var isUnion = StructIsUnion.GetValueOrDefault(structName);
         var packed = PackedStructs.Contains(structName);   // byte-packed: no inter-field padding
+        var cap = StructPack.GetValueOrDefault(structName);   // #pragma pack(N): no alignment beyond N
         var places = new List<FieldPlace>(fields.Count);
         int off = 0, unitOff = 0, unitBytes = -1, unitUsed = 0;
         foreach (var f in fields)
         {
             var (fs, fa) = Layout(f.Type);
             if (packed) { fa = 1; }
+            if (cap > 0 && fa > cap) { fa = cap; }
             if (isUnion)
             {
                 places.Add(new FieldPlace(f, 0, 0, f.IsBitField ? fs : 0));
@@ -403,6 +411,7 @@ internal sealed partial class IrModule
         StructFields.Remove(name);
         StructIsUnion.Remove(name);
         PackedStructs.Remove(name);
+        StructPack.Remove(name);
         Types.RemoveAll(t => t.Name == name);
     }
 

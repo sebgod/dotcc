@@ -286,11 +286,13 @@ internal sealed partial class IrBuilder
     /// The name of a synthesized anonymous aggregate over <paramref name="memberList"/>. A
     /// whole program numbers them. An object names one by its members' parse fingerprint: a
     /// header struct's anonymous member is then the same type, behind the same hidden field,
-    /// in every unit that includes it, as the linker's one copy of the struct requires.
+    /// in every unit that includes it, as the linker's one copy of the struct requires. The
+    /// <c>#pragma pack</c> cap <paramref name="pack"/> is part of that name, since the same
+    /// members under another cap are another layout.
     /// </summary>
-    private string AnonAggregateName(Item memberList, bool isUnion) => ObjectKey is null
+    private string AnonAggregateName(Item memberList, bool isUnion, int pack) => ObjectKey is null
         ? $"__Anon{_anonAggrSeq++}"
-        : $"__Anon{(isUnion ? 'U' : 'S')}_{Fingerprints.Of(memberList).A:x16}";
+        : $"__Anon{(isUnion ? 'U' : 'S')}{(pack > 0 ? $"P{pack}" : "")}_{Fingerprints.Of(memberList).A:x16}";
 
     // ---- top level -------------------------------------------------------
 
@@ -1235,8 +1237,9 @@ internal sealed partial class IrBuilder
     /// its fields for member-type resolution, and maps the typedef alias to it.
     /// A body a synthetic header gives a runtime-owned aggregate (<paramref name="synthetic"/>, and
     /// <see cref="RuntimeTypeNames.IsRuntimeOwnedAggregate"/>) is registered the same way, marked
-    /// <see cref="StructTypeDef.IsRuntimeOwned"/> so the backend emits no second type for it.</summary>
-    private void BuildStructDef(string? tag, Item memberList, string? alias, bool isUnion, bool synthetic)
+    /// <see cref="StructTypeDef.IsRuntimeOwned"/> so the backend emits no second type for it.
+    /// <paramref name="pack"/> is the <c>#pragma pack</c> cap it was written under (0: none).</summary>
+    private void BuildStructDef(string? tag, Item memberList, string? alias, bool isUnion, bool synthetic, int pack)
     {
         var canonical = tag ?? alias ?? throw new IrUnsupportedException("struct with neither tag nor typedef name");
         RejectReservedTypeName(canonical, isUnion ? "union" : "struct");
@@ -1246,8 +1249,9 @@ internal sealed partial class IrBuilder
         {
             _structFields[canonical] = fields;
             _structIsUnion[canonical] = isUnion;
+            RecordPack(canonical, pack);
             var runtimeOwned = synthetic && RuntimeTypeNames.IsRuntimeOwnedAggregate(canonical);
-            Types.Add(new StructTypeDef(canonical, fields, isUnion, IsRuntimeOwned: runtimeOwned));
+            Types.Add(new StructTypeDef(canonical, fields, isUnion, IsRuntimeOwned: runtimeOwned, Pack: pack));
         }
         else
         {
@@ -1319,15 +1323,16 @@ internal sealed partial class IrBuilder
     /// each inner field as promoted (so <c>parent.inner</c> rewrites to
     /// <c>parent.hidden.inner</c> at access time, keeping the union's overlap /
     /// the struct's sequential layout).</summary>
-    private void AddAnonMember(Item innerMemberList, string owner, List<StructField> parentFields, bool isUnion)
+    private void AddAnonMember(Item innerMemberList, string owner, List<StructField> parentFields, bool isUnion, int pack)
     {
-        var nested = AnonAggregateName(innerMemberList, isUnion);
+        var nested = AnonAggregateName(innerMemberList, isUnion, pack);
         if (!_structFields.TryGetValue(nested, out var innerFields))
         {
             innerFields = BuildStructFields(innerMemberList, nested);
             _structFields[nested] = innerFields;
             _structIsUnion[nested] = isUnion;
-            Types.Add(new StructTypeDef(nested, innerFields, isUnion));
+            RecordPack(nested, pack);
+            Types.Add(new StructTypeDef(nested, innerFields, isUnion, Pack: pack));
         }
 
         var hidden = "__anon_" + nested;
@@ -1433,17 +1438,26 @@ internal sealed partial class IrBuilder
     /// keyed by the Type item), so the field that holds it and every member access
     /// agree on one struct. A source position is no key: two headers can hold
     /// anonymous definitions at the same line and column.</summary>
-    private CType ResolveAnonAggregate(Item memberListItem, bool isUnion)
+    private CType ResolveAnonAggregate(Item memberListItem, bool isUnion, int pack)
     {
-        var name = AnonAggregateName(memberListItem, isUnion);
+        var name = AnonAggregateName(memberListItem, isUnion, pack);
         if (!_structFields.ContainsKey(name))
         {
             var fields = BuildStructFields(memberListItem, name);
             _structFields[name] = fields;
             _structIsUnion[name] = isUnion;
-            Types.Add(new StructTypeDef(name, fields, isUnion));
+            RecordPack(name, pack);
+            Types.Add(new StructTypeDef(name, fields, isUnion, Pack: pack));
         }
         return new CType.Named(name);
+    }
+
+    /// <summary>Record the <c>#pragma pack</c> cap of an aggregate being registered, for
+    /// the layout model (<see cref="IrModule.StructPack"/>); natural alignment records
+    /// nothing.</summary>
+    private void RecordPack(string name, int pack)
+    {
+        if (pack > 0) { Module.StructPack[name] = pack; }
     }
 
     /// <summary>`struct Tag` / `union Tag` as a type: the canonical C# struct name. A tag the
