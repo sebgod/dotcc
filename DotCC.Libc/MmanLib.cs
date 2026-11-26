@@ -2,6 +2,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Runtime.InteropServices;
 
 namespace DotCC.Libc;
@@ -24,13 +25,31 @@ public static unsafe partial class Libc
     private static void* MapFailed => (void*)(nint)(-1);
 
     /// <summary><c>mmap(addr, length, prot, flags, fd, offset)</c>: a new mapping, or
-    /// <c>MAP_FAILED</c> with <c>errno</c> set.</summary>
+    /// <c>MAP_FAILED</c> with <c>errno</c> set. A file mapping's <paramref name="fd"/> is one of
+    /// dotcc's descriptors, an index into its file table, not the host's: on Linux and macOS it
+    /// is translated to the descriptor of the file's stream (EBADF when it names no open file),
+    /// so it never reaches the host as a number that may be some other open file of the process.</summary>
     public static void* mmap(void* addr, ulong length, int prot, int flags, int fd, long offset)
     {
-        if (OperatingSystem.IsWindows()) { return WinMmap(addr, length, prot, flags, fd); }
-        var p = PosixMmap(addr, (nuint)length, prot, HostMapFlags(flags), fd, offset);
+        var anonymous = (flags & MAP_ANONYMOUS) != 0;
+        if (OperatingSystem.IsWindows()) { return WinMmap(addr, length, prot, flags, anonymous ? -1 : fd); }
+        var hostFd = -1;
+        if (!anonymous && !TryHostDescriptor(fd, out hostFd)) { errno = EBADF; return MapFailed; }
+        var p = PosixMmap(addr, (nuint)length, prot, HostMapFlags(flags), hostFd, offset);
         if (p == MapFailed) { errno = Marshal.GetLastPInvokeError(); }
         return p;
+    }
+
+    /// <summary>The host's descriptor for dotcc descriptor <paramref name="fd"/>: that of the
+    /// <see cref="FileStream"/> behind an open file, whose buffered writes are flushed first so a
+    /// mapping sees them. False for a standard stream, a socket, or a descriptor not open.</summary>
+    private static bool TryHostDescriptor(int fd, out int hostFd)
+    {
+        hostFd = -1;
+        if (SlotByFd(fd) is not { Kind: FileSlot.K.File, Stream: FileStream fs }) { return false; }
+        fs.Flush();
+        hostFd = (int)fs.SafeFileHandle.DangerousGetHandle();
+        return true;
     }
 
     /// <summary><c>munmap(addr, length)</c>: 0, or -1 with <c>errno</c> set.</summary>
@@ -121,7 +140,13 @@ public static unsafe partial class Libc
 
     private static void* WinMmap(void* addr, ulong length, int prot, int flags, int fd)
     {
-        if ((flags & MAP_ANONYMOUS) == 0 || fd != -1) { errno = ENODEV; return MapFailed; }
+        if ((flags & MAP_ANONYMOUS) == 0)
+        {
+            // A file mapping: none on Windows, where dotcc's descriptors are no OS handles. One
+            // that names no open file is EBADF first, as on the other hosts.
+            errno = SlotByFd(fd) is { Kind: FileSlot.K.File } ? ENODEV : EBADF;
+            return MapFailed;
+        }
         if (length == 0) { errno = EINVAL; return MapFailed; }
         var len = (nuint)length;
         if ((flags & MAP_FIXED) != 0)

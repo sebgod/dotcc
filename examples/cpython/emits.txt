@@ -189,6 +189,7 @@ Modules/_pickle.c
 Modules/_randommodule.c
 Modules/_bisectmodule.c
 Modules/_heapqmodule.c
+Modules/mmapmodule.c
 Modules/selectmodule.c
 Modules/pyexpat.c
 Modules/expat/xmlparse.c

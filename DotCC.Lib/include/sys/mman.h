@@ -16,8 +16,10 @@
      gives back the pages and leaves them zero as Linux does, and munmap of a
      whole mapping releases it (part of one is decommitted, its address range
      staying reserved).
-   - A mapping of a file (no MAP_ANONYMOUS) fails ENODEV on Windows: dotcc's
-     descriptors are no OS handles there. */
+   - A mapping of a file (no MAP_ANONYMOUS) takes one of dotcc's descriptors,
+     which on Linux and macOS is translated to the host's descriptor of that
+     file; one that names no open file fails EBADF everywhere. Windows has no
+     file mappings here (ENODEV): dotcc's descriptors are no OS handles. */
 
 #include <sys/types.h>
 
