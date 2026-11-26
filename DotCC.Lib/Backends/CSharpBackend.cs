@@ -2467,7 +2467,7 @@ internal sealed partial class CSharpBackend
                     var cboolMismatch = t.Type.IsArithmetic && CBoolRendered(t.Then) != CBoolRendered(t.Else);
                     // An `unreachable` arm (zig's `x catch unreachable`, lowered to a ternary on the error
                     // test) is a C# throw expression: the void call has no value to give the other arm's type.
-                    string Arm(CExpr a) => NoHoist(() =>
+                    string ArmValue(CExpr a) =>
                         IsUnreachableCall(a)
                             ? "throw new System.Diagnostics.UnreachableException(\"unreachable() reached\")"
                             : cboolMismatch && CBoolRendered(a)
@@ -2480,8 +2480,23 @@ internal sealed partial class CSharpBackend
                             // fn-ptr type before the ternary (or a call) can bind.
                             : IsFnPtrType(t.Type) && UnparenIsFunc(a)
                             ? $"({Cs(t.Type)})({Expr(a)})"
-                            : Expr(a));
-                    return ($"({TruthSub(t.Cond, PCond + 1)} ? {Arm(t.Then)} : {Arm(t.Else)})", PPrimary);
+                            : Expr(a);
+                    var pendingMark = _pending.Count;
+                    var delegatesMark = _commaDelegates;
+                    var text = $"({TruthSub(t.Cond, PCond + 1)} ? {NoHoist(() => ArmValue(t.Then))} : {NoHoist(() => ArmValue(t.Else))})";
+                    if (_canHoist && _commaDelegates > delegatesMark)
+                    {
+                        // An arm held a comma that only a closure could evaluate inline (a
+                        // void operand: Goose's bounds check `i < n ? i : (fail(...), 0)`).
+                        // The statement can take temps here, so the ternary becomes an
+                        // if/else over one instead: each arm's comma operands are statements
+                        // of its own branch, conditional as C has them, with no closure (which
+                        // would move captured locals to the heap and cannot capture a local
+                        // whose address is taken, CS1686).
+                        _pending.RemoveRange(pendingMark, _pending.Count - pendingMark);
+                        return (CondViaTemp(t, ArmValue), PPrimary);
+                    }
+                    return (text, PPrimary);
                 }
             case SwitchExpr sw:
                 {
@@ -3555,8 +3570,47 @@ internal sealed partial class CSharpBackend
         return IsPointerType(items[^1].Type) ? $"(({Cs(items[^1].Type)})({pick}))" : $"({pick})";
     }
 
+    /// <summary>Lower the ternary <paramref name="t"/> at a statement that can take temps
+    /// to an if/else that assigns a fresh temp, which becomes the ternary's value: the
+    /// condition hoists as the statement's other operands do, and each arm renders with
+    /// hoisting on, its hoisted operands kept inside its own branch. <paramref name="armValue"/>
+    /// renders an arm coerced to the ternary's type, as the inline form does; an arm that is
+    /// a C23 <c>unreachable()</c> becomes the throw statement.</summary>
+    private string CondViaTemp(CondExpr t, System.Func<CExpr, string> armValue)
+    {
+        var temp = $"__ct{_condTemps++}";
+        _pending.Add($"{Cs(t.Type)} {temp}");
+        var cond = Truth(t.Cond).Text;
+        string Branch(CExpr arm)
+        {
+            var start = _pending.Count;
+            var value = IsUnreachableCall(arm) ? null : armValue(arm);
+            var body = new StringBuilder("{ ");
+            for (var i = start; i < _pending.Count; i++) { body.Append(_pending[i]).Append("; "); }
+            _pending.RemoveRange(start, _pending.Count - start);
+            body.Append(value is null
+                ? "throw new System.Diagnostics.UnreachableException(\"unreachable() reached\"); }"
+                : $"{temp} = {value}; }}");
+            return body.ToString();
+        }
+        var then = Branch(t.Then);
+        var els = Branch(t.Else);
+        _pending.Add($"if ({cond}) {then} else {els}");
+        return temp;
+    }
+
+    /// <summary>How many comma operators this backend has rendered as an immediately
+    /// invoked delegate (<see cref="CommaDelegate"/>), so a ternary can tell that one of
+    /// its arms needed one.</summary>
+    private int _commaDelegates;
+
+    /// <summary>Counter naming the temps <see cref="CondViaTemp"/> introduces
+    /// (<c>__ct0</c>, <c>__ct1</c>, …). Never reset, so unique in any scope.</summary>
+    private int _condTemps;
+
     private string CommaDelegate(IReadOnlyList<CExpr> items)
     {
+        _commaDelegates++;
         var body = new StringBuilder();
         for (var i = 0; i < items.Count - 1; i++) { body.Append(RenderStmtExpr(items[i])).Append("; "); }
         var last = items[^1];
