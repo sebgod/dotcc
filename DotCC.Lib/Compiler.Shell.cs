@@ -221,7 +221,7 @@ public static partial class Compiler
         bool mainErrPayloadIsVoid = false,
         bool testMode = false,
         IReadOnlyList<(string Name, string FnName)>? tests = null,
-        bool pythonShim = false,
+        RuntimePieces runtimePieces = RuntimePieces.None,
         bool posixPaths = false,
         IReadOnlyList<string>? libraryClasses = null,
         IReadOnlyList<(int Priority, string Name)>? constructors = null)
@@ -237,7 +237,7 @@ public static partial class Compiler
         var ctorCalls = string.Concat(ctors.Select(n => $"{n}();\n"));
         if (emit == EmitMode.SharedLib)
         {
-            return BuildLibraryShell(string.Join("\n\n", emittedFns), structDecls, usingAliases, globals, exports, importsClass, importsAreStatic, pythonShim);
+            return BuildLibraryShell(string.Join("\n\n", emittedFns), structDecls, usingAliases, globals, exports, importsClass, importsAreStatic, runtimePieces);
         }
         // Import mode: surface the import table by bare name and splice it into the
         // type-decls section. A GOT (-l) table is bound before main; static [DllImport]
@@ -255,7 +255,7 @@ public static partial class Compiler
         // classes are surfaced by bare name, as the program's own are.
         var runtimeBlock = libraryClasses is { Count: > 0 }
             ? "// ---- the runtime is the linked managed library's"
-            : RuntimeBlock(pythonShim);
+            : RuntimeBlock(runtimePieces);
         var libraryUsings = libraryClasses is { Count: > 0 } libs
             ? "\n" + string.Join("\n", libs.Select(c => $"using static {c};"))
             : "";
@@ -507,12 +507,12 @@ public static partial class Compiler
     /// the classes a program surfaces by bare name, the globals class first.
     /// </summary>
     private static (string Program, IReadOnlyList<string> Classes) BuildAssemblyShell(
-        string prefix, IReadOnlyList<string> fns, string structDecls, string globals, bool pythonShim,
+        string prefix, IReadOnlyList<string> fns, string structDecls, string globals, RuntimePieces runtimePieces,
         IReadOnlyList<EmitHelpers.Export> exports, IReadOnlyList<string> libraryClasses)
     {
         var runtimeBlock = libraryClasses.Count > 0
             ? "// ---- the runtime is the linked managed library's"
-            : RuntimeBlock(pythonShim);
+            : RuntimeBlock(runtimePieces);
         var exportsBlock = new StringBuilder();
         var table = new StringBuilder();
         foreach (var e in exports)
@@ -607,7 +607,7 @@ public static partial class Compiler
         IReadOnlyList<EmitHelpers.Export> exports,
         string importsClass = "",
         bool importsAreStatic = false,
-        bool pythonShim = false)
+        RuntimePieces runtimePieces = RuntimePieces.None)
     {
         // Import mode in a -shared lib: surface the table by bare name and splice it. A
         // GOT table binds in a static constructor (no entry point here); static [DllImport]
@@ -618,7 +618,7 @@ public static partial class Compiler
         // library and exe shells share the same set of stdlib functions;
         // only the framing (DotCcLib + DotCcExports vs. top-level
         // statements + `main`) differs.
-        var runtimeBlock = RuntimeBlock(pythonShim);
+        var runtimeBlock = RuntimeBlock(runtimePieces);
         // Visitor emits user fns as `static unsafe T name(...)` — class-member
         // default is private, which would block DotCcExports from calling
         // them. Promote to `public static unsafe …`. DotCcLib itself is

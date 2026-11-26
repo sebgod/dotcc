@@ -231,8 +231,10 @@ internal sealed class CFrontend : IFrontend
             foreach (var d in gate.Diagnostics) { Compiler.Diagnostics.WriteLine("dotcc: warning: " + d); }
         }
         irBuilder.PublishImportAnalysis();
-        irBuilder.Module.UsesPythonShim = includeResolver.IncludedBuiltins.Contains("Python.h")
-            || unitResolvers.Any(r => r.IncludedBuiltins.Contains("Python.h"));
+        bool Included(string header) => includeResolver.IncludedBuiltins.Contains(header)
+            || unitResolvers.Any(r => r.IncludedBuiltins.Contains(header));
+        irBuilder.Module.RuntimePieces = (Included("Python.h") ? RuntimePieces.Python : RuntimePieces.None)
+            | (Included("pthread.h") || Included("sched.h") ? RuntimePieces.Pthreads : RuntimePieces.None);
         return irBuilder.Module;
     }
 }

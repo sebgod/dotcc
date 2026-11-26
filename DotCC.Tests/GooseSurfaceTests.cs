@@ -161,6 +161,49 @@ public sealed class GooseSurfaceTests
         cs.ShouldContain("System.Func");
     }
 
+    /// <summary>The runtime's POSIX threads, as a program sees them.</summary>
+    private const string PthreadsRuntime = "public static int pthread_create(";
+
+    [Fact]
+    public void The_pthreads_runtime_comes_with_the_header_and_not_otherwise()
+    {
+        Emit("""
+            #include <pthread.h>
+            int main(void) { return pthread_equal(pthread_self(), pthread_self()) ? 0 : 1; }
+            """).ShouldContain(PthreadsRuntime);
+        // A program with pthread names of its own (CPython's stubs) gets none of the runtime's,
+        // which a call reaching both by bare name would find ambiguous.
+        Emit("""
+            typedef unsigned my_thread;
+            my_thread pthread_self(void) { return 7; }
+            int sched_yield(void) { return 0; }
+            int main(void) { return (int)pthread_self() - 7 + sched_yield(); }
+            """).ShouldNotContain(PthreadsRuntime);
+    }
+
+    [Fact]
+    public void An_object_carries_the_pthreads_runtime_to_the_link()
+    {
+        var a = Path.Combine(Path.GetTempPath(), $"dotcc-goose-{Guid.NewGuid():N}.c");
+        var b = Path.Combine(Path.GetTempPath(), $"dotcc-goose-{Guid.NewGuid():N}.c");
+        var objA = Path.ChangeExtension(a, ".obj.cs");
+        var objB = Path.ChangeExtension(b, ".obj.cs");
+        File.WriteAllText(a, "#include <sched.h>\nint yield_once(void) { return sched_yield(); }\n");
+        File.WriteAllText(b, "int yield_once(void);\nint main(void) { return yield_once(); }\n");
+        try
+        {
+            File.WriteAllText(objA, Compiler.EmitObject(a));
+            File.WriteAllText(objB, Compiler.EmitObject(b));
+            File.ReadAllText(objA).ShouldContain("//!!dotcc-obj runtime:pthreads");
+            Compiler.LinkObjects(new[] { objA, objB }).ShouldContain(PthreadsRuntime);
+            Compiler.LinkObjects(new[] { objB }).ShouldNotContain(PthreadsRuntime);
+        }
+        finally
+        {
+            foreach (var f in new[] { a, b, objA, objB }) { File.Delete(f); }
+        }
+    }
+
     [Fact]
     public void Gnu_atomic_builtins_lower_onto_the_Atomic_helpers()
     {

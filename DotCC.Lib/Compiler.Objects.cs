@@ -48,8 +48,9 @@ public static partial class Compiler
     private const string FragImport = "//!!dotcc-obj import:"; // import:<name> <delegate* unmanaged[Cdecl]<…>>
     private const string FragDef    = "//!!dotcc-obj def:";    // def:<name> (this TU defines it)
     // `runtime:python`: the unit included the synthetic <Python.h>, so the program links the
-    // runtime's abi3 shim.
+    // runtime's abi3 shim. `runtime:pthreads`: it included <pthread.h> or <sched.h>.
     private const string FragRuntimePython = "//!!dotcc-obj runtime:python";
+    private const string FragRuntimePthreads = "//!!dotcc-obj runtime:pthreads";
     // `ctor:<priority> <name>`: a [[gnu::constructor]] function, which the program's entry
     // calls before main, by priority and then in link order.
     private const string FragCtor = "//!!dotcc-obj ctor:";
@@ -102,7 +103,7 @@ public static partial class Compiler
         IReadOnlyList<Backends.LinkRecord> records, int mainArity,
         IReadOnlyList<(string Name, string FieldType)> importSpecs, IEnumerable<string> defNames,
         IReadOnlyList<EmitHelpers.Export> exports, bool mainReturnsVoid = false,
-        bool mainReturnsErrUnion = false, bool mainErrPayloadIsVoid = false, bool pythonShim = false,
+        bool mainReturnsErrUnion = false, bool mainErrPayloadIsVoid = false, RuntimePieces runtimePieces = RuntimePieces.None,
         IReadOnlyList<(int Priority, string Name)>? constructors = null)
     {
         var sb = new StringBuilder();
@@ -110,7 +111,8 @@ public static partial class Compiler
         sb.Append(FragMain).Append(mainArity).Append('\n');
         if (mainReturnsVoid) { sb.Append(FragMainVoid).Append("1").Append('\n'); }
         if (mainReturnsErrUnion) { sb.Append(FragMainErr).Append(mainErrPayloadIsVoid ? "v" : "i").Append('\n'); }
-        if (pythonShim) { sb.Append(FragRuntimePython).Append('\n'); }
+        if (runtimePieces.HasFlag(RuntimePieces.Python)) { sb.Append(FragRuntimePython).Append('\n'); }
+        if (runtimePieces.HasFlag(RuntimePieces.Pthreads)) { sb.Append(FragRuntimePthreads).Append('\n'); }
         foreach (var (priority, name) in constructors ?? [])
         {
             sb.Append(FragCtor).Append(priority).Append(' ').Append(name).Append('\n');
@@ -219,8 +221,8 @@ public static partial class Compiler
         /// <summary><c>main</c>'s error union has a <c>void</c> payload.</summary>
         public bool MainErrPayloadIsVoid { get; set; }
 
-        /// <summary>Some unit included the synthetic <c>&lt;Python.h&gt;</c>.</summary>
-        public bool PythonShim { get; set; }
+        /// <summary>The optional runtime pieces some unit's synthetic headers brought in.</summary>
+        public RuntimePieces RuntimePieces { get; set; }
 
         /// <summary>The type declarations as the objects carry them, in definition order, then a
         /// placeholder for each struct only pointed at, each passed through <paramref name="declare"/>.</summary>
@@ -294,7 +296,7 @@ public static partial class Compiler
                           emit, set.Exports, debugHeap, importsClass,
                           importsAreStatic: false, mainReturnsVoid: set.MainReturnsVoid,
                           mainReturnsErrUnion: set.MainReturnsErrUnion, mainErrPayloadIsVoid: set.MainErrPayloadIsVoid,
-                          pythonShim: set.PythonShim, posixPaths: posixPaths,
+                          runtimePieces: set.RuntimePieces, posixPaths: posixPaths,
                           libraryClasses: managed.SelectMany(l => l.Classes).ToList(),
                           constructors: set.Constructors);
     }
@@ -306,10 +308,11 @@ public static partial class Compiler
     /// <param name="Defs">The functions and objects with external linkage it defines.</param>
     /// <param name="Types">Each type it defines, with its object text.</param>
     /// <param name="OpaqueTypes">The structs it only points at.</param>
-    /// <param name="PythonShim">It carries the runtime's abi3 shim for the synthetic <c>&lt;Python.h&gt;</c>.</param>
+    /// <param name="RuntimePieces">The optional runtime pieces it carries (the abi3 shim for the
+    /// synthetic <c>&lt;Python.h&gt;</c>, the POSIX threads).</param>
     private sealed record ManagedLibrary(
         string Path, string AssemblyName, IReadOnlyList<string> Classes, HashSet<string> Defs,
-        Dictionary<string, string> Types, HashSet<string> OpaqueTypes, bool PythonShim);
+        Dictionary<string, string> Types, HashSet<string> OpaqueTypes, RuntimePieces RuntimePieces);
 
     /// <summary>
     /// The manifests of the managed libraries among <paramref name="imports"/>' <c>-l</c> names:
@@ -352,7 +355,7 @@ public static partial class Compiler
         var defs = new HashSet<string>(StringComparer.Ordinal);
         var types = new Dictionary<string, string>(StringComparer.Ordinal);
         var opaque = new HashSet<string>(StringComparer.Ordinal);
-        var pythonShim = false;
+        var pieces = RuntimePieces.None;
         string? typeName = null;
         var body = new StringBuilder();
         void EndType()
@@ -369,12 +372,13 @@ public static partial class Compiler
             else if (line.StartsWith(LibAssembly, StringComparison.Ordinal)) { assembly = line[LibAssembly.Length..]; }
             else if (line.StartsWith(LibClass, StringComparison.Ordinal)) { classes.Add(line[LibClass.Length..]); }
             else if (line.StartsWith(LibDef, StringComparison.Ordinal)) { defs.Add(line[LibDef.Length..]); }
-            else if (line == LibRuntimePython) { pythonShim = true; }
+            else if (line == LibRuntimePython) { pieces |= RuntimePieces.Python; }
+            else if (line == LibRuntimePthreads) { pieces |= RuntimePieces.Pthreads; }
             else if (typeName is not null) { body.Append(line).Append('\n'); }
         }
         EndType();
         return new ManagedLibrary(manifestPath, assembly ?? throw new CompileException($"'{from}' names no assembly"),
-                                  classes, defs, types, opaque, pythonShim);
+                                  classes, defs, types, opaque, pieces);
     }
 
     /// <summary>
@@ -400,9 +404,14 @@ public static partial class Compiler
                 else { owner[d] = lib; }
             }
         }
-        if (set.PythonShim && !libraries.Any(l => l.PythonShim))
+        var carried = libraries.Aggregate(RuntimePieces.None, (all, l) => all | l.RuntimePieces);
+        if (set.RuntimePieces.HasFlag(RuntimePieces.Python) && !carried.HasFlag(RuntimePieces.Python))
         {
             errors.Add("the program includes <Python.h>, but no managed library it links carries the Python shim");
+        }
+        if (set.RuntimePieces.HasFlag(RuntimePieces.Pthreads) && !carried.HasFlag(RuntimePieces.Pthreads))
+        {
+            errors.Add("the program includes <pthread.h>, but no managed library it links carries the POSIX threads");
         }
         foreach (var r in set.Functions.Concat(set.Globals).Where(r => !r.TuLocal))
         {
@@ -570,7 +579,11 @@ public static partial class Compiler
                 }
                 else if (line == FragRuntimePython)
                 {
-                    set.PythonShim = true;
+                    set.RuntimePieces |= RuntimePieces.Python;
+                }
+                else if (line == FragRuntimePthreads)
+                {
+                    set.RuntimePieces |= RuntimePieces.Pthreads;
                 }
                 else if (record is not null)
                 {
@@ -613,6 +626,7 @@ public static partial class Compiler
     private const string LibClass = "//!!dotcc-lib class:";
     private const string LibDef = "//!!dotcc-lib def:";
     private const string LibRuntimePython = "//!!dotcc-lib runtime:python";
+    private const string LibRuntimePthreads = "//!!dotcc-lib runtime:pthreads";
 
     /// <summary>The file a managed library's manifest is written to, beside its project.</summary>
     public static string LibraryManifestFile(string assemblyName) => assemblyName + ".dotcc-lib";
@@ -647,7 +661,7 @@ public static partial class Compiler
         var fns = set.Functions.Select(f => WithAccess(f.Text.TrimEnd('\n'), f.TuLocal ? "internal" : "public")).ToList();
         var globals = string.Concat(set.Storage.Concat(set.Globals).Select(r => r.TuLocal ? InternalMembers(r.Text) : r.Text));
         var carriesRuntime = managed.Count == 0;
-        var (program, classes) = BuildAssemblyShell(prefix, fns, set.TypeDecls(PublicTypes), globals, set.PythonShim, set.Exports,
+        var (program, classes) = BuildAssemblyShell(prefix, fns, set.TypeDecls(PublicTypes), globals, set.RuntimePieces, set.Exports,
                                                      managed.SelectMany(l => l.Classes).ToList());
 
         var manifest = new StringBuilder();
@@ -655,7 +669,8 @@ public static partial class Compiler
             .Append(" — link a program or extension module against it with `-L<dir> -l").Append(assemblyName).Append("`.\n");
         manifest.Append(LibAssembly).Append(assemblyName).Append('\n');
         foreach (var c in classes) { manifest.Append(LibClass).Append(c).Append('\n'); }
-        if (carriesRuntime && set.PythonShim) { manifest.Append(LibRuntimePython).Append('\n'); }
+        if (carriesRuntime && set.RuntimePieces.HasFlag(RuntimePieces.Python)) { manifest.Append(LibRuntimePython).Append('\n'); }
+        if (carriesRuntime && set.RuntimePieces.HasFlag(RuntimePieces.Pthreads)) { manifest.Append(LibRuntimePthreads).Append('\n'); }
         foreach (var r in set.Functions.Concat(set.Globals).Where(r => !r.TuLocal))
         {
             manifest.Append(LibDef).Append(r.Name).Append('\n');
