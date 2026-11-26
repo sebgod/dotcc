@@ -161,6 +161,7 @@ octal-binary-literals
 offsetof
 offsetof-path
 paren-fn-name
+pragma-pack
 predefined-ids
 preproc-cond
 printf-format

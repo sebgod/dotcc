@@ -108,7 +108,12 @@ internal sealed class ParseFingerprints
             }
             else
             {
-                c = Leaf(child.ID, child.Content as string ?? "");
+                c = Leaf(child.ID, child.Content switch
+                {
+                    string text => text,
+                    PackedTagKeyword k => k.FingerprintText,
+                    _ => "",
+                });
             }
             // The children's fingerprints are already mixed, so folding them in takes one multiply per lane.
             a = (a ^ c.A) * 0x100000001B3UL;

@@ -2,6 +2,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using LALR.CC;
 using LALR.CC.LexicalGrammar;
@@ -105,6 +106,9 @@ internal sealed class CPreprocessor : C.IPreprocessor
     // per directive, carrying the content-hash key into _embeds (no lexer rule —
     // the terminal is produced here, never scanned). See c.lalr.yaml's EMBED.
     private readonly int _embedSymbolId;
+    // The `#pragma` terminal, reused as the carrier of a `#pragma pack` directive
+    // (a PackPragma content) that PragmaPackRewriter consumes before the parser.
+    private readonly int _pragmaSymbolId;
 
     // C23 #embed support. _embedDirs are the filesystem directories probed for an
     // embedded file (the -I dirs + each TU's own dir); _embeds is the byte
@@ -148,6 +152,7 @@ internal sealed class CPreprocessor : C.IPreprocessor
         _stringSymbolId = symMap["STRING"];
         _idSymbolId = symMap["ID"];
         _embedSymbolId = symMap["EMBED"];
+        _pragmaSymbolId = symMap["#pragma"];
         Macros = new MacroEngine(this);
         foreach (var d in predefines)
         {
@@ -939,12 +944,17 @@ internal sealed class CPreprocessor : C.IPreprocessor
     public bool IsDefined(string name) => name != null && _macros.ContainsKey(name);
 
     /// <summary>
-    /// <c>#pragma</c> dispatcher. Currently only <c>#pragma once</c> is
-    /// honoured — the rest are silently ignored (matches the convention of
-    /// most compilers: unknown pragmas don't break the build).
+    /// <c>#pragma</c> dispatcher. <c>#pragma once</c> is honoured here, and
+    /// <c>#pragma pack</c> becomes a carrier token in the stream (see
+    /// <see cref="OnPragmaPack"/>); the rest are silently ignored (matches the
+    /// convention of most compilers: unknown pragmas don't break the build).
     /// </summary>
     public IEnumerable<Item> OnPragma(IReadOnlyList<Item> args)
     {
+        if (args.Count > 0 && args[0].Content is string p && p == "pack")
+        {
+            return OnPragmaPack(args);
+        }
         if (args.Count > 0 && args[0].Content is string s && s == "once")
         {
             // Remember the currently-being-processed file as include-once.
@@ -956,6 +966,80 @@ internal sealed class CPreprocessor : C.IPreprocessor
             }
         }
         return Array.Empty<Item>();
+    }
+
+    /// <summary>
+    /// <c>#pragma pack</c>, in the forms gcc, clang and MSVC share: <c>pack(N)</c>,
+    /// <c>pack()</c>, <c>pack(push[, label][, N])</c> and <c>pack(pop[, label | N])</c>,
+    /// N being 1, 2, 4, 8 or 16. The arguments are macro-expanded first, as gcc does.
+    /// The directive becomes one carrier token (a <see cref="PackPragma"/>) where it
+    /// stood, so <see cref="PragmaPackRewriter"/> applies it in token order, to the
+    /// <c>struct</c>s a later macro expands to as well. A malformed directive or an
+    /// alignment that is no small power of two is gcc's warning, and is ignored.
+    /// </summary>
+    private IEnumerable<Item> OnPragmaPack(IReadOnlyList<Item> args)
+    {
+        var line = args[0].Position.Line;
+        var expanded = Macros.ExpandList(args);
+        var words = new List<string>();
+        for (var i = 1; i < expanded.Count; i++) { words.Add(expanded[i].Content as string ?? ""); }
+        IEnumerable<Item> Ignored(string why)
+        {
+            _diag.WriteLine($"{DiagnosticFile}:{line}: warning: {why}");
+            return Array.Empty<Item>();
+        }
+        if (words.Count < 2 || words[0] != "(" || words[^1] != ")")
+        {
+            return Ignored("missing '(' after '#pragma pack' - ignored");
+        }
+        // The comma-separated operands between the parentheses, one token each.
+        var operands = new List<string>();
+        for (var i = 1; i < words.Count - 1; i++)
+        {
+            if (i % 2 == 0)
+            {
+                if (words[i] != ",") { return Ignored("malformed '#pragma pack' - ignored"); }
+                continue;
+            }
+            operands.Add(words[i]);
+        }
+        if (words.Count > 2 && words[^2] == ",") { return Ignored("malformed '#pragma pack' - ignored"); }
+        var op = PackOp.Set;
+        string? label = null;
+        int? value = null;
+        var at = 0;
+        if (operands.Count > 0 && operands[0] is "push" or "pop")
+        {
+            op = operands[0] == "push" ? PackOp.Push : PackOp.Pop;
+            at = 1;
+        }
+        for (; at < operands.Count; at++)
+        {
+            var w = operands[at];
+            if (w.Length > 0 && char.IsAsciiDigit(w[0]))
+            {
+                if (value is not null || !int.TryParse(w, NumberStyles.None, CultureInfo.InvariantCulture, out var n))
+                {
+                    return Ignored("malformed '#pragma pack' - ignored");
+                }
+                if (n is not (1 or 2 or 4 or 8 or 16))
+                {
+                    return Ignored($"alignment must be a small power of two, not {w}");
+                }
+                value = n;
+            }
+            else if (op != PackOp.Set && label is null && value is null && w.Length > 0 && (char.IsAsciiLetter(w[0]) || w[0] == '_'))
+            {
+                label = w;
+            }
+            else
+            {
+                return Ignored("malformed '#pragma pack' - ignored");
+            }
+        }
+        // `pack()` is natural alignment again.
+        if (op == PackOp.Set) { value ??= 0; }
+        return new[] { new Item(_pragmaSymbolId, new PackPragma(op, label, value), args[0].Position) };
     }
 
     /// <summary>

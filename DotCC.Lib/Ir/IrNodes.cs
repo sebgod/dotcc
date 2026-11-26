@@ -635,8 +635,10 @@ public enum AggregateLayout { Default, Sequential, Packed }
 /// non-union aggregate (Zig <c>extern</c>/<c>packed struct</c>).
 /// <see cref="IsRuntimeOwned"/> marks a body a synthetic header declares for a type the runtime
 /// supplies (<c>struct tm</c> is <c>Libc.tm</c>, see <see cref="RuntimeTypeNames.IsRuntimeOwnedAggregate"/>):
-/// the IR has its fields and layout, and the backend emits nothing for it.</summary>
-public sealed record StructTypeDef(string Name, IReadOnlyList<StructField> Fields, bool IsUnion, AggregateLayout Layout = AggregateLayout.Default, bool IsRuntimeOwned = false);
+/// the IR has its fields and layout, and the backend emits nothing for it.
+/// <see cref="Pack"/> is the alignment cap a C <c>#pragma pack(N)</c> put on the definition
+/// (0 for none): no member is aligned beyond it, nor is the aggregate.</summary>
+public sealed record StructTypeDef(string Name, IReadOnlyList<StructField> Fields, bool IsUnion, AggregateLayout Layout = AggregateLayout.Default, bool IsRuntimeOwned = false, int Pack = 0);
 
 /// <summary>One field of a <see cref="StructTypeDef"/>. <see cref="BitWidth"/> is
 /// <c>null</c> for a normal field, or the declared width of a bit-field —
