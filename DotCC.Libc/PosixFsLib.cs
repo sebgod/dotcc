@@ -452,6 +452,35 @@ public static unsafe partial class Libc
         catch (IOException) { errno = EIO; return -1; }
     }
 
+    /// <summary><c>fsync(fd)</c>: write the descriptor's buffered data through to the storage
+    /// device (<see cref="FileStream.Flush(bool)"/> with <c>flushToDisk</c>). A standard stream
+    /// has nothing to keep (0); a descriptor not open is EBADF.</summary>
+    public static int fsync(int fd)
+    {
+        var s = SlotByFd(fd);
+        if (s is null) { errno = EBADF; return -1; }
+        try
+        {
+            if (s.Stream is FileStream fs) { fs.Flush(flushToDisk: true); }
+            else { s.Stream?.Flush(); }
+            return 0;
+        }
+        catch (IOException) { errno = EIO; return -1; }
+    }
+
+    /// <summary><c>fdatasync(fd)</c>: <see cref="fsync"/> (the metadata goes with the data).</summary>
+    public static int fdatasync(int fd) => fsync(fd);
+
+    /// <summary><c>fchmod(fd, mode)</c>: <see cref="chmod"/> on the file the descriptor has open,
+    /// best-effort where the host has no Unix permission bits. EBADF for a descriptor that is no
+    /// open file.</summary>
+    public static int fchmod(int fd, uint mode)
+    {
+        if (SlotByFd(fd)?.Stream is not FileStream fs) { errno = EBADF; return -1; }
+        TrySetUnixMode(fs.Name, (int)mode);
+        return 0;
+    }
+
     /// <summary><c>mkfifo(path, mode)</c> — create a named pipe (FIFO). Forwards
     /// to <c>mkfifo(3)</c> on POSIX. Windows named pipes aren't filesystem
     /// objects (no <c>mkfifo</c> equivalent that a path-based open could reopen),

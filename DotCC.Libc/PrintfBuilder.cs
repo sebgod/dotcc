@@ -155,6 +155,8 @@ public unsafe ref struct PrintfBuilder
                 s = FormatFloat(v, spec, ci);
                 break;
         }
+        // An infinity or NaN is padded with spaces, the 0 flag notwithstanding, as glibc does.
+        if (!double.IsFinite(v)) { spec.Zero = false; }
         Emit(ApplyWidth(s, spec));
         return this;
     }
@@ -192,7 +194,12 @@ public unsafe ref struct PrintfBuilder
     /// Lua's <c>quotefloat</c> needs for <c>%q</c>.</summary>
     private static string FormatHexFloat(double v, bool upper, CultureInfo ci, int precision = -1)
     {
-        if (double.IsNaN(v)) { return upper ? "NAN" : "nan"; }
+        if (double.IsNaN(v))
+        {
+            // A negative NaN prints its sign, as glibc does (and as %f's does, FormatNonFinite).
+            var nan = upper ? "NAN" : "nan";
+            return double.IsNegative(v) ? "-" + nan : nan;
+        }
         if (double.IsInfinity(v))
         {
             var hex = upper ? "INF" : "inf";
@@ -592,6 +599,7 @@ public unsafe ref struct PrintfBuilder
 
     private static string FormatFloat(double v, Spec spec, CultureInfo ci)
     {
+        if (!double.IsFinite(v)) { return FormatNonFinite(v, spec); }
         var prec = spec.Precision >= 0 ? spec.Precision : 6;
         string s = spec.Conv switch
         {
@@ -611,6 +619,17 @@ public unsafe ref struct PrintfBuilder
         if (spec.Plus && v >= 0) { s = "+" + s; }
         else if (spec.Space && v >= 0) { s = " " + s; }
         return s;
+    }
+
+    /// <summary>An infinity or NaN as C prints it under <c>%f %e %g</c> and their uppercase forms
+    /// (C11 7.21.6.1p8): <c>inf</c> / <c>nan</c>, <c>INF</c> / <c>NAN</c> for <c>F E G</c>, the
+    /// precision ignored, a <c>-</c> when the sign bit is set (a negative NaN's too, as glibc
+    /// prints it), else <c>+</c> or a space by the flags.</summary>
+    private static string FormatNonFinite(double v, Spec spec)
+    {
+        var upper = spec.Conv is (byte)'F' or (byte)'E' or (byte)'G';
+        var body = double.IsNaN(v) ? (upper ? "NAN" : "nan") : (upper ? "INF" : "inf");
+        return double.IsNegative(v) ? "-" + body : spec.Plus ? "+" + body : spec.Space ? " " + body : body;
     }
 
     private static string ApplyWidth(string s, Spec spec)

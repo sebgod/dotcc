@@ -77,6 +77,9 @@ long readlink(const char *path, char *buf, unsigned long bufsiz);
 int access(const char *path, int mode);
 int chown(const char *path, unsigned int owner, unsigned int group);
 int ftruncate(int fd, off_t length);
+/* Write a descriptor's data through to the storage device. */
+int fsync(int fd);
+int fdatasync(int fd);
 int dup(int fd);
 int dup2(int oldfd, int newfd);
 int pipe(int *pipefd);

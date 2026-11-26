@@ -70,5 +70,6 @@ int lstat(const char *path, struct stat *buf);
 int mkdir(const char *path, unsigned int mode);
 int mkfifo(const char *path, unsigned int mode);
 int chmod(const char *path, unsigned int mode);
+int fchmod(int fd, unsigned int mode);
 
 #endif /* _SYS_STAT_H */
