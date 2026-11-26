@@ -56,6 +56,7 @@ comma-for-loop
 comma-operator
 comma-pointer-value
 comma-ptr-typedef
+comma-ternary-temp
 comma-void-call
 comma-void-control
 comma-void-value
