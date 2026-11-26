@@ -1,0 +1,1 @@
+cl.exe prints a negative NaN as "-nan(ind)" where glibc prints "-nan"; the gcc oracle checks this fixture.

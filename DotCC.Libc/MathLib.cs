@@ -48,8 +48,15 @@ public static unsafe partial class Libc
     /// <summary><c>M_LN10</c> — natural log of 10.</summary>
     public const double M_LN10 = 2.30258509299404568402;
 
-    /// <summary><c>NAN</c> — a quiet IEEE-754 not-a-number.</summary>
-    public static double NAN => double.NaN;
+    /// <summary><c>NAN</c> — a quiet IEEE-754 not-a-number with the sign bit clear, as C's is
+    /// (.NET's <see cref="double.NaN"/> has it set, which <c>signbit</c> and <c>printf</c> would show).</summary>
+    public static double NAN => PositiveNaN;
+
+    /// <summary>The quiet NaN with the sign bit clear, as C's <c>NAN</c> and <c>nan("")</c> give it.</summary>
+    private static readonly double PositiveNaN = BitConverter.Int64BitsToDouble(0x7FF8000000000000);
+
+    /// <summary>The single-precision quiet NaN with the sign bit clear.</summary>
+    private static readonly float PositiveNaNF = BitConverter.Int32BitsToSingle(0x7FC00000);
     /// <summary><c>INFINITY</c> — positive IEEE-754 infinity.</summary>
     public static double INFINITY => double.PositiveInfinity;
     /// <summary><c>HUGE_VAL</c> — overflow sentinel for double-precision math (== <see cref="INFINITY"/> on IEEE-754 platforms).</summary>

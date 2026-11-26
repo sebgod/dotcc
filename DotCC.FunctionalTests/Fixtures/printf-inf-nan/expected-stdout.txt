@@ -1,0 +1,5 @@
+[inf] [-inf] [nan] [INF]
+[inf] [-INF] [nan] [-NAN]
+[     inf] [inf     |] [+inf] [ inf] [inf]
+[     inf] [ -nan] [0]
+[-inf/nan]
