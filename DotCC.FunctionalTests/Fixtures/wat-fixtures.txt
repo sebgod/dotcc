@@ -113,6 +113,7 @@ for-shadow
 fprintf-streams
 function-declarators
 getrandom
+gnu-attributes
 goto-cleanup
 goto-into-block-decl
 goto-into-loop

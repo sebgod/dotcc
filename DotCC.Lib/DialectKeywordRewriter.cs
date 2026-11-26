@@ -129,6 +129,16 @@ internal sealed class DialectKeywordRewriter : RewritingTokenStream
             // via this promotion (no lexer rule): pre-C23 `constexpr` remains a valid
             // ordinary identifier.
             ["constexpr"] = (2023, map["constexpr"], "constexpr"),
+
+            // GNU `__attribute__((...))`. Not ISO C, but the spelling is reserved to the
+            // implementation in every dialect, so it promotes from C90 on (gcc and clang
+            // accept it under any -std). Promoting after macro expansion keeps a portable
+            // header's `#ifndef __GNUC__ / #define __attribute__(x)` in charge.
+            ["__attribute__"] = (1990, map["__attribute__"], "__attribute__"),
+
+            // GNU `__thread`, the thread storage class gcc, clang and tcc had before C11's
+            // `_Thread_local`, onto that terminal. A reserved spelling, so from C90 on too.
+            ["__thread"] = (1990, map["_Thread_local"], "_Thread_local"),
         };
     }
 

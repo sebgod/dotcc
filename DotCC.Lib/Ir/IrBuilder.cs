@@ -684,6 +684,36 @@ internal sealed partial class IrBuilder
         }
     }
 
+    /// <summary>Walk the list of a GNU <c>__attribute__((...))</c> specifier and record
+    /// the attributes with a lowering of their own for the declaration being built:
+    /// <c>noreturn</c> marks the function as the <c>_Noreturn</c> specifier does, and
+    /// <c>always_inline</c> as <c>inline</c> does. GCC spells every attribute either
+    /// bare or wrapped in double underscores (<c>__noreturn__</c>), which name the same
+    /// attribute. The rest (<c>noinline</c>, <c>aligned</c>, <c>format</c>, ...) are
+    /// accepted and ignored, as clang ignores an attribute it does not know.</summary>
+    private void CollectGnuAttrs(Item it)
+    {
+        switch (it.Content)
+        {
+            case C.AttrListCons c: CollectGnuAttrs(c.Arg0); CollectGnuAttrs(c.Arg2); break;
+            case C.Attr { Arg0.Content: C.AttrStdName n }:
+                switch (GnuAttrName(Tok(n.Arg0)))
+                {
+                    case "noreturn": _sawNoreturnSpec = true; break;
+                    case "always_inline": _sawInlineSpec = true; break;
+                }
+                break;
+            default: break;
+        }
+    }
+
+    /// <summary>A GNU attribute's name without the double underscores it may be
+    /// wrapped in (<c>__noreturn__</c> is <c>noreturn</c>).</summary>
+    private static string GnuAttrName(string name) =>
+        name.Length > 4 && name.StartsWith("__", StringComparison.Ordinal) && name.EndsWith("__", StringComparison.Ordinal)
+            ? name[2..^2]
+            : name;
+
     /// <summary>An attribute's namespace and name (C23 6.7.12.1's attribute-token):
     /// <c>(null, "deprecated")</c> for a standard attribute, <c>("gnu", "aligned")</c>
     /// for a prefixed one.</summary>
@@ -694,10 +724,15 @@ internal sealed partial class IrBuilder
         var other => throw new IrUnsupportedException(TypeName(other)),
     };
 
-    /// <summary>An attribute's argument, the <c>E</c> of its <c>( E? )</c> clause, or
-    /// null when it has no clause or an empty one.</summary>
-    private static Item? AttrArgOf(C.Attr a) =>
-        a.Arg1 is { Content: C.AttrArgs { Arg1: { } arg } } ? arg : null;
+    /// <summary>An attribute's first argument, the leading <c>E</c> of its
+    /// <c>( ArgList? )</c> clause, or null when it has no clause or an empty one. The
+    /// standard attributes and <c>gnu::constructor</c> take one argument at most.</summary>
+    private static Item? AttrArgOf(C.Attr a) => a.Arg1?.Content switch
+    {
+        C.AttrArgs { Arg1.Content: C.ArgsOne one } => one.Arg0,
+        C.AttrArgs { Arg1.Content: C.ArgsCons cons } => cons.Arg0,
+        _ => null,
+    };
 
     /// <summary>True when <paramref name="a"/> is the standard attribute
     /// <paramref name="name"/> with no namespace and no argument clause.</summary>
@@ -1436,6 +1471,11 @@ internal sealed partial class IrBuilder
     /// classes are read structurally from the declaration's Type instead.</summary>
     private CType DeclSpec(Item spec, Item inner)
     {
+        if (spec.Content is C.SpecGnuAttr g)
+        {
+            if (g.Arg3 is { } attrs) { CollectGnuAttrs(attrs); }
+            return ResolveType(inner);
+        }
         var kw = SpecOf(spec);
         if (kw is SpecKw.Inline or SpecKw.Noreturn or SpecKw.ThreadLocal or SpecKw.Constexpr)
         {
@@ -1499,6 +1539,9 @@ internal sealed partial class IrBuilder
         {
             switch (it.Content)
             {
+                // A GNU attribute is no storage class or function specifier.
+                case C.TypeDeclSpec { Arg0.Content: C.SpecGnuAttr } t: it = t.Arg1; break;
+                case C.TypeDeclSpecPost { Arg1.Content: C.SpecGnuAttr } t: it = t.Arg0; break;
                 case C.TypeDeclSpec t: acc.Add(new(SpecOf(t.Arg0), t.Arg0)); it = t.Arg1; break;
                 case C.TypeDeclSpecPost t: acc.Add(new(SpecOf(t.Arg1), t.Arg1)); it = t.Arg0; break;
                 case C.TypeConstPost t: it = t.Arg0; break;
@@ -3295,6 +3338,17 @@ internal sealed partial class IrBuilder
         CType? Object() => args.Count > 0 && args[0].Type.Unqualified is CType.Pointer p ? p.Pointee.Unqualified : null;
         return generic switch
         {
+            // GCC's __atomic builtins on a T* (gcc's manual, "Built-in Functions for Memory
+            // Model Aware Atomic Operations"): the value ones give a T, the tests a bool.
+            "__atomic_load_n" or "__atomic_exchange_n"
+                or "__atomic_fetch_add" or "__atomic_fetch_sub" or "__atomic_fetch_and"
+                or "__atomic_fetch_or" or "__atomic_fetch_xor"
+                or "__atomic_add_fetch" or "__atomic_sub_fetch" or "__atomic_and_fetch"
+                or "__atomic_or_fetch" or "__atomic_xor_fetch" => Object(),
+            "__atomic_compare_exchange_n" or "__atomic_test_and_set"
+                or "__atomic_always_lock_free" or "__atomic_is_lock_free" => CType.Bool,
+            "__atomic_store_n" or "__atomic_clear"
+                or "__atomic_thread_fence" or "__atomic_signal_fence" => CType.Void,
             "atomic_load" or "atomic_exchange" or "atomic_fetch_add" or "atomic_fetch_sub"
                 or "atomic_fetch_or" or "atomic_fetch_and" or "atomic_fetch_xor" => Object(),
             "atomic_compare_exchange_strong" or "atomic_compare_exchange_weak"

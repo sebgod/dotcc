@@ -1,0 +1,3 @@
+cl.exe has no GNU __attribute__ or __thread (its spellings are __declspec(noreturn)
+and __declspec(thread)), so this fixture does not compile under the MSVC oracle.
+The gcc oracle checks it.

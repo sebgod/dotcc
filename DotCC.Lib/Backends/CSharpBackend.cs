@@ -3578,6 +3578,7 @@ internal sealed partial class CSharpBackend
     /// normal call path runs).</summary>
     private string? LowerAtomicCall(Call c)
     {
+        if (c.Callee.StartsWith("__atomic_", StringComparison.Ordinal)) { return LowerGnuAtomicCall(c); }
         if (!c.Callee.StartsWith("atomic_", StringComparison.Ordinal)) { return null; }
         var args = c.Args;
         var name = c.Callee.EndsWith("_explicit", StringComparison.Ordinal)
@@ -3622,6 +3623,50 @@ internal sealed partial class CSharpBackend
             case "atomic_is_lock_free": return Eligible() ? "1" : "0";
             default: return null;
         }
+    }
+
+    /// <summary>Lower one of GCC's <c>__atomic_*</c> builtins onto the same <c>Atomic.*</c>
+    /// helpers as the C11 generic functions: the <c>_n</c> loads, stores and exchanges, the
+    /// fetch-and-op and op-and-fetch arithmetic, the compare-exchange (always strong, which a
+    /// weak one may be), the byte flag's test-and-set and clear, the fences, and the lock-free
+    /// queries (true for 1, 2, 4 and 8 bytes). The memory-order arguments are ignored, every
+    /// order being a full barrier, as for <c>&lt;stdatomic.h&gt;</c>. Null for any other
+    /// <c>__atomic_</c> name, which then lowers as an ordinary call.</summary>
+    private string? LowerGnuAtomicCall(Call c)
+    {
+        var args = c.Args;
+        string? Pointee() => args.Count > 0 && args[0].Type.Unqualified is CType.Pointer p ? Cs(p.Pointee.Unqualified) : null;
+        string Obj() => $"*({Expr(args[0])})";
+        bool Eligible() => Pointee() is string p && _atomicEligible.Contains(p);
+        string Cast(int i) => Pointee() is string p ? $"({p})({Expr(args[i])})" : Expr(args[i]);
+        // The flag of __atomic_test_and_set / __atomic_clear is one byte, whatever its pointer's type.
+        string Flag() => $"*(byte*)({Expr(args[0])})";
+        string LockFree() => _module?.ConstEval(args[0]) is { } size
+            ? size is 1 or 2 or 4 or 8 ? "true" : "false"
+            : $"({Expr(args[0])} is 1 or 2 or 4 or 8)";
+        return c.Callee switch
+        {
+            "__atomic_load_n" => Eligible() ? $"Atomic.Load(ref {Obj()})" : $"({Obj()})",
+            "__atomic_store_n" => Eligible() ? $"Atomic.Store(ref {Obj()}, {Cast(1)})" : $"{Obj()} = {Cast(1)}",
+            "__atomic_exchange_n" => $"Atomic.Exchange(ref {Obj()}, {Cast(1)})",
+            "__atomic_compare_exchange_n" => $"((CBool)Atomic.CompareExchange(ref {Obj()}, ref *({Expr(args[1])}), {Cast(2)}))",
+            "__atomic_fetch_add" => $"Atomic.FetchAdd(ref {Obj()}, {Cast(1)})",
+            "__atomic_fetch_sub" => $"Atomic.FetchSub(ref {Obj()}, {Cast(1)})",
+            "__atomic_fetch_and" => $"Atomic.FetchAnd(ref {Obj()}, {Cast(1)})",
+            "__atomic_fetch_or" => $"Atomic.FetchOr(ref {Obj()}, {Cast(1)})",
+            "__atomic_fetch_xor" => $"Atomic.FetchXor(ref {Obj()}, {Cast(1)})",
+            "__atomic_add_fetch" => $"Atomic.AddFetch(ref {Obj()}, {Cast(1)})",
+            "__atomic_sub_fetch" => $"Atomic.SubFetch(ref {Obj()}, {Cast(1)})",
+            "__atomic_and_fetch" => $"Atomic.AndFetch(ref {Obj()}, {Cast(1)})",
+            "__atomic_or_fetch" => $"Atomic.OrFetch(ref {Obj()}, {Cast(1)})",
+            "__atomic_xor_fetch" => $"Atomic.XorFetch(ref {Obj()}, {Cast(1)})",
+            "__atomic_test_and_set" => $"((CBool)(Atomic.Exchange(ref {Flag()}, (byte)1) != 0))",
+            "__atomic_clear" => $"Atomic.Store(ref {Flag()}, (byte)0)",
+            "__atomic_thread_fence" => "Atomic.ThreadFence()",
+            "__atomic_signal_fence" => "Atomic.SignalFence()",
+            "__atomic_always_lock_free" or "__atomic_is_lock_free" => $"((CBool){LockFree()})",
+            _ => null,
+        };
     }
 
     /// <summary>Lower the <c>&lt;stdarg.h&gt;</c> control macros onto the
