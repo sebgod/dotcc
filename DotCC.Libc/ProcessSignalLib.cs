@@ -242,6 +242,44 @@ public static unsafe partial class Libc
     /// <c>void*</c> here, like <c>stat</c>).</summary>
     public static int sigaction(int sig, void* act, void* oldact) => 0;
 
+    // stack_t (see <signal.h>): ss_sp at 0, ss_flags at 8, ss_size at 16.
+    private const int SS_DISABLE = 2, MINSIGSTKSZ = 2048;
+
+    /// <summary>This thread's alternate signal stack as <see cref="sigaltstack"/> was last
+    /// given it: none (<c>SS_DISABLE</c>) until then.</summary>
+    [ThreadStatic] private static (nint Sp, int Flags, ulong Size)? _altStack;
+
+    /// <summary><c>sigaltstack(ss, old_ss)</c>: hand back this thread's alternate signal stack
+    /// in <paramref name="old"/>, then take <paramref name="ss"/> as the new one. Kept, not used:
+    /// no signal handler runs in a dotcc program, so <c>SS_ONSTACK</c> is never reported. POSIX's
+    /// checks hold: flags other than 0 and <c>SS_DISABLE</c> fail EINVAL, and an enabled stack
+    /// smaller than <c>MINSIGSTKSZ</c> fails ENOMEM.</summary>
+    public static int sigaltstack(void* ss, void* old)
+    {
+        var current = _altStack ?? (0, SS_DISABLE, 0UL);
+        if (ss != null)
+        {
+            var flags = *(int*)((byte*)ss + 8);
+            var size = *(ulong*)((byte*)ss + 16);
+            if (flags is not (0 or SS_DISABLE)) { errno = EINVAL; return -1; }
+            if (flags == 0 && size < MINSIGSTKSZ) { errno = ENOMEM; return -1; }
+        }
+        if (old != null)
+        {
+            *(nint*)old = current.Sp;
+            *(int*)((byte*)old + 8) = current.Flags;
+            *(ulong*)((byte*)old + 16) = current.Size;
+        }
+        if (ss != null)
+        {
+            var flags = *(int*)((byte*)ss + 8);
+            _altStack = flags == SS_DISABLE
+                ? (0, SS_DISABLE, 0UL)
+                : (*(nint*)ss, 0, *(ulong*)((byte*)ss + 16));
+        }
+        return 0;
+    }
+
     /// <summary><c>sigprocmask(how, set, oldset)</c> — no real signal mask;
     /// accepted and ignored (0).</summary>
     public static int sigprocmask(int how, ulong* set, ulong* oldset) => 0;

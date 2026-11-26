@@ -1,0 +1,14 @@
+zeroed 1
+guard 0
+discard 0
+after discard 0 171
+unmap 0
+file mapping fails 1
+altstack before 1
+altstack set 0
+altstack back 1
+altstack too small 1
+locked twice 0
+jumped
+measure 8 abc:1234
+atomics 40 42 1 5 1

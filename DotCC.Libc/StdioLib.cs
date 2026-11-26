@@ -1,5 +1,8 @@
 #nullable enable
 
+using System.Collections.Concurrent;
+using System.Threading;
+
 namespace DotCC.Libc;
 
 /// <summary>
@@ -49,6 +52,38 @@ public static unsafe partial class Libc
 
     /// <summary><c>getchar()</c> ≡ <c>fgetc(stdin)</c>.</summary>
     public static int getchar() => fgetc(stdin);
+
+    // ---- POSIX stream locking -------------------------------------------------
+
+    /// <summary>Each stream's lock, by its slot: a monitor, so a thread may take it again
+    /// (POSIX's flockfile counts as a recursive lock does).</summary>
+    private static readonly ConcurrentDictionary<int, object> _streamLocks = new();
+
+    /// <summary>The lock object of <paramref name="stream"/>.</summary>
+    private static object StreamLock(FILE* stream) => _streamLocks.GetOrAdd(stream->_slot, static _ => new object());
+
+    /// <summary><c>flockfile(stream)</c>: take the stream's lock, waiting while another thread
+    /// holds it.</summary>
+    public static void flockfile(FILE* stream) => Monitor.Enter(StreamLock(stream));
+
+    /// <summary><c>ftrylockfile(stream)</c>: 0 when the lock was free (or already this
+    /// thread's) and is now taken, non-zero when another thread holds it.</summary>
+    public static int ftrylockfile(FILE* stream) => Monitor.TryEnter(StreamLock(stream)) ? 0 : 1;
+
+    /// <summary><c>funlockfile(stream)</c>: give up one level of the stream's lock.</summary>
+    public static void funlockfile(FILE* stream) => Monitor.Exit(StreamLock(stream));
+
+    /// <summary><c>getc_unlocked(stream)</c>: <see cref="getc"/>, whose call is whole on its own.</summary>
+    public static int getc_unlocked(FILE* stream) => fgetc(stream);
+
+    /// <summary><c>getchar_unlocked()</c>: <see cref="getchar"/>.</summary>
+    public static int getchar_unlocked() => fgetc(stdin);
+
+    /// <summary><c>putc_unlocked(c, stream)</c>: <see cref="putc"/>.</summary>
+    public static int putc_unlocked(int c, FILE* stream) => fputc(c, stream);
+
+    /// <summary><c>putchar_unlocked(c)</c>: <see cref="putchar"/>.</summary>
+    public static int putchar_unlocked(int c) => fputc(c, stdout);
 
     /// <summary>
     /// <c>fgets(s, n, stream)</c> — read at most <c><paramref name="n"/>-1</c>

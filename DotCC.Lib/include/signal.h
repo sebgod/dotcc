@@ -71,14 +71,29 @@ struct sigaction {
 #define SIGTSTP  20
 #define SIGTTIN  21
 #define SIGTTOU  22
+#define SIGBUS   7
+
+/* The alternate signal stack (POSIX sigaltstack). A thread's stack is kept as
+   it was given and handed back, so code that sets one up and tears it down
+   runs as written; no handler ever runs on it (see above), so ss_flags never
+   reports SS_ONSTACK. glibc's layout and Linux's x86-64 sizes. */
+typedef struct {
+    void *ss_sp;
+    int ss_flags;
+    unsigned long ss_size;
+} stack_t;
+#define SS_ONSTACK  1
+#define SS_DISABLE  2
+#define MINSIGSTKSZ 2048
+#define SIGSTKSZ    8192
+int sigaltstack(const stack_t *ss, stack_t *old_ss);
 
 /* sa_flags bits + sigprocmask() 'how' values. */
 #define SA_SIGINFO  0x00000004
 #define SA_RESTART  0x10000000
 #define SA_NODEFER  0x40000000
-/* Run the handler on the alternate signal stack. dotcc has no sigaltstack(),
-   so no stack is ever set up and the flag changes nothing, as on a thread
-   that set up none. */
+/* Run the handler on the alternate signal stack. No handler runs (see above),
+   so the flag changes nothing. */
 #define SA_ONSTACK  0x08000000
 #define SIG_BLOCK   0
 #define SIG_UNBLOCK 1

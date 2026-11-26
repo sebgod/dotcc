@@ -1,0 +1,2 @@
+cl.exe has no <pthread.h> (Windows threads are its own API), so this fixture
+does not compile under the MSVC oracle. The gcc oracle checks it.
