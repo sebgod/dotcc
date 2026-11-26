@@ -179,6 +179,11 @@ public static partial class Compiler
     /// surfaces alike.</summary>
     internal const int FunctionsPerClass = 8192;
 
+    /// <summary>The namespace a program's own classes (<c>DotCcProgram</c>…, <c>DotCcGlobals</c>)
+    /// are declared in, with their <c>using static</c> imports inside it, so a name the program
+    /// defines is found before the runtime's (<c>using static Libc;</c> is outside).</summary>
+    internal const string UserNamespace = "DotCcUser";
+
     /// <summary>The user functions as the static classes that hold them: <c>DotCcProgram</c>, and past
     /// <see cref="FunctionsPerClass"/> functions <c>DotCcProgram2</c>, <c>DotCcProgram3</c>, …, each method made
     /// <c>internal</c> so <c>using static</c> surfaces it. Returns the class names and their source.</summary>
@@ -286,6 +291,7 @@ public static partial class Compiler
         // C function names are unique in a program, so the imports never collide.
         var (programClassNames, programClasses) = ProgramClasses(emittedFns);
         var programUsings = string.Join("\n", programClassNames.Select(n => $"using static {n};"));
+        var qualifiedProgramUsings = string.Join("\n", programClassNames.Select(n => $"using static {UserNamespace}.{n};"));
         if (emit == EmitMode.Translation)
         {
             return BuildTranslation(programClasses, structDecls, usingAliases, globals);
@@ -387,15 +393,20 @@ public static partial class Compiler
             using static Libc;
             // ---- File-scope variables + user functions ----------------
             // C globals are static fields of `DotCcGlobals`; user functions are
-            // static methods of `DotCcProgram` (both declared at file end).
-            // `using static` on both makes every global + function visible by bare
-            // name everywhere — functions call each other and read globals
-            // unqualified, the entry below calls `main(...)`, AND a file-scope
-            // initializer can take a function's address (`&fn`, the `luaL_Reg`-table
-            // idiom) by bare name across the class boundary (using-static surfaces
-            // the method group).
-            using static DotCcGlobals;
-            {{programUsings}}{{importsUsing}}{{libraryUsings}}
+            // static methods of `DotCcProgram` (both declared at file end, in the
+            // `DotCcUser` namespace). `using static` on both makes every global +
+            // function visible by bare name everywhere — functions call each other and
+            // read globals unqualified, the entry below calls `main(...)`, AND a
+            // file-scope initializer can take a function's address (`&fn`, the
+            // `luaL_Reg`-table idiom) by bare name across the class boundary
+            // (using-static surfaces the method group). Inside the namespace the
+            // same imports come first, so a program function or global named like a
+            // runtime member is the one found, as a C linker prefers the program's
+            // symbol, wherever the call is (past FunctionsPerClass functions a call
+            // crosses classes, and both would otherwise be in scope: CS0121).
+            using DotCcUser;
+            using static DotCcUser.DotCcGlobals;
+            {{qualifiedProgramUsings}}{{importsUsing}}{{libraryUsings}}
 
             // ---- typedef'd `using` aliases (C# 12+ permits `using unsafe X = Y;`
             //      at file scope, ahead of top-level statements). Empty when no
@@ -427,7 +438,13 @@ public static partial class Compiler
             //      `using static` note above — class methods, not top-level locals,
             //      so `&fn` / function-pointer tables / cross-context refs work) ----
 
+            namespace DotCcUser
+            {
+            using static DotCcGlobals;
+            {{programUsings}}
+
             {{programClasses}}
+            }
 
             {{importsClass}}
             // ---- type declarations (must come last; C# requires top-level
@@ -438,9 +455,15 @@ public static partial class Compiler
             // C file-scope variables, collected as static fields. Empty
             // class when no globals are declared — harmless but kept for
             // shell-shape stability.
+            namespace DotCcUser
+            {
+            using static DotCcGlobals;
+            {{programUsings}}
+
             static class DotCcGlobals
             {
             {{globals}}}
+            }
 
             {{CondClass}}
 
@@ -542,9 +565,14 @@ public static partial class Compiler
         var fnChunks = fns.Count == 0 ? new[] { System.Array.Empty<string>() } : fns.Chunk(FunctionsPerClass).ToArray();
         var programClassNames = fnChunks.Select((_, i) => i == 0 ? $"{prefix}_Program" : $"{prefix}_Program{i + 1}").ToArray();
         var globalsClass = $"{prefix}_Globals";
-        var classes = new List<string> { globalsClass };
-        classes.AddRange(programClassNames);
-        var usings = string.Join("\n", classes.Concat(libraryClasses).Select(n => $"using static {n};"));
+        var ownClasses = new List<string> { globalsClass };
+        ownClasses.AddRange(programClassNames);
+        // The library's classes sit in a namespace named by its prefix, with their own imports
+        // inside it, so its names win over the runtime's there (see UserNamespace); a program
+        // linking it imports them qualified, as the manifest lists them.
+        var classes = ownClasses.Select(n => $"{prefix}.{n}").ToList();
+        var ownUsings = string.Join("\n", ownClasses.Select(n => $"using static {n};"));
+        var usings = string.Join("\n", libraryClasses.Select(n => $"using static {n};"));
         var programClasses = string.Join("\n\n", fnChunks.Select((chunk, i) =>
             $"public static class {programClassNames[i]}\n{{\n" + IndentBlock(string.Join("\n\n", chunk), "    ") + "\n}"));
         var program = $$"""
@@ -569,9 +597,11 @@ public static partial class Compiler
             using static Libc;
             {{usings}}
 
-            {{programClasses}}
+            namespace {{prefix}}
+            {
+            {{ownUsings}}
 
-            {{structDecls}}
+            {{programClasses}}
 
             // C file-scope variables, collected as static fields: one object per
             // name for the whole process, whichever assembly takes its address.
@@ -584,6 +614,9 @@ public static partial class Compiler
             public static class {{prefix}}_Exports
             {
             {{exportsBlock}}}
+            }
+
+            {{structDecls}}
 
             {{CondClass}}
 

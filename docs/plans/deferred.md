@@ -66,9 +66,11 @@ standalone-REPL" note (functions landed), `Float128.cs`'s stale "later stages" h
 
 ## C — bad emit (transpiles "successfully" but the emitted C# does NOT compile)
 
-| Gap | Divergence | Fix sketch |
-|---|---|---|
-| A program function named like a runtime function, called from another program class | A program defines `strlen` (or any name the always-linked runtime has): a call in the same generated class finds the program's (C# prefers the class's own member, as a C linker prefers the program's symbol), but a program past `FunctionsPerClass` (8192) functions continues in `DotCcProgram2`, ..., and a call from one class to a function in another reaches it through `using static`, beside `Libc`'s: CS0121, ambiguous. Seen with CPython's pthread stubs once the runtime had `pthread_*` (the Goose batch); those now come in an optional runtime piece (`RuntimePieces`) instead, which is the fix for a whole header but not for a single name. | qualify a call to a program function by its class (the backend knows each function's emission index, hence its class) whenever a runtime member of that name exists, or always across classes |
+**Currently EMPTY.** Its last two rows were fixed in the Goose batch (2026-11-26): a call to an
+undeclared function, which dotcc emitted (typed `int`) and is now gcc 14's error from C99 on;
+and a program function or object named like a runtime member, ambiguous with `Libc`'s once a
+call crossed the program's classes (CS0121 / CS0229), which the program's classes now win from
+the `DotCcUser` namespace.
 
 ## Zig — parse-only (parses today; lowering is a loud `IrUnsupportedException`)
 
