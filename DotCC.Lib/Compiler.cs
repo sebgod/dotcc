@@ -222,10 +222,10 @@ public static partial class Compiler
                 .Where(s => !s.IsTuLocal).Select(s => s.Name)
                 .Distinct(StringComparer.Ordinal);
             return SerializeFragment(cg.Records ?? [], cg.MainArity,
-                objImports, objDefs, cg.Exports, cg.MainReturnsVoid, cg.MainReturnsErrUnion, cg.MainErrPayloadIsVoid, irBuilder.UsesPythonShim,
+                objImports, objDefs, cg.Exports, cg.MainReturnsVoid, cg.MainReturnsErrUnion, cg.MainErrPayloadIsVoid, irBuilder.RuntimePieces,
                 cg.Constructors ?? []);
         }
-        return BuildShell(cg.MainArity, cg.Functions, cg.Structs, cg.Aliases, cg.Globals, emit, cg.Exports, debugHeap, importsClass, importsAreStatic, cg.MainReturnsVoid, cg.MainReturnsErrUnion, cg.MainErrPayloadIsVoid, testMode, cg.Tests, pythonShim: irBuilder.UsesPythonShim, posixPaths: posixPaths,
+        return BuildShell(cg.MainArity, cg.Functions, cg.Structs, cg.Aliases, cg.Globals, emit, cg.Exports, debugHeap, importsClass, importsAreStatic, cg.MainReturnsVoid, cg.MainReturnsErrUnion, cg.MainErrPayloadIsVoid, testMode, cg.Tests, runtimePieces: irBuilder.RuntimePieces, posixPaths: posixPaths,
             constructors: cg.Constructors);
     }
 

@@ -128,20 +128,27 @@ public static partial class Compiler
     /// <c>../DotCC.Libc/Libc.cs</c> updates BOTH the unit-tested DLL
     /// AND every emitted program.
     /// </summary>
-    private static readonly Lazy<string> _runtimeBlock = new(() => LoadRuntimeBlock(pythonShim: false));
-    private static readonly Lazy<string> _runtimeBlockWithPythonShim = new(() => LoadRuntimeBlock(pythonShim: true));
+    /// <summary>The runtime block for each combination of <see cref="RuntimePieces"/>, built on
+    /// first use.</summary>
+    private static readonly Lazy<string>[] _runtimeBlocks = Enumerable.Range(0, (int)RuntimePieces.All + 1)
+        .Select(i => new Lazy<string>(() => LoadRuntimeBlock((RuntimePieces)i))).ToArray();
 
     /// <summary>The optional runtime piece behind dotcc's synthetic <c>&lt;Python.h&gt;</c>: the
     /// abi3 shim, spliced only into a program that includes that header
-    /// (<see cref="Ir.IrModule.UsesPythonShim"/>), since its C API names would collide with a
+    /// (<see cref="Ir.IrModule.RuntimePieces"/>), since its C API names would collide with a
     /// program defining them itself (CPython).</summary>
     private const string PythonShimPiece = "PythonLib.cs";
 
-    /// <summary>The embedded runtime block, with the <c>&lt;Python.h&gt;</c> shim when
-    /// <paramref name="pythonShim"/>.</summary>
-    private static string RuntimeBlock(bool pythonShim) => (pythonShim ? _runtimeBlockWithPythonShim : _runtimeBlock).Value;
+    /// <summary>The runtime piece behind dotcc's synthetic <c>&lt;pthread.h&gt;</c> and
+    /// <c>&lt;sched.h&gt;</c>, spliced only into a program that includes one of them, since a
+    /// program may define those names itself (CPython's pthread stubs).</summary>
+    private const string PthreadsPiece = "PthreadLib.cs";
 
-    private static string LoadRuntimeBlock(bool pythonShim)
+    /// <summary>The embedded runtime block, with the optional <paramref name="pieces"/> and
+    /// without the others.</summary>
+    private static string RuntimeBlock(RuntimePieces pieces) => _runtimeBlocks[(int)(pieces & RuntimePieces.All)].Value;
+
+    private static string LoadRuntimeBlock(RuntimePieces wanted)
     {
         const string prefix = "DotCC.Runtime.";
         var asm = typeof(Compiler).Assembly;
@@ -149,7 +156,9 @@ public static partial class Compiler
         foreach (var name in asm.GetManifestResourceNames())
         {
             if (!name.StartsWith(prefix, StringComparison.Ordinal)) { continue; }
-            if (!pythonShim && name[prefix.Length..] == PythonShimPiece) { continue; }
+            var file = name[prefix.Length..];
+            if (file == PythonShimPiece && !wanted.HasFlag(RuntimePieces.Python)) { continue; }
+            if (file == PthreadsPiece && !wanted.HasFlag(RuntimePieces.Pthreads)) { continue; }
             using var stream = asm.GetManifestResourceStream(name)
                 ?? throw new InvalidOperationException($"missing embedded runtime resource: {name}");
             using var reader = new StreamReader(stream);

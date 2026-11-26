@@ -63,6 +63,12 @@ Doc-rot fixed by the audit (no action left): the `signal.h` row's stale "deferre
 standalone-REPL" note (functions landed), `Float128.cs`'s stale "later stages" header comment
 (everything landed), and `realpath` misfiled under the faithful tier.
 
+## C — bad emit (transpiles "successfully" but the emitted C# does NOT compile)
+
+| Gap | Divergence | Fix sketch |
+|---|---|---|
+| A program function named like a runtime function, called from another program class | A program defines `strlen` (or any name the always-linked runtime has): a call in the same generated class finds the program's (C# prefers the class's own member, as a C linker prefers the program's symbol), but a program past `FunctionsPerClass` (8192) functions continues in `DotCcProgram2`, ..., and a call from one class to a function in another reaches it through `using static`, beside `Libc`'s: CS0121, ambiguous. Seen with CPython's pthread stubs once the runtime had `pthread_*` (the Goose batch); those now come in an optional runtime piece (`RuntimePieces`) instead, which is the fix for a whole header but not for a single name. | qualify a call to a program function by its class (the backend knows each function's emission index, hence its class) whenever a runtime member of that name exists, or always across classes |
+
 ## Zig — parse-only (parses today; lowering is a loud `IrUnsupportedException`)
 
 The road-to-zig-std S9 bricks advance *parse* coverage ahead of lowering on purpose (the
