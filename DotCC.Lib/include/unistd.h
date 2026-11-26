@@ -54,7 +54,7 @@ int usleep(unsigned int usec);
 int isatty(int fd);
 int close(int fd);
 long read(int fd, void *buf, unsigned long count);
-long write(int fd, void *buf, unsigned long count);
+long write(int fd, const void *buf, unsigned long count);
 off_t lseek(int fd, off_t offset, int whence);
 
 /* access(path, mode) mode bits. */

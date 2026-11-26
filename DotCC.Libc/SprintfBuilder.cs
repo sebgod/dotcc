@@ -24,7 +24,12 @@ public unsafe ref struct SprintfBuilder
     private PrintfBuilder _inner;
     private readonly StringWriter _buf;
     private readonly byte* _dst;
-    private readonly int _capacity;  // <0 = unbounded sprintf; ≥0 = snprintf bound (exclusive of NUL)
+    private readonly int _capacity;  // -1 = unbounded sprintf; ≥0 = snprintf bound (exclusive of NUL); NoStore
+
+    /// <summary>The capacity of an <c>snprintf</c> whose size is 0: nothing is stored, not even
+    /// the NUL, so the destination may be a null pointer (C11 7.21.6.5p2), the usual way to
+    /// measure the output first.</summary>
+    internal const int NoStore = -2;
 
     internal SprintfBuilder(byte* dst, byte* fmt, int capacity)
     {
@@ -63,6 +68,7 @@ public unsafe ref struct SprintfBuilder
         // encodings handle identically).
         var latin1 = System.Text.Encoding.GetEncoding(28591);
         var bytes = latin1.GetBytes(_buf.ToString());
+        if (_capacity == NoStore) { return bytes.Length; }
         int writeCount = _capacity < 0 ? bytes.Length : Math.Min(bytes.Length, _capacity);
         for (int i = 0; i < writeCount; i++) { _dst[i] = bytes[i]; }
         _dst[writeCount] = 0;
