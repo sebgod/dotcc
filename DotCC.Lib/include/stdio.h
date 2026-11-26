@@ -93,6 +93,19 @@ int fputc(int c, FILE* stream);
 int putc(int c, FILE* stream);
 int fgetc(FILE* stream);
 int getc(FILE* stream);
+
+/* POSIX stream locking: flockfile takes a stream's lock, recursively, so a
+   thread's run of calls on it is not interleaved with another thread's
+   flockfile'd run; funlockfile releases one level, ftrylockfile is 0 when it
+   took the lock. The *_unlocked forms are the plain calls (each dotcc stdio
+   call is whole on its own). */
+void flockfile(FILE* stream);
+int ftrylockfile(FILE* stream);
+void funlockfile(FILE* stream);
+int getc_unlocked(FILE* stream);
+int getchar_unlocked(void);
+int putc_unlocked(int c, FILE* stream);
+int putchar_unlocked(int c);
 char* fgets(char* s, int n, FILE* stream);
 
 /* File streams (FILE* is a real pointer to the opaque Libc.FILE). */

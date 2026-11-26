@@ -69,6 +69,10 @@ typedef int clockid_t;
 #define CLOCK_THREAD_CPUTIME_ID  3
 int clock_gettime(clockid_t clk, struct timespec* ts);
 int clock_getres(clockid_t clk, struct timespec* res);
+/* POSIX nanosleep: the whole interval always elapses (no signal interrupts a
+   wait on .NET), so *rem, when given, is zero. EINVAL for a negative time or
+   a tv_nsec outside [0, 1e9). */
+int nanosleep(const struct timespec* req, struct timespec* rem);
 
 /* Calendar conversions. gmtime/localtime/asctime/ctime return a pointer
    into a reused static buffer (overwritten by the next call). */

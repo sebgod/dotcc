@@ -28,6 +28,9 @@
    to set; dotcc's headers declare unconditionally and ignore them). */
 #define _POSIX_VERSION 200809L
 
+/* ssize_t, off_t, pid_t, ... (POSIX has <unistd.h> define the ones it uses). */
+#include <sys/types.h>
+
 typedef long fd_set;
 
 #ifndef _OFF_T_DEFINED

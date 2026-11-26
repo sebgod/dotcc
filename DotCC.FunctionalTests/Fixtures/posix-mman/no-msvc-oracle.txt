@@ -1,0 +1,2 @@
+cl.exe has no <sys/mman.h>, sigaltstack, flockfile or GCC's __atomic builtins;
+this fixture is POSIX and GNU C. The gcc oracle checks it.

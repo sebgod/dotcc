@@ -39,4 +39,15 @@ typedef LongJmpToken jmp_buf;
 int setjmp(jmp_buf env);
 void longjmp(jmp_buf env, int value);
 
+/* POSIX's variants differ from setjmp/longjmp only in whether the signal mask
+   is saved and restored. dotcc has no signal mask (sigprocmask changes
+   nothing), so each is the plain form: the same recognised shapes apply.
+   _setjmp/_longjmp never touch the mask; sigsetjmp saves it when its second
+   argument is non-zero, which here leaves nothing to restore. */
+#define _setjmp(env) setjmp(env)
+#define _longjmp longjmp
+typedef jmp_buf sigjmp_buf;
+#define sigsetjmp(env, savemask) setjmp(env)
+#define siglongjmp longjmp
+
 #endif

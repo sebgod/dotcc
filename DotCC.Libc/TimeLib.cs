@@ -70,6 +70,26 @@ public static unsafe partial class Libc
         return @base;
     }
 
+    /// <summary><c>nanosleep(req, rem)</c> (POSIX): sleep for <paramref name="req"/>, to the
+    /// <see cref="TimeSpan"/> tick. No signal interrupts the wait, so the whole interval passes and
+    /// <paramref name="rem"/> is zeroed. Returns 0, or -1 with <c>errno</c> EINVAL for a negative
+    /// time or a <c>tv_nsec</c> outside [0, 1e9) and EFAULT for a null <paramref name="req"/>.</summary>
+    public static int nanosleep(timespec* req, timespec* rem)
+    {
+        if (req == null) { errno = EFAULT; return -1; }
+        if (req->tv_sec < 0 || req->tv_nsec is < 0 or >= 1_000_000_000) { errno = EINVAL; return -1; }
+        var ticks = (Int128)req->tv_sec * TimeSpan.TicksPerSecond + (req->tv_nsec + 99) / 100;
+        var remaining = ticks;
+        while (remaining > 0)
+        {
+            var slice = (long)Int128.Min(remaining, int.MaxValue * TimeSpan.TicksPerMillisecond);
+            Thread.Sleep(TimeSpan.FromTicks(slice));
+            remaining -= slice;
+        }
+        if (rem != null) { rem->tv_sec = 0; rem->tv_nsec = 0; }
+        return 0;
+    }
+
     /// <summary><c>clock_gettime(clk, ts)</c> (POSIX): the time of clock <paramref name="clk"/>, by
     /// <c>&lt;time.h&gt;</c>'s Linux ids: 0 <c>CLOCK_REALTIME</c> (UTC since the epoch), 1
     /// <c>CLOCK_MONOTONIC</c> (the <see cref="System.Diagnostics.Stopwatch"/> timestamp, which never

@@ -1,0 +1,9 @@
+total 15005000 results 20000
+signalled 1
+recursive 0
+errorcheck 1 1
+unlock unowned 1
+timed out 1
+specific 1 destroyed 5
+exit 99
+once 1 self 1
