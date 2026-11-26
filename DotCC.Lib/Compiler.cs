@@ -526,6 +526,15 @@ public static partial class Compiler
             "__STDC_EMBED_NOT_FOUND__=0",
             "__STDC_EMBED_FOUND__=1",
             "__STDC_EMBED_EMPTY__=2",
+            // The memory orders of GCC's __atomic_* builtins, which dotcc
+            // implements (gcc and clang predefine these; every order lowers to
+            // a full barrier, as <stdatomic.h>'s do).
+            "__ATOMIC_RELAXED=0",
+            "__ATOMIC_CONSUME=1",
+            "__ATOMIC_ACQUIRE=2",
+            "__ATOMIC_RELEASE=3",
+            "__ATOMIC_ACQ_REL=4",
+            "__ATOMIC_SEQ_CST=5",
         };
         var stdcVersion = dialect.StdcVersionLiteral;
         if (stdcVersion is not null)

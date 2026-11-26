@@ -501,11 +501,16 @@ symbols:
   - StaticAssert   # 206 non-terminal: `_Static_assert ( E StaticAssertMsg? ) ;`, file and block scope
   - StaticAssertMsg # 207 non-terminal: a static assertion's `, STRING` message
   - AttrName       # 208 non-terminal: an attribute's name, `ID` or `ID :: ID`
-  - AttrArgs       # 209 non-terminal: an attribute's argument clause, `( E? )`
+  - AttrArgs       # 209 non-terminal: an attribute's argument clause, `( ArgList? )`
   - EnumBase       # 210 non-terminal: a C23 enum's fixed underlying type, `: Type`
   # C23 6.7.10's initializer and designator-list (see the InitElem group).
   - Initializer    # 211 non-terminal: an initializer, an E or a BraceInit
   - DesignatorList # 212 non-terminal: one or more Designators, a Designation before its `=`
+  # GNU `__attribute__((list))`, a declaration specifier in GCC's and clang's C (any
+  # -std, the spelling being reserved). No lexer rule: DialectKeywordRewriter promotes
+  # the ID after macro expansion, so a portable header's `#define __attribute__(x)`
+  # keeps working. The list inside is the C23 AttrList (see SpecGnuAttr).
+  - '__attribute__' # 213 keyword (GNU): attribute specifier, a DeclSpec
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -956,6 +961,10 @@ productions:
       - { lhs: DeclSpec, rhs: ['constexpr'],     action: specConstexpr }
       - { lhs: DeclSpec, rhs: ['inline'],        action: specInline }
       - { lhs: DeclSpec, rhs: ['_Noreturn'],     action: specNoreturn }
+      # GNU attributes in specifier position (`static __attribute__((noreturn)) void
+      # f(void);`). The binder lowers the ones with a .NET counterpart and accepts
+      # the rest; they are no storage class, so DeclSpecsOf steps over them.
+      - { lhs: DeclSpec, rhs: ['__attribute__', '(', '(', AttrList?, ')', ')'], action: specGnuAttr }
 
   # EnumList / EnumItem — enumerator body for `enum Name { … }`.
   - derivation: leftmost
@@ -1392,17 +1401,19 @@ productions:
       - { lhs: U8StringSeq, rhs: [U8StringSeq, U8STRING], action: u8strSeqCons }
       - { lhs: U8StringSeq, rhs: [U8STRING],             action: u8strSeqOne }
 
-  # C23 attribute-list interior — the inside of `[[ … ] ]`, reached only from
-  # the attrFn/attrStmt wrappers. No generated-visitor dispatch: IrBuilder walks
-  # these records STRUCTURALLY (CollectDeclAttrs / AttrListHasFallthrough /
-  # AttrListHasMaybeUnused) to pick out the recognized attrs and drops the rest.
-  # V1 shapes: bare ID, namespaced
+  # C23 attribute-list interior — the inside of `[[ … ] ]`, reached from the
+  # attrFn/attrStmt wrappers and from GNU's `__attribute__(( … ))` (specGnuAttr).
+  # No generated-visitor dispatch: IrBuilder walks
+  # these records STRUCTURALLY (CollectDeclAttrs / CollectGnuAttrs /
+  # AttrListHasFallthrough / AttrListHasMaybeUnused) to pick out the recognized
+  # attrs and drops the rest. V1 shapes: bare ID, namespaced
   # `ns :: ID` (`::` is two ':' tokens — dotcc has no '::' terminal), the call
-  # forms with an empty / single-expression argument (`deprecated("msg")`,
-  # `gnu::aligned(16)`), and `_Noreturn` — under -std=c23 the rewriter promotes
+  # forms with an argument list, empty or of comma-separated expressions
+  # (`deprecated("msg")`, `gnu::aligned(16)`, GNU's `format(printf, 1, 2)`), and
+  # `_Noreturn` — under -std=c23 the rewriter promotes
   # bare `noreturn` onto the `_Noreturn` terminal BEFORE parsing, so
   # `[[noreturn]]` arrives as a keyword, not an ID. Cuts (clear parse errors):
-  # `[[]]`, trailing/empty commas, a multi-token argument soup, and a vendor
+  # `[[]]`, trailing/empty commas, an argument that is no expression, and a vendor
   # attr spelled like a keyword or typedef name (`[[gnu::const]]`).
   - derivation: leftmost
     rules:
@@ -1411,12 +1422,12 @@ productions:
       # C23 6.7.12.1's `attribute-token attribute-argument-clause?`: a name, bare
       # or namespaced, then an optional argument clause whose argument is itself
       # optional, so `deprecated`, `deprecated()` and `deprecated("msg")` are one
-      # record (a null AttrArgs, an AttrArgs with a null E, and one with an E).
+      # record (a null AttrArgs, an AttrArgs with a null ArgList, and one with one).
       - { lhs: Attr, rhs: [AttrName, AttrArgs?],                     action: attr }
       - { lhs: Attr, rhs: ['_Noreturn'],                             action: attrNoreturn }
       - { lhs: AttrName, rhs: [ID],                                  action: attrStdName }
       - { lhs: AttrName, rhs: [ID, ':', ':', ID],                    action: attrNsName }
-      - { lhs: AttrArgs, rhs: ['(', E?, ')'],                        action: attrArgs }
+      - { lhs: AttrArgs, rhs: ['(', ArgList?, ')'],                  action: attrArgs }
 
   # `_Static_assert ( E , STRING ) ;` (C11 6.7.10) and the C23 message-less
   # `_Static_assert ( E ) ;`, one nonterminal for the file-scope (Fn) and the
