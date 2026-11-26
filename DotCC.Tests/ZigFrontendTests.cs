@@ -4653,7 +4653,7 @@ public sealed class ZigFrontendTests
         // it across the seam: the c_allocator default DEVIRTUALIZES to a direct Libc.malloc, the C
         // function is emitted in the same program, and the cross-language call binds by bare name.
         var cs = EmitMixed(
-            "void take_and_free(int *p) { free(p); }\n",
+            "#include <stdlib.h>\nvoid take_and_free(int *p) { free(p); }\n",
             "const std = @import(\"std\");\n" +
             "extern fn take_and_free(p: [*c]c_int) void;\n" +
             "pub fn main() u8 {\n" +

@@ -39,11 +39,12 @@ Pinned by the fixtures `gnu-attributes/`, `pragma-pack/`, `comma-ternary-temp/`,
 
 ### Left from (a)
 
-- **Reject calls to undeclared functions.** C99 makes an implicit declaration an error (gcc 14
-  does); dotcc emits the call and Roslyn fails later. Goose no longer needs it (everything it
-  calls is declared now), but it is the next "be a good compiler" item. Needs a sweep of the
-  synthetic headers first, so Lua/chibi/CPython do not lose a call that only an implicit
-  declaration reaches today.
+- ~~Reject calls to undeclared functions.~~ Done: an error from C99 on (gcc 14's wording), a
+  warning under C90. Turning it on found the C99 `<math.h>` functions the runtime lacked:
+  Goose's runtime calls `fma`/`fmaf` (in a helper no sample reaches, so it never reached the
+  C# before), CPython's math modules `fma`, `log1p`, `nextafter` and `asinh`. All of C99 7.12
+  but `erf`/`erfc`/`tgamma`/`lgamma` is in now, and `printf` prints infinities and NaNs as C
+  does.
 - ~~A comma in a short-circuit operand or a loop condition still lowers to the lambda.~~ Done:
   `&&`/`||` become an if over a bool temp, and such a loop evaluates its condition at the top
   of each iteration (`while (true) { ...; if (!cond) break; ... }`, a do-while through a label

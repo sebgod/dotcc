@@ -26,7 +26,8 @@ public sealed class MallocStackallocTests
     private static string WriteTemp(string body)
     {
         var path = Path.Combine(Path.GetTempPath(), $"dotcc-msa-{Guid.NewGuid():N}.c");
-        File.WriteAllText(path, body);
+        // Every source here calls malloc/free, which C99 wants declared.
+        File.WriteAllText(path, "#include <stdlib.h>\n" + body);
         return path;
     }
 

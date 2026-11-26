@@ -300,7 +300,7 @@ public sealed class WatBackendTests
     {
         // A string-literal printf is expanded at the call site — no $printf function,
         // direct writes for literal runs, a formatting-helper call for the conversion.
-        var wat = Wat("int main(void){ printf(\"n=%d\\n\", 42); return 0; }");
+        var wat = Wat("#include <stdio.h>\nint main(void){ printf(\"n=%d\\n\", 42); return 0; }");
         wat.ShouldContain("(import \"wasi_snapshot_preview1\" \"fd_write\"");
         wat.ShouldContain("call $__pf_int_s");      // the %d conversion
         wat.ShouldContain("call $__write");         // a literal run
@@ -310,7 +310,7 @@ public sealed class WatBackendTests
     [Fact]
     public void printf_string_and_char_conversions_reuse_the_io_runtime()
     {
-        var wat = Wat("int main(void){ printf(\"%s%c\", \"hi\", 33); return 0; }");
+        var wat = Wat("#include <stdio.h>\nint main(void){ printf(\"%s%c\", \"hi\", 33); return 0; }");
         wat.ShouldContain("call $__emit_str");
         wat.ShouldContain("call $__emit_char");
     }
@@ -320,7 +320,7 @@ public sealed class WatBackendTests
     {
         // Width/precision/flags are compile-time constants from the literal format —
         // resolved here (width 5, zero-pad mode 2) and handed to the formatter.
-        var wat = Wat("int main(void){ printf(\"%05d\", 42); return 0; }");
+        var wat = Wat("#include <stdio.h>\nint main(void){ printf(\"%05d\", 42); return 0; }");
         wat.ShouldContain("call $__pf_int_s");
         wat.ShouldContain("i32.const 5");   // the width immediate
     }
@@ -330,7 +330,7 @@ public sealed class WatBackendTests
     {
         // sprintf points the output sink at the destination buffer, runs the shared
         // expansion, then NUL-terminates — no $sprintf runtime function.
-        var wat = Wat("int main(void){ char b[16]; sprintf(b, \"%d\", 42); return 0; }");
+        var wat = Wat("#include <stdio.h>\nint main(void){ char b[16]; sprintf(b, \"%d\", 42); return 0; }");
         wat.ShouldContain("global.set $__ob");     // sink aimed at the buffer
         wat.ShouldContain("call $__sink_end");
         wat.ShouldNotContain("call $sprintf");
@@ -445,7 +445,7 @@ public sealed class WatBackendTests
     public void printf_percent_p_routes_to_the_pointer_formatter()
     {
         // %p lowers to the glibc-shaped pointer helper ("(nil)" / "0x"+hex).
-        Wat("int main(void){ printf(\"%p\", (void*)0); return 0; }").ShouldContain("call $__pf_p");
+        Wat("#include <stdio.h>\nint main(void){ printf(\"%p\", (void*)0); return 0; }").ShouldContain("call $__pf_p");
     }
 
     [Fact]
@@ -453,9 +453,9 @@ public sealed class WatBackendTests
     {
         // %E/%F/%G reuse the %e/%f/%g formatters with an extra uppercase flag (the
         // last `i32.const` immediate before the call) selecting 'E' / INF / NAN.
-        Wat("int main(void){ printf(\"%E\", 1.5); return 0; }").ShouldContain("call $__pf_e");
-        Wat("int main(void){ printf(\"%G\", 1.5); return 0; }").ShouldContain("call $__pf_g");
-        Wat("int main(void){ printf(\"%F\", 1.5); return 0; }").ShouldContain("call $__pf_f");
+        Wat("#include <stdio.h>\nint main(void){ printf(\"%E\", 1.5); return 0; }").ShouldContain("call $__pf_e");
+        Wat("#include <stdio.h>\nint main(void){ printf(\"%G\", 1.5); return 0; }").ShouldContain("call $__pf_g");
+        Wat("#include <stdio.h>\nint main(void){ printf(\"%F\", 1.5); return 0; }").ShouldContain("call $__pf_f");
     }
 
     [Fact]
@@ -463,7 +463,7 @@ public sealed class WatBackendTests
     {
         // %a is an exact IEEE-754 bit-dump, so it routes to $__pf_a and pulls in only
         // the shared field layout — never the %f big-integer block or the %e/%g Dragon.
-        var wat = Wat("int main(void){ printf(\"%a\", 1.5); return 0; }");
+        var wat = Wat("#include <stdio.h>\nint main(void){ printf(\"%a\", 1.5); return 0; }");
         wat.ShouldContain("call $__pf_a");
         wat.ShouldNotContain("call $__dragon");
         wat.ShouldNotContain("call $__bn_mul");
@@ -475,8 +475,8 @@ public sealed class WatBackendTests
         // %#x packs the "0x" prefix low-byte-first into the same i32 slot $__pf_emit
         // reads a sign from: '0' | ('x' << 8) == 48 | (120 << 8) == 30768. %#X uses
         // 'X' (88) → 48 | (88 << 8) == 22576.
-        Wat("int main(void){ printf(\"%#x\", 255); return 0; }").ShouldContain("i32.const 30768");
-        Wat("int main(void){ printf(\"%#X\", 255); return 0; }").ShouldContain("i32.const 22576");
+        Wat("#include <stdio.h>\nint main(void){ printf(\"%#x\", 255); return 0; }").ShouldContain("i32.const 30768");
+        Wat("#include <stdio.h>\nint main(void){ printf(\"%#X\", 255); return 0; }").ShouldContain("i32.const 22576");
     }
 
     [Fact]
@@ -485,7 +485,7 @@ public sealed class WatBackendTests
         // %f drives the hand-written formatter ($__pf_f) over the big-integer helper
         // block; the value's bits are decomposed (reinterpret) rather than converted
         // through f64, and the limb-count global is declared.
-        var wat = Wat("int main(void){ printf(\"%f\", 1.5); return 0; }");
+        var wat = Wat("#include <stdio.h>\nint main(void){ printf(\"%f\", 1.5); return 0; }");
         wat.ShouldContain("call $__pf_f");
         wat.ShouldContain("(func $__pf_f");
         wat.ShouldContain("(func $__bn_mul");
@@ -498,7 +498,7 @@ public sealed class WatBackendTests
     public void printf_float_default_precision_is_six()
     {
         // No explicit precision → C's default of 6, passed to the formatter as an immediate.
-        var wat = Wat("int main(void){ printf(\"%f\", 1.5); return 0; }");
+        var wat = Wat("#include <stdio.h>\nint main(void){ printf(\"%f\", 1.5); return 0; }");
         wat.ShouldContain("i32.const 6");
         wat.ShouldContain("call $__pf_f");
     }
@@ -507,7 +507,7 @@ public sealed class WatBackendTests
     public void printf_float_runtime_is_emitted_only_on_demand()
     {
         // An integer-only printf pulls in none of the float machinery.
-        var wat = Wat("int main(void){ printf(\"%d\", 42); return 0; }");
+        var wat = Wat("#include <stdio.h>\nint main(void){ printf(\"%d\", 42); return 0; }");
         wat.ShouldNotContain("__pf_f");
         wat.ShouldNotContain("__bnlen");
         wat.ShouldNotContain("__bn_mul");
@@ -520,13 +520,13 @@ public sealed class WatBackendTests
     {
         // %e/%g drive the scaled-Dragon digit generator over the region big-integer
         // helpers — a different machine from %f's single-register bignum.
-        var e = Wat("int main(void){ printf(\"%e\", 1.5); return 0; }");
+        var e = Wat("#include <stdio.h>\nint main(void){ printf(\"%e\", 1.5); return 0; }");
         e.ShouldContain("call $__pf_e");
         e.ShouldContain("(func $__dragon");
         e.ShouldContain("(func $__r_cmp");
         e.ShouldContain("(func $__r_sub");
 
-        var g = Wat("int main(void){ printf(\"%g\", 1.5); return 0; }");
+        var g = Wat("#include <stdio.h>\nint main(void){ printf(\"%g\", 1.5); return 0; }");
         g.ShouldContain("call $__pf_g");
         g.ShouldContain("(func $__dragon");
     }
@@ -535,7 +535,7 @@ public sealed class WatBackendTests
     public void printf_g_precision_zero_is_treated_as_one()
     {
         // C99: a %g precision of 0 is taken as 1 significant digit.
-        var wat = Wat("int main(void){ printf(\"%.0g\", 1.5); return 0; }");
+        var wat = Wat("#include <stdio.h>\nint main(void){ printf(\"%.0g\", 1.5); return 0; }");
         wat.ShouldContain("i32.const 1");   // the precision immediate passed to $__pf_g
         wat.ShouldContain("call $__pf_g");
     }
@@ -545,7 +545,7 @@ public sealed class WatBackendTests
     {
         // Byte-level stdout: a WASI fd_write import (exported memory so the host can
         // read the iovec), the call, and the hand-written runtime definition.
-        var wat = Wat("int main(void){ putchar('A'); return 0; }");
+        var wat = Wat("#include <stdio.h>\nint main(void){ putchar('A'); return 0; }");
         wat.ShouldContain("(import \"wasi_snapshot_preview1\" \"fd_write\"");
         wat.ShouldContain("(memory (export \"memory\") 1)");
         wat.ShouldContain("call $putchar");
@@ -555,7 +555,7 @@ public sealed class WatBackendTests
     [Fact]
     public void puts_emits_an_inline_strlen_loop_and_runtime_function()
     {
-        var wat = Wat("int main(void){ puts(\"hi\"); return 0; }");
+        var wat = Wat("#include <stdio.h>\nint main(void){ puts(\"hi\"); return 0; }");
         wat.ShouldContain("(func $puts (param $s i32) (result i32)");
         wat.ShouldContain("loop $scan");      // the inline strlen
         wat.ShouldContain("call $__wasi_fd_write");

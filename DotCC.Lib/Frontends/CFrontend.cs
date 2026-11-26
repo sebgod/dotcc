@@ -175,6 +175,7 @@ internal sealed class CFrontend : IFrontend
         {
             Fingerprints = fingerprints,
             ObjectKey = req.ObjectKey,
+            Dialect = activeDialect,
         };
         var irParser = fingerprints.Wrap(C.BuildParser(C.IdentityVisitor.Instance));
         foreach (var unitPath in inputPaths)
