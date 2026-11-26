@@ -1,0 +1,55 @@
+name: goose
+
+# End-to-end integration: the C that the Goose compiler (github.com/aardappel/goose)
+# generates, compiled by dotcc and run. Goose is a heap-free systems language whose
+# programs compile to one standalone C file with the runtime pasted in: packed
+# structs (#pragma pack), GNU attributes, mmap'd data stacks, pthreads, setjmp. Each
+# sample's output is diffed against `goose run` (Goose's own in-process TinyCC
+# build of the same C), or against gcc for the thread samples. See
+# examples/goose/run.sh and docs/plans/goose.md.
+#
+# Same conventions as lua.yml: ubuntu-latest, setup-dotnet 10.0.x, NuGet build path.
+# The pinned Goose release is downloaded and checked against its sha256 (fetch.sh).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # 03:47 UTC nightly, clear of lua.yml's 03:17.
+    - cron: '47 3 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  goose-samples:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore dotcc.sln
+
+      - name: Build dotcc (Release, NuGet path)
+        run: dotnet build DotCC/DotCC.csproj -c Release --no-restore --nologo -p:UseLocalLalrCc=false
+
+      - name: Fetch the pinned Goose release
+        run: bash examples/goose/fetch.sh
+
+      # Every console sample, the two thread samples (gcc reference) and the one
+      # that calls a C header; the graphics samples need a window. One dotnet
+      # build per sample, so they run a few at a time.
+      - name: Goose samples through dotcc, diffed against goose run / gcc
+        env:
+          MSBUILDDISABLENODEREUSE: '1'
+        run: JOBS="$(nproc)" bash examples/goose/run.sh
