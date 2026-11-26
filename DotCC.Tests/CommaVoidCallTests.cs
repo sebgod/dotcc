@@ -41,17 +41,19 @@ public sealed class CommaVoidCallTests
     }
 
     [Fact]
-    public void void_leading_comma_inside_short_circuit_condition_lowers_in_place()
+    public void void_leading_comma_inside_short_circuit_condition_lowers_to_an_if_over_a_temp()
     {
-        // The comma sits in an `&&` — hoisting would break short-circuit, so it must
-        // stay an in-place delegate (no statement lift out of the condition).
+        // The comma sits in an `&&`: lifting it ahead of the condition would run it
+        // unconditionally. The `&&` becomes an if over a bool temp instead, the call inside
+        // the if, so it runs only when the left operand is true (no closure either).
         var emitted = Emit("""
             static void note(int* p) { (*p)++; }
             int main(void) { int log = 0; int* lp = &log;
                 if (log == 0 && (note(lp), 1)) { return 1; } return 0; }
             """);
-        emitted.ShouldContain("System.Func<int>)(() =>");
-        emitted.ShouldContain("note(lp)");
+        emitted.ShouldContain("bool __ct0 = log == 0;");
+        emitted.ShouldContain("if (__ct0) { note(lp); __ct0 = true; }");
+        emitted.ShouldNotContain("System.Func<int>)(() =>");
     }
 
     [Fact]

@@ -148,17 +148,38 @@ public sealed class GooseSurfaceTests
     }
 
     [Fact]
-    public void A_ternary_in_a_short_circuit_operand_keeps_the_inline_form()
+    public void A_short_circuit_operand_with_a_void_comma_becomes_an_if_over_a_temp()
     {
-        // The right operand of && is conditional as a whole, so no temp can be hoisted out of it.
+        // The right operand of && is conditional as a whole: its statements go inside the if.
         var cs = UserCode(Emit("""
             void note(void);
             int f(int a, int b) { return a && (b ? (note(), 1) : 0); }
             void note(void) {}
             int main(void) { return f(1, 1) - 1; }
             """));
-        cs.ShouldNotContain("__ct0");
-        cs.ShouldContain("System.Func");
+        cs.ShouldContain("bool __ct0 = a != 0;");
+        cs.ShouldContain("if (__ct0) { int __ct1; if (b != 0) { note(); __ct1 = 1; } else { __ct1 = 0; }; __ct0 = __ct1 != 0; }");
+        cs.ShouldNotContain("System.Func");
+    }
+
+    [Fact]
+    public void A_loop_condition_with_a_void_comma_is_evaluated_at_the_top_of_each_iteration()
+    {
+        var cs = UserCode(Emit("""
+            void note(void);
+            int main(void) {
+                int i = 0, k = 0;
+                while (i < 3 && (note(), 1)) i++;
+                for (int j = 0; j < 3 && (note(), 1); j++) k += j;
+                do { if (k++ == 1) continue; } while (k < 5 && (note(), 1));
+                return i + k;
+            }
+            void note(void) {}
+            """));
+        cs.ShouldNotContain("System.Func");
+        cs.ShouldContain("while (true)");
+        cs.ShouldContain("for (int j = 0; ; j++)");
+        cs.ShouldMatch(@"goto (__dc\d+);[\s\S]*\1: ;");
     }
 
     /// <summary>The runtime's POSIX threads, as a program sees them.</summary>

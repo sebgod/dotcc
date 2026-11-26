@@ -929,7 +929,14 @@ internal sealed partial class CSharpBackend
                 // just past the switch — otherwise it would escape the enclosing loop.
                 sb.Append(pad).Append(_breakAsGoto is { } bt ? $"goto {bt};\n" : "break;\n");
                 break;
-            case Continue: sb.Append(pad).Append("continue;\n"); break;
+            case Continue:
+                if (_continueAsGoto is { } continueLabel)
+                {
+                    sb.Append(pad).Append("goto ").Append(continueLabel).Append(";\n");
+                    _continueGotoUsed = true;
+                }
+                else { sb.Append(pad).Append("continue;\n"); }
+                break;
             case If f:
                 // The condition is evaluated once, so a value comma in it can hoist.
                 var ifc = Hoist(sb, pad, () => Truth(f.Cond).Text);
@@ -942,16 +949,53 @@ internal sealed partial class CSharpBackend
                 }
                 break;
             case While w:
+            {
                 // zig's `while (true)` renders bare, so C#'s flow analysis sees the loop never falls out (a function
                 // whose every exit is inside it, std.fmt.parse_float's scanDigit, would otherwise be CS0161).
-                sb.Append(pad).Append($"while ({Truth(w.Cond).Text})\n");
+                var delegatesMark = _commaDelegates;
+                var whileCond = Truth(w.Cond).Text;
+                if (_commaDelegates > delegatesMark)
+                {
+                    // A comma in the condition only a closure could evaluate inline: the
+                    // condition's statements run at the top of each iteration instead.
+                    var hoisted = HoistLoopCondition(w.Cond);
+                    sb.Append(pad).Append("while (true)\n").Append(pad).Append("{\n");
+                    LoopConditionTest(sb, hoisted, ind + 1);
+                    WithNormalBreak(() => Stmt(sb, w.Body, ind + 1));
+                    sb.Append(pad).Append("}\n");
+                    break;
+                }
+                sb.Append(pad).Append($"while ({whileCond})\n");
                 WithNormalBreak(() => Nested(sb, w.Body, ind));
                 break;
+            }
             case DoWhile dw:
+            {
+                var delegatesMark = _commaDelegates;
+                var doCond = Truth(dw.Cond).Text;
+                if (_commaDelegates > delegatesMark)
+                {
+                    // As for while, but the condition follows the body, which a `continue` in it
+                    // must still reach: it jumps to a label before the condition's statements.
+                    var hoisted = HoistLoopCondition(dw.Cond);
+                    var label = $"__dc{_condTemps++}";
+                    var body = new StringBuilder();
+                    var savedUsed = _continueGotoUsed;
+                    _continueGotoUsed = false;
+                    WithNormalBreak(() => Stmt(body, dw.Body, ind + 1), continueTarget: label);
+                    var labelUsed = _continueGotoUsed;
+                    _continueGotoUsed = savedUsed;
+                    sb.Append(pad).Append("while (true)\n").Append(pad).Append("{\n").Append(body);
+                    if (labelUsed) { sb.Append(Pad(ind + 1)).Append(label).Append(": ;\n"); }
+                    LoopConditionTest(sb, hoisted, ind + 1);
+                    sb.Append(pad).Append("}\n");
+                    break;
+                }
                 sb.Append(pad).Append("do\n");
                 WithNormalBreak(() => Nested(sb, dw.Body, ind));
-                sb.Append(pad).Append($"while ({Truth(dw.Cond).Text});\n");
+                sb.Append(pad).Append($"while ({doCond});\n");
                 break;
+            }
             case Goto g:
                 // A cross-section goto to a label that starts another case section
                 // can't be a plain label-goto (C# can't jump into a sibling case —
@@ -1042,8 +1086,20 @@ internal sealed partial class CSharpBackend
                 };
                 // zig's `while (true) : (i -= 1)` (std.mem.findLastLinear) has no condition to spell, so C# sees the loop
                 // never falls out, as a bare `while (true)` does (CS0161 otherwise).
+                var forDelegatesMark = _commaDelegates;
                 var cond = fr.Cond is null or LitBool { Value: true } ? "" : Truth(fr.Cond).Text;
                 var post = fr.Post is null ? "" : Expr(fr.Post);
+                if (fr.Cond is { } forCond && _commaDelegates > forDelegatesMark)
+                {
+                    // As for while: the condition's statements open each iteration's block; a
+                    // `continue` still runs the post expression first.
+                    var hoisted = HoistLoopCondition(forCond);
+                    sb.Append(pad).Append($"for ({init}; ; {post})\n").Append(pad).Append("{\n");
+                    LoopConditionTest(sb, hoisted, ind + 1);
+                    WithNormalBreak(() => Stmt(sb, fr.Body, ind + 1));
+                    sb.Append(pad).Append("}\n");
+                    break;
+                }
                 sb.Append(pad).Append($"for ({init}; {cond}; {post})\n");
                 WithNormalBreak(() => Nested(sb, fr.Body, ind));
                 break;
@@ -1077,15 +1133,20 @@ internal sealed partial class CSharpBackend
     /// after a switch with hoisted shared-handler tails.</summary>
     private int _switchPastSeq;
 
-    /// <summary>Render with <c>break</c> bound to its normal target (loop/switch
+    /// <summary>Render a loop body with <c>break</c> bound to its normal target (loop/switch
     /// exit) — used around a loop or switch body nested inside a hoisted switch tail,
-    /// where the surrounding <see cref="_breakAsGoto"/> redirection must not leak in.</summary>
-    private void WithNormalBreak(System.Action render)
+    /// where the surrounding <see cref="_breakAsGoto"/> redirection must not leak in — and
+    /// <c>continue</c> to <paramref name="continueTarget"/>, a label, or to its normal target
+    /// when null (an enclosing do-while's <see cref="_continueAsGoto"/> must not leak in either).</summary>
+    private void WithNormalBreak(System.Action render, string? continueTarget = null)
     {
         var saved = _breakAsGoto;
+        var savedContinue = _continueAsGoto;
         _breakAsGoto = null;
+        _continueAsGoto = continueTarget;
         render();
         _breakAsGoto = saved;
+        _continueAsGoto = savedContinue;
     }
 
     /// <summary>Render a C <c>switch</c> to C#, reconciling two label-scope
@@ -2841,12 +2902,26 @@ internal sealed partial class CSharpBackend
                 return Truth(eq with { Op = eq.Op == BinOp.Eq ? BinOp.Ne : BinOp.Eq });
             case Binary { Op: BinOp.Eq or BinOp.Ne or BinOp.Lt or BinOp.Gt or BinOp.Le or BinOp.Ge } rel:
                 return Not((RelationalText(rel with { Left = DecayEnum(rel.Left), Right = DecayEnum(rel.Right) }), Prec(rel.Op)));
-            case Binary { Op: BinOp.LogAnd } and:
+            case Binary { Op: BinOp.LogAnd or BinOp.LogOr } lg:
+            {
                 // The right operand is short-circuited: rendered WITHOUT hoisting, so a
                 // comma there stays conditional (the left always evaluates).
-                return Not(($"{TruthSub(and.Left, PLogAnd)} && {NoHoist(() => TruthSub(and.Right, PLogAnd + 1))}", PLogAnd));
-            case Binary { Op: BinOp.LogOr } or:
-                return Not(($"{TruthSub(or.Left, PLogOr)} || {NoHoist(() => TruthSub(or.Right, PLogOr + 1))}", PLogOr));
+                var isAnd = lg.Op == BinOp.LogAnd;
+                var prec = isAnd ? PLogAnd : PLogOr;
+                var pendingMark = _pending.Count;
+                var left = TruthSub(lg.Left, prec);
+                var delegatesMark = _commaDelegates;
+                var right = NoHoist(() => TruthSub(lg.Right, prec + 1));
+                if (_canHoist && _commaDelegates > delegatesMark)
+                {
+                    // The right operand held a comma only a closure could evaluate inline; the
+                    // statement can take temps, so the operator becomes an if over one instead
+                    // (as a ternary does, CondViaTemp).
+                    _pending.RemoveRange(pendingMark, _pending.Count - pendingMark);
+                    return Not((ShortCircuitViaTemp(lg), PPrimary));
+                }
+                return Not(($"{left} {(isAnd ? "&&" : "||")} {right}", prec));
+            }
         }
         if (IsUntypedMember(e)) { return Not(($"Cond.B({Expr(e)})", PPostfix)); }
         var op = negate ? "==" : "!=";
@@ -3598,6 +3673,58 @@ internal sealed partial class CSharpBackend
         _pending.Add($"if ({cond}) {then} else {els}");
         return temp;
     }
+
+    /// <summary>Lower <c>a &amp;&amp; b</c> or <c>a || b</c> at a statement that can take temps to a
+    /// <c>bool</c> temp holding <c>a</c>'s truth and an if that, when <c>b</c> is still to decide
+    /// (<c>a</c> true for <c>&amp;&amp;</c>, false for <c>||</c>), runs <c>b</c>'s hoisted operands and
+    /// stores its truth. <c>a</c> renders with hoisting on, as it always evaluates; <c>b</c>'s hoisted
+    /// operands stay inside the if, conditional as C has them. Returns the temp.</summary>
+    private string ShortCircuitViaTemp(Binary lg)
+    {
+        var temp = $"__ct{_condTemps++}";
+        _pending.Add($"bool {temp} = {Truth(lg.Left).Text}");
+        var start = _pending.Count;
+        var right = Truth(lg.Right).Text;
+        var body = new StringBuilder("{ ");
+        for (var i = start; i < _pending.Count; i++) { body.Append(_pending[i]).Append("; "); }
+        _pending.RemoveRange(start, _pending.Count - start);
+        body.Append(temp).Append(" = ").Append(right).Append("; }");
+        _pending.Add($"if ({(lg.Op == BinOp.LogAnd ? temp : "!" + temp)}) {body}");
+        return temp;
+    }
+
+    /// <summary>A loop condition rendered with hoisting on: the statements its commas and
+    /// temps hoisted, and the condition's text, for a loop that evaluates them anew on each
+    /// iteration (<c>while (true) { stmts; if (!cond) break; ... }</c>). Used only when the
+    /// plain rendering needed a closure (<see cref="_commaDelegates"/>).</summary>
+    private (List<string> Stmts, string Cond) HoistLoopCondition(CExpr cond)
+    {
+        var prev = _canHoist;
+        _canHoist = true;
+        var mark = _pending.Count;
+        var text = Truth(cond).Text;
+        var stmts = _pending.GetRange(mark, _pending.Count - mark);
+        _pending.RemoveRange(mark, _pending.Count - mark);
+        _canHoist = prev;
+        return (stmts, text);
+    }
+
+    /// <summary>The top of a loop whose condition hoists: its hoisted statements, then the exit
+    /// test, each a statement of the loop's block at <paramref name="ind"/>.</summary>
+    private static void LoopConditionTest(StringBuilder sb, (List<string> Stmts, string Cond) hoisted, int ind)
+    {
+        foreach (var st in hoisted.Stmts) { sb.Append(Pad(ind)).Append(st).Append(";\n"); }
+        sb.Append(Pad(ind)).Append("if (!(").Append(hoisted.Cond).Append(")) break;\n");
+    }
+
+    /// <summary>When set, a <c>continue</c> renders as <c>goto &lt;this&gt;</c>: in the body of a
+    /// do-while whose condition hoists, which then moved into the loop's block after the body
+    /// (<c>continue</c> must still reach it). Cleared inside a nested loop.</summary>
+    private string? _continueAsGoto;
+
+    /// <summary>Whether a <c>continue</c> rendered as <see cref="_continueAsGoto"/>, so the label
+    /// it jumps to is needed.</summary>
+    private bool _continueGotoUsed;
 
     /// <summary>How many comma operators this backend has rendered as an immediately
     /// invoked delegate (<see cref="CommaDelegate"/>), so a ternary can tell that one of
