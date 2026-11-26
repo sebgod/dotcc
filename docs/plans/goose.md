@@ -44,9 +44,10 @@ Pinned by the fixtures `gnu-attributes/`, `pragma-pack/`, `comma-ternary-temp/`,
   calls is declared now), but it is the next "be a good compiler" item. Needs a sweep of the
   synthetic headers first, so Lua/chibi/CPython do not lose a call that only an implicit
   declaration reaches today.
-- **A comma in a short-circuit operand or a loop condition** still lowers to the lambda: no
-  statement can take a temp there. A `while` condition could become `while (true) { temps; if
-  (!cond) break; ... }`.
+- ~~A comma in a short-circuit operand or a loop condition still lowers to the lambda.~~ Done:
+  `&&`/`||` become an if over a bool temp, and such a loop evaluates its condition at the top
+  of each iteration (`while (true) { ...; if (!cond) break; ... }`, a do-while through a label
+  its `continue` reaches). Fixture `comma-short-circuit-loop/`.
 
 ## (b) Heap-free .NET: NOT STARTED
 
