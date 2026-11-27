@@ -54,6 +54,7 @@ public sealed class ErrnoDeclarationTests
     {
         var cs = CSharp("#include <errno.h>\nint errno;\nint main(void) { errno = 3; return errno; }\n");
         cs.ShouldContain("errno = 3;");
+        cs.ShouldContain("public static int errno;");
     }
 
     /// <summary>The errno slot's address: the constant a bare read of errno loads from.</summary>

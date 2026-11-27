@@ -3492,12 +3492,12 @@ internal sealed partial class WatBackend
     {
         while (stream is Cast cast) { stream = cast.Operand; }
         // Zig's std.debug.print builds a VarRef to a synthesized `stderr` symbol; C's
-        // stdout/stderr are declared in <stdio.h>, so they bind to a VarRef too. The
-        // NameRef arms stay as a guard for a stream name reaching here unresolved.
+        // stdout/stderr are declared in <stdio.h>, so they bind to a VarRef too; an
+        // undeclared stream name is rejected by the binder and never reaches here.
         return stream switch
         {
-            VarRef { Sym.Name: "stdout" } or NameRef { RawName: "stdout" } => 1,
-            VarRef { Sym.Name: "stderr" } or NameRef { RawName: "stderr" } => 2,
+            VarRef { Sym.Name: "stdout" } => 1,
+            VarRef { Sym.Name: "stderr" } => 2,
             _ => -1,
         };
     }

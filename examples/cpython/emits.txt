@@ -179,7 +179,6 @@ Modules/_localemodule.c
 Modules/_operator.c
 Modules/_stat.c
 Modules/symtablemodule.c
-Modules/mathmodule.c
 Modules/cmathmodule.c
 Modules/_datetimemodule.c
 Modules/_struct.c

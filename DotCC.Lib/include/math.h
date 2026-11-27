@@ -19,7 +19,8 @@
 #define M_LN10  2.302585092994046
 
 /* INFINITY, NAN and HUGE_VAL. For C# they are declared objects whose bare names resolve to
-   CMath's statics through `using static` (typed as CMath types them); the wat target (__wasm__) has no runtime class to resolve them, so they are the constant
+   Libc's statics through `using static` (typed as Libc types them, DotCC.Libc/MathLib.cs); the
+   wat target (__wasm__) has no runtime class to resolve them, so they are the constant
    expressions musl spells them as. */
 #ifdef __wasm__
 #define INFINITY  (1e5000f)
