@@ -497,14 +497,13 @@ public sealed partial class CompilerTests
     public void Nullptr_is_an_identifier_before_c23()
     {
         // Pre-C23 with no header: `nullptr` is an unknown identifier, not a
-        // keyword — `int* p = nullptr;` references an undeclared name. dotcc
-        // emits it verbatim as `nullptr` (the gate didn't promote it to the
-        // NULLPTR terminal, so it never reaches the `null` lowering).
+        // keyword (the gate doesn't promote it to the NULLPTR terminal), so
+        // `int* p = nullptr;` references an undeclared name: an error, as in gcc.
         var src = WriteTemp("int main() { int* p = nullptr; return 0; }");
         try
         {
-            var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17"));
-            emitted.ShouldContain("p = nullptr;");
+            Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17")))
+                .Message.ShouldContain("'nullptr' undeclared (first use in this function)");
         }
         finally { File.Delete(src); }
     }
