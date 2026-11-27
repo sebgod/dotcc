@@ -1086,15 +1086,7 @@ internal sealed partial class ZigLowering
         return true;
     }
 
-    /// <summary>The std FILES a curated type stands for, by path under the std root: std's own files name them by
-    /// import (mem.zig's <c>pub const Allocator = @import("mem/Allocator.zig");</c>), not by the <c>std.mem.Allocator</c>
-    /// path the curated set is keyed on, so the file itself has to map back to the curated type.</summary>
-    private static readonly Dictionary<string, string> CuratedStdFiles = new(System.StringComparer.Ordinal)
-    {
-        ["mem/Allocator.zig"] = "std.mem.Allocator",
-    };
-
-    /// <summary>The curated type <paramref name="module"/> stands for (<see cref="CuratedStdFiles"/>), or null when it
+    /// <summary>The curated type <paramref name="module"/> stands for (a registry type row with a <c>StdFile</c>), or null when it
     /// is not one of those std files: std.mem.join's <c>allocator: Allocator</c> is then the runtime allocator, whose
     /// <c>alloc</c> / <c>free</c> the curated model owns, exactly as <c>std.mem.Allocator</c> from user code.</summary>
     private CType? CuratedStdFileType(ZigModule? module)
@@ -1105,9 +1097,7 @@ internal sealed partial class ZigLowering
             return null;
         }
         var relative = System.IO.Path.GetRelativePath(stdDir, System.IO.Path.GetFullPath(module.Path)).Replace('\\', '/');
-        return CuratedStdFiles.TryGetValue(relative, out var curated) && StdTypes.TryGetValue(curated, out var make)
-            ? make()
-            : null;
+        return ZigCuratedStd.FindByFile(relative)?.MakeType is { } make ? make() : null;
     }
 
     /// <summary>The IR name for a container this module declares under source name
@@ -1364,24 +1354,24 @@ internal sealed partial class ZigLowering
     /// <c>page_allocator</c>/<c>c_allocator</c> default (→ direct <c>Libc.malloc</c>/<c>free</c>);
     /// <c>Fba</c> = a provable <c>fba.allocator()</c> result (Milestone U → a direct FBA bump over
     /// the <c>&amp;fba</c> in <see cref="_fbaAllocatorSites"/>). Both devirtualize (no vtable).</summary>
-    private enum AllocKind { CHeap, Fba }
+    internal enum AllocKind { CHeap, Fba }
 
     /// <summary>The runtime <c>FixedBufferAllocator</c> type name (a <see cref="CType.Named"/>), as
     /// spelled by the spliced <c>ZigAlloc.cs</c> — the second concrete allocator.</summary>
-    private const string FbaTypeName = "FixedBufferAllocator";
+    internal const string FbaTypeName = "FixedBufferAllocator";
 
     /// <summary>The runtime <c>ArenaAllocator</c> type name (a <see cref="CType.Named"/>), as
     /// spelled by the spliced <c>ZigAlloc.cs</c> — the third concrete allocator (Milestone U).</summary>
-    private const string ArenaTypeName = "ArenaAllocator";
+    internal const string ArenaTypeName = "ArenaAllocator";
 
     /// <summary>The runtime <c>AllocatorVTable</c> type name (Milestone W, part 1b) — the 4-fn
     /// <c>{ alloc, resize, remap, free }</c> table a user-constructed <c>std.mem.Allocator</c>
     /// carries by value, as spelled by the spliced <c>ZigAlloc.cs</c>.</summary>
-    private const string VTableTypeName = "AllocatorVTable";
+    internal const string VTableTypeName = "AllocatorVTable";
 
     /// <summary>The runtime <c>Alignment</c> type name (Milestone W, part 1b) — Zig's
     /// <c>std.mem.Alignment</c> threaded through the vtable functions.</summary>
-    private const string AlignmentTypeName = "Alignment";
+    internal const string AlignmentTypeName = "Alignment";
 
     /// <summary>The discriminant field name on a lowered tagged-union struct — a leading
     /// double-underscore so it can't collide with a user variant (a Zig field name).</summary>

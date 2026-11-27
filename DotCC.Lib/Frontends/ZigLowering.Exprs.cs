@@ -459,23 +459,23 @@ internal sealed partial class ZigLowering
                 }
                 if (TryResolveStdPath(expr, out var stdPath))
                 {
-                    // Both StdAllocatorValues rows are the C heap today, so a value use
+                    // Both default-allocator value rows are the C heap today, so a value use
                     // materializes the one runtime fat pointer; a distinct AllocKind row would
                     // switch on the kind here. A curated TYPE path used as a value gets the
                     // specific "type, not a value" message; the rest the registry-derived list.
-                    if (StdAllocatorValues.ContainsKey(stdPath)) { return MaterializeCHeap(); }
+                    if (ZigCuratedStd.Find(stdPath, CuratedShape.Value) is not null) { return MaterializeCHeap(); }
                     // Any other std VALUE (`std.atomic.cache_line`, array_list's growth policy) is the real
                     // std's: a top-level value const of the module the path names, lowered there.
-                    if (!StdTypes.ContainsKey(stdPath) && !StdGenericTypes.ContainsKey(stdPath)
+                    if (!IsCuratedTypePath(stdPath)
                         && ResolveModulePath(fld.Arg0) is { Lowering: { } valueOwner }
                         && valueOwner.LowerExportedValueConst(fieldName) is { } exportedValue)
                     {
                         return exportedValue;
                     }
                     throw new IrUnsupportedException(
-                        StdTypes.ContainsKey(stdPath) || StdGenericTypes.ContainsKey(stdPath)
+                        IsCuratedTypePath(stdPath)
                             ? $"zig `{stdPath}` is a type, not a value"
-                            : $"zig std path `{stdPath}` is not modeled (values: {string.Join(" / ", StdAllocatorValues.Keys)})");
+                            : $"zig std path `{stdPath}` is not modeled (values: {string.Join(" / ", ZigCuratedStd.Paths(CuratedShape.Value))})");
                 }
                 if (fld.Arg0.Content is Zig.Ident cbid
                     && _symbols.Resolve(Tok(cbid.Arg0)) is null
@@ -1383,12 +1383,13 @@ internal sealed partial class ZigLowering
                 $"decl literal `.{Tok(declLit.Arg1)}(…)` needs a struct/union result type to resolve against "
                 + "(a typed `const`/`var`, a typed parameter, a `return` of a typed function)");
         }
-        // Inside std's own mem.zig a bare `asBytes(…)` / `sliceAsBytes(…)` (std.mem.indexOf's `sliceAsBytes(haystack)`)
-        // is the curated lowering too, as `std.mem.asBytes(…)` from any other module is.
-        if (calleeItem.Content is Zig.Ident { Arg0: var curatedTok } && Tok(curatedTok) is "asBytes" or "sliceAsBytes" or "bytesAsValue" or "bytesToValue" or "bytesAsSlice" or "sliceTo"
+        // Inside std's own mem.zig a bare `asBytes(...)` / `sliceAsBytes(...)` (std.mem.indexOf's `sliceAsBytes(haystack)`)
+        // is the curated lowering too, as `std.mem.asBytes(...)` from any other module is: the rows flagged BareInStdMem.
+        if (calleeItem.Content is Zig.Ident { Arg0: var curatedTok }
+            && ZigCuratedStd.FindFunction("std.mem", Tok(curatedTok)) is { BareInStdMem: true } bareRow
             && IsStdModule("mem.zig"))
         {
-            return LowerStdMemCall(Tok(curatedTok), argItems);
+            return LowerCuratedStdFn(bareRow, argItems);
         }
         if (calleeItem.Content is not Zig.Ident id)
         {
@@ -1695,35 +1696,14 @@ internal sealed partial class ZigLowering
     {
         var methodName = Tok(fld.Arg2);
 
-        // --- curated `std.mem` helpers (a static call on the std.mem namespace) ---
-        // Routed before the generic dispatch. dotcc models no `std` in general — only this curated
-        // set of the most common slice utilities. An unmodeled member is a clear, specific error without
-        // a std tree; with one (DOTCC_ZIG_LIB_DIR) it navigates to real source (TakesCuratedStdCall).
-        if (TryResolveStdPath(fld.Arg0, out var stdNs) && stdNs == "std.mem" && TakesCuratedStdCall(stdNs, methodName))
+        // --- curated std namespace functions (std.mem.*, std.fmt.comptimePrint, std.debug.print, std.testing.*) ---
+        // Routed before the generic dispatch through the ZigCuratedStd registry, which models no `std` in general, only
+        // the rows. An unmodeled member is a clear, specific error without a std tree; with one (DOTCC_ZIG_LIB_DIR) it
+        // navigates to real source. `comptimePrint` is formatted while lowering (task #128), as zig types its result by
+        // running the formatter at compile time.
+        if (TryLowerCuratedStdCall(fld.Arg0, methodName, argItems) is { } curatedCall)
         {
-            return LowerStdMemCall(methodName, argItems);
-        }
-
-        // --- `std.fmt.comptimePrint` (task #128): formatted while lowering, over comptime-known arguments. zig types the
-        // result by running the formatter at compile time, which the source signature needs before the call can bind.
-        if (methodName == "comptimePrint" && TryResolveStdPath(fld.Arg0, out var stdFmt) && stdFmt == "std.fmt")
-        {
-            return LowerComptimePrint(argItems);
-        }
-
-        // --- curated `std.debug.print` (wall-plan W6) --- the biggest remaining std idiom. Like the
-        // std.mem helpers it's a curated path, not a general std model; only `print` is modeled.
-        if (TryResolveStdPath(fld.Arg0, out var stdDbg) && stdDbg == "std.debug" && TakesCuratedStdCall(stdDbg, methodName))
-        {
-            return LowerStdDebugCall(methodName, argItems);
-        }
-
-        // --- curated `std.testing` assertions (`dotcc zig test`) --- `expect` / `expectEqual`, each
-        // returning an error union so a `try` propagates a failing assertion to the test's boundary
-        // (and thence to the generated test runner). A curated path, like the ones above.
-        if (TryResolveStdPath(fld.Arg0, out var stdTest) && stdTest == "std.testing" && TakesCuratedStdCall(stdTest, methodName))
-        {
-            return LowerStdTestingCall(methodName, argItems);
+            return curatedCall;
         }
 
         // --- a call navigated to an @import'ed module: `util.func(args)` / `std.ascii.isDigit(args)` ---
@@ -1810,7 +1790,7 @@ internal sealed partial class ZigLowering
         {
             return LowerDeclLiteralCall(AlignmentTypeName, methodName, argItems);
         }
-        if (TryResolveStdPath(fld.Arg0, out var curatedBase) && StdTypes.ContainsKey(curatedBase))
+        if (TryResolveStdPath(fld.Arg0, out var curatedBase) && ZigCuratedStd.Find(curatedBase, CuratedShape.Type) is not null)
         {
             throw new IrUnsupportedException(
                 $"zig `{curatedBase}` has no modeled function '{methodName}' — dotcc curates these std "

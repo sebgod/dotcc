@@ -31,12 +31,8 @@ internal sealed partial class ZigLowering
     private readonly record struct ComptimeFmtArg(string? Str, System.Int128? Int, bool Signed, bool? Bool);
 
     /// <summary>Lower <c>std.fmt.comptimePrint(fmt, args)</c> to the string literal it formats (task #128).</summary>
-    private CExpr LowerComptimePrint(IReadOnlyList<Item> argItems)
+    internal CExpr LowerComptimePrint(IReadOnlyList<Item> argItems)
     {
-        if (argItems.Count != 2)
-        {
-            throw new IrUnsupportedException($"std.fmt.comptimePrint takes a format and an argument tuple (got {argItems.Count} arguments)");
-        }
         var fmt = AsByteString(TryEvalComptime(argItems[0], ComptimeTier.Lowering))
             ?? throw new IrUnsupportedException("std.fmt.comptimePrint: the format must be a comptime-known string");
         IReadOnlyList<Item> elems = argItems[1].Content switch

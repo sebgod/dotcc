@@ -325,7 +325,7 @@ internal sealed partial class ZigLowering
 
             // `const List = std.ArrayList(i32);` — a curated generic std type in value position; the
             // CallArgs resolves through LowerType exactly as in type position (wall-plan W0).
-            case Zig.CallArgs { Arg2: not null } ca when TryResolveStdPath(ca.Arg0, out var gp) && StdGenericTypes.ContainsKey(gp):
+            case Zig.CallArgs { Arg2: not null } ca when TryResolveStdPath(ca.Arg0, out var gp) && ZigCuratedStd.Find(gp, CuratedShape.GenericType) is not null:
                 type = LowerType(rhs);
                 return true;
 
@@ -378,7 +378,7 @@ internal sealed partial class ZigLowering
                 return true;
 
             // `const A = std.mem.Allocator;` — a dotted std TYPE path aliased to a name.
-            case Zig.Field when TryResolveStdPath(rhs, out var fp) && StdTypes.ContainsKey(fp):
+            case Zig.Field when TryResolveStdPath(rhs, out var fp) && ZigCuratedStd.Find(fp, CuratedShape.Type) is not null:
                 type = LowerStdType(rhs);
                 return true;
 
@@ -605,8 +605,9 @@ internal sealed partial class ZigLowering
         {
             return true;
         }
-        if (TryResolveStdPath(expr, out var path) && StdAllocatorValues.TryGetValue(path, out kind))
+        if (TryResolveStdPath(expr, out var path) && ZigCuratedStd.Find(path, CuratedShape.Value) is { Alloc: { } valueKind })
         {
+            kind = valueKind;
             return true;
         }
         kind = AllocKind.CHeap;
@@ -771,10 +772,10 @@ internal sealed partial class ZigLowering
         // A curated GENERIC std type in TYPE position (`std.ArrayList(T)`, wall-plan W0). A
         // call parses in type position via the ordinary Suffix chain (Type → ErrUnion →
         // Suffix → callArgs), so NO grammar change: resolve the callee's std path against
-        // the StdGenericTypes registry and instantiate over the lowered element. A composed
+        // the curated registry and instantiate over the lowered element. A composed
         // form (`*std.ArrayList(T)`, `?std.ArrayList(T)`, a fn param/return) rides the
         // surrounding Type productions.
-        Zig.CallArgs { Arg2: not null } ca when TryResolveStdPath(ca.Arg0, out var gp) && StdGenericTypes.TryGetValue(gp, out var makeGeneric)
+        Zig.CallArgs { Arg2: not null } ca when TryResolveStdPath(ca.Arg0, out var gp) && ZigCuratedStd.Find(gp, CuratedShape.GenericType) is { MakeGeneric: { } makeGeneric }
             => makeGeneric(LowerSingleTypeArg(ca.Arg2, gp)),
         // A USER type-returning generic (wall-plan W4) in TYPE position — `Pair(i32)` / a no-arg
         // `Empty()`. Reifies (or reuses) the returned struct per resolved type argument. Checked after
@@ -978,76 +979,26 @@ internal sealed partial class ZigLowering
 
     // ---- the curated-std registry ------------------------------------------
     //
-    // ONE row per modeled std path, consulted by every position that resolves a
-    // dotted std path (type position, type-alias RHS, value position, the
-    // known-allocator predicate) — so adding a curated path is a table edit, not a
-    // hunt across dispatch ladders, and the "not modeled" error messages list the
-    // curated set straight from the table keys. Bespoke METHOD-call handling
-    // (the std.mem helper cluster, FixedBufferAllocator/ArenaAllocator .init, the
-    // ArrayList member set) stays hand-written in LowerMethodCall — each of those
-    // is genuine lowering logic, not a name→node mapping.
+    // ONE row per modeled std path lives in ZigCuratedStd (the burn-down ledger of #231/#233), consulted by every
+    // position that resolves a dotted std path (type position, type-alias RHS, value position, the known-allocator
+    // predicate, a namespace function call). Adding a curated path is a row, and the "not modeled" error messages list
+    // the curated set straight from the rows. The ArrayList member set and FixedBufferAllocator/ArenaAllocator .init
+    // stay hand-written in LowerMethodCall: genuine lowering logic, not a name to node mapping.
 
-    /// <summary>Non-generic std paths that resolve in TYPE position → the CType factory.
-    /// (The runtime carrier types — VTable / Alignment / FBA / Arena — live in ZigAlloc.cs.)</summary>
-    private static readonly Dictionary<string, System.Func<CType>> StdTypes = new(System.StringComparer.Ordinal)
-    {
-        ["std.mem.Allocator"] = static () => new CType.Allocator(),
-        // A user-constructed custom allocator (Milestone W, part 1b): the vtable struct type
-        // and the alignment a vtable function receives.
-        ["std.mem.Allocator.VTable"] = static () => new CType.Named(VTableTypeName),
-        ["std.mem.Alignment"] = static () => new CType.Named(AlignmentTypeName),
-        ["std.heap.FixedBufferAllocator"] = static () => new CType.Named(FbaTypeName),
-        ["std.heap.ArenaAllocator"] = static () => new CType.Named(ArenaTypeName),
-    };
-
-    /// <summary>GENERIC std paths — spelled as a CALL with one type argument in type position
-    /// (<c>std.ArrayList(i32)</c>, wall-plan W0) → the factory over the lowered element type.</summary>
-    private static readonly Dictionary<string, System.Func<CType, CType>> StdGenericTypes = new(System.StringComparer.Ordinal)
-    {
-        ["std.ArrayList"] = static elem => new CType.ZigList(elem),
-    };
-
-    /// <summary>Std paths that are a VALUE — the statically-known default allocators, each →
-    /// its <see cref="AllocKind"/> (the devirtualization discriminator; both rows today are the
-    /// C heap, so a value use materializes <c>ZigAlloc.CHeap()</c>).</summary>
-    private static readonly Dictionary<string, AllocKind> StdAllocatorValues = new(System.StringComparer.Ordinal)
-    {
-        ["std.heap.page_allocator"] = AllocKind.CHeap,
-        ["std.heap.c_allocator"] = AllocKind.CHeap,
-    };
-
-    /// <summary>The functions each curated std NAMESPACE lowers by hand (<see cref="LowerStdMemCall"/>,
-    /// <see cref="LowerStdDebugCall"/>, <see cref="LowerStdTestingCall"/>). A namespace is not a curated
-    /// PATH the way a type is: <c>std.mem</c> also holds hundreds of functions dotcc never modeled, so only
-    /// these members claim the call; with a real std tree configured any other member falls through to
-    /// source navigation (road-to-zig-std G2, the curated-first rule applied per member).</summary>
-    private static readonly Dictionary<string, HashSet<string>> CuratedStdNamespaceFns = new(System.StringComparer.Ordinal)
-    {
-        ["std.mem"] = new(System.StringComparer.Ordinal)
-            { "eql", "copyForwards", "span", "zeroes", "asBytes", "sliceAsBytes", "bytesAsValue", "bytesToValue", "bytesAsSlice", "sliceTo" },
-        ["std.debug"] = new(System.StringComparer.Ordinal) { "print" },
-        ["std.testing"] = new(System.StringComparer.Ordinal)
-            { "expect", "expectEqual", "expectError", "expectEqualStrings", "expectEqualSlices" },
-    };
-
-    /// <summary>True when the call <c>namespace.method(…)</c> takes the curated lowering: the member is
-    /// curated, or no std source tree is configured (so the curated "not modeled" message, which lists
-    /// what IS modeled, is the most useful error). False sends it to the module graph instead.</summary>
-    private bool TakesCuratedStdCall(string ns, string method)
-        => CuratedStdNamespaceFns[ns].Contains(method) || _moduleGraph?.StdRootPath is null;
-
-    /// <summary>True when a dotted expression resolves to a std path the CURATED model OWNS — a
-    /// <see cref="StdTypes"/>, <see cref="StdGenericTypes"/> or <see cref="StdAllocatorValues"/> row.
-    /// The discriminator that keeps real-std source navigation (road-to-zig-std S1/S2, active when a
-    /// <c>DOTCC_ZIG_LIB_DIR</c> std tree is configured) from shadowing a curated path: upstream re-exports
-    /// its allocators as whole files, so <c>std.heap.FixedBufferAllocator</c> is BOTH a curated type and a
-    /// navigable module, and only the curated model can lower it. Registry-driven, so curating a new path
-    /// automatically makes it win — no second list to keep in sync.</summary>
+    /// <summary>True when a dotted expression resolves to a std path the CURATED model OWNS: a type, generic type or value
+    /// row of <see cref="ZigCuratedStd"/>. The discriminator that keeps real-std source navigation (road-to-zig-std S1/S2,
+    /// active when a <c>DOTCC_ZIG_LIB_DIR</c> std tree is configured) from shadowing a curated path: upstream re-exports
+    /// its allocators as whole files, so <c>std.heap.FixedBufferAllocator</c> is BOTH a curated type and a navigable
+    /// module, and only the curated model can lower it. Registry-driven, so curating a new path automatically makes it
+    /// win, with no second list to keep in sync.</summary>
     private bool IsCuratedStdPath(Item expr)
-        => TryResolveStdPath(expr, out var path)
-        && (StdTypes.ContainsKey(path) || StdGenericTypes.ContainsKey(path) || StdAllocatorValues.ContainsKey(path));
+        => TryResolveStdPath(expr, out var path) && ZigCuratedStd.IsOwnedPath(path);
 
-    /// <summary>Lower a dotted std type (Milestone F): a <see cref="StdTypes"/> row — e.g.
+    /// <summary>True when <paramref name="path"/> is a curated type or generic type row (not a value or a function).</summary>
+    private static bool IsCuratedTypePath(string path)
+        => ZigCuratedStd.Find(path, CuratedShape.Type) is not null || ZigCuratedStd.Find(path, CuratedShape.GenericType) is not null;
+
+    /// <summary>Lower a dotted std type (Milestone F): a <see cref="CuratedShape.Type"/> row — e.g.
     /// <c>std.mem.Allocator</c> → the runtime <see cref="CType.Allocator"/> fat pointer,
     /// <c>std.heap.FixedBufferAllocator</c> → the concrete <see cref="CType.Named"/> bump
     /// allocator — or, when no curated row claims the path, the type the MODULE GRAPH resolves it to
@@ -1059,7 +1010,7 @@ internal sealed partial class ZigLowering
         // The CURATED model is checked FIRST, in type position as in every other (road-to-zig-std S1's
         // rule; see IsCuratedStdPath for why that ordering is load-bearing).
         var isStdPath = TryResolveStdPath(f, out var path);
-        if (isStdPath && StdTypes.TryGetValue(path, out var make))
+        if (isStdPath && ZigCuratedStd.Find(path, CuratedShape.Type) is { MakeType: { } make })
         {
             return make();
         }
@@ -1085,7 +1036,7 @@ internal sealed partial class ZigLowering
         if (isStdPath)
         {
             throw new IrUnsupportedException(
-                $"zig type `{path}` is not modeled (std types: {string.Join(", ", StdTypes.Keys)})");
+                $"zig type `{path}` is not modeled (std types: {string.Join(", ", ZigCuratedStd.Paths(CuratedShape.Type))})");
         }
         throw new IrUnsupportedException(
             $"zig type: a dotted type `{Tok(member.Arg2)}` that is not a modeled std path");

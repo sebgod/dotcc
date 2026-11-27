@@ -43,20 +43,10 @@ internal sealed partial class ZigLowering
         FromSystemHeader = true,
     };
 
-    /// <summary>Lower a curated <c>std.debug</c> call (wall-plan W6). Only <c>std.debug.print(fmt,
-    /// .{args})</c> is modeled; any other member (<c>assert</c>, <c>panic</c>, …) is a clear cut.</summary>
-    private CExpr LowerStdDebugCall(string method, IReadOnlyList<Item> argItems)
+    /// <summary>Lower <c>std.debug.print(fmt, .{args})</c> (wall-plan W6; a registry row, the dispatcher checks the
+    /// arity). Any other <c>std.debug</c> member (<c>assert</c>, <c>panic</c>, ...) has no row and is a clear cut.</summary>
+    internal CExpr LowerDebugPrint(IReadOnlyList<Item> argItems)
     {
-        if (method != "print")
-        {
-            throw new IrUnsupportedException(
-                $"zig `std.debug.{method}` is not supported yet — only `std.debug.print` is modeled (wall-plan W6)");
-        }
-        if (argItems.Count != 2)
-        {
-            throw new IrUnsupportedException(
-                "zig `std.debug.print` takes exactly two arguments — a comptime format string and an argument tuple `.{…}`");
-        }
         // The format string must be a plain string literal (a comptime-const format is a V1 cut).
         if (argItems[0].Content is not Zig.StrLit fmtLit)
         {
