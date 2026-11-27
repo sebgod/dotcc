@@ -11,7 +11,7 @@ The compiler is an N-frontend × M-backend frame meeting at one **typed IR**. Tw
   and `WatBackend` renders none of them — they fall to its loud default. So `--target=wat` compiles C
   (the web sandbox's C side) and, for Zig, only programs whose lowering stays inside the C-shaped node
   set — in practice `std.debug.print` (→ `fprintf(stderr, …)`) over scalars. Tracked in
-  [`plans/deferred.md`](plans/deferred.md). C × C#, C × wat and Zig × C# are real.
+  [#161](https://github.com/sebgod/dotcc/issues/161). C × C#, C × wat and Zig × C# are real.
 - **The neutral IR is `IrModule`; the C binder is `IrBuilder`.** `Ir/IrModule.cs` (+ `IrModule.Comptime.cs`)
   is what every front-end builds into and every backend reads: the output lists (functions, globals,
   emitted aggregates/enums, diagnostics, the Zig test manifest and error table), the aggregate/enum

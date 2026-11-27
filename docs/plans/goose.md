@@ -32,7 +32,7 @@ branch on every host, Windows included. What that took, each brick a general dot
 | GCC `__atomic_*` builtins | Emitted as calls to nothing. | Lowered onto the `Atomic.*` helpers `<stdatomic.h>` uses; `__ATOMIC_*` predefined. |
 | POSIX surface | Missing headers and calls. | `<sys/mman.h>` (libc on Linux/macOS; `VirtualAlloc` on Windows), `<pthread.h>` + `<sched.h>` (over `<threads.h>`'s tables), `sigaltstack`/`stack_t`, `_setjmp`/`_longjmp`/`sigsetjmp`, `flockfile`/`ftrylockfile`/`funlockfile` and the `*_unlocked` calls, `nanosleep`, `ssize_t` from `<unistd.h>`. |
 | `snprintf(NULL, 0, ...)` | Wrote the NUL at `dst[0]`: a crash on NULL, a one-byte overrun otherwise. | Stores nothing, returns the length. |
-| libc prototypes | `memcpy(void*, void*, int)`, `strlen(char*)`, ...: false "discards const" warnings on every const buffer. | The read-only operands of `<string.h>` and `write` are const. (The `int` counts stay: see deferred.md.) |
+| libc prototypes | `memcpy(void*, void*, int)`, `strlen(char*)`, ...: false "discards const" warnings on every const buffer. | The read-only operands of `<string.h>` and `write` are const. (The `int` counts stay: [#243](https://github.com/sebgod/dotcc/issues/243).) |
 
 Pinned by the fixtures `gnu-attributes/`, `pragma-pack/`, `comma-ternary-temp/`, `posix-mman/`,
 `pthreads/` (all gcc-matched) and the unit tests `GooseSurfaceTests`, `LibcGooseRuntimeTests`.

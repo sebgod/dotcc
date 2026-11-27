@@ -167,7 +167,7 @@ internal static class ZigSyntheticModules
     /// another architecture (which keeps the arch-only literal). The model is the x86-64 microarchitecture level
     /// the host reaches (<c>x86_64</c>, <c>_v2</c>, <c>_v3</c>, <c>_v4</c>) or aarch64's <c>generic</c>; the
     /// features are those .NET reports supported. The arm64 half is not verified on an arm64 host yet (backlog
-    /// T6, docs/plans/deferred.md).</summary>
+    /// T6, GitHub issue #136).</summary>
     internal static string? HostCpuSource(string arch)
     {
         var (family, model, features) = arch switch

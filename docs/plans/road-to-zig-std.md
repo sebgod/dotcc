@@ -179,7 +179,7 @@ that retire curated shortcuts.
 > One silent hazard was closed on the way: `IrBuilder.RegisterStructType` was idempotent-by-name and
 > **ignored** a second, differently-shaped aggregate — invisible while imported types were unreachable,
 > a wrong-layout miscompile the moment they weren't. It now throws. The real fix is module-qualified
-> container naming ([`deferred.md`](deferred.md)).
+> container naming (which landed on 2026-09-23).
 >
 > Validation: 8 emit pins (sibling-module + synthetic-std-tree) + 4 new zig-oracle programs
 > (`import_type`, `import_type_method`, `import_enum_member`, `import_generic_type`) + the runnable
@@ -220,7 +220,7 @@ that retire curated shortcuts.
 > collapses `*T`/`[*]T`/`[*c]T` to one C pointer, so the size class is genuinely not
 > recoverable); `@field`/`@hasDecl`/`@hasField`; a `|*x|` by-ref capture; a block-bodied prong in
 > value position. `.child` of a `[]const T` carries dotcc's element `const` where zig's does not
-> — a divergence recorded in [`deferred.md`](deferred.md), not exercised by the oracle.
+> — a divergence tracked in [#158](https://github.com/sebgod/dotcc/issues/158), not exercised by the oracle.
 >
 > Validation: 13 emit pins (every fold path + every loud cut) + 4 zig-oracle programs
 > (`typeinfo_kind`, `typeinfo_signedness`, `typeinfo_bits`, `typeinfo_child`) + the runnable
@@ -251,7 +251,7 @@ that retire curated shortcuts.
 >
 > **Still cut, and probably permanently:** an `anytype` param or `@TypeOf(expr)`, where the type is
 > inferred from a VALUE and no spelling survives anywhere — that would need the width on `CType`
-> after all. Recorded in [`deferred.md`](deferred.md).
+> after all. Tracked in [#142](https://github.com/sebgod/dotcc/issues/142).
 >
 > Validation: 6 emit pins (through a param / an alias / the `u21`-vs-`u32` non-collision / an
 > unchanged standard-width name / the nested same-named-param shadow restore / the remaining cut) —
@@ -741,11 +741,11 @@ that retire curated shortcuts.
 >   value `if` that folds, a value switch with a `return` arm, variadic `@min` / `@max`, parenthesized
 >   types, and a latent lazy-declaration scoping bug all fell. It now stops at `math.cast(u8, c)`'s
 >   `maxInt(@TypeOf(x))`: the declared width of an `anytype` argument, which the `@typeInfo` fidelity
->   rule refuses (a `u5` value lowers to `byte`, like a `u8`). Fix sketch in deferred.md.
+>   rule refuses (a `u5` value lowers to `byte`, like a `u8`). Fix sketch in [#142](https://github.com/sebgod/dotcc/issues/142).
 > - `std.mem.indexOfScalar`: a lazy module's top-level value consts now lower where they are named
 >   (`use_vectors_for_comparison`), with trailing-comma case lists and `@inComptime()`. It stops at
 >   `std.simd.suggestVectorLength(T)` (a `?comptime_int` over `builtin.cpu`), which is dotcc's TARGET
->   identity: the honest answer is null (scalars), a decision for the user (deferred.md).
+>   identity: the honest answer is null (scalars), a decision for the user (made on 2026-09-24: the target-identity segment below).
 > - `std.AutoHashMap`: the runtime multi-object `for (metadata, keys, values) |m, k, v|`, an assignment
 >   prong body, and a parse-skip diagnostic through a same-module alias (`HashMapUnmanaged = Custom`)
 >   let `Custom` parse whole. Then G4's nested-container cut fell: a reified type's nested containers
@@ -1005,7 +1005,7 @@ vector length feeds TYPES.
   `Dotcc_matches_zig_std_math_misc`, `_crypto_sha1_blake2s`, `_math_float_queries`, `_unicode_utf16_round_trip`,
   `_priority_dequeue`, `_uri_parse`, `_treap`.
 - **T6 (backlog)** arm64 hosts: verify and complete the `Arm` intrinsics → `std.Target.aarch64` mapping when this runs on
-  arm64 (the maintainer's request, 2026-09-24; tracked in `docs/plans/deferred.md`, target identity).
+  arm64 (the maintainer's request, 2026-09-24; tracked in [#136](https://github.com/sebgod/dotcc/issues/136)).
 
 ### S0 — the wall-finder + std pin (S; do FIRST, it steers everything)
 
@@ -1324,9 +1324,10 @@ Seed list (each its own loop increment; ranked by the table above, not guesswork
   `field: struct { a: u8 }` parse while `const X = struct {…}` stays `structDecl` with no S/R
   conflict. `AType → Type` is transparent, so every existing annotation lowers unchanged; the
   inline form is parse-only (`LowerType` default = loud cut). Probe **30.7%→31.8%** (170→176);
-  the `:`-in-307 bucket is **gone**. **Still deferred** (see [`deferred.md`](deferred.md)):
+  the `:`-in-307 bucket is **gone**. **Still deferred** then:
   inline named struct as a VALUE (`const X = if (c) struct {…} else …`, the CurlySuffix
-  conflict) and under a recursive type prefix (`?struct{…}`, `[]struct{…}`).**)**
+  conflict; it parses and lowers on main since) and under a recursive type prefix (`?struct{…}`,
+  `[]struct{…}`, [#165](https://github.com/sebgod/dotcc/issues/165)).**)**
 - **Quoted identifiers `@"…"`** (if not already landed with S5).
 - **Arbitrary-width ints** (`u1`…`u128`, `u21` for Unicode): round up to the
   smallest C# container (byte/ushort/uint/ulong/UInt128) + mask at stores and
