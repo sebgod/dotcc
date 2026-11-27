@@ -194,6 +194,13 @@ public sealed class StdParseProbeTests
         sb.Append($"files   : {total}\n");
         sb.Append($"parse-clean : {ok} ({pct:F1}%)\n");
         sb.Append($"failing     : {failing}\n");
+        // The curated registry's counts and ledger (static data, #233); the text is built in one place, split here at its
+        // first blank line so the summary sits under the parse lines and the ledger after the failing files.
+        var curated = DotCC.Frontends.ZigCuratedStd.ReportText();
+        var split = curated.IndexOf("\n\n", StringComparison.Ordinal);
+        var curatedSummary = curated[..(split + 1)];
+        var curatedLedger = curated[(split + 2)..];
+        sb.Append(curatedSummary);
         sb.Append('\n');
         sb.Append("## Parse-failure buckets (ranked by file count) — the S9 worklist\n");
         sb.Append("count  signature\n");
@@ -213,6 +220,8 @@ public sealed class StdParseProbeTests
         sb.Append('\n');
         sb.Append("## Failing files\n");
         foreach (var f in failingFiles.OrderBy(f => f, StringComparer.Ordinal)) { sb.Append($"std/{f}\n"); }
+        sb.Append('\n');
+        sb.Append(curatedLedger);
         return sb.ToString();
     }
 

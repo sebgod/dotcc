@@ -29,7 +29,7 @@ as **wall-plan W5**. That completes the **generative core** of the monomorphizat
 (`std.debug.print("{d} {s}\n", .{n, s})` — the comptime format parsed at lowering time, its
 `{…}` placeholders paired positionally with the tuple and lowered to a stderr `fprintf`) lands
 as **wall-plan W6** — so the **entire planned arc W0–W6 is now complete**. `std` is **not** modeled in general —
-only a curated set of paths resolves: the
+only a curated set of paths resolves, and the registry (`DotCC.Lib/Frontends/ZigCuratedStd.cs`, 72 rows: 69 scaffold, 3 platform floor) IS that list, one row per path with its kind and the condition that retires it (the std probe report prints the count and the ledger). A new row must be platform floor (#231 rule 1); anything else is scaffold and needs a retirement condition. The set: the
 allocator paths (`std.mem.Allocator`, `std.heap.page_allocator`/`c_allocator`/`FixedBufferAllocator`/`ArenaAllocator`;
 see the Allocators section), a few `std.mem` slice helpers (`eql`, `copyForwards`,
 `span`, `zeroes`), and **`std.ArrayList(T)`** (wall-plan W0, the modern unmanaged
@@ -424,7 +424,7 @@ of a comptime string, and read like any comptime string (oracle `comptime_string
 
 Two tiers, since the wall-breaking plan (`fable-wall.md`, 2026-07-05):
 
-**The planned arc W0–W6 is COMPLETE — later work only *widens the curated `std` set*, the rest are loud errors:** the
+**The planned arc W0–W6 is COMPLETE — later work only *widens the curated `std` set*, the rest are loud errors. The curated set is the registry in `DotCC.Lib/Frontends/ZigCuratedStd.cs` (kind and retirement condition per row; a new row must be platform floor, #231 rule 1):** the
 comptime-**type** foundation SHIPPED — type-as-value aliases (`const T = i32;`, with
 `*T`/`?T`/`[]T` composing) and `@TypeOf` (**wall-plan W1**), in-function struct
 decls (**W2**, the reify-a-struct primitive), **generic functions via `comptime`
