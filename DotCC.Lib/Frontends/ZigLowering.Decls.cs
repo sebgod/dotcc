@@ -1857,19 +1857,11 @@ internal sealed partial class ZigLowering
     /// checked against the sink here; the ordinary store coercion does that.</summary>
     private CExpr LowerDeclLiteralCall(string container, string name, IReadOnlyList<Item> argItems)
     {
-        // The curated `std.mem.Alignment` (the runtime carrier) models `.fromByteUnits(n)` directly.
-        // `.of(T)` (std.Io.Writer.Allocating's `.of(u8)`): T's own alignment.
-        if (container == AlignmentTypeName && name == "of" && argItems.Count == 1)
+        // A curated container (the `std.mem.Alignment` carrier: `.fromByteUnits(n)`, `.of(T)`) models its statics as registry rows.
+        if (ZigCuratedStd.PathOfType(new CType.Named(container)) is { } curatedOwner
+            && ZigCuratedStd.FindMember(curatedOwner, name, CuratedShape.StaticFn) is { } staticRow)
         {
-            var ofAlign = _ir.AlignOfConst(LowerType(argItems[0]));
-            return new Call("Alignment.fromByteUnits",
-                new List<CExpr> { new LitInt(ofAlign.ToString(System.Globalization.CultureInfo.InvariantCulture), ofAlign) { Type = CType.ULong } },
-                new List<CType> { CType.ULong }, null) { Type = new CType.Named(AlignmentTypeName) };
-        }
-        if (container == AlignmentTypeName && name == "fromByteUnits" && argItems.Count == 1)
-        {
-            return new Call("Alignment.fromByteUnits", new List<CExpr> { LowerExprSink(argItems[0], CType.ULong) },
-                new List<CType> { CType.ULong }, null) { Type = new CType.Named(AlignmentTypeName) };
+            return LowerCuratedMember(staticRow, new CuratedMemberCall(name, argItems));
         }
         var fn = EnsureMethodDeclared(container, name)
             ?? throw new IrUnsupportedException(
@@ -1996,11 +1988,13 @@ internal sealed partial class ZigLowering
             // for the empty unmanaged list is exactly `default`: a null pointer with zero
             // length/capacity (the first growing call allocates). Any other decl literal on a
             // list sink is an unmodeled member — clear error, never a silent zero.
-            case Zig.EnumLit el when sink?.Unqualified is CType.ZigList:
-                return Tok(el.Arg1) == "empty"
-                    ? new DefaultLit { Type = sink }
+            case Zig.EnumLit el when sink is not null && ZigCuratedStd.PathOfType(sink) is { } literalOwner
+                && ZigCuratedStd.MembersOf(literalOwner, CuratedShape.DeclLiteral).Any():
+                return ZigCuratedStd.FindMember(literalOwner, Tok(el.Arg1), CuratedShape.DeclLiteral) is { } literalRow
+                    ? LowerCuratedMember(literalRow, new CuratedMemberCall(Tok(el.Arg1), [], Sink: sink))
                     : throw new IrUnsupportedException(
-                        $"zig std.ArrayList has no modeled decl literal `.{Tok(el.Arg1)}` (only `.empty`)");
+                        $"zig {literalOwner} has no modeled decl literal `.{Tok(el.Arg1)}` (only "
+                        + string.Join(" / ", ZigCuratedStd.MembersOf(literalOwner, CuratedShape.DeclLiteral).Select(r => "`." + r.Member + "`")) + ")");
             // A DECL LITERAL (zig 0.14+) at a struct/union sink: `.fixed(buf)` IS `T.fixed(buf)`, and a
             // bare `.origin` IS `T.origin` — the member is looked up on the RESULT type, like an enum
             // literal's tag (road-to-zig-std G3 — `var w: Writer = .fixed(buf);` in `std.fmt.bufPrint`).
