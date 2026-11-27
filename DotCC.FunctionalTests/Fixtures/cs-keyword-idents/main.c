@@ -2,8 +2,8 @@
  * are valid C names but illegal as bare C# identifiers — dotcc @-escapes them
  * on emit. This exercises the must-match decl/reference pairs: keyword local
  * vars, a keyword function name + keyword parameter, a keyword call, and
- * keyword struct fields read through member access. (The struct *tag* is a
- * non-keyword — type-name escaping is a separate, deferred gap.) A local named
+ * keyword struct fields read through member access. (Keyword struct *tags* are the
+ * cs-keyword-tags fixture.) A local named
  * `null` sits beside a real NULL, which is `((void *)0)` and so never spells the
  * C# keyword itself (GH #247). gcc accepts
  * all of these verbatim, so the oracle confirms the @-escaped C# matches. */
