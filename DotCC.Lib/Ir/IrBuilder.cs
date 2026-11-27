@@ -3884,8 +3884,10 @@ internal sealed partial class IrBuilder
     {
         var raw = Tok(f.Arg0);
         if (raw.Length >= 2 && raw[0] == '0' && raw[1] is 'x' or 'X') { Gate(1999, "hex float literal", f.Arg0); }
-        // §6.4.4.2: f/F suffix → float; otherwise double (long double IS double here).
-        var type = raw.Length > 0 && raw[^1] is 'f' or 'F' ? CType.Float : CType.Double;
+        // §6.4.4.2: f/F suffix → float, l/L → long double (spelled double in C#, but typed apart so
+        // `1.0 + 1.0L` and <tgmath.h> see it); otherwise double.
+        var last = raw.Length > 0 ? raw[^1] : ' ';
+        var type = last is 'f' or 'F' ? CType.Float : last is 'l' or 'L' ? CType.LongDouble : CType.Double;
         return new LitFloat(LowerFloat(raw)) { Type = type };
     }
 

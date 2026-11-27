@@ -26,9 +26,9 @@ public sealed class TgmathTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { path });
-            var i = emitted.IndexOf("static int main(", System.StringComparison.Ordinal);
-            i.ShouldBeGreaterThanOrEqualTo(0, "no main in the emit");
-            return emitted[i..];
+            var m = Regex.Match(emitted, @"int main\(\)\s*\{.*?\r?\n    \}\r?\n", RegexOptions.Singleline);
+            m.Success.ShouldBeTrue("no main in the emit: " + emitted);
+            return m.Value;
         }
         finally { File.Delete(path); }
     }
