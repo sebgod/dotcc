@@ -232,7 +232,7 @@ public sealed class GenericTests
             var emitted = Compiler.EmitCSharp(new[] { src });
             emitted.ShouldContain("int fs = 1;");
             emitted.ShouldContain("int ds = 1;");
-            emitted.ShouldContain("int sz = 4;");
+            emitted.ShouldContain("int sz = unchecked((int)((ulong)(sizeof(float))));");
         }
         finally { File.Delete(src); }
     }
@@ -250,7 +250,10 @@ public sealed class GenericTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("gcf((float)i)");
+            // The int argument converts to the selected float parameter (C#'s implicit
+            // int-to-float at the direct call); the double arm would take it as gcd(i).
+            emitted.ShouldContain("(int)gcf(i)");
+            emitted.ShouldNotContain("gcd(i)");
         }
         finally { File.Delete(src); }
     }
