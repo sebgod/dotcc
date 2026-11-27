@@ -267,7 +267,28 @@ internal sealed partial class ZigLowering
             _ => (comparison, comparison, true),
         };
         if (!IsComptimeStringRead(left) && !IsComptimeStringRead(right)) { return null; }
-        return ComptimeScalarOperand(left) is { } l && ComptimeScalarOperand(right) is { } r ? (l == r) == equal : null;
+        return Scalar(left) is { } l && Scalar(right) is { } r ? (l == r) == equal : null;
+
+        // A comptime scalar operand: a byte of a comptime string at a LITERAL index (a `comptime var` index's constant
+        // is its declaration value, not its current one), its length, or a character / integer literal.
+        long? Scalar(Item operand)
+        {
+            while (operand.Content is Zig.Grouped g) { operand = g.Arg1; }
+            switch (operand.Content)
+            {
+                case Zig.Index { Arg2.Content: Zig.IntLit indexLit } ix when AsBytes(TryEvalComptime(ix.Arg0, ComptimeTier.Lowering)) is { } bytes:
+                    return DecodeZigInt(Tok(indexLit.Arg0)).Value is { } k && k >= 0 && k < bytes.Length ? bytes[k] : null;
+                case Zig.Field f when Tok(f.Arg2) == "len" && AsBytes(TryEvalComptime(f.Arg0, ComptimeTier.Lowering)) is { } lenBytes:
+                    return lenBytes.Length;
+                case Zig.CharLit or Zig.IntLit:
+                {
+                    using var hoist = EnterThrowawayHoist();
+                    return _ir.ConstEval(LowerExpr(operand));
+                }
+                default:
+                    return null;
+            }
+        }
     }
     /// <summary>Is <paramref name="operand"/> a byte or the length of a comptime string?</summary>
     private bool IsComptimeStringRead(Item operand)
