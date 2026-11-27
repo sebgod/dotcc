@@ -21,8 +21,7 @@ int main(void) {
     printf("%s %s %s %s %s %s %s %s\n", typename(i), typename(d), typename(f),
            typename(l), typename(u), typename(p), typename("str"), typename(i + d));
     printf("%.1f %.1f\n", (double)my_sqrt(9.0f), my_sqrt(16.0));
-    printf("%.1f %.1f %.1f
-", (double)my_cbrt(27.0f), my_cbrt(64.0), my_cbrt(8));
+    printf("%.1f %.1f %.1f\n", (double)my_cbrt(27.0f), my_cbrt(64.0), my_cbrt(8));
     int arr[3] = {1, 2, 3};
     printf("decay=%d qual=%d\n", _Generic(arr, int *: 1, default: 0),
            _Generic((const int){5}, int: 1, default: 0));
