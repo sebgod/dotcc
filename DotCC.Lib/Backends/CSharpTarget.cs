@@ -31,8 +31,8 @@ internal sealed class CSharpTarget : ITarget
         // unchanged — `&fn` of dotcc's own methods stays a managed delegate*.
         CType.Func f => (f.IsNativeCallConv ? "delegate* unmanaged[Cdecl]<" : "delegate*<")
             + string.Join(", ", f.Params.Where(p => !CSharpBackend.IsVoidParam(p)).Select(RenderType).Append(RenderType(f.Return))) + ">",
-        CType.Named n => NoteNamed(n.Name),
-        CType.Enum e => e.Name,
+        CType.Named n => TypeName(NoteNamed(n.Name)),
+        CType.Enum e => TypeName(e.Name),
         // A Zig SIMD vector: a bool one is its lane bitmask, a numeric one .NET's vector of its width.
         CType.Vector { IsMask: true } => "ulong",
         CType.Vector v => "System.Runtime.Intrinsics." + (v.NetFamily
@@ -82,6 +82,33 @@ internal sealed class CSharpTarget : ITarget
     /// <summary>Every struct / union name rendered so far: what the program reaches, which decides the prunable
     /// aggregates the backend emits (<see cref="IrModule.PrunableTypes"/>, task #194).</summary>
     internal HashSet<string> RenderedNamedTypes { get; } = new(System.StringComparer.Ordinal);
+
+    /// <summary>The C# spelling of a struct, union or enum tag: the raw C name, <c>@</c>-escaped when it is a C# keyword.
+    /// Every point the backend writes a type name goes through here; side tables keep the raw name.</summary>
+    internal static string TypeName(string rawName) =>
+        _capturedTypeNames.Contains(rawName) ? CapturedPrefix + rawName
+        : _escapedTypeNames.Contains(rawName) || DotCC.EmitHelpers.Id(rawName) != rawName ? "@" + rawName
+        : rawName;
+
+    /// <summary>Prefix of the spelling a C tag gets when its name is a contextual keyword the emitted program or the
+    /// spliced runtime uses. C reserves a leading double underscore, so no C program can declare a clash.</summary>
+    private const string CapturedPrefix = "__dotcc_tag_";
+
+    /// <summary>Contextual keywords C# refuses as a type name but accepts after an <c>@</c> escape (Roslyn CS9029,
+    /// CS9056, CS9062, CS9306 for <c>extension</c>, and the CS8860 warning for <c>record</c>).</summary>
+    private static readonly HashSet<string> _escapedTypeNames = new(System.StringComparer.Ordinal)
+    {
+        "record", "required", "file", "scoped", "extension",
+    };
+
+    /// <summary>Names the emitted shell and the runtime use as contextual keywords. The type declarations sit at the
+    /// top level, so a type named like one captures every use (<c>var x = ...</c>, <c>nint</c>, <c>nuint</c>, the
+    /// <c>where T : unmanaged</c> constraint), and <c>@var</c> still declares a type named <c>var</c>. These get the
+    /// reserved <see cref="CapturedPrefix"/> rename instead, a pure function of the name so every site agrees.</summary>
+    private static readonly HashSet<string> _capturedTypeNames = new(System.StringComparer.Ordinal)
+    {
+        "var", "nint", "nuint", "unmanaged",
+    };
 
     /// <summary>Record <paramref name="name"/> in <see cref="RenderedNamedTypes"/> and return it.</summary>
     private string NoteNamed(string name)

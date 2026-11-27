@@ -69,8 +69,8 @@ internal sealed partial class CSharpBackend
         var cg = new CSharpBackend { _convGate = convGate, _module = unit };
         // C tag namespace vs ordinary namespace: collect globals whose name an
         // emitted struct/enum type will shadow, so reads qualify (GlobalName).
-        var typeNames = new HashSet<string>(unit.Types.Where(t => !t.IsRuntimeOwned).Select(t => t.Name), StringComparer.Ordinal);
-        typeNames.UnionWith(unit.Enums.Select(e => e.Name));
+        var typeNames = new HashSet<string>(unit.Types.Where(t => !t.IsRuntimeOwned).Select(t => CSharpTarget.TypeName(t.Name)), StringComparer.Ordinal);
+        typeNames.UnionWith(unit.Enums.Select(e => CSharpTarget.TypeName(e.Name)));
         cg._typeShadowedGlobals = new HashSet<string>(
             unit.Globals.Select(g => g.Sym.TargetName).Where(typeNames.Contains), StringComparer.Ordinal);
         cg._laidOutTypes = new HashSet<string>(unit.Types.Select(t => t.Name).Concat(unit.Enums.Select(e => e.Name)), StringComparer.Ordinal);
@@ -291,7 +291,7 @@ internal sealed partial class CSharpBackend
         var definedTypes = new HashSet<string>(unit.Types.Select(t => t.Name).Concat(unit.Enums.Select(e => e.Name)), StringComparer.Ordinal);
         foreach (var tag in unit.DeclaredTags.Where(t => !definedTypes.Contains(t) && !unit.RuntimeTags.Contains(t)).Order(StringComparer.Ordinal))
         {
-            var text = $"struct {tag}\n{{\n}}\n\n";
+            var text = $"struct {CSharpTarget.TypeName(tag)}\n{{\n}}\n\n";
             structs.Append(text);
             records.Add(new LinkRecord(LinkRecordKind.OpaqueType, tag, false, text));
         }
@@ -352,7 +352,8 @@ internal sealed partial class CSharpBackend
             // Zig `packed struct` — byte-pack with no inter-field padding (V1: Pack=1, not bit-packed).
             sb.Append($"[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential, Pack = 1{size})]\n");
         }
-        sb.Append("struct ").Append(t.Name).Append("\n{\n");
+        var tn = CSharpTarget.TypeName(t.Name);
+        sb.Append("struct ").Append(tn).Append("\n{\n");
         var bitUnitCounter = 0;
         for (var fi = 0; fi < t.Fields.Count; )
         {
@@ -396,7 +397,7 @@ internal sealed partial class CSharpBackend
                 }
                 else
                 {
-                    var wrap = $"__IA_{t.Name}_{fid}";
+                    var wrap = $"__IA_{t.Name}_{f.Name}";
                     wrappers.Append("[System.Runtime.CompilerServices.InlineArray(").Append(count).Append(")]\nstruct ")
                         .Append(wrap).Append("\n{\n    public ").Append(UnsafeFor(flat)).Append(Cs(flat)).Append(" _e;\n}\n\n");
                     sb.Append("    public ").Append(wrap).Append(' ').Append(fid).Append(";\n");
@@ -411,12 +412,12 @@ internal sealed partial class CSharpBackend
         {
             // zig compares a packed struct as its backing integer (std.meta.eql's `.@"packed" => a == b`): the
             // bytes of the storage, which the masked bit-field setters keep free of stray bits.
-            var bytes = $"System.Runtime.InteropServices.MemoryMarshal.AsBytes(new System.ReadOnlySpan<{t.Name}>(in {{0}}))";
-            sb.Append("    public static bool operator ==(").Append(t.Name).Append(" a, ").Append(t.Name).Append(" b) => System.MemoryExtensions.SequenceEqual(")
+            var bytes = $"System.Runtime.InteropServices.MemoryMarshal.AsBytes(new System.ReadOnlySpan<{tn}>(in {{0}}))";
+            sb.Append("    public static bool operator ==(").Append(tn).Append(" a, ").Append(tn).Append(" b) => System.MemoryExtensions.SequenceEqual(")
               .Append(string.Format(System.Globalization.CultureInfo.InvariantCulture, bytes, "a")).Append(", ")
               .Append(string.Format(System.Globalization.CultureInfo.InvariantCulture, bytes, "b")).Append(");\n");
-            sb.Append("    public static bool operator !=(").Append(t.Name).Append(" a, ").Append(t.Name).Append(" b) => !(a == b);\n");
-            sb.Append("    public override bool Equals(object o) => o is ").Append(t.Name).Append(" other && this == other;\n");
+            sb.Append("    public static bool operator !=(").Append(tn).Append(" a, ").Append(tn).Append(" b) => !(a == b);\n");
+            sb.Append("    public override bool Equals(object o) => o is ").Append(tn).Append(" other && this == other;\n");
             sb.Append("    public override int GetHashCode() => 0;\n");
         }
         if (_arrayInitTypes.Contains(t.Name) || _module is { IsObject: true }) { sb.Append(ArrayMemberInitHelper(t)); }
@@ -465,7 +466,7 @@ internal sealed partial class CSharpBackend
             var dst = IsFixedBufferType(elemCs) ? $"__v.{fid}[__i]" : $"(({elemCs}*)&__v.{fid})[__i]";
             body.Append($"        for (var __i = 0; __i < {fid}.Length; __i++) {{ {dst} = {src}; }}\n");
         }
-        return $"\n    public static unsafe {t.Name} {ArrayInitHelper}({t.Name} __v, {string.Join(", ", ps)})\n    {{\n{body}        return __v;\n    }}\n";
+        return $"\n    public static unsafe {CSharpTarget.TypeName(t.Name)} {ArrayInitHelper}({CSharpTarget.TypeName(t.Name)} __v, {string.Join(", ", ps)})\n    {{\n{body}        return __v;\n    }}\n";
     }
 
     /// <summary>Render a C enum as a real C# <c>enum Name : underlying { … }</c>.
@@ -474,7 +475,7 @@ internal sealed partial class CSharpBackend
     private string EnumText(EnumTypeDef e)
     {
         var sb = new StringBuilder();
-        sb.Append("enum ").Append(e.Name).Append(" : ").Append(Cs(e.Underlying)).Append("\n{\n");
+        sb.Append("enum ").Append(CSharpTarget.TypeName(e.Name)).Append(" : ").Append(Cs(e.Underlying)).Append("\n{\n");
         // A 64-bit UNSIGNED enum carries its members' bit patterns in the `long` value, so a member
         // above long.MaxValue (Zig `enum(u64)`'s maxInt) prints as the unsigned value it is.
         var unsigned64 = e.Underlying.Unqualified is CType.Prim { Integer: true, Signed: false, Bytes: 8 };

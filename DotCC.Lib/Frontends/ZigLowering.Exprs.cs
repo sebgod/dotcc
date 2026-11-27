@@ -1,6 +1,7 @@
 #nullable enable
 
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Linq;
 using DotCC.Ir;
@@ -459,23 +460,23 @@ internal sealed partial class ZigLowering
                 }
                 if (TryResolveStdPath(expr, out var stdPath))
                 {
-                    // Both StdAllocatorValues rows are the C heap today, so a value use
+                    // Both default-allocator value rows are the C heap today, so a value use
                     // materializes the one runtime fat pointer; a distinct AllocKind row would
                     // switch on the kind here. A curated TYPE path used as a value gets the
                     // specific "type, not a value" message; the rest the registry-derived list.
-                    if (StdAllocatorValues.ContainsKey(stdPath)) { return MaterializeCHeap(); }
+                    if (ZigCuratedStd.Find(stdPath, CuratedShape.Value) is not null) { return MaterializeCHeap(); }
                     // Any other std VALUE (`std.atomic.cache_line`, array_list's growth policy) is the real
                     // std's: a top-level value const of the module the path names, lowered there.
-                    if (!StdTypes.ContainsKey(stdPath) && !StdGenericTypes.ContainsKey(stdPath)
+                    if (!IsCuratedTypePath(stdPath)
                         && ResolveModulePath(fld.Arg0) is { Lowering: { } valueOwner }
                         && valueOwner.LowerExportedValueConst(fieldName) is { } exportedValue)
                     {
                         return exportedValue;
                     }
                     throw new IrUnsupportedException(
-                        StdTypes.ContainsKey(stdPath) || StdGenericTypes.ContainsKey(stdPath)
+                        IsCuratedTypePath(stdPath)
                             ? $"zig `{stdPath}` is a type, not a value"
-                            : $"zig std path `{stdPath}` is not modeled (values: {string.Join(" / ", StdAllocatorValues.Keys)})");
+                            : $"zig std path `{stdPath}` is not modeled (values: {string.Join(" / ", ZigCuratedStd.Paths(CuratedShape.Value))})");
                 }
                 if (fld.Arg0.Content is Zig.Ident cbid
                     && _symbols.Resolve(Tok(cbid.Arg0)) is null
@@ -569,19 +570,15 @@ internal sealed partial class ZigLowering
                         _ => throw new IrUnsupportedException($"slice has no field '{fieldName}' (only .len / .ptr)"),
                     };
                 }
-                // Curated `std.ArrayList(T)` fields (wall-plan W0): `items` — the occupied
-                // prefix as a mutable `[]T` (subscript / `.len` / `for (list.items) |x|` all
-                // ride the ordinary slice lowering on the result) — and `capacity`. The runtime
-                // ZigList<T> exposes them as `Items` / `Cap`; anything else is a clear error.
-                if (structExpr.Type.Unqualified is CType.ZigList zlist)
+                // A field row of the receiver's curated runtime type (wall-plan W0: `std.ArrayList(T)`'s `items`, the
+                // occupied prefix as a mutable `[]T`, and `capacity`); anything else is a clear error.
+                if (ZigCuratedStd.PathOfType(structExpr.Type) is { } fieldOwner && ZigCuratedStd.MembersOf(fieldOwner, CuratedShape.Field).Any())
                 {
-                    return fieldName switch
-                    {
-                        "items" => new Member(structExpr, "Items", arrow) { Type = new CType.Slice(zlist.Element) },
-                        "capacity" => new Member(structExpr, "Cap", arrow) { Type = CType.ULong, IsLValue = true },
-                        _ => throw new IrUnsupportedException(
-                            $"zig std.ArrayList has no modeled field '{fieldName}' (only .items / .capacity)"),
-                    };
+                    return ZigCuratedStd.FindMember(fieldOwner, fieldName, CuratedShape.Field) is { } fieldRow
+                        ? LowerCuratedMember(fieldRow, new CuratedMemberCall(fieldName, [], structExpr, fld.Arg0, Arrow: arrow))
+                        : throw new IrUnsupportedException(
+                            $"zig {fieldOwner} has no modeled field '{fieldName}' (only "
+                            + string.Join(" / ", ZigCuratedStd.MembersOf(fieldOwner, CuratedShape.Field).Select(r => "." + r.Member)) + ")");
                 }
                 // Fixed-array `.len` — a `[N]T`'s length is the comptime-known element count N
                 // (Zig). The array lowered to a pointer (no runtime length field), so fold to a
@@ -1383,12 +1380,13 @@ internal sealed partial class ZigLowering
                 $"decl literal `.{Tok(declLit.Arg1)}(…)` needs a struct/union result type to resolve against "
                 + "(a typed `const`/`var`, a typed parameter, a `return` of a typed function)");
         }
-        // Inside std's own mem.zig a bare `asBytes(…)` / `sliceAsBytes(…)` (std.mem.indexOf's `sliceAsBytes(haystack)`)
-        // is the curated lowering too, as `std.mem.asBytes(…)` from any other module is.
-        if (calleeItem.Content is Zig.Ident { Arg0: var curatedTok } && Tok(curatedTok) is "asBytes" or "sliceAsBytes" or "bytesAsValue" or "bytesToValue" or "bytesAsSlice" or "sliceTo"
+        // Inside std's own mem.zig a bare `asBytes(...)` / `sliceAsBytes(...)` (std.mem.indexOf's `sliceAsBytes(haystack)`)
+        // is the curated lowering too, as `std.mem.asBytes(...)` from any other module is: the rows flagged BareInStdMem.
+        if (calleeItem.Content is Zig.Ident { Arg0: var curatedTok }
+            && ZigCuratedStd.FindFunction("std.mem", Tok(curatedTok)) is { BareInStdMem: true } bareRow
             && IsStdModule("mem.zig"))
         {
-            return LowerStdMemCall(Tok(curatedTok), argItems);
+            return LowerCuratedStdFn(bareRow, argItems);
         }
         if (calleeItem.Content is not Zig.Ident id)
         {
@@ -1695,35 +1693,14 @@ internal sealed partial class ZigLowering
     {
         var methodName = Tok(fld.Arg2);
 
-        // --- curated `std.mem` helpers (a static call on the std.mem namespace) ---
-        // Routed before the generic dispatch. dotcc models no `std` in general — only this curated
-        // set of the most common slice utilities. An unmodeled member is a clear, specific error without
-        // a std tree; with one (DOTCC_ZIG_LIB_DIR) it navigates to real source (TakesCuratedStdCall).
-        if (TryResolveStdPath(fld.Arg0, out var stdNs) && stdNs == "std.mem" && TakesCuratedStdCall(stdNs, methodName))
+        // --- curated std namespace functions (std.mem.*, std.fmt.comptimePrint, std.debug.print, std.testing.*) ---
+        // Routed before the generic dispatch through the ZigCuratedStd registry, which models no `std` in general, only
+        // the rows. An unmodeled member is a clear, specific error without a std tree; with one (DOTCC_ZIG_LIB_DIR) it
+        // navigates to real source. `comptimePrint` is formatted while lowering (task #128), as zig types its result by
+        // running the formatter at compile time.
+        if (TryLowerCuratedStdCall(fld.Arg0, methodName, argItems) is { } curatedCall)
         {
-            return LowerStdMemCall(methodName, argItems);
-        }
-
-        // --- `std.fmt.comptimePrint` (task #128): formatted while lowering, over comptime-known arguments. zig types the
-        // result by running the formatter at compile time, which the source signature needs before the call can bind.
-        if (methodName == "comptimePrint" && TryResolveStdPath(fld.Arg0, out var stdFmt) && stdFmt == "std.fmt")
-        {
-            return LowerComptimePrint(argItems);
-        }
-
-        // --- curated `std.debug.print` (wall-plan W6) --- the biggest remaining std idiom. Like the
-        // std.mem helpers it's a curated path, not a general std model; only `print` is modeled.
-        if (TryResolveStdPath(fld.Arg0, out var stdDbg) && stdDbg == "std.debug" && TakesCuratedStdCall(stdDbg, methodName))
-        {
-            return LowerStdDebugCall(methodName, argItems);
-        }
-
-        // --- curated `std.testing` assertions (`dotcc zig test`) --- `expect` / `expectEqual`, each
-        // returning an error union so a `try` propagates a failing assertion to the test's boundary
-        // (and thence to the generated test runner). A curated path, like the ones above.
-        if (TryResolveStdPath(fld.Arg0, out var stdTest) && stdTest == "std.testing" && TakesCuratedStdCall(stdTest, methodName))
-        {
-            return LowerStdTestingCall(methodName, argItems);
+            return curatedCall;
         }
 
         // --- a call navigated to an @import'ed module: `util.func(args)` / `std.ascii.isDigit(args)` ---
@@ -1792,36 +1769,29 @@ internal sealed partial class ZigLowering
 
         // --- Zig allocators (Milestone F), before the generic method dispatch ---
         // `std.heap.FixedBufferAllocator.init(buf)` — a static call on the std FBA type.
-        if (methodName == "init" && TryResolveStdPath(fld.Arg0, out var basePath) && basePath == "std.heap.FixedBufferAllocator")
+        // A static function row of a curated type: `FixedBufferAllocator.init(buf)`, `ArenaAllocator.init(backing)`
+        // (Milestone U), and the Alignment carrier's `fromByteUnits(n)` / `of(T)` spelled through the type
+        // (std.MultiArrayList's `.big_align = mem.Alignment.fromByteUnits(big_align)`, task #108).
+        if (TryResolveStdPath(fld.Arg0, out var curatedBase))
         {
-            return LowerFbaInit(argItems);
-        }
-        // `std.heap.ArenaAllocator.init(backing)` — a static call on the std arena type (Milestone U).
-        if (methodName == "init" && TryResolveStdPath(fld.Arg0, out var arenaBase) && arenaBase == "std.heap.ArenaAllocator")
-        {
-            return LowerArenaInit(argItems);
-        }
-        // Any OTHER member call on a curated std TYPE: the model owns the path (so it was not
-        // navigated above) but doesn't provide this function — say so precisely, instead of falling
-        // through to the instance path and reporting the type as "a type, not a value".
-        // `mem.Alignment.fromByteUnits(n)` / `.of(T)` spelled through the type (std.MultiArrayList's `.big_align =
-        // mem.Alignment.fromByteUnits(big_align)`, task #108): the curated carrier's decl-literal forms.
-        if (methodName is "fromByteUnits" or "of" && TryResolveStdPath(fld.Arg0, out var alignBase) && alignBase == "std.mem.Alignment")
-        {
-            return LowerDeclLiteralCall(AlignmentTypeName, methodName, argItems);
-        }
-        if (TryResolveStdPath(fld.Arg0, out var curatedBase) && StdTypes.ContainsKey(curatedBase))
-        {
-            throw new IrUnsupportedException(
-                $"zig `{curatedBase}` has no modeled function '{methodName}' — dotcc curates these std "
-                + "types, and models `init` on std.heap.FixedBufferAllocator / std.heap.ArenaAllocator");
+            if (ZigCuratedStd.FindMember(curatedBase, methodName, CuratedShape.StaticFn) is { } staticRow)
+            {
+                return LowerCuratedMember(staticRow, new CuratedMemberCall(methodName, argItems, Base: fld.Arg0));
+            }
+            // Any OTHER member call on a curated std TYPE: the model owns the path (so it was not
+            // navigated above) but doesn't provide this function: say so precisely, instead of falling
+            // through to the instance path and reporting the type as "a type, not a value".
+            if (ZigCuratedStd.Find(curatedBase, CuratedShape.Type) is not null)
+            {
+                throw new IrUnsupportedException(
+                    $"zig `{curatedBase}` has no modeled function '{methodName}'; dotcc curates these std "
+                    + $"types, and models `init` on {string.Join(" / ", ZigCuratedStd.TypesWithStatic("init"))}");
+            }
         }
         // `a.alloc(T, n)` / `a.free(s)` (and the deferred `create`/`destroy`) on a known-default
         // (→ devirt) or an Allocator-typed receiver (→ indirect). A same-named method on a
         // non-allocator receiver falls through to the generic dispatch below.
-        if (methodName is "alloc" or "alignedAlloc" or "dupe" or "dupeSentinel" or "allocSentinel" or "free" or "create" or "destroy"
-                or "realloc" or "resize" or "remap"
-            or "rawAlloc" or "rawResize" or "rawRemap" or "rawFree"
+        if (ZigCuratedStd.AllocatorPath is { } allocatorPath && ZigCuratedStd.FindMember(allocatorPath, methodName, CuratedShape.Method) is not null
             // A container TYPE's own function of that name (std.array_hash_map's `IndexHeader.alloc(gpa, bit_index)`,
             // task #135) is a static call, not an allocator method: it takes the `Type.func(args)` path below.
             && !(fld.Arg0.Content is Zig.Ident typeRecv && _symbols.Resolve(Tok(typeRecv.Arg0)) is null
@@ -1928,77 +1898,21 @@ internal sealed partial class ZigLowering
             return BuildCall(tagMethod, argItems, tagFn.Params.Count > 0 ? AdjustReceiver(tagRecv, tagFn.Params[0]) : null);
         }
         var recv = LowerExpr(fld.Arg0);
-        // `fba.allocator()` / `arena.allocator()` — a FixedBufferAllocator (Milestone F) or an
-        // ArenaAllocator (Milestone U) hands out an Allocator fat pointer over itself. Needs `&self`
-        // as the vtable context; the result is opaque (→ the indirect dispatch path). Handled before
-        // the generic _methods lookup (both are runtime types, not Zig-declared containers).
-        if (methodName == "allocator" && recv.Type.Unqualified is CType.Named { Name: var allocTy }
-            && allocTy is FbaTypeName or ArenaTypeName)
+        // A member row of the receiver's curated runtime type (a registry lookup on the type path): `fba.allocator()`,
+        // `arena.allocator()` / `arena.deinit()` (Milestones F and U; both are runtime types, not Zig-declared
+        // containers), the Alignment carrier's methods (hash_map's `max_align.forward(total)`) and the unmanaged
+        // `std.ArrayList(T)` members (wall-plan W0; the allocator is an explicit per-call argument, zig 0.15+).
+        // Mutating methods are INSTANCE methods on the runtime struct, so calling on an lvalue receiver mutates in place.
+        if (ZigCuratedStd.PathOfType(recv.Type) is { } recvPath)
         {
-            if (argItems.Count != 0)
+            if (ZigCuratedStd.FindMember(recvPath, methodName, CuratedShape.Method) is { } methodRow)
             {
-                throw new IrUnsupportedException($"zig `{allocTy}.allocator()` takes no arguments");
+                return LowerCuratedMember(methodRow, new CuratedMemberCall(methodName, argItems, recv, fld.Arg0));
             }
-            if (Unparen(recv) is VarRef { Sym: { Kind: SymKind.Var or SymKind.Param } s })
+            if (ZigCuratedStd.ReportsUnmodeledMembers(recvPath))
             {
-                s.AddressTaken = true;
+                throw ZigCuratedStd.UnmodeledMember(recvPath, methodName, argItems.Count);
             }
-            var selfAddr = new Unary(UnOp.AddrOf, recv) { Type = new CType.Pointer(recv.Type) };
-            var factory = allocTy == FbaTypeName ? "ZigAlloc.FbaAllocator" : "ZigAlloc.ArenaToAllocator";
-            return new Call(factory, new List<CExpr> { selfAddr },
-                new List<CType> { new CType.Pointer(new CType.Named(allocTy)) }, null) { Type = new CType.Allocator() };
-        }
-        // `arena.deinit()` — free the whole arena chunk chain (Milestone U). A static wrapper called
-        // by-ref on the local, like `allocator()`. The headline use is `defer arena.deinit();`.
-        if (methodName == "deinit" && recv.Type.Unqualified is CType.Named { Name: ArenaTypeName })
-        {
-            if (argItems.Count != 0)
-            {
-                throw new IrUnsupportedException("zig `arena.deinit()` takes no arguments");
-            }
-            if (Unparen(recv) is VarRef { Sym: { Kind: SymKind.Var or SymKind.Param } sd })
-            {
-                sd.AddressTaken = true;
-            }
-            var arenaAddr = new Unary(UnOp.AddrOf, recv) { Type = new CType.Pointer(recv.Type) };
-            return new Call("ZigAlloc.ArenaDeinit", new List<CExpr> { arenaAddr },
-                new List<CType> { new CType.Pointer(new CType.Named(ArenaTypeName)) }, null) { Type = CType.Void };
-        }
-        // Curated `std.ArrayList(T)` member calls (wall-plan W0) — routed on the receiver's
-        // ZigList type before the generic container dispatch (a runtime type, not a
-        // Zig-declared container). Mutating methods are INSTANCE methods on the runtime
-        // struct, so calling on an lvalue receiver mutates in place (zig's `*Self` methods);
-        // the allocator is an explicit per-call argument (the unmanaged API, zig 0.15+).
-        // The curated `std.mem.Alignment` carrier's methods (std-internal code names them: hash_map's
-        // `max_align.forward(total)`): static helpers on the runtime `Alignment`, receiver first.
-        if (recv.Type.Unqualified is CType.Named { Name: AlignmentTypeName })
-        {
-            (string Helper, CType Ret, int Arity)? alignMethod = methodName switch
-            {
-                "toByteUnits" => ("Alignment.ToByteUnits", CType.ULong, 0),
-                "forward" => ("Alignment.Forward", CType.ULong, 1),
-                "backward" => ("Alignment.Backward", CType.ULong, 1),
-                "check" => ("Alignment.Check", CType.Bool, 1),
-                _ => null,
-            };
-            if (alignMethod is not { } am || argItems.Count != am.Arity)
-            {
-                throw new IrUnsupportedException(
-                    $"zig std.mem.Alignment has no modeled member '{methodName}' taking {argItems.Count} argument(s) "
-                    + "(curated: toByteUnits(), forward(addr), backward(addr), check(addr), fromByteUnits(n))");
-            }
-            var alignArgs = new List<CExpr> { recv };
-            var alignTypes = new List<CType> { recv.Type };
-            foreach (var a in argItems)
-            {
-                alignArgs.Add(LowerExprSink(a, CType.ULong));
-                alignTypes.Add(CType.ULong);
-            }
-            return new Call(am.Helper, alignArgs, alignTypes, null) { Type = am.Ret };
-        }
-        if (recv.Type.Unqualified is CType.ZigList listTy)
-        {
-            return LowerZigListCall(recv, listTy, methodName, argItems);
         }
         if (!TryContainerName(recv.Type, out var container))
         {
@@ -2076,145 +1990,6 @@ internal sealed partial class ZigLowering
         return BuildCall(msym, argItems, receiver);
     }
 
-    /// <summary>Lower a curated <c>std.ArrayList(T)</c> member call (wall-plan W0) to a
-    /// <see cref="ZigListCall"/> on the runtime <c>ZigList&lt;T&gt;</c> instance. The unmanaged
-    /// API only (zig 0.15+ re-pointed <c>std.ArrayList</c> at it): every growing call takes the
-    /// allocator explicitly, <c>append</c>/<c>appendSlice</c> return <c>!void</c> (so <c>try</c>
-    /// composes, <c>error.OutOfMemory</c> on exhaustion), <c>pop</c> returns <c>?T</c>. An
-    /// unmodeled member is a clear error naming the curated set — never a silent drop.</summary>
-    private CExpr LowerZigListCall(CExpr recv, CType.ZigList listTy, string methodName, IReadOnlyList<Item> argItems)
-    {
-        var elem = listTy.Element;
-        switch (methodName)
-        {
-            case "append":
-            {
-                RequireListArgs(methodName, argItems, 2, "(alloc, item)");
-                var a = LowerListAllocatorArg(methodName, argItems[0]);
-                var item = LowerExprSink(argItems[1], elem);   // result-located at the element type
-                return new ZigListCall(recv, "Append", new List<CExpr> { a, item, OomLit() })
-                { Type = new CType.ErrorUnion(CType.Void) };
-            }
-            case "appendSlice":
-            {
-                RequireListArgs(methodName, argItems, 2, "(alloc, slice)");
-                var a = LowerListAllocatorArg(methodName, argItems[0]);
-                // `&arr` / a `[N]T` value / `&.{ 1, 1 }` coerces to a slice exactly as at any other slice sink: lowered AT
-                // the slice (so an anonymous list literal is result-located at the element type), then coerced.
-                var sliceType = new CType.Slice(elem);
-                var sliceArg = LowerExprSink(argItems[1], sliceType);
-                var s = sliceArg.Type?.Unqualified is CType.Slice ? sliceArg : CoerceToSlice(sliceArg, sliceType);
-                return new ZigListCall(recv, "AppendSlice", new List<CExpr> { a, s, OomLit() })
-                { Type = new CType.ErrorUnion(CType.Void) };
-            }
-            case "pop":
-            {
-                RequireListArgs(methodName, argItems, 0, "()");
-                return new ZigListCall(recv, "Pop", new List<CExpr>()) { Type = new CType.Optional(elem) };
-            }
-            case "deinit":
-            {
-                RequireListArgs(methodName, argItems, 1, "(alloc)");
-                var a = LowerListAllocatorArg(methodName, argItems[0]);
-                return new ZigListCall(recv, "Deinit", new List<CExpr> { a }) { Type = CType.Void };
-            }
-            case "clearRetainingCapacity":
-            {
-                RequireListArgs(methodName, argItems, 0, "()");
-                return new ZigListCall(recv, "ClearRetainingCapacity", new List<CExpr>()) { Type = CType.Void };
-            }
-            // The index / capacity members (task #74): each maps 1:1 onto the runtime ZigList.
-            case "insert":
-            {
-                RequireListArgs(methodName, argItems, 3, "(alloc, index, item)");
-                var a = LowerListAllocatorArg(methodName, argItems[0]);
-                var at = LowerExprSink(argItems[1], CType.ULong);
-                var item = LowerExprSink(argItems[2], elem);
-                return new ZigListCall(recv, "Insert", new List<CExpr> { a, at, item, OomLit() })
-                { Type = new CType.ErrorUnion(CType.Void) };
-            }
-            case "insertSlice":
-            {
-                // task #138: the tail moves up by `slice.len`; the slice coerces as appendSlice's does.
-                RequireListArgs(methodName, argItems, 3, "(alloc, index, slice)");
-                var a = LowerListAllocatorArg(methodName, argItems[0]);
-                var at = LowerExprSink(argItems[1], CType.ULong);
-                var sliceType = new CType.Slice(elem);
-                var sliceArg = LowerExprSink(argItems[2], sliceType);
-                var s = sliceArg.Type?.Unqualified is CType.Slice ? sliceArg : CoerceToSlice(sliceArg, sliceType);
-                return new ZigListCall(recv, "InsertSlice", new List<CExpr> { a, at, s, OomLit() })
-                { Type = new CType.ErrorUnion(CType.Void) };
-            }
-            // task #172: `appendNTimes` fills, `replaceRange` swaps a range for a slice (growing, or asserting capacity).
-            case "appendNTimes" or "appendNTimesAssumeCapacity":
-            {
-                var assume = methodName == "appendNTimesAssumeCapacity";
-                RequireListArgs(methodName, argItems, assume ? 2 : 3, assume ? "(value, n)" : "(alloc, value, n)");
-                var nArgs = new List<CExpr>();
-                if (!assume) { nArgs.Add(LowerListAllocatorArg(methodName, argItems[0])); }
-                nArgs.Add(LowerExprSink(argItems[assume ? 0 : 1], elem));
-                nArgs.Add(LowerExprSink(argItems[assume ? 1 : 2], CType.ULong));
-                if (!assume) { nArgs.Add(OomLit()); }
-                return new ZigListCall(recv, assume ? "AppendNTimesAssumeCapacity" : "AppendNTimes", nArgs)
-                { Type = assume ? CType.Void : new CType.ErrorUnion(CType.Void) };
-            }
-            case "replaceRange" or "replaceRangeAssumeCapacity":
-            {
-                var assume = methodName == "replaceRangeAssumeCapacity";
-                RequireListArgs(methodName, argItems, assume ? 3 : 4, assume ? "(start, len, new_items)" : "(alloc, start, len, new_items)");
-                var rArgs = new List<CExpr>();
-                if (!assume) { rArgs.Add(LowerListAllocatorArg(methodName, argItems[0])); }
-                var first = assume ? 0 : 1;
-                rArgs.Add(LowerExprSink(argItems[first], CType.ULong));
-                rArgs.Add(LowerExprSink(argItems[first + 1], CType.ULong));
-                var replaceSliceType = new CType.Slice(elem);
-                var replaceArg = LowerExprSink(argItems[first + 2], replaceSliceType);
-                rArgs.Add(replaceArg.Type?.Unqualified is CType.Slice ? replaceArg : CoerceToSlice(replaceArg, replaceSliceType));
-                if (!assume) { rArgs.Add(OomLit()); }
-                return new ZigListCall(recv, assume ? "ReplaceRangeAssumeCapacity" : "ReplaceRange", rArgs)
-                { Type = assume ? CType.Void : new CType.ErrorUnion(CType.Void) };
-            }
-            case "orderedRemove" or "swapRemove":
-            {
-                RequireListArgs(methodName, argItems, 1, "(index)");
-                var at = LowerExprSink(argItems[0], CType.ULong);
-                return new ZigListCall(recv, methodName == "orderedRemove" ? "OrderedRemove" : "SwapRemove", new List<CExpr> { at })
-                { Type = elem };
-            }
-            case "getLast":
-            {
-                // zig 0.17-dev: `?T`, null for an empty list.
-                RequireListArgs(methodName, argItems, 0, "()");
-                return new ZigListCall(recv, "GetLast", new List<CExpr>()) { Type = new CType.Optional(elem) };
-            }
-            case "ensureTotalCapacity" or "ensureUnusedCapacity":
-            {
-                RequireListArgs(methodName, argItems, 2, "(alloc, n)");
-                var a = LowerListAllocatorArg(methodName, argItems[0]);
-                var n = LowerExprSink(argItems[1], CType.ULong);
-                return new ZigListCall(recv, methodName == "ensureTotalCapacity" ? "EnsureTotalCapacity" : "EnsureUnusedCapacity",
-                    new List<CExpr> { a, n, OomLit() }) { Type = new CType.ErrorUnion(CType.Void) };
-            }
-            case "appendAssumeCapacity":
-            {
-                RequireListArgs(methodName, argItems, 1, "(item)");
-                var item = LowerExprSink(argItems[0], elem);
-                return new ZigListCall(recv, "AppendAssumeCapacity", new List<CExpr> { item }) { Type = CType.Void };
-            }
-            case "shrinkRetainingCapacity":
-            {
-                RequireListArgs(methodName, argItems, 1, "(n)");
-                var n = LowerExprSink(argItems[0], CType.ULong);
-                return new ZigListCall(recv, "ShrinkRetainingCapacity", new List<CExpr> { n }) { Type = CType.Void };
-            }
-            default:
-                throw new IrUnsupportedException(
-                    $"zig std.ArrayList has no modeled member '{methodName}' (curated: append, appendSlice, appendNTimes, insert, insertSlice, replaceRange, pop, "
-                    + "orderedRemove, swapRemove, getLast, ensureTotalCapacity, ensureUnusedCapacity, "
-                    + "appendAssumeCapacity, shrinkRetainingCapacity, deinit, clearRetainingCapacity, items, capacity)");
-        }
-    }
-
     /// <summary>Arity check for a curated list member — a clear error naming the expected shape.</summary>
     private static void RequireListArgs(string method, IReadOnlyList<Item> argItems, int count, string shape)
     {
@@ -2253,16 +2028,21 @@ internal sealed partial class ZigLowering
     }
 
     /// <summary>Try to lower an allocator method call <c>a.alloc(T, n)</c> / <c>a.free(s)</c> /
-    /// <c>a.create(T)</c> / <c>a.destroy(p)</c> (Milestone F/U). The receiver is DEVIRTUALIZED to a
-    /// direct call when provable: the statically-known C-heap default (→ <c>ZigAlloc.*CHeap</c>, a
-    /// direct <c>Libc.malloc</c>/<c>free</c>) or a provable <c>fba.allocator()</c> site (→
-    /// <c>ZigAlloc.*Fba(&amp;fba, …)</c>, a direct FBA bump). Otherwise the receiver is lowered and,
-    /// if it is an <see cref="CType.Allocator"/>, dispatched indirectly through its vtable. Returns
-    /// <c>false</c> (so the caller falls through to the generic method dispatch) when the receiver is
-    /// neither — i.e. a same-named method on a non-allocator type.</summary>
-    private bool TryLowerAllocatorMethod(Zig.Field fld, string methodName, IReadOnlyList<Item> argItems, out CExpr result)
+    /// <c>a.create(T)</c> / <c>a.destroy(p)</c> (Milestone F/U) through the <c>std.mem.Allocator</c> member rows of the
+    /// curated registry. The receiver is DEVIRTUALIZED to a direct call when provable: the statically-known C-heap
+    /// default (the row sees no receiver and no FBA context) or a provable <c>fba.allocator()</c> site (the row sees the
+    /// <c>&amp;fba</c> context). Otherwise the receiver is lowered and, if it is an <see cref="CType.Allocator"/>,
+    /// dispatched indirectly through its vtable. Returns <c>false</c> (so the caller falls through to the generic method
+    /// dispatch) when the receiver is neither, i.e. a same-named method on a non-allocator type, or when the registry
+    /// has no such row.</summary>
+    private bool TryLowerAllocatorMethod(Zig.Field fld, string methodName, IReadOnlyList<Item> argItems, [NotNullWhen(true)] out CExpr? result)
     {
-        result = null!;
+        result = null;
+        if (ZigCuratedStd.AllocatorPath is not { } allocatorPath
+            || ZigCuratedStd.FindMember(allocatorPath, methodName, CuratedShape.Method) is not { } row)
+        {
+            return false;
+        }
         bool devirt = TryKnownAllocatorKind(fld.Arg0, out var kind);
         CExpr? recv = null;
         // For an FBA-site devirt the `&fba` context rides on the IR node's FbaCtx (takes precedence
@@ -2272,209 +2052,10 @@ internal sealed partial class ZigLowering
         if (!devirt)
         {
             recv = LowerExpr(fld.Arg0);
-            if (recv.Type.Unqualified is not CType.Allocator) { return false; }   // not an allocator → generic dispatch
+            if (recv.Type.Unqualified is not CType.Allocator) { return false; }   // not an allocator, generic dispatch
         }
-
-        switch (methodName)
-        {
-            case "alloc":
-            case "alignedAlloc":   // (type, comptime alignment, count) → Error![]align(a) T
-            {
-                // `alignedAlloc` carries an extra comptime alignment arg between the type and count.
-                // dotcc's alignment model caps at 16 (ZigAlloc.AlignOf) and satisfies that by
-                // construction on the C heap / arena while the FBA aligns up to it, so the requested
-                // alignment is not threaded through — it is honored up to dotcc's natural alignment and
-                // over-alignment (> the element's, or > 16) is the same documented cut as elsewhere.
-                // The alignment arg is dropped (it is comptime and has no runtime effect here).
-                int wantArgs = methodName == "alignedAlloc" ? 3 : 2;
-                if (argItems.Count != wantArgs)
-                {
-                    throw new IrUnsupportedException($"zig allocator `.{methodName}` expects ({(methodName == "alignedAlloc" ? "type, alignment, count" : "type, count")}); got {argItems.Count} argument(s)");
-                }
-                var elem = LowerType(argItems[0]);
-                var count = LowerExpr(argItems[wantArgs - 1]);
-                result = new AllocCall(recv, elem, count, ErrorCode("OutOfMemory"), fbaCtx)
-                {
-                    Type = new CType.ErrorUnion(new CType.Slice(elem)),
-                };
-                return true;
-            }
-            case "dupe":   // (type, slice) → Error![]T: a fresh allocation holding a copy (std.mem.join's `dupe(u8, &[1]u8{0})`)
-            {
-                if (argItems.Count != 2)
-                {
-                    throw new IrUnsupportedException($"zig allocator `.dupe` expects (type, slice); got {argItems.Count} argument(s)");
-                }
-                var elem = LowerType(argItems[0]);
-                var sliceType = new CType.Slice(elem);
-                // At a `[]const T` sink, so C# infers Dupe's `T` from the argument (no Slice → ConstSlice step).
-                var src = LowerExprSink(argItems[1], new CType.Slice(elem.WithQuals(TypeQual.Const)));
-                // One runtime call allocates AND copies, so the source is evaluated once. It takes the allocator as a
-                // value: a devirtualized receiver materializes, as it does at any opaque allocator sink.
-                var allocator = recv
-                    ?? (kind == AllocKind.Fba && fld.Arg0.Content is Zig.Ident { Arg0: var fbaTok }
-                        ? MaterializeFba(_fbaAllocatorSites[Tok(fbaTok)])
-                        : MaterializeCHeap());
-                result = new Call("ZigAlloc.Dupe", new List<CExpr> { allocator, src, OomLit() })
-                {
-                    Type = new CType.ErrorUnion(sliceType),
-                };
-                return true;
-            }
-            // (type, slice, sentinel) / (type, count, sentinel) → Error![:s]T (task #107): one element more, the sentinel
-            // stored past the end. dotcc's slice carries no sentinel, so the result is the `len`-long slice before it.
-            case "dupeSentinel":
-            case "allocSentinel":
-            {
-                if (argItems.Count != 3)
-                {
-                    throw new IrUnsupportedException(
-                        $"zig allocator `.{methodName}` expects (type, {(methodName == "dupeSentinel" ? "slice" : "count")}, sentinel); "
-                        + $"got {argItems.Count} argument(s)");
-                }
-                var elem = LowerType(argItems[0]);
-                var source = methodName == "dupeSentinel"
-                    ? LowerExprSink(argItems[1], new CType.Slice(elem.WithQuals(TypeQual.Const)))
-                    : LowerExprSink(argItems[1], CType.ULong);
-                var sentinel = LowerExprSink(argItems[2], elem);
-                var allocator = recv
-                    ?? (kind == AllocKind.Fba && fld.Arg0.Content is Zig.Ident { Arg0: var fbaTok }
-                        ? MaterializeFba(_fbaAllocatorSites[Tok(fbaTok)])
-                        : MaterializeCHeap());
-                var helper = methodName == "dupeSentinel" ? "ZigAlloc.DupeSentinel" : "ZigAlloc.AllocSentinel";
-                result = new Call(helper, new List<CExpr> { allocator, source, new Cast(elem, sentinel) { Type = elem }, OomLit() })
-                {
-                    Type = new CType.ErrorUnion(new CType.Slice(elem)),
-                };
-                return true;
-            }
-            case "rawAlloc":    // (len, alignment, ret_addr) → ?[*]u8
-            case "rawResize":   // (memory, alignment, new_len, ret_addr) → bool
-            case "rawRemap":    // (memory, alignment, new_len, ret_addr) → ?[*]u8
-            case "rawFree":     // (memory, alignment, ret_addr) → void
-            {
-                // The vtable's byte-level calls (std.Io.Writer.Allocating grows its buffer through them): one runtime
-                // helper each, over the allocator as a value (a devirtualized receiver materializes).
-                var bytes = new CType.Slice(CType.UChar);
-                var alignmentType = new CType.Named(AlignmentTypeName);
-                var (helper, paramTypes, resultType) = methodName switch
-                {
-                    "rawAlloc" => ("ZigAlloc.RawAlloc", new[] { CType.ULong, alignmentType, CType.ULong }, (CType)new CType.Pointer(CType.UChar)),
-                    "rawResize" => ("ZigAlloc.RawResize", new[] { bytes, alignmentType, CType.ULong, CType.ULong }, CType.Bool),
-                    "rawRemap" => ("ZigAlloc.RawRemap", new[] { bytes, alignmentType, CType.ULong, CType.ULong }, new CType.Pointer(CType.UChar)),
-                    _ => ("ZigAlloc.RawFree", new[] { bytes, alignmentType, CType.ULong }, CType.Void),
-                };
-                if (argItems.Count != paramTypes.Length)
-                {
-                    throw new IrUnsupportedException($"zig allocator `.{methodName}` expects {paramTypes.Length} argument(s); got {argItems.Count}");
-                }
-                var allocatorValue = recv
-                    ?? (kind == AllocKind.Fba && fld.Arg0.Content is Zig.Ident { Arg0: var rawFbaTok }
-                        ? MaterializeFba(_fbaAllocatorSites[Tok(rawFbaTok)])
-                        : MaterializeCHeap());
-                var rawArgs = new List<CExpr> { allocatorValue };
-                for (var i = 0; i < paramTypes.Length; i++) { rawArgs.Add(LowerExprSink(argItems[i], paramTypes[i])); }
-                result = new Call(helper, rawArgs) { Type = resultType };
-                return true;
-            }
-            case "free":
-            {
-                if (argItems.Count != 1)
-                {
-                    throw new IrUnsupportedException($"zig allocator `.free` expects (slice); got {argItems.Count} argument(s)");
-                }
-                var sliceExpr = LowerExpr(argItems[0]);
-                if (sliceExpr.Type.Unqualified is not CType.Slice slc)
-                {
-                    throw new IrUnsupportedException($"zig allocator `.free` expects a slice argument, got {sliceExpr.Type.Describe()}");
-                }
-                result = new FreeCall(recv, sliceExpr, slc.Element, fbaCtx) { Type = CType.Void };
-                return true;
-            }
-            case "create":   // single-object alloc → Error!*T (Milestone U)
-            {
-                if (argItems.Count != 1)
-                {
-                    throw new IrUnsupportedException($"zig allocator `.create` expects (type); got {argItems.Count} argument(s)");
-                }
-                var elem = LowerType(argItems[0]);
-                // `Error!*T` is represented `ErrorUnion(Pointer(T))` at the IR-type level (so `try`
-                // unwraps to a `*T`); the runtime carrier is `ErrUnion<nuint>` (a pointer can't be
-                // an ErrUnion<T> generic arg). The `try` lowering casts the unwrapped nuint to T*.
-                result = new CreateCall(recv, elem, ErrorCode("OutOfMemory"), fbaCtx)
-                {
-                    Type = new CType.ErrorUnion(new CType.Pointer(elem)),
-                };
-                return true;
-            }
-            case "destroy":   // free a single object from `.create` (Milestone U)
-            {
-                if (argItems.Count != 1)
-                {
-                    throw new IrUnsupportedException($"zig allocator `.destroy` expects (pointer); got {argItems.Count} argument(s)");
-                }
-                var ptrExpr = LowerExpr(argItems[0]);
-                if (ptrExpr.Type.Unqualified is not CType.Pointer pp)
-                {
-                    throw new IrUnsupportedException($"zig allocator `.destroy` expects a pointer argument, got {ptrExpr.Type.Describe()}");
-                }
-                result = new DestroyCall(recv, ptrExpr, pp.Pointee, fbaCtx) { Type = CType.Void };
-                return true;
-            }
-            case "realloc":   // grow/shrink a slice → Error![]T (Milestone U)
-            {
-                if (argItems.Count != 2)
-                {
-                    throw new IrUnsupportedException($"zig allocator `.realloc` expects (slice, new count); got {argItems.Count} argument(s)");
-                }
-                var oldSlice = LowerExpr(argItems[0]);
-                if (oldSlice.Type.Unqualified is not CType.Slice rslc)
-                {
-                    throw new IrUnsupportedException($"zig allocator `.realloc` expects a slice argument, got {oldSlice.Type.Describe()}");
-                }
-                var newCount = LowerExpr(argItems[1]);
-                result = new ReallocCall(recv, oldSlice, rslc.Element, newCount, ErrorCode("OutOfMemory"), fbaCtx)
-                {
-                    Type = new CType.ErrorUnion(new CType.Slice(rslc.Element)),
-                };
-                return true;
-            }
-            case "resize":   // in-place resize → bool
-            case "remap":    // resize-possibly-moving → ?[]T
-            {
-                // `resize` returns whether the block grew/shrank IN PLACE (no move); `remap` returns
-                // the possibly-moved slice or null. Two live forks: a PROVABLE FBA site devirtualizes
-                // (fbaCtx set — ZigAlloc.ResizeFba/RemapFba); an opaque Allocator dispatches through the
-                // vtable (recv set — recv.Resize/Remap, whose answer is whatever the concrete runtime
-                // allocator gives). Only the C-heap DEVIRT case (both null — `std.heap.page_allocator`
-                // resolved statically) stays deferred: its in-place result is page-dependent (real zig
-                // answers from malloc_usable_size / page rounding), so a devirtualized guess would
-                // diverge from the oracle — use `.realloc` there (which always works).
-                if (fbaCtx is null && recv is null)
-                {
-                    throw new IrUnsupportedException(
-                        $"zig allocator `.{methodName}` on the statically-known C-heap default is deferred "
-                        + "(the in-place page/malloc_usable_size result would diverge from real zig); "
-                        + "use `.realloc`, or route through an opaque `std.mem.Allocator` / a FixedBufferAllocator");
-                }
-                if (argItems.Count != 2)
-                {
-                    throw new IrUnsupportedException($"zig allocator `.{methodName}` expects (slice, new count); got {argItems.Count} argument(s)");
-                }
-                var oldSlice = LowerExpr(argItems[0]);
-                if (oldSlice.Type.Unqualified is not CType.Slice sl)
-                {
-                    throw new IrUnsupportedException($"zig allocator `.{methodName}` expects a slice argument, got {oldSlice.Type.Describe()}");
-                }
-                var newCount = LowerExpr(argItems[1]);
-                result = methodName == "resize"
-                    ? new ResizeCall(recv, oldSlice, sl.Element, newCount, fbaCtx) { Type = CType.Bool }
-                    : new RemapCall(recv, oldSlice, sl.Element, newCount, fbaCtx) { Type = new CType.Optional(new CType.Slice(sl.Element)) };
-                return true;
-            }
-            default:   // unreachable: the caller only dispatches the allocator method names above
-                return false;
-        }
+        result = LowerCuratedMember(row, new CuratedMemberCall(methodName, argItems, recv, fld.Arg0, devirt ? kind : null, fbaCtx));
+        return true;
     }
 
     /// <summary>Build the <c>&amp;fba</c> context for a devirtualized FBA-site allocator call
@@ -2497,7 +2078,7 @@ internal sealed partial class ZigLowering
     /// single <c>&amp;buf</c> argument, where <c>buf</c> is a <c>[N]T</c> array local — which
     /// already lowers to a stackalloc'd pointer, so the buffer pointer is the array value itself
     /// (cast to <c>byte*</c>) and the capacity is <c>N * sizeof(T)</c> bytes.</summary>
-    private CExpr LowerFbaInit(IReadOnlyList<Item> argItems)
+    internal CExpr LowerFbaInit(IReadOnlyList<Item> argItems)
     {
         if (argItems.Count != 1)
         {
@@ -2523,7 +2104,7 @@ internal sealed partial class ZigLowering
     /// <c>std.mem.Allocator</c> — the statically-known default materializes a runtime C-heap
     /// <see cref="CType.Allocator"/> through the ordinary value path (so the arena draws its chunks
     /// from a real allocator); an opaque allocator value is taken as-is.</summary>
-    private CExpr LowerArenaInit(IReadOnlyList<Item> argItems)
+    internal CExpr LowerArenaInit(IReadOnlyList<Item> argItems)
     {
         if (argItems.Count != 1)
         {

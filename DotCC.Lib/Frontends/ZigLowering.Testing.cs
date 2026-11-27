@@ -17,92 +17,76 @@ namespace DotCC.Frontends;
 /// observes as a failing test.</para></summary>
 internal sealed partial class ZigLowering
 {
-    /// <summary>Lower a curated <c>std.testing</c> call. <c>expect(ok: bool)</c> and
-    /// <c>expectEqual(expected, actual)</c> are modeled; any other member is a clear cut.</summary>
-    private CExpr LowerStdTestingCall(string method, IReadOnlyList<Item> argItems)
+    /// <summary>The error union over <c>void</c> every assertion returns.</summary>
+    private static CType TestingResult => new CType.ErrorUnion(CType.Void);
+
+    /// <summary>Lower <c>std.testing.expect(ok: bool)</c> (a registry row).</summary>
+    internal CExpr LowerTestingExpect(IReadOnlyList<Item> argItems)
     {
-        var errUnionVoid = new CType.ErrorUnion(CType.Void);
-        switch (method)
+        var cond = LowerExprSink(argItems[0], CType.Bool);
+        return new Call("ZigTesting.expect", new List<CExpr> { cond }, new List<CType> { CType.Bool })
         {
-            case "expect":
-                if (argItems.Count != 1)
-                {
-                    throw new IrUnsupportedException(
-                        $"zig `std.testing.expect` expects one argument (ok: bool); got {argItems.Count}");
-                }
-                var cond = LowerExprSink(argItems[0], CType.Bool);
-                return new Call("ZigTesting.expect", new List<CExpr> { cond }, new List<CType> { CType.Bool })
-                {
-                    Type = errUnionVoid,
-                };
-            case "expectEqual":
-                if (argItems.Count != 2)
-                {
-                    throw new IrUnsupportedException(
-                        $"zig `std.testing.expectEqual` expects two arguments (expected, actual); got {argItems.Count}");
-                }
-                // Both operands lower with their natural types; C# infers the generic `T` at the
-                // emitted call. Real Zig also requires `@TypeOf(expected) == @TypeOf(actual)`.
-                var expected = LowerExpr(argItems[0]);
-                var actual = LowerExpr(argItems[1]);
-                return new Call("ZigTesting.expectEqual", new List<CExpr> { expected, actual })
-                {
-                    Type = errUnionVoid,
-                };
-            case "expectError":
-                if (argItems.Count != 2)
-                {
-                    throw new IrUnsupportedException(
-                        $"zig `std.testing.expectError` expects two arguments (expected_error, actual); got {argItems.Count}");
-                }
-                // `error.X` lowers to its flat code (CType.ErrorSet → ushort); the actual result must
-                // be an error union (the un-`try`'d result of a fallible call), whose code is compared.
-                var expectedErr = LowerExpr(argItems[0]);
-                var actualResult = LowerExpr(argItems[1]);
-                if (actualResult.Type.Unqualified is not CType.ErrorUnion)
-                {
-                    throw new IrUnsupportedException(
-                        "zig `std.testing.expectError` expects an error-union second argument (a fallible "
-                        + $"call's result, not `try`'d), got {actualResult.Type.Describe()}");
-                }
-                return new Call("ZigTesting.expectError", new List<CExpr> { expectedErr, actualResult })
-                {
-                    Type = errUnionVoid,
-                };
-            case "expectEqualStrings":
-                if (argItems.Count != 2)
-                {
-                    throw new IrUnsupportedException(
-                        $"zig `std.testing.expectEqualStrings` expects two arguments (expected, actual); got {argItems.Count}");
-                }
-                var strSink = new CType.Slice(CType.UChar.WithQuals(TypeQual.Const));   // []const u8
-                var strA = LowerExprSink(argItems[0], strSink);
-                var strB = LowerExprSink(argItems[1], strSink);
-                return new Call("ZigTesting.expectEqualStrings", new List<CExpr> { strA, strB })
-                {
-                    Type = errUnionVoid,
-                };
-            case "expectEqualSlices":
-                if (argItems.Count != 3)
-                {
-                    throw new IrUnsupportedException(
-                        $"zig `std.testing.expectEqualSlices` expects three arguments (T, expected, actual); got {argItems.Count}");
-                }
-                // First argument is the element TYPE (like `std.mem.eql`); C# infers the generic `T`
-                // from the coerced slice operands, so it is not passed through to the emitted call.
-                var elem = LowerType(argItems[0]).Unqualified;
-                var sliceSink = new CType.Slice(elem.WithQuals(TypeQual.Const));
-                var slA = LowerExprSink(argItems[1], sliceSink);
-                var slB = LowerExprSink(argItems[2], sliceSink);
-                return new Call("ZigTesting.expectEqualSlices", new List<CExpr> { slA, slB })
-                {
-                    Type = errUnionVoid,
-                };
-            default:
-                throw new IrUnsupportedException(
-                    $"zig `std.testing.{method}` is not supported yet — `dotcc zig test` models `expect`, "
-                    + "`expectEqual`, `expectError`, `expectEqualStrings`, and `expectEqualSlices` "
-                    + "(road-to-zig-std; more assertions grow on demand)");
+            Type = TestingResult,
+        };
+    }
+
+    /// <summary>Lower <c>std.testing.expectEqual(expected, actual)</c> (a registry row). Both operands lower with their
+    /// natural types; C# infers the generic <c>T</c> at the emitted call. Real Zig also requires
+    /// <c>@TypeOf(expected) == @TypeOf(actual)</c>.</summary>
+    internal CExpr LowerTestingExpectEqual(IReadOnlyList<Item> argItems)
+    {
+        var expected = LowerExpr(argItems[0]);
+        var actual = LowerExpr(argItems[1]);
+        return new Call("ZigTesting.expectEqual", new List<CExpr> { expected, actual })
+        {
+            Type = TestingResult,
+        };
+    }
+
+    /// <summary>Lower <c>std.testing.expectError(expected_error, actual)</c> (a registry row). <c>error.X</c> lowers to
+    /// its flat code (<c>CType.ErrorSet</c> to <c>ushort</c>); the actual result must be an error union (the
+    /// un-<c>try</c>'d result of a fallible call), whose code is compared.</summary>
+    internal CExpr LowerTestingExpectError(IReadOnlyList<Item> argItems)
+    {
+        var expectedErr = LowerExpr(argItems[0]);
+        var actualResult = LowerExpr(argItems[1]);
+        if (actualResult.Type.Unqualified is not CType.ErrorUnion)
+        {
+            throw new IrUnsupportedException(
+                "zig `std.testing.expectError` expects an error-union second argument (a fallible "
+                + $"call's result, not `try`'d), got {actualResult.Type.Describe()}");
         }
+        return new Call("ZigTesting.expectError", new List<CExpr> { expectedErr, actualResult })
+        {
+            Type = TestingResult,
+        };
+    }
+
+    /// <summary>Lower <c>std.testing.expectEqualStrings(expected, actual)</c> (a registry row), both as
+    /// <c>[]const u8</c>.</summary>
+    internal CExpr LowerTestingExpectEqualStrings(IReadOnlyList<Item> argItems)
+    {
+        var strSink = new CType.Slice(CType.UChar.WithQuals(TypeQual.Const));   // []const u8
+        var strA = LowerExprSink(argItems[0], strSink);
+        var strB = LowerExprSink(argItems[1], strSink);
+        return new Call("ZigTesting.expectEqualStrings", new List<CExpr> { strA, strB })
+        {
+            Type = TestingResult,
+        };
+    }
+
+    /// <summary>Lower <c>std.testing.expectEqualSlices(T, expected, actual)</c> (a registry row). The first argument is
+    /// the element TYPE (like <c>std.mem.eql</c>); C# infers the generic <c>T</c> from the coerced slice operands, so it is
+    /// not passed through to the emitted call.</summary>
+    internal CExpr LowerTestingExpectEqualSlices(IReadOnlyList<Item> argItems)
+    {
+        var elem = LowerType(argItems[0]).Unqualified;
+        var sliceSink = new CType.Slice(elem.WithQuals(TypeQual.Const));
+        var slA = LowerExprSink(argItems[1], sliceSink);
+        var slB = LowerExprSink(argItems[2], sliceSink);
+        return new Call("ZigTesting.expectEqualSlices", new List<CExpr> { slA, slB })
+        {
+            Type = TestingResult,
+        };
     }
 }
