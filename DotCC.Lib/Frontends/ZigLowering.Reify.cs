@@ -660,9 +660,7 @@ internal sealed partial class ZigLowering
     {
         var lowered = InlineUnfoldedConsts(LowerExpr(item));
         // A width that CALLS (std.math.IntFittingRange's `1 + log2(pos_max)`) runs through the interpreter.
-        var n = _ir.ConstEval(lowered)
-            ?? (_ir.EvalComptimeValue(lowered) is IrModule.CtInt { Value: var big } && big >= long.MinValue && big <= long.MaxValue
-                ? (long)big : null);
+        var n = ComptimeLong(lowered);
         if (n is null)
         {
             throw new IrUnsupportedException(

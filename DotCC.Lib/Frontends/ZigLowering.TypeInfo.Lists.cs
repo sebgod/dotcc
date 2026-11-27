@@ -541,10 +541,10 @@ internal sealed partial class ZigLowering
     {
         // A literal or comptime binding, else any index the const-folder settles (a `const` whose
         // initializer folded, std.Io.Writer.print's `arg_to_print`).
-        long? folded = EvalComptimeValue(indexItem) is LitInt { Value: { } lit } ? lit : null;
+        var folded = AsLong(TryEvalComptime(indexItem));
         if (folded is null)
         {
-            using (EnterThrowawayHoist()) { folded = _ir.ConstEval(LowerExpr(indexItem)); }
+            using (EnterThrowawayHoist()) { folded = ComptimeLong(LowerExpr(indexItem)); }
         }
         if (folded is not { } n)
         {

@@ -87,7 +87,7 @@ internal sealed partial class ZigLowering
         var folded = _ir.EvalComptimeValue(lowered);
         if (lowered is LitBool lb) { return new ComptimeFmtArg(null, null, false, lb.Value); }
         if (folded is IrModule.CtBool cb) { return new ComptimeFmtArg(null, null, false, cb.Value); }
-        System.Int128? value = folded is IrModule.CtInt ci ? ci.Value : ComptimeIntValue(lowered) is { } l ? l : null;
+        var value = ComptimeInt128(lowered);
         if (value is { } v && lowered.Type?.Unqualified is CType.Prim { Integer: true } or CType.Enum or null)
         {
             var signed = IsComptimeIntOperand(item, lowered)

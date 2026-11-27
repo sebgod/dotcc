@@ -359,7 +359,7 @@ internal sealed partial class ZigLowering
             var init = initFor(k);
             // An element of a comptime-known aggregate (a const evaluated at compile time) folds through the interpreter.
             var folded = captureType.Unqualified is CType.Prim { Integer: true }
-                ? _ir.ConstEval(init) ?? (_ir.EvalComptimeValue(init) is IrModule.CtInt { Value: var big } && big >= long.MinValue && big <= long.MaxValue ? (long)big : null)
+                ? ComptimeLong(init)
                 : null;
             var sym = _symbols.Declare(new Symbol
             {

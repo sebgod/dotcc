@@ -133,4 +133,70 @@ public sealed class ZigComptimeEvalTests
             """);
         cs.ShouldContain("Libc.L(\"a1\\0\"u8)");
     }
+
+    [Fact]
+    public void One_comptime_value_reads_as_an_int_width()
+    {
+        var cs = EmitZig("""
+            const w = 4 + 4;
+            pub fn main() u8 {
+                const x: @Int(.unsigned, w) = 200;
+                return @intCast(x);
+            }
+            """);
+        cs.ShouldContain("byte");
+    }
+
+    [Fact]
+    public void A_comptime_int_const_sets_the_eval_branch_quota()
+    {
+        var cs = EmitZig("""
+            const q = 1000 * 2;
+            pub fn main() u8 {
+                @setEvalBranchQuota(q);
+                return 3;
+            }
+            """);
+        cs.ShouldNotBeNull();
+    }
+
+    [Fact]
+    public void A_comptime_int_const_is_read_by_a_const_local_and_an_array_extent()
+    {
+        var cs = EmitZig("""
+            const n: comptime_int = 2 + 1;
+            pub fn main() u8 {
+                var a: [n]u8 = undefined;
+                a[0] = 1;
+                return a[0];
+            }
+            """);
+        cs.ShouldNotBeNull();
+    }
+
+    [Fact]
+    public void An_anytype_comptime_int_argument_keys_an_instance()
+    {
+        var cs = EmitZig("""
+            fn id(comptime v: anytype) u8 { return v; }
+            pub fn main() u8 {
+                const a = 3;
+                return id(a) + id(4);
+            }
+            """);
+        cs.ShouldNotBeNull();
+    }
+
+    [Fact]
+    public void A_comptime_repeat_count_and_a_byte_list_fold()
+    {
+        var cs = EmitZig("""
+            const k = 2;
+            pub fn main() u8 {
+                const s = "ab" ** k;
+                return @intCast(s.len);
+            }
+            """);
+        cs.ShouldContain("abab");
+    }
 }

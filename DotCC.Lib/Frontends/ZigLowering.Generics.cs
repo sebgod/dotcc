@@ -662,9 +662,7 @@ internal sealed partial class ZigLowering
                             : argScope.LowerExpr(argItems[i]);
                         // The interpreter's value too (a call such as std.math.nan's `mantissaOne(RuntimeType) | 1 << …`), as a
                         // comptime_int argument's is read (ComptimeIntArgValue), within the 64 bits a seed carries.
-                        if ((_ir.ConstEval(argExpr)
-                             ?? (_ir.EvalComptimeValue(argExpr) is IrModule.CtInt { Value: var bigArg } && bigArg >= long.MinValue && bigArg <= long.MaxValue
-                                 ? (long)bigArg : null)) is not { } v)
+                        if (ComptimeLong(argExpr) is not { } v)
                         {
                             // A comptime-only callee reached from a comptime-only body with an argument only the evaluation
                             // knows (std.math.log10's `return result * pow10(rest_exp);`, `rest_exp` read off comptime vars a
@@ -977,8 +975,7 @@ internal sealed partial class ZigLowering
         {
             return null;
         }
-        return _ir.ConstEval(lowered) is { } small ? small
-            : _ir.EvalComptimeValue(lowered) is IrModule.CtInt { Value: var big } ? big : null;
+        return ComptimeInt128(lowered);
     }
 
     /// <summary>Lower one queued instantiation body (drained after pass 2). Hands the pre-resolved
@@ -1708,8 +1705,8 @@ internal sealed partial class ZigLowering
                             : argScope.LowerExpr(argItems[i]);
                         // A `u64` past `i64` (std.hash.Fnv1a_64's `0xcbf29ce484222325`, task #139) has no long value; the
                         // interpreter reads it, and the seed carries its bit pattern, which the unsigned type spells back.
-                        vv = _ir.ConstEval(valueArg)
-                            ?? (IsUnsigned64(valueParamType) && _ir.EvalComptimeValue(valueArg) is IrModule.CtInt { Value: var wide }
+                        vv = ComptimeLong(valueArg)
+                            ?? (IsUnsigned64(valueParamType) && ComptimeInt128(valueArg) is { } wide
                                 && wide >= 0 && wide <= ulong.MaxValue ? unchecked((long)(ulong)wide) : (long?)null)
                             ?? throw new IrUnsupportedException(
                                 $"call to type-returning generic '{templateSym.Name}': the `comptime {p.Name}` argument "
