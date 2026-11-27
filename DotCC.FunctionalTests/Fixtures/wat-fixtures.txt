@@ -71,6 +71,7 @@ const-cast-unchecked
 const-qualifiers
 constructor-atexit
 cs-keyword-idents
+cs-keyword-tags
 ctype-predicates
 declaration-specifiers
 declarator-lists

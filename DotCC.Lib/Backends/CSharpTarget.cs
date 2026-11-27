@@ -31,8 +31,8 @@ internal sealed class CSharpTarget : ITarget
         // unchanged — `&fn` of dotcc's own methods stays a managed delegate*.
         CType.Func f => (f.IsNativeCallConv ? "delegate* unmanaged[Cdecl]<" : "delegate*<")
             + string.Join(", ", f.Params.Where(p => !CSharpBackend.IsVoidParam(p)).Select(RenderType).Append(RenderType(f.Return))) + ">",
-        CType.Named n => NoteNamed(n.Name),
-        CType.Enum e => e.Name,
+        CType.Named n => TypeName(NoteNamed(n.Name)),
+        CType.Enum e => TypeName(e.Name),
         // A Zig SIMD vector: a bool one is its lane bitmask, a numeric one .NET's vector of its width.
         CType.Vector { IsMask: true } => "ulong",
         CType.Vector v => "System.Runtime.Intrinsics." + (v.NetFamily
@@ -82,6 +82,10 @@ internal sealed class CSharpTarget : ITarget
     /// <summary>Every struct / union name rendered so far: what the program reaches, which decides the prunable
     /// aggregates the backend emits (<see cref="IrModule.PrunableTypes"/>, task #194).</summary>
     internal HashSet<string> RenderedNamedTypes { get; } = new(System.StringComparer.Ordinal);
+
+    /// <summary>The C# spelling of a struct, union or enum tag: the raw C name, <c>@</c>-escaped when it is a C# keyword.
+    /// Every point the backend writes a type name goes through here; side tables keep the raw name.</summary>
+    internal static string TypeName(string rawName) => DotCC.EmitHelpers.Id(rawName);
 
     /// <summary>Record <paramref name="name"/> in <see cref="RenderedNamedTypes"/> and return it.</summary>
     private string NoteNamed(string name)
