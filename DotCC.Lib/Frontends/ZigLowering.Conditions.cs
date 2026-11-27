@@ -275,27 +275,23 @@ internal sealed partial class ZigLowering
         while (operand.Content is Zig.Grouped g) { operand = g.Arg1; }
         return operand.Content switch
         {
-            Zig.Index ix => ComptimeStringArg(ix.Arg0) is not null,
-            Zig.Field f => Tok(f.Arg2) == "len" && ComptimeStringArg(f.Arg0) is not null,
+            Zig.Index ix => AsBytes(TryEvalComptime(ix.Arg0, ComptimeTier.Lowering)) is not null,
+            Zig.Field f => Tok(f.Arg2) == "len" && AsBytes(TryEvalComptime(f.Arg0, ComptimeTier.Lowering)) is not null,
             _ => false,
         };
     }
     /// <summary>The value of a comptime scalar operand: a byte of a comptime string at a constant index, its length, or a
-    /// constant (a character or integer literal). Null when it is none of those, or the string spells an escape (its raw
-    /// text is not its bytes).</summary>
+    /// constant (a character or integer literal). Null when it is none of those.</summary>
     private long? ComptimeScalarOperand(Item operand)
     {
         while (operand.Content is Zig.Grouped g) { operand = g.Arg1; }
         switch (operand.Content)
         {
             // Only at a LITERAL index (`fmt[0]`): a `comptime var` index's constant is its declaration value, not its current one.
-            case Zig.Index { Arg2.Content: Zig.IntLit indexLit } ix when ComptimeStringArg(ix.Arg0) is { } text && !text.Contains('\\'):
-            {
-                var bytes = System.Text.Encoding.UTF8.GetBytes(text);
+            case Zig.Index { Arg2.Content: Zig.IntLit indexLit } ix when AsBytes(TryEvalComptime(ix.Arg0, ComptimeTier.Lowering)) is { } bytes:
                 return DecodeZigInt(Tok(indexLit.Arg0)).Value is { } k && k >= 0 && k < bytes.Length ? bytes[k] : null;
-            }
-            case Zig.Field f when Tok(f.Arg2) == "len" && ComptimeStringArg(f.Arg0) is { } lenText && !lenText.Contains('\\'):
-                return System.Text.Encoding.UTF8.GetByteCount(lenText);
+            case Zig.Field f when Tok(f.Arg2) == "len" && AsBytes(TryEvalComptime(f.Arg0, ComptimeTier.Lowering)) is { } lenBytes:
+                return lenBytes.Length;
             case Zig.CharLit or Zig.IntLit:
             {
                 using var hoist = EnterThrowawayHoist();

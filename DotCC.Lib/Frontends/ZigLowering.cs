@@ -156,23 +156,6 @@ internal sealed partial class ZigLowering
             : null;
     }
 
-    /// <summary>A comptime NAME: a comptime string (<see cref="EvalComptimeValue"/>), or <c>@tagName(x)</c>
-    /// of a comptime enum value (a generic's <c>comptime family: Arch.Family</c> seed). Null otherwise.</summary>
-    private string? ComptimeName(Item item)
-    {
-        if (item.Content is Zig.BuiltinCall { Arg2: not null, Arg0: var tn } tb && Tok(tn) == "@tagName"
-            && Flatten(tb.Arg2) is [{ Content: Zig.Ident { Arg0: var argTok } }]
-            && _symbols.Resolve(Tok(argTok)) is { } seed && _comptimeVars.TryGetValue(seed, out var seedValue)
-            && seedValue.Type.Unqualified is CType.Enum seedEnum
-            && _enumMembers.TryGetValue(seedEnum.Name, out var members))
-        {
-            return members.FirstOrDefault(m => m.Value.ConstValue == seedValue.Value).Key;
-        }
-        return EvalComptimeValue(item) is LitStr s
-            ? new string(DotCC.EmitHelpers.StringByteValues(s.Segments).Select(b => (char)b).ToArray())
-            : null;
-    }
-
     /// <summary>The module a top-level NAME of this module denotes: an import, an alias of a module path
     /// (<c>const math = std.math;</c>), or a re-export of another module name (std.zig's
     /// <c>pub const builtin = lang;</c>, so <c>std.builtin.Endian</c> is lang.zig's). Null when it names none.</summary>

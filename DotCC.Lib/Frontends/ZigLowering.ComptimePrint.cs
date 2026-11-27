@@ -100,14 +100,6 @@ internal sealed partial class ZigLowering
             + "(zig requires every argument comptime-known; dotcc formats those three kinds at compile time)");
     }
 
-    /// <summary>A comptime string as its BYTES, one char per byte (the model this formatter works in, so a width counts
-    /// bytes, as zig's does): a literal decodes its escapes through the shared string encoder; another comptime string
-    /// (a capture, a const) is taken as spelled.</summary>
-    private string? ComptimeByteText(Item item)
-        => EvalComptimeValue(item) is LitStr lit
-            ? new string(DotCC.EmitHelpers.StringByteValues(lit.Segments).Select(b => (char)b).ToArray())
-            : ComptimeStringArg(item);
-
     /// <summary>Format <paramref name="fmt"/> over <paramref name="args"/> by zig's <c>std.Io.Writer.print</c> rules, to
     /// the bytes of the result. Placeholders take the next argument unless they name one by position, and every
     /// argument must be used, as zig checks.</summary>
