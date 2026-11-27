@@ -636,8 +636,8 @@ that retire curated shortcuts.
 > most of them:
 >
 > 1. **A curated std namespace claimed every member.** `std.mem.indexOfScalar` stopped at "not
->    modeled yet" even with a std tree configured. `CuratedStdNamespaceFns` now lists what each of
->    `std.mem` / `std.debug` / `std.testing` lowers by hand; any other member navigates to source.
+>    modeled yet" even with a std tree configured. The curated-std registry (`ZigCuratedStd`) now has a row for each of
+>    the `std.mem` / `std.debug` / `std.testing` functions lowered by hand; any other member navigates to source.
 > 2. **Re-exported declarations** (633 in the pin). `ResolveExportedDecl` follows a top-level
 >    `const NAME = name;` / `= mod.name;` to the module that owns the function, generic,
 >    type-returning generic or type, recorded syntactically so preparing a module never fans out.
@@ -1417,7 +1417,7 @@ count is 72 rows, 69 scaffold and 3 platform floor; the scaffold count must only
   4. ~~**S4d — type-position module-graph fallback**~~ — **✅ DONE 2026-09-03** (see the status update
      above). `LowerType`'s dotted and call cases now fall through to `ResolveModulePath`, so a
      non-curated std TYPE reaches source; a navigated type carries its methods and enum members. The
-     curated `StdGenericTypes["std.ArrayList"] → ZigList` peephole still intercepts `std.ArrayList`
+     curated `std.ArrayList` registry row (a `ZigList` generic type in `ZigCuratedStd`) still intercepts `std.ArrayList`
      itself by design — retiring that peephole is G4's own step, once blockers 2/3/5 are cleared.
      The original entry, for the record: `LowerType`'s `Zig.CallArgs`/`Zig.Field`
      cases threw instead of falling through to `ResolveModulePath`, and the curated
