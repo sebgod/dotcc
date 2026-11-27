@@ -89,6 +89,7 @@ public sealed class TypeNameEscapeTests
     [InlineData("required")]
     [InlineData("file")]
     [InlineData("scoped")]
+    [InlineData("extension")]
     public void contextual_keyword_tag_is_at_escaped(string tag)
     {
         var e = Emit($"struct {tag} {{ int x; }};\nint main(void) {{ struct {tag} v; v.x = 1; return v.x + (int)sizeof(struct {tag}); }}");

@@ -95,10 +95,10 @@ internal sealed class CSharpTarget : ITarget
     private const string CapturedPrefix = "__dotcc_tag_";
 
     /// <summary>Contextual keywords C# refuses as a type name but accepts after an <c>@</c> escape (Roslyn CS9029,
-    /// CS9056, CS9062 and the CS8860 warning for <c>record</c>).</summary>
+    /// CS9056, CS9062, CS9306 for <c>extension</c>, and the CS8860 warning for <c>record</c>).</summary>
     private static readonly HashSet<string> _escapedTypeNames = new(System.StringComparer.Ordinal)
     {
-        "record", "required", "file", "scoped",
+        "record", "required", "file", "scoped", "extension",
     };
 
     /// <summary>Names the emitted shell and the runtime use as contextual keywords. The type declarations sit at the
