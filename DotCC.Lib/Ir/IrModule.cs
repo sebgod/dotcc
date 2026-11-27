@@ -112,6 +112,10 @@ internal sealed partial class IrModule
     /// <summary>See <see cref="ProtoOnlyReferenced"/>.</summary>
     public IReadOnlyList<string> ExternDataReferenced { get; internal set; } = Array.Empty<string>();
 
+    /// <summary>The extern objects a builtin header declares (<c>errno</c>), which the runtime provides;
+    /// the import-mode warning for <see cref="ExternDataReferenced"/> skips them.</summary>
+    public IReadOnlySet<string> ExternDataFromSystemHeader { get; internal set; } = new HashSet<string>(StringComparer.Ordinal);
+
     // ---- the compile-time layout model -------------------------------------
 
     /// <summary>The constant byte size of a type — the layout model for a user

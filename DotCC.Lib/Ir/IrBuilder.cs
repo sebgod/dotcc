@@ -105,7 +105,12 @@ internal sealed partial class IrBuilder
     {
         Module.ProtoOnlyReferenced = ProtoOnlyReferenced;
         Module.ExternDataReferenced = ExternDataReferenced;
+        Module.ExternDataFromSystemHeader = _systemExternData;
     }
+
+    /// <summary>Extern objects a builtin header declares (<c>errno</c>): the runtime provides
+    /// them, so import mode's unsupported-data-import warning skips them.</summary>
+    private readonly HashSet<string> _systemExternData = new(StringComparer.Ordinal);
 
     public IReadOnlyDictionary<string, Symbol> ProtoOnlyReferenced
     {
@@ -491,6 +496,7 @@ internal sealed partial class IrBuilder
                 DefineFileScopeObject(prior.Sym, d, typeItem);
                 return;
             }
+            if (declStorage == Storage.Extern && d.At.Position.Line >= SrcPos.SyntheticLineBase) { _systemExternData.Add(name); }
             var sym = _symbols.Declare(new Symbol
             {
                 Name = name, Kind = SymKind.Var, Storage = declStorage, IsGlobal = true,

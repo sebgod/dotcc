@@ -1,15 +1,18 @@
 #ifndef _ERRNO_H
 #define _ERRNO_H
 
-/* dotcc's <errno.h> — C99 7.5. The error indicator `errno` is a
-   thread-local int exposed by DotCC.Libc.Libc as a settable property;
-   emitted code references the bare name (resolved via `using static
-   Libc;`), so no macro is needed here — `errno = 0;` and
-   `if (errno == ERANGE)` both work.
+/* dotcc's <errno.h> (C11 7.5). `errno` is declared here as `extern int
+   errno;` (7.5p2 allows an identifier with external linkage), not as a
+   macro, so every use binds to a declared symbol. The C# build prints the
+   bare name, which `using static Libc;` binds to the runtime's thread-local
+   Libc.errno property; the wat backend recognizes the declared symbol and
+   gives it a slot of its own. It carries no _Thread_local: the binder needs
+   none, since both backends already treat the name specially. */
+extern int errno;
 
-   The E* numbers below match the Linux/glibc asm-generic values and are
+/* The E* numbers below match the Linux/glibc asm-generic values and are
    mirrored as `const int` in DotCC.Libc/ErrnoLib.cs (which strerror's
-   switch keys on) — keep the two in sync. C mandates only EDOM / ERANGE
+   switch keys on); keep the two in sync. C mandates only EDOM / ERANGE
    / EILSEQ; the rest are the common POSIX set, useful since dotcc maps
    BCL I/O exceptions onto these. */
 
