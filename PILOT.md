@@ -10,8 +10,8 @@ holds only what a flight needs to plan, build, check and land.
   push, open a PR or merge; the controller lands the flight. Leave nothing uncommitted, and put scratch output
   outside the plane.
 - LALR.CC (the parser generator) is a sibling clone the plane cannot see. `UseLocalLalrCc` switches on only when
-  `..\..\sharpastro\LALR.CC` exists beside the repo root, which from a plane is `.claude/worktrees/`, where none
-  lives. So a plane restores the pinned NuGet package, as CI does. Never force it on with `-p:UseLocalLalrCc=true`.
+  `..\..\sharpastro\LALR.CC` exists relative to the repo root, which from a plane resolves inside `.claude\`, where
+  none lives. So a plane restores the pinned NuGet package, as CI does. Never force it on with `-p:UseLocalLalrCc=true`.
   A change LALR.CC needs is `pilot follow-up SharpAstro/LALR.CC --title ...`, never `gh issue create`.
 - Every build and test goes through `pilot run -- <one plain command>`; the node queues jobs per repo. Never wait
   with a job that sleeps or polls: use `pilot leg wait --for-file <path>` and end the turn.
@@ -36,8 +36,9 @@ dotnet test DotCC.FunctionalTests/DotCC.FunctionalTests.csproj -c Release --no-b
   `--target=wat` must be listed in `DotCC.FunctionalTests/wat-fixtures.txt`, or CI's wat ratchet fails.
 - Unit tests that regex an emitted program see the whole spliced runtime (`DotCC.Libc/*.cs` is embedded into every
   emit), so new runtime code can trip an unrelated pin: run the unit suite after a runtime change.
-- The differential oracles are opt-in. A plane runs those whose tool it has and names every one it did not run in
-  the leg's report; CI runs them all on the PR:
+- A plane does not run the differential oracles: they switch on through environment variables, and a `pilot run`
+  job gets the node's environment, not the plane's, with no way to pass one. The leg's report names which oracles
+  cover the change; CI runs them all on the PR, and a person can run one by hand. What each needs:
   - `DOTCC_RUN_GCC_ORACLE=1`: gcc (WSL Ubuntu on Windows).
   - `DOTCC_RUN_MSVC_ORACLE=1`: `cl.exe` from a Visual Studio developer environment.
   - `DOTCC_RUN_ZIG_ORACLE=1`: `zig` 0.16.0, CI's pin.
@@ -48,8 +49,9 @@ dotnet test DotCC.FunctionalTests/DotCC.FunctionalTests.csproj -c Release --no-b
 - The real-world suites (Lua, chibi-scheme, CPython, Goose) are CI workflows (`lua.yml`, `chibi.yml`, `python.yml`,
   `goose.yml`). A leg that changes the emitter, the runtime or a header names them in its report.
 - After a `.lalr.yaml` edit: a full build, never `--no-build` (a stale parse table makes a right grammar look
-  wrong), and a diff of the resolved-conflict dump against main's (`LALRCC_RESOLVED_DUMP`, recipe in
-  `docs/architecture.md`, Grammar conventions). Every new line is a silently settled conflict to justify in the report.
+  wrong). The resolved-conflict dump diff against main's needs `LALRCC_RESOLVED_DUMP` set at build time, which a
+  plane cannot do either, so the leg's report flags the grammar edit and the controller runs the diff (recipe in
+  `docs/architecture.md`, Grammar conventions): every new line is a silently settled conflict to justify.
 - Package versions live in `Directory.Packages.props`, never in a `.csproj`. The SDK is pinned in `global.json`.
 
 ## How a flight merges
