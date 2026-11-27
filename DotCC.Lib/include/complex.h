@@ -46,5 +46,8 @@ double _Complex catan(double _Complex z);
 double _Complex csinh(double _Complex z);
 double _Complex ccosh(double _Complex z);
 double _Complex ctanh(double _Complex z);
+double _Complex cacosh(double _Complex z);
+double _Complex casinh(double _Complex z);
+double _Complex catanh(double _Complex z);
 
 #endif /* _COMPLEX_H */

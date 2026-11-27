@@ -1,12 +1,9 @@
-/* Type-generic math dispatch via <tgmath.h>. In real C this is C11
-   _Generic; in dotcc the same effect falls out of C# overload
-   resolution because the CMath helper class has both `sin(float)` and
-   `sin(double)` overloads. Compile this with MSVC's oracle and it
-   should still work (MSVC's tgmath.h provides the real _Generic
-   macros). The expected output below comes from the double-precision
-   path on both sides — values match because we use round-trip-safe
-   inputs (0.5 has an exact float representation, and printf's "%.6f"
-   truncates well before the float/double divergence point). */
+/* Type-generic math via <tgmath.h>. dotcc's header is real C11 _Generic
+   macros, resolved at lowering time: sqrt(1.0f) is sqrtf and has type float,
+   sqrt(1) is sqrt (an integer counts as double), sqrt(1.0L) is sqrtl, and
+   pow(1.0f, 2) is pow while pow(1.0f, 2.0f) is powf (C11 7.25p3). The
+   numeric rows use round-trip-safe inputs so float and double agree at
+   "%.6f". The complex rows are in tgmath-complex (wat has no _Complex). */
 
 #define _USE_MATH_DEFINES
 
@@ -27,6 +24,14 @@ int main(void)
     printf("sqrtf(4f) = %.6f\n", sqrtf(4.0f));
     printf("sinf(0f)  = %.6f\n", sinf(0.0f));
     printf("cosf(0f)  = %.6f\n", cosf(0.0f));
+
+    /* Which function was chosen shows in the type of the call. */
+    printf("sqrt(1.0f) float: %d\n", _Generic(sqrt(1.0f), float: 1, default: 0));
+    printf("sqrt(1) double: %d\n", _Generic(sqrt(1), double: 1, default: 0));
+    printf("sqrt(1.0L) long double: %d\n", _Generic(sqrt(1.0L), long double: 1, default: 0));
+    printf("pow(1.0f, 2) double: %d\n", _Generic(pow(1.0f, 2), double: 1, default: 0));
+    printf("pow(1.0f, 2.0f) float: %d\n", _Generic(pow(1.0f, 2.0f), float: 1, default: 0));
+    printf("sqrt(4f) = %.6f\n", sqrt(4.0f));
 
     return 0;
 }

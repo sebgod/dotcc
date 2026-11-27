@@ -504,6 +504,9 @@ public abstract record CType
         {
             if (pa.Integer) { return pb; }
             if (pb.Integer) { return pa; }
+            // C 6.3.1.8: long double outranks double (both 8 bytes here), so rank by name first.
+            if (pa.Name == "long double") { return pa; }
+            if (pb.Name == "long double") { return pb; }
             return pa.Bytes >= pb.Bytes ? pa : pb;
         }
 
