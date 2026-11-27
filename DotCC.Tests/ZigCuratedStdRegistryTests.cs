@@ -81,7 +81,46 @@ public sealed partial class ZigCuratedStdRegistryTests
                     row.Lower.ShouldNotBeNull(row.Path);
                     row.Arity.ShouldBeGreaterThan(0, row.Path);
                     break;
+                case CuratedShape.StaticFn:
+                case CuratedShape.Method:
+                case CuratedShape.Field:
+                case CuratedShape.DeclLiteral:
+                    row.LowerMember.ShouldNotBeNull(row.Path);
+                    break;
             }
         }
+    }
+
+    /// <summary>Every member row (static function, method, field, decl literal) hangs under a curated type row, and
+    /// the members the call sites dispatch on are all there: no member-name list lives outside the registry.</summary>
+    [Fact]
+    public void MemberRowsHangUnderCuratedTypes()
+    {
+        var typePaths = ZigCuratedStd.Rows
+            .Where(r => r.Shape is CuratedShape.Type or CuratedShape.GenericType)
+            .Select(r => r.Path)
+            .ToHashSet();
+        var members = ZigCuratedStd.Rows.Where(r => r.LowerMember is not null).ToList();
+        members.ShouldNotBeEmpty();
+        foreach (var row in members)
+        {
+            typePaths.ShouldContain(row.Namespace, row.Path);
+            row.Kind.ShouldBe(CuratedKind.Scaffold, row.Path);
+        }
+        foreach (var path in new[]
+        {
+            "std.ArrayList.append", "std.ArrayList.items", "std.ArrayList.capacity", "std.ArrayList.empty",
+            "std.mem.Allocator.alloc", "std.mem.Allocator.rawFree",
+            "std.heap.FixedBufferAllocator.init", "std.heap.FixedBufferAllocator.allocator",
+            "std.heap.ArenaAllocator.init", "std.heap.ArenaAllocator.allocator", "std.heap.ArenaAllocator.deinit",
+            "std.mem.Alignment.fromByteUnits", "std.mem.Alignment.of", "std.mem.Alignment.toByteUnits",
+            "std.mem.Alignment.forward", "std.mem.Alignment.backward", "std.mem.Alignment.check",
+        })
+        {
+            ZigCuratedStd.Find(path).ShouldNotBeNull(path);
+        }
+        ZigCuratedStd.Find("std.ArrayList.items", CuratedShape.Field).ShouldNotBeNull();
+        ZigCuratedStd.Find("std.ArrayList.empty", CuratedShape.DeclLiteral).ShouldNotBeNull();
+        ZigCuratedStd.IsOwnedPath("std.ArrayList.append").ShouldBeFalse();
     }
 }

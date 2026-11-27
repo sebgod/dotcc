@@ -256,4 +256,430 @@ internal sealed partial class ZigLowering
                     $"zig `std.mem.sliceTo` expects a pointer to an array, a many-item pointer or a slice, got {stPtr.Type.Describe()}");
         }
     }
+
+    /// <summary>The curated <c>std.ArrayList(T)</c> the member call's receiver is.</summary>
+    private static CType.ZigList ListOf(CuratedMemberCall c)
+        => c.Recv?.Type.Unqualified as CType.ZigList ?? throw new IrUnsupportedException($"zig `.{c.Member}` needs a std.ArrayList receiver");
+
+    /// <summary>The lowered receiver of a list member call; a list member always has one.</summary>
+    private static CExpr ListRecv(CuratedMemberCall c)
+        => c.Recv ?? throw new IrUnsupportedException($"zig `.{c.Member}` needs a std.ArrayList receiver");
+
+    /// <summary>The slice argument <paramref name="item"/> of a list call, lowered at <c>[]T</c> and coerced when it is not one yet.</summary>
+    private CExpr LowerListSliceArg(Item item, CType elem)
+    {
+        var sliceType = new CType.Slice(elem);
+        var sliceArg = LowerExprSink(item, sliceType);
+        return sliceArg.Type?.Unqualified is CType.Slice ? sliceArg : CoerceToSlice(sliceArg, sliceType);
+    }
+
+    /// <summary>Lower <c>list.append(alloc, item)</c> (a registry row).</summary>
+    internal CExpr LowerListAppend(CuratedMemberCall c)
+    {
+        RequireListArgs(c.Member, c.Args, 2, "(alloc, item)");
+        var a = LowerListAllocatorArg(c.Member, c.Args[0]);
+        var item = LowerExprSink(c.Args[1], ListOf(c).Element);   // result-located at the element type
+        return new ZigListCall(ListRecv(c), "Append", new List<CExpr> { a, item, OomLit() }) { Type = new CType.ErrorUnion(CType.Void) };
+    }
+
+    /// <summary>Lower <c>list.appendSlice(alloc, slice)</c> (a registry row). <c>&amp;arr</c> / a <c>[N]T</c> value /
+    /// <c>&amp;.{ 1, 1 }</c> coerces to a slice as at any other slice sink.</summary>
+    internal CExpr LowerListAppendSlice(CuratedMemberCall c)
+    {
+        RequireListArgs(c.Member, c.Args, 2, "(alloc, slice)");
+        var a = LowerListAllocatorArg(c.Member, c.Args[0]);
+        var s = LowerListSliceArg(c.Args[1], ListOf(c).Element);
+        return new ZigListCall(ListRecv(c), "AppendSlice", new List<CExpr> { a, s, OomLit() }) { Type = new CType.ErrorUnion(CType.Void) };
+    }
+
+    /// <summary>Lower <c>list.pop()</c> (a registry row): <c>?T</c>.</summary>
+    internal CExpr LowerListPop(CuratedMemberCall c)
+    {
+        RequireListArgs(c.Member, c.Args, 0, "()");
+        return new ZigListCall(ListRecv(c), "Pop", new List<CExpr>()) { Type = new CType.Optional(ListOf(c).Element) };
+    }
+
+    /// <summary>Lower <c>list.deinit(alloc)</c> (a registry row).</summary>
+    internal CExpr LowerListDeinit(CuratedMemberCall c)
+    {
+        RequireListArgs(c.Member, c.Args, 1, "(alloc)");
+        var a = LowerListAllocatorArg(c.Member, c.Args[0]);
+        return new ZigListCall(ListRecv(c), "Deinit", new List<CExpr> { a }) { Type = CType.Void };
+    }
+
+    /// <summary>Lower <c>list.clearRetainingCapacity()</c> (a registry row).</summary>
+    internal CExpr LowerListClearRetainingCapacity(CuratedMemberCall c)
+    {
+        RequireListArgs(c.Member, c.Args, 0, "()");
+        return new ZigListCall(ListRecv(c), "ClearRetainingCapacity", new List<CExpr>()) { Type = CType.Void };
+    }
+
+    /// <summary>Lower <c>list.insert(alloc, index, item)</c> (a registry row; the index members are task #74).</summary>
+    internal CExpr LowerListInsert(CuratedMemberCall c)
+    {
+        RequireListArgs(c.Member, c.Args, 3, "(alloc, index, item)");
+        var a = LowerListAllocatorArg(c.Member, c.Args[0]);
+        var at = LowerExprSink(c.Args[1], CType.ULong);
+        var item = LowerExprSink(c.Args[2], ListOf(c).Element);
+        return new ZigListCall(ListRecv(c), "Insert", new List<CExpr> { a, at, item, OomLit() }) { Type = new CType.ErrorUnion(CType.Void) };
+    }
+
+    /// <summary>Lower <c>list.insertSlice(alloc, index, slice)</c> (a registry row; task #138): the tail moves up by <c>slice.len</c>.</summary>
+    internal CExpr LowerListInsertSlice(CuratedMemberCall c)
+    {
+        RequireListArgs(c.Member, c.Args, 3, "(alloc, index, slice)");
+        var a = LowerListAllocatorArg(c.Member, c.Args[0]);
+        var at = LowerExprSink(c.Args[1], CType.ULong);
+        var s = LowerListSliceArg(c.Args[2], ListOf(c).Element);
+        return new ZigListCall(ListRecv(c), "InsertSlice", new List<CExpr> { a, at, s, OomLit() }) { Type = new CType.ErrorUnion(CType.Void) };
+    }
+
+    /// <summary>Lower <c>list.appendNTimes(alloc, value, n)</c> or its <paramref name="assume"/>-capacity form (a registry row; task #172).</summary>
+    internal CExpr LowerListAppendNTimes(CuratedMemberCall c, bool assume)
+    {
+        RequireListArgs(c.Member, c.Args, assume ? 2 : 3, assume ? "(value, n)" : "(alloc, value, n)");
+        var nArgs = new List<CExpr>();
+        if (!assume) { nArgs.Add(LowerListAllocatorArg(c.Member, c.Args[0])); }
+        nArgs.Add(LowerExprSink(c.Args[assume ? 0 : 1], ListOf(c).Element));
+        nArgs.Add(LowerExprSink(c.Args[assume ? 1 : 2], CType.ULong));
+        if (!assume) { nArgs.Add(OomLit()); }
+        return new ZigListCall(ListRecv(c), assume ? "AppendNTimesAssumeCapacity" : "AppendNTimes", nArgs)
+        { Type = assume ? CType.Void : new CType.ErrorUnion(CType.Void) };
+    }
+
+    /// <summary>Lower <c>list.replaceRange(alloc, start, len, new_items)</c> or its <paramref name="assume"/>-capacity form (a registry row; task #172).</summary>
+    internal CExpr LowerListReplaceRange(CuratedMemberCall c, bool assume)
+    {
+        RequireListArgs(c.Member, c.Args, assume ? 3 : 4, assume ? "(start, len, new_items)" : "(alloc, start, len, new_items)");
+        var rArgs = new List<CExpr>();
+        if (!assume) { rArgs.Add(LowerListAllocatorArg(c.Member, c.Args[0])); }
+        var first = assume ? 0 : 1;
+        rArgs.Add(LowerExprSink(c.Args[first], CType.ULong));
+        rArgs.Add(LowerExprSink(c.Args[first + 1], CType.ULong));
+        rArgs.Add(LowerListSliceArg(c.Args[first + 2], ListOf(c).Element));
+        if (!assume) { rArgs.Add(OomLit()); }
+        return new ZigListCall(ListRecv(c), assume ? "ReplaceRangeAssumeCapacity" : "ReplaceRange", rArgs)
+        { Type = assume ? CType.Void : new CType.ErrorUnion(CType.Void) };
+    }
+
+    /// <summary>Lower <c>list.orderedRemove(i)</c> or <c>list.swapRemove(i)</c> (a registry row).</summary>
+    internal CExpr LowerListRemove(CuratedMemberCall c, bool ordered)
+    {
+        RequireListArgs(c.Member, c.Args, 1, "(index)");
+        var at = LowerExprSink(c.Args[0], CType.ULong);
+        return new ZigListCall(ListRecv(c), ordered ? "OrderedRemove" : "SwapRemove", new List<CExpr> { at }) { Type = ListOf(c).Element };
+    }
+
+    /// <summary>Lower <c>list.getLast()</c> (a registry row): zig 0.17-dev, <c>?T</c>, null for an empty list.</summary>
+    internal CExpr LowerListGetLast(CuratedMemberCall c)
+    {
+        RequireListArgs(c.Member, c.Args, 0, "()");
+        return new ZigListCall(ListRecv(c), "GetLast", new List<CExpr>()) { Type = new CType.Optional(ListOf(c).Element) };
+    }
+
+    /// <summary>Lower <c>list.ensureTotalCapacity(alloc, n)</c> or <c>ensureUnusedCapacity</c> (a registry row).</summary>
+    internal CExpr LowerListEnsureCapacity(CuratedMemberCall c, bool total)
+    {
+        RequireListArgs(c.Member, c.Args, 2, "(alloc, n)");
+        var a = LowerListAllocatorArg(c.Member, c.Args[0]);
+        var n = LowerExprSink(c.Args[1], CType.ULong);
+        return new ZigListCall(ListRecv(c), total ? "EnsureTotalCapacity" : "EnsureUnusedCapacity", new List<CExpr> { a, n, OomLit() })
+        { Type = new CType.ErrorUnion(CType.Void) };
+    }
+
+    /// <summary>Lower <c>list.appendAssumeCapacity(item)</c> (a registry row).</summary>
+    internal CExpr LowerListAppendAssumeCapacity(CuratedMemberCall c)
+    {
+        RequireListArgs(c.Member, c.Args, 1, "(item)");
+        var item = LowerExprSink(c.Args[0], ListOf(c).Element);
+        return new ZigListCall(ListRecv(c), "AppendAssumeCapacity", new List<CExpr> { item }) { Type = CType.Void };
+    }
+
+    /// <summary>Lower <c>list.shrinkRetainingCapacity(n)</c> (a registry row).</summary>
+    internal CExpr LowerListShrinkRetainingCapacity(CuratedMemberCall c)
+    {
+        RequireListArgs(c.Member, c.Args, 1, "(n)");
+        var n = LowerExprSink(c.Args[0], CType.ULong);
+        return new ZigListCall(ListRecv(c), "ShrinkRetainingCapacity", new List<CExpr> { n }) { Type = CType.Void };
+    }
+
+    /// <summary>Lower the field <c>list.items</c> (a registry row): the occupied prefix as a mutable <c>[]T</c>, so a
+    /// subscript, <c>.len</c> and <c>for (list.items) |x|</c> ride the ordinary slice lowering on the result.</summary>
+    internal CExpr LowerListItems(CuratedMemberCall c)
+        => new Member(ListRecv(c), "Items", c.Arrow) { Type = new CType.Slice(ListOf(c).Element) };
+
+    /// <summary>Lower the field <c>list.capacity</c> (a registry row).</summary>
+    internal CExpr LowerListCapacity(CuratedMemberCall c)
+        => new Member(ListRecv(c), "Cap", c.Arrow) { Type = CType.ULong, IsLValue = true };
+
+    /// <summary>Lower the decl literal <c>.empty</c> at a list sink (a registry row): zig's empty unmanaged list is exactly
+    /// <c>default</c>, a null pointer with zero length and capacity (the first growing call allocates).</summary>
+    internal CExpr LowerListEmpty(CuratedMemberCall c)
+        => new DefaultLit { Type = c.Sink ?? throw new IrUnsupportedException("zig `.empty` needs a std.ArrayList sink") };
+
+    /// <summary>The allocator as a value for a runtime helper: the lowered receiver, or the devirtualised default or FBA site materialised.</summary>
+    private CExpr AllocatorValue(CuratedMemberCall c)
+        => c.Recv
+            ?? (c.Kind == AllocKind.Fba && c.Base?.Content is Zig.Ident { Arg0: var fbaTok }
+                ? MaterializeFba(_fbaAllocatorSites[Tok(fbaTok)])
+                : MaterializeCHeap());
+
+    /// <summary>Lower <c>a.alloc(T, n)</c> or <c>a.alignedAlloc(T, alignment, n)</c> (a registry row). The comptime alignment
+    /// is not threaded through: dotcc's alignment model caps at 16 (ZigAlloc.AlignOf), met by construction on the C heap
+    /// and arena while the FBA aligns up to it, so over-alignment is the same documented cut as elsewhere.</summary>
+    internal CExpr LowerAllocatorAlloc(CuratedMemberCall c, bool aligned)
+    {
+        int wantArgs = aligned ? 3 : 2;
+        if (c.Args.Count != wantArgs)
+        {
+            throw new IrUnsupportedException($"zig allocator `.{c.Member}` expects ({(aligned ? "type, alignment, count" : "type, count")}); got {c.Args.Count} argument(s)");
+        }
+        var elem = LowerType(c.Args[0]);
+        var count = LowerExpr(c.Args[wantArgs - 1]);
+        return new AllocCall(c.Recv, elem, count, ErrorCode("OutOfMemory"), c.FbaCtx)
+        {
+            Type = new CType.ErrorUnion(new CType.Slice(elem)),
+        };
+    }
+
+    /// <summary>Lower <c>a.dupe(T, slice)</c> (a registry row): a fresh allocation holding a copy (std.mem.join's
+    /// <c>dupe(u8, &amp;[1]u8{0})</c>), one runtime call so the source is evaluated once.</summary>
+    internal CExpr LowerAllocatorDupe(CuratedMemberCall c)
+    {
+        if (c.Args.Count != 2)
+        {
+            throw new IrUnsupportedException($"zig allocator `.dupe` expects (type, slice); got {c.Args.Count} argument(s)");
+        }
+        var elem = LowerType(c.Args[0]);
+        // At a `[]const T` sink, so C# infers Dupe's `T` from the argument (no Slice to ConstSlice step).
+        var src = LowerExprSink(c.Args[1], new CType.Slice(elem.WithQuals(TypeQual.Const)));
+        return new Call("ZigAlloc.Dupe", new List<CExpr> { AllocatorValue(c), src, OomLit() })
+        {
+            Type = new CType.ErrorUnion(new CType.Slice(elem)),
+        };
+    }
+
+    /// <summary>Lower <c>a.dupeSentinel(T, slice, s)</c> or <c>a.allocSentinel(T, n, s)</c> (a registry row; task #107): one
+    /// element more, the sentinel stored past the end. dotcc's slice carries no sentinel, so the result is the
+    /// <c>len</c>-long slice before it.</summary>
+    internal CExpr LowerAllocatorSentinel(CuratedMemberCall c, bool dupe)
+    {
+        if (c.Args.Count != 3)
+        {
+            throw new IrUnsupportedException(
+                $"zig allocator `.{c.Member}` expects (type, {(dupe ? "slice" : "count")}, sentinel); got {c.Args.Count} argument(s)");
+        }
+        var elem = LowerType(c.Args[0]);
+        var source = dupe
+            ? LowerExprSink(c.Args[1], new CType.Slice(elem.WithQuals(TypeQual.Const)))
+            : LowerExprSink(c.Args[1], CType.ULong);
+        var sentinel = LowerExprSink(c.Args[2], elem);
+        var helper = dupe ? "ZigAlloc.DupeSentinel" : "ZigAlloc.AllocSentinel";
+        return new Call(helper, new List<CExpr> { AllocatorValue(c), source, new Cast(elem, sentinel) { Type = elem }, OomLit() })
+        {
+            Type = new CType.ErrorUnion(new CType.Slice(elem)),
+        };
+    }
+
+    /// <summary>Lower the vtable's byte-level calls <c>rawAlloc</c> / <c>rawResize</c> / <c>rawRemap</c> / <c>rawFree</c> (the
+    /// registry rows; std.Io.Writer.Allocating grows its buffer through them): one runtime helper each, over the allocator
+    /// as a value.</summary>
+    internal CExpr LowerAllocatorRaw(CuratedMemberCall c, string method)
+    {
+        var bytes = new CType.Slice(CType.UChar);
+        var alignmentType = new CType.Named(AlignmentTypeName);
+        var (helper, paramTypes, resultType) = method switch
+        {
+            "rawAlloc" => ("ZigAlloc.RawAlloc", new[] { CType.ULong, alignmentType, CType.ULong }, (CType)new CType.Pointer(CType.UChar)),
+            "rawResize" => ("ZigAlloc.RawResize", new[] { bytes, alignmentType, CType.ULong, CType.ULong }, CType.Bool),
+            "rawRemap" => ("ZigAlloc.RawRemap", new[] { bytes, alignmentType, CType.ULong, CType.ULong }, new CType.Pointer(CType.UChar)),
+            _ => ("ZigAlloc.RawFree", new[] { bytes, alignmentType, CType.ULong }, CType.Void),
+        };
+        if (c.Args.Count != paramTypes.Length)
+        {
+            throw new IrUnsupportedException($"zig allocator `.{method}` expects {paramTypes.Length} argument(s); got {c.Args.Count}");
+        }
+        var rawArgs = new List<CExpr> { AllocatorValue(c) };
+        for (var i = 0; i < paramTypes.Length; i++) { rawArgs.Add(LowerExprSink(c.Args[i], paramTypes[i])); }
+        return new Call(helper, rawArgs) { Type = resultType };
+    }
+
+    /// <summary>Lower <c>a.free(slice)</c> (a registry row).</summary>
+    internal CExpr LowerAllocatorFree(CuratedMemberCall c)
+    {
+        if (c.Args.Count != 1)
+        {
+            throw new IrUnsupportedException($"zig allocator `.free` expects (slice); got {c.Args.Count} argument(s)");
+        }
+        var sliceExpr = LowerExpr(c.Args[0]);
+        if (sliceExpr.Type.Unqualified is not CType.Slice slc)
+        {
+            throw new IrUnsupportedException($"zig allocator `.free` expects a slice argument, got {sliceExpr.Type.Describe()}");
+        }
+        return new FreeCall(c.Recv, sliceExpr, slc.Element, c.FbaCtx) { Type = CType.Void };
+    }
+
+    /// <summary>Lower <c>a.create(T)</c> (a registry row; Milestone U): <c>Error!*T</c> is <c>ErrorUnion(Pointer(T))</c> at the
+    /// IR-type level (so <c>try</c> unwraps to a <c>*T</c>); the runtime carrier is <c>ErrUnion&lt;nuint&gt;</c> (a pointer can't
+    /// be an ErrUnion generic argument), and the <c>try</c> lowering casts the unwrapped nuint to <c>T*</c>.</summary>
+    internal CExpr LowerAllocatorCreate(CuratedMemberCall c)
+    {
+        if (c.Args.Count != 1)
+        {
+            throw new IrUnsupportedException($"zig allocator `.create` expects (type); got {c.Args.Count} argument(s)");
+        }
+        var elem = LowerType(c.Args[0]);
+        return new CreateCall(c.Recv, elem, ErrorCode("OutOfMemory"), c.FbaCtx)
+        {
+            Type = new CType.ErrorUnion(new CType.Pointer(elem)),
+        };
+    }
+
+    /// <summary>Lower <c>a.destroy(p)</c> (a registry row): frees a single object from <c>.create</c>.</summary>
+    internal CExpr LowerAllocatorDestroy(CuratedMemberCall c)
+    {
+        if (c.Args.Count != 1)
+        {
+            throw new IrUnsupportedException($"zig allocator `.destroy` expects (pointer); got {c.Args.Count} argument(s)");
+        }
+        var ptrExpr = LowerExpr(c.Args[0]);
+        if (ptrExpr.Type.Unqualified is not CType.Pointer pp)
+        {
+            throw new IrUnsupportedException($"zig allocator `.destroy` expects a pointer argument, got {ptrExpr.Type.Describe()}");
+        }
+        return new DestroyCall(c.Recv, ptrExpr, pp.Pointee, c.FbaCtx) { Type = CType.Void };
+    }
+
+    /// <summary>Lower <c>a.realloc(slice, n)</c> (a registry row): grows or shrinks a slice, <c>Error![]T</c>.</summary>
+    internal CExpr LowerAllocatorRealloc(CuratedMemberCall c)
+    {
+        if (c.Args.Count != 2)
+        {
+            throw new IrUnsupportedException($"zig allocator `.realloc` expects (slice, new count); got {c.Args.Count} argument(s)");
+        }
+        var oldSlice = LowerExpr(c.Args[0]);
+        if (oldSlice.Type.Unqualified is not CType.Slice rslc)
+        {
+            throw new IrUnsupportedException($"zig allocator `.realloc` expects a slice argument, got {oldSlice.Type.Describe()}");
+        }
+        var newCount = LowerExpr(c.Args[1]);
+        return new ReallocCall(c.Recv, oldSlice, rslc.Element, newCount, ErrorCode("OutOfMemory"), c.FbaCtx)
+        {
+            Type = new CType.ErrorUnion(new CType.Slice(rslc.Element)),
+        };
+    }
+
+    /// <summary>Lower <c>a.resize(slice, n)</c> (in place, <c>bool</c>) or <c>a.remap(slice, n)</c> (possibly moving,
+    /// <c>?[]T</c>) (the registry rows). A provable FBA site devirtualises (FbaCtx set); an opaque Allocator dispatches
+    /// through the vtable (Recv set). Only the statically-known C-heap default stays deferred: its in-place result is
+    /// page-dependent (real zig answers from malloc_usable_size / page rounding), so a devirtualised guess would diverge
+    /// from the oracle; use <c>.realloc</c> there.</summary>
+    internal CExpr LowerAllocatorResize(CuratedMemberCall c, bool remap)
+    {
+        if (c.FbaCtx is null && c.Recv is null)
+        {
+            throw new IrUnsupportedException(
+                $"zig allocator `.{c.Member}` on the statically-known C-heap default is deferred "
+                + "(the in-place page/malloc_usable_size result would diverge from real zig); "
+                + "use `.realloc`, or route through an opaque `std.mem.Allocator` / a FixedBufferAllocator");
+        }
+        if (c.Args.Count != 2)
+        {
+            throw new IrUnsupportedException($"zig allocator `.{c.Member}` expects (slice, new count); got {c.Args.Count} argument(s)");
+        }
+        var oldSlice = LowerExpr(c.Args[0]);
+        if (oldSlice.Type.Unqualified is not CType.Slice sl)
+        {
+            throw new IrUnsupportedException($"zig allocator `.{c.Member}` expects a slice argument, got {oldSlice.Type.Describe()}");
+        }
+        var newCount = LowerExpr(c.Args[1]);
+        return remap
+            ? new RemapCall(c.Recv, oldSlice, sl.Element, newCount, c.FbaCtx) { Type = new CType.Optional(new CType.Slice(sl.Element)) }
+            : new ResizeCall(c.Recv, oldSlice, sl.Element, newCount, c.FbaCtx) { Type = CType.Bool };
+    }
+
+    /// <summary>Lower <c>fba.allocator()</c> / <c>arena.allocator()</c> (the registry rows): the Allocator fat pointer over the
+    /// runtime allocator itself, which needs <c>&amp;self</c> as the vtable context; the result is opaque (the indirect dispatch path).</summary>
+    internal CExpr LowerRuntimeAllocatorAllocator(CuratedMemberCall c)
+    {
+        var recv = c.Recv ?? throw new IrUnsupportedException("zig `.allocator()` needs a receiver");
+        var allocTy = recv.Type.Unqualified is CType.Named named ? named.Name : "";
+        if (c.Args.Count != 0)
+        {
+            throw new IrUnsupportedException($"zig `{allocTy}.allocator()` takes no arguments");
+        }
+        if (Unparen(recv) is VarRef { Sym: { Kind: SymKind.Var or SymKind.Param } s })
+        {
+            s.AddressTaken = true;
+        }
+        var selfAddr = new Unary(UnOp.AddrOf, recv) { Type = new CType.Pointer(recv.Type) };
+        var factory = allocTy == FbaTypeName ? "ZigAlloc.FbaAllocator" : "ZigAlloc.ArenaToAllocator";
+        return new Call(factory, new List<CExpr> { selfAddr },
+            new List<CType> { new CType.Pointer(new CType.Named(allocTy)) }, null) { Type = new CType.Allocator() };
+    }
+
+    /// <summary>Lower <c>arena.deinit()</c> (a registry row; Milestone U): frees the whole chunk chain, a static wrapper
+    /// called by-ref on the local. The headline use is <c>defer arena.deinit();</c>.</summary>
+    internal CExpr LowerArenaDeinit(CuratedMemberCall c)
+    {
+        var recv = c.Recv ?? throw new IrUnsupportedException("zig `arena.deinit()` needs a receiver");
+        if (c.Args.Count != 0)
+        {
+            throw new IrUnsupportedException("zig `arena.deinit()` takes no arguments");
+        }
+        if (Unparen(recv) is VarRef { Sym: { Kind: SymKind.Var or SymKind.Param } sd })
+        {
+            sd.AddressTaken = true;
+        }
+        var arenaAddr = new Unary(UnOp.AddrOf, recv) { Type = new CType.Pointer(recv.Type) };
+        return new Call("ZigAlloc.ArenaDeinit", new List<CExpr> { arenaAddr },
+            new List<CType> { new CType.Pointer(new CType.Named(ArenaTypeName)) }, null) { Type = CType.Void };
+    }
+
+    /// <summary>Lower an instance method of the curated <c>std.mem.Alignment</c> carrier (the registry rows; std-internal code
+    /// names them, hash_map's <c>max_align.forward(total)</c>): a static helper on the runtime <c>Alignment</c>, receiver
+    /// first, taking <paramref name="arity"/> address arguments.</summary>
+    internal CExpr LowerAlignmentMethod(CuratedMemberCall c, string helper, CType ret, int arity)
+    {
+        var recv = c.Recv ?? throw new IrUnsupportedException($"zig std.mem.Alignment `.{c.Member}` needs a receiver");
+        if (c.Args.Count != arity)
+        {
+            throw ZigCuratedStd.UnmodeledMember("std.mem.Alignment", c.Member, c.Args.Count);
+        }
+        var alignArgs = new List<CExpr> { recv };
+        var alignTypes = new List<CType> { recv.Type };
+        foreach (var a in c.Args)
+        {
+            alignArgs.Add(LowerExprSink(a, CType.ULong));
+            alignTypes.Add(CType.ULong);
+        }
+        return new Call(helper, alignArgs, alignTypes, null) { Type = ret };
+    }
+
+    /// <summary>Lower <c>Alignment.fromByteUnits(n)</c> (a registry row), spelled through the type or as a decl literal
+    /// (std.MultiArrayList's <c>.big_align = mem.Alignment.fromByteUnits(big_align)</c>, task #108).</summary>
+    internal CExpr LowerAlignmentFromByteUnits(CuratedMemberCall c)
+    {
+        if (c.Args.Count != 1) { throw AlignmentStaticArity(c); }
+        return new Call("Alignment.fromByteUnits", new List<CExpr> { LowerExprSink(c.Args[0], CType.ULong) },
+            new List<CType> { CType.ULong }, null) { Type = new CType.Named(AlignmentTypeName) };
+    }
+
+    /// <summary>Lower <c>Alignment.of(T)</c> (a registry row; std.Io.Writer.Allocating's <c>.of(u8)</c>): T's own alignment.</summary>
+    internal CExpr LowerAlignmentOf(CuratedMemberCall c)
+    {
+        if (c.Args.Count != 1) { throw AlignmentStaticArity(c); }
+        var ofAlign = _ir.AlignOfConst(LowerType(c.Args[0]));
+        return new Call("Alignment.fromByteUnits",
+            new List<CExpr> { new LitInt(ofAlign.ToString(CultureInfo.InvariantCulture), ofAlign) { Type = CType.ULong } },
+            new List<CType> { CType.ULong }, null) { Type = new CType.Named(AlignmentTypeName) };
+    }
+
+    /// <summary>The error for an Alignment static called with the wrong argument count, as a decl literal of an unknown function reports it.</summary>
+    private static IrUnsupportedException AlignmentStaticArity(CuratedMemberCall c)
+        => new($"decl literal `.{c.Member}(…)`: '{AlignmentTypeName}' has no function '{c.Member}'");
+
+    /// <summary>Lower the call of a curated member row <paramref name="row"/> with the call context <paramref name="call"/>.</summary>
+    private CExpr LowerCuratedMember(CuratedStdEntry row, CuratedMemberCall call)
+        => row.LowerMember is { } lower ? lower(this, call) : throw new IrUnsupportedException($"zig `{row.Path}` has no lowering");
 }
