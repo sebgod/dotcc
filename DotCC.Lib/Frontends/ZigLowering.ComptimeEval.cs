@@ -141,8 +141,8 @@ internal sealed partial class ZigLowering
         long? lo, hi;
         using (EnterThrowawayHoist())
         {
-            lo = _ir.ConstEval(LowerUsizeOperand(loItem));
-            hi = hiItem is { } h ? _ir.ConstEval(LowerUsizeOperand(h)) : bytes.Length;
+            lo = ComptimeLong(LowerUsizeOperand(loItem));
+            hi = hiItem is { } h ? ComptimeLong(LowerUsizeOperand(h)) : bytes.Length;
         }
         if (lo is not { } l || hi is not { } e || l < 0 || e > bytes.Length || l > e) { return null; }
         return StringValue(bytes.Skip((int)l).Take((int)(e - l)));
@@ -214,6 +214,23 @@ internal sealed partial class ZigLowering
     /// <summary>A comptime integer that fits a <see cref="long"/>, or null.</summary>
     private static long? AsLong(IrModule.ComptimeValue? v)
         => v is IrModule.CtInt { Value: var n } && n >= long.MinValue && n <= long.MaxValue ? (long)n : null;
+
+    /// <summary>A comptime integer at full 128-bit width, or null. A comptime bool reads as 0 / 1 (the C rule
+    /// <see cref="IrModule.ConstEval"/> has).</summary>
+    private static System.Int128? AsInt128(IrModule.ComptimeValue? v) => v switch
+    {
+        IrModule.CtInt { Value: var n } => n,
+        IrModule.CtBool { Value: var b } => b ? 1 : 0,
+        _ => null,
+    };
+
+    /// <summary>The ONE IR-level integer read: an already-lowered expression's comptime integer in 128 bits, calls
+    /// allowed (a comptime integer initializer may call, <c>cacheLineForCpu(builtin.cpu)</c>), or null. The call-free
+    /// fold is tried first, so a plain constant never reaches the interpreter.</summary>
+    private System.Int128? ComptimeInt128(CExpr e) => _ir.ConstEval128(e) ?? AsInt128(_ir.EvalComptimeValue(e));
+
+    /// <summary>The <see cref="long"/> projection of <see cref="ComptimeInt128"/>: null when the value is outside long.</summary>
+    private long? ComptimeLong(CExpr e) => ComptimeInt128(e) is { } v && v >= long.MinValue && v <= long.MaxValue ? (long)v : null;
 
     /// <summary>A comptime integer that fits an <see cref="int"/>, or null.</summary>
     private static int? AsInt(IrModule.ComptimeValue? v) => AsLong(v) is { } n && n >= int.MinValue && n <= int.MaxValue ? (int)n : null;

@@ -850,8 +850,7 @@ internal sealed partial class ZigLowering
     /// .right;` in std.fmt is an enum literal that only its use can type.</summary>
     /// <summary>The value of a <c>comptime_int</c> initializer. Comptime by definition, so a call in it runs
     /// (<c>cacheLineForCpu(builtin.cpu)</c> in std.atomic), not only the call-free constant folding.</summary>
-    private long? ComptimeIntValue(CExpr init) =>
-        _ir.ConstEval(init) ?? (_ir.ResolveComptimeFold(init) is { } folded ? _ir.ConstEval(folded) : null);
+    private long? ComptimeIntValue(CExpr init) => ComptimeLong(init);
 
     private CExpr? LowerLazyValueConst(string name, CType? useSink = null)
     {

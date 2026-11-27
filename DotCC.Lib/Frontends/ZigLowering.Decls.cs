@@ -3306,9 +3306,7 @@ internal sealed partial class ZigLowering
         // `const key = comptime Indexer.keyForIndex(i);` names its comptime fold.
         if (tagged is VarRef { Sym: var keySym } && _unfoldedConstInits.TryGetValue(keySym, out var keyInit)) { tagged = keyInit; }
         if (tagged.Type?.Unqualified is not CType.Enum tagEnum) { return null; }
-        var value = _ir.ConstEval(tagged)
-            ?? (_ir.EvalComptimeValue(tagged) is IrModule.CtInt { Value: var big } && big >= long.MinValue && big <= long.MaxValue
-                ? (long)big : null);
+        var value = ComptimeLong(tagged);
         if (value is not { } v || MembersOfEnum(tagEnum) is not { } members) { return null; }
         foreach (var m in members)
         {

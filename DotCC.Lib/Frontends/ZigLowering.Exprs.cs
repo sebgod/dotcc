@@ -1100,7 +1100,7 @@ internal sealed partial class ZigLowering
     private CExpr LowerRepeat(Item leftItem, Item countItem)
     {
         // The count resolves to a comptime integer (a literal or a `const` bound to one).
-        if (EvalComptimeValue(countItem) is not LitInt { Value: { } n } || n < 0 || n > MaxRepeat)
+        if (AsLong(TryEvalComptime(countItem)) is not { } n || n < 0 || n > MaxRepeat)
         {
             throw new IrUnsupportedException(
                 $"zig `a ** n`: the repeat count must be a comptime integer in [0, {MaxRepeat}]"
@@ -1206,8 +1206,7 @@ internal sealed partial class ZigLowering
                 try { lowered = LowerExpr(pos.Arg0); }
                 catch (IrUnsupportedException) { return null; }
             }
-            var value = _ir.ConstEval(lowered)
-                ?? (_ir.EvalComptimeValue(lowered) is IrModule.CtInt { Value: var big } && big >= 0 && big <= 255 ? (long)big : null);
+            var value = ComptimeLong(lowered);
             if (value is not { } b || b is < 0 or > 255) { return null; }
             bytes.Add((int)b);
         }
