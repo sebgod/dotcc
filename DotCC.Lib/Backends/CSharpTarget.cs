@@ -85,7 +85,30 @@ internal sealed class CSharpTarget : ITarget
 
     /// <summary>The C# spelling of a struct, union or enum tag: the raw C name, <c>@</c>-escaped when it is a C# keyword.
     /// Every point the backend writes a type name goes through here; side tables keep the raw name.</summary>
-    internal static string TypeName(string rawName) => DotCC.EmitHelpers.Id(rawName);
+    internal static string TypeName(string rawName) =>
+        _capturedTypeNames.Contains(rawName) ? CapturedPrefix + rawName
+        : _escapedTypeNames.Contains(rawName) || DotCC.EmitHelpers.Id(rawName) != rawName ? "@" + rawName
+        : rawName;
+
+    /// <summary>Prefix of the spelling a C tag gets when its name is a contextual keyword the emitted program or the
+    /// spliced runtime uses. C reserves a leading double underscore, so no C program can declare a clash.</summary>
+    private const string CapturedPrefix = "__dotcc_tag_";
+
+    /// <summary>Contextual keywords C# refuses as a type name but accepts after an <c>@</c> escape (Roslyn CS9029,
+    /// CS9056, CS9062 and the CS8860 warning for <c>record</c>).</summary>
+    private static readonly HashSet<string> _escapedTypeNames = new(System.StringComparer.Ordinal)
+    {
+        "record", "required", "file", "scoped",
+    };
+
+    /// <summary>Names the emitted shell and the runtime use as contextual keywords. The type declarations sit at the
+    /// top level, so a type named like one captures every use (<c>var x = ...</c>, <c>nint</c>, <c>nuint</c>, the
+    /// <c>where T : unmanaged</c> constraint), and <c>@var</c> still declares a type named <c>var</c>. These get the
+    /// reserved <see cref="CapturedPrefix"/> rename instead, a pure function of the name so every site agrees.</summary>
+    private static readonly HashSet<string> _capturedTypeNames = new(System.StringComparer.Ordinal)
+    {
+        "var", "nint", "nuint", "unmanaged",
+    };
 
     /// <summary>Record <paramref name="name"/> in <see cref="RenderedNamedTypes"/> and return it.</summary>
     private string NoteNamed(string name)

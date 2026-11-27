@@ -84,6 +84,45 @@ public sealed class TypeNameEscapeTests
         e.ShouldContain("DotCcGlobals.@object");
     }
 
+    [Theory]
+    [InlineData("record")]
+    [InlineData("required")]
+    [InlineData("file")]
+    [InlineData("scoped")]
+    public void contextual_keyword_tag_is_at_escaped(string tag)
+    {
+        var e = Emit($"struct {tag} {{ int x; }};\nint main(void) {{ struct {tag} v; v.x = 1; return v.x + (int)sizeof(struct {tag}); }}");
+        e.ShouldContain($"struct @{tag}");
+        e.ShouldNotContain("__dotcc_tag_" + tag);
+    }
+
+    [Theory]
+    [InlineData("var")]
+    [InlineData("nint")]
+    [InlineData("nuint")]
+    [InlineData("unmanaged")]
+    public void captured_contextual_tag_is_renamed_everywhere(string tag)
+    {
+        var e = Emit($"struct {tag} {{ int x; }};\nint main(void) {{ struct {tag} v; v.x = 1; return v.x + (int)sizeof(struct {tag}); }}");
+        var renamed = "__dotcc_tag_" + tag;
+        e.ShouldContain($"struct {renamed}");
+        e.ShouldContain($"{renamed} v");
+        e.ShouldContain($"sizeof({renamed})");
+        e.ShouldNotContain($"struct {tag}\n");
+        e.ShouldNotContain($"struct @{tag}");
+    }
+
+    [Theory]
+    [InlineData("record")]
+    [InlineData("var")]
+    public void enum_tag_of_each_kind_and_enumerator_reference(string tag)
+    {
+        var e = Emit($"enum {tag} {{ A = 1, B = 4 }};\nint main(void) {{ enum {tag} v = B; return v + A; }}");
+        var spelled = tag == "var" ? "__dotcc_tag_var" : "@record";
+        e.ShouldContain($"enum {spelled} : int");
+        e.ShouldContain($"{spelled}.");
+    }
+
     [Fact]
     public void plain_tag_is_unchanged()
     {
