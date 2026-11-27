@@ -191,7 +191,7 @@ public sealed class GenericTests
         float gcf(float v) { return v + 0.5f; }
         double gcd(double v) { return v + 0.25; }
         #define sel(X) _Generic((X), float: gcf, default: gcd)
-        """;
+        """ + "\n";
 
     [Fact]
     public void Generic_callee_is_a_direct_call_of_the_selected_function()
