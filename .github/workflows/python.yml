@@ -217,6 +217,7 @@ jobs:
 
   capi-oracle:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       DOTCC_RUN_CPYTHON_ORACLE: '1'
     steps:
