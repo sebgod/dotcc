@@ -33,6 +33,10 @@
 
 typedef long fd_set;
 
+/* The fd count an fd_set holds (glibc's value). Code sizes arrays by it (CPython's
+   selectmodule.c), though dotcc's fd_set is a placeholder the throwing select() never reads. */
+#define FD_SETSIZE 1024
+
 #ifndef _OFF_T_DEFINED
 #define _OFF_T_DEFINED
 typedef long off_t;

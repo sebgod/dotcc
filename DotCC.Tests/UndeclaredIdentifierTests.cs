@@ -108,6 +108,13 @@ public sealed class UndeclaredIdentifierTests
         cs.ShouldContain("double d = NAN;");
     }
 
+    /// <summary><c>&lt;sys/select.h&gt;</c> defines <c>FD_SETSIZE</c> (CPython's selectmodule.c sizes
+    /// a parameter array by it at file scope).</summary>
+    [Fact]
+    public void Fd_setsize_comes_from_sys_select() =>
+        Emit("#include <sys/select.h>\nstatic int seq2set(int fds[FD_SETSIZE + 1]) { return fds[0]; }\n"
+            + "int main(void) { int a[FD_SETSIZE + 1]; a[0] = 0; return seq2set(a); }\n").ShouldContain("seq2set");
+
     [Fact]
     public void Pre_c23_true_needs_stdbool()
     {
