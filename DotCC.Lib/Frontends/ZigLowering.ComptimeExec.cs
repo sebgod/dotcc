@@ -43,7 +43,7 @@ internal sealed partial class ZigLowering
                     "`comptime` here is only supported on a `var`/`const` value declaration");
         }
         // A comptime STRING var (`comptime var literal: []const u8 = "";`, std.Io.Writer.print).
-        if (EvalComptimeValue(initItem) is LitStr initStr)
+        if (AsLitStr(TryEvalComptime(initItem)) is LitStr initStr)
         {
             var stype = typeItem is { } st ? LowerType(st) : initStr.Type;
             var ssym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = stype });

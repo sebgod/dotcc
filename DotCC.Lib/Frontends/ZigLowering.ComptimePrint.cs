@@ -37,7 +37,7 @@ internal sealed partial class ZigLowering
         {
             throw new IrUnsupportedException($"std.fmt.comptimePrint takes a format and an argument tuple (got {argItems.Count} arguments)");
         }
-        var fmt = ComptimeByteText(argItems[0])
+        var fmt = AsByteString(TryEvalComptime(argItems[0], ComptimeTier.Lowering))
             ?? throw new IrUnsupportedException("std.fmt.comptimePrint: the format must be a comptime-known string");
         IReadOnlyList<Item> elems = argItems[1].Content switch
         {
@@ -82,7 +82,7 @@ internal sealed partial class ZigLowering
     /// (whose signedness is its type's, or a comptime_int's sign).</summary>
     private ComptimeFmtArg ComptimePrintArg(Item item, int index)
     {
-        if (ComptimeByteText(item) is { } text) { return new ComptimeFmtArg(text, null, false, null); }
+        if (AsByteString(TryEvalComptime(item, ComptimeTier.Lowering)) is { } text) { return new ComptimeFmtArg(text, null, false, null); }
         var lowered = LowerExpr(item);
         var folded = _ir.EvalComptimeValue(lowered);
         if (lowered is LitBool lb) { return new ComptimeFmtArg(null, null, false, lb.Value); }

@@ -119,7 +119,7 @@ internal sealed partial class ZigLowering
 
             // `inline for (cs) |c|` over a comptime STRING (std.fmt.parse_float's FloatStream.firstIsLower, a
             // `comptime cs: []const u8` seed): one copy per byte, the capture bound to that byte as a literal.
-            case { } when EvalComptimeValue(obj.Expr) is LitStr csv:
+            case { } when AsLitStr(TryEvalComptime(obj.Expr)) is LitStr csv:
             {
                 var bytes = DotCC.EmitHelpers.StringByteValues(csv.Segments).ToList();
                 return UnrollInlineFor(bytes.Count, capture, CType.UChar, body,

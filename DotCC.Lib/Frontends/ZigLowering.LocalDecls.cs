@@ -105,7 +105,7 @@ internal sealed partial class ZigLowering
         // comptime-only integer has no runtime type to hold it, so it folds and binds the literal.
         if (typeItem?.Content is Zig.Ident { Arg0: var ctTok } && Tok(ctTok) == "comptime_int")
         {
-            if (ComptimeIntValue(LowerExprSink(initExpr, CType.Long)) is not { } ctValue)
+            if (ComptimeLong(LowerExprSink(initExpr, CType.Long)) is not { } ctValue)
             {
                 throw new IrUnsupportedException(
                     $"zig `const {Tok(nameTok)}: comptime_int` must be initialized with a compile-time-known integer");
@@ -544,9 +544,9 @@ internal sealed partial class ZigLowering
         });
         if (declared is null && init is LitStr) { _stringLiteralSyms.Add(sym2); }
         NoteComptimeFloatConst(sym2, isConst, declared, init);
-        if (isConst && declared is null && init is LitStr && ComptimeByteText(initExpr) is { } constText) { _constStringLocals[sym2] = constText; }
+        if (isConst && declared is null && init is LitStr && AsByteString(TryEvalComptime(initExpr, ComptimeTier.Lowering)) is { } constText) { _constStringLocals[sym2] = constText; }
         // `const value = 42;` is a comptime_int in zig (the lowered local is an `int` carrier): an `anytype` it is
-        // passed to binds it as a comptime value (ComptimeIntArgValue).
+        // passed to binds it as a comptime value (ComptimeIntAnytypeArg).
         if (declared is null && isConst && folded is not null && initExpr.Content is Zig.IntLit) { _comptimeIntLocals.Add(sym2); }
         // A `comptime_int` const whose initializer is a CALL (std.sort.pdq's `const stack_size = math.log2(math.maxInt(usize) + 1);`)
         // does not fold here; an array extent that names it runs the call then (task #73, see ConstEvalArraySize). Only a

@@ -501,7 +501,7 @@ internal sealed partial class ZigLowering
                 // An `anytype` bound to a `comptime_int` (`log2(pos_max)` in std.math.IntFittingRange) is comptime:
                 // zig instantiates per VALUE, and `@TypeOf(x)` is `comptime_int`, so it is a value seed here.
                 // Evaluated ONCE: the argument may run a comptime call, which must not be lowered twice.
-                case ParamKind.AnyType when argScope.ComptimeIntArgValue128(argItems[i]) is { } ctIntArg:
+                case ParamKind.AnyType when argScope.ComptimeIntAnytypeArg(argItems[i]) is { } ctIntArg:
                     if (ctIntArg >= long.MinValue && ctIntArg <= long.MaxValue) { comptimeIntArgs[g.Params[i].Name] = (long)ctIntArg; }
                     else { wideComptimeIntArgs[g.Params[i].Name] = ctIntArg; }
                     anytypeSeeds.Add((g.Params[i].Name, CType.ComptimeInt));
@@ -612,7 +612,8 @@ internal sealed partial class ZigLowering
                         // as a comptime string, the way an `inline for` capture over field names is.
                         if (IsByteSliceOrArray(valueParamType))
                         {
-                            if (argScope.EvalComptimeStringArg(argItems[i]) is not { } str)
+                            if ((AsLitStr(argScope.TryEvalComptime(argItems[i]))
+                                 ?? (argItems[i].Content is Zig.PreAddrOf { Arg1.Content: Zig.AnonStructInit byteList } ? argScope.TryComptimeByteList(byteList.Arg2) : null)) is not { } str)
                             {
                                 throw new IrUnsupportedException(
                                     $"call to generic '{templateSym.Name}': the `comptime {g.Params[i].Name}` argument must be a "
@@ -661,7 +662,7 @@ internal sealed partial class ZigLowering
                             ? argScope.LowerExprSink(argItems[i], valueParamType)
                             : argScope.LowerExpr(argItems[i]);
                         // The interpreter's value too (a call such as std.math.nan's `mantissaOne(RuntimeType) | 1 << …`), as a
-                        // comptime_int argument's is read (ComptimeIntArgValue), within the 64 bits a seed carries.
+                        // comptime_int argument's is read (ComptimeIntAnytypeArg), within the 64 bits a seed carries.
                         if (ComptimeLong(argExpr) is not { } v)
                         {
                             // A comptime-only callee reached from a comptime-only body with an argument only the evaluation
@@ -950,21 +951,14 @@ internal sealed partial class ZigLowering
     }
 
     /// <summary>Each local <c>const</c> initialized by an untyped integer literal: a <c>comptime_int</c> in zig, lowered
-    /// on an <c>int</c> carrier (see <see cref="ComptimeIntArgValue"/>).</summary>
+    /// on an <c>int</c> carrier (see <see cref="ComptimeIntAnytypeArg"/>).</summary>
     private readonly HashSet<Symbol> _comptimeIntLocals = new();
-
-    /// <summary>The value of an argument whose zig type is <c>comptime_int</c>: an untyped integer literal, or
-    /// an expression of the <see cref="CType.ComptimeInt"/> type (a <c>comptime_int</c> parameter, a capture of
-    /// one, arithmetic over those), when it evaluates at compile time. Null for anything else, including a
-    /// value outside the 64-bit range comptime seeds carry today.</summary>
-    private long? ComptimeIntArgValue(Item argItem)
-        => ComptimeIntArgValue128(argItem) is { } v && v >= long.MinValue && v <= long.MaxValue ? (long)v : null;
 
     /// <summary>The comptime_int VALUE of an <c>anytype</c> argument (a literal, an untyped const, or a
     /// comptime_int-typed expression) at full 128-bit width, or null for any other argument.</summary>
-    private System.Int128? ComptimeIntArgValue128(Item argItem)
+    private System.Int128? ComptimeIntAnytypeArg(Item argItem)
     {
-        if (argItem.Content is Zig.Grouped g) { return ComptimeIntArgValue128(g.Arg1); }
+        if (argItem.Content is Zig.Grouped g) { return ComptimeIntAnytypeArg(g.Arg1); }
         using var _ = EnterThrowawayHoist();
         CExpr lowered;
         try { lowered = LowerExpr(argItem); }

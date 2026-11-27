@@ -126,7 +126,7 @@ internal sealed partial class ZigLowering
         // `@field(Target, @tagName(family))` (std.Target.Cpu.has's parameter type): a module member named by a
         // comptime string, on a module or on this file's own `@This()`.
         Zig.BuiltinCall { Arg2: not null } fb when Tok(fb.Arg0) == "@field" && Flatten(fb.Arg2) is { Count: 2 } fa
-                               && ComptimeName(fa[1]) is { } member
+                               && AsString(TryEvalComptime(fa[1])) is { } member
                                && FieldBaseModule(fa[0]) is { } baseModule =>
             baseModule.ResolveNamedModule(member),
         _ => null,
@@ -848,10 +848,6 @@ internal sealed partial class ZigLowering
     /// <summary>Lower a lazy module's top-level value const <paramref name="name"/> where it is read. An
     /// UNTYPED one takes <paramref name="useSink"/>, the reader's result type: `const default_alignment =
     /// .right;` in std.fmt is an enum literal that only its use can type.</summary>
-    /// <summary>The value of a <c>comptime_int</c> initializer. Comptime by definition, so a call in it runs
-    /// (<c>cacheLineForCpu(builtin.cpu)</c> in std.atomic), not only the call-free constant folding.</summary>
-    private long? ComptimeIntValue(CExpr init) => ComptimeLong(init);
-
     private CExpr? LowerLazyValueConst(string name, CType? useSink = null)
     {
         if (!_lazy) { return null; }
@@ -867,7 +863,7 @@ internal sealed partial class ZigLowering
             // comptime-only integer folds to its literal; it has no runtime type to lower.
             if (vc.typeItem?.Content is Zig.Ident { Arg0: var ctTok } && Tok(ctTok) == "comptime_int")
             {
-                return ComptimeIntValue(LowerExprSink(vc.rhs, CType.Long)) is { } ct
+                return ComptimeLong(LowerExprSink(vc.rhs, CType.Long)) is { } ct
                     ? new LitInt(ct.ToString(System.Globalization.CultureInfo.InvariantCulture), ct) { Type = CType.Long }
                     : throw new IrUnsupportedException($"zig `const {name}: comptime_int` must be compile-time-known");
             }

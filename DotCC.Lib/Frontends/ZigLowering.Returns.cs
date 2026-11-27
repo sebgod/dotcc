@@ -384,7 +384,7 @@ internal sealed partial class ZigLowering
         var lhs = LowerExpr(lhsItem);
         // An optional dotcc already folded to its compile-time VALUE (std.unicode's `std.simd.suggestVectorLength(u16) orelse
         // break :vectorized`, task #144): with no none path, the fallback never runs and the payload is that value.
-        if (!isCatch && lhs.Type.Unqualified is not (CType.Optional or CType.Pointer) && ComptimeIntValue(lhs) is { } knownPayload)
+        if (!isCatch && lhs.Type.Unqualified is not (CType.Optional or CType.Pointer) && ComptimeLong(lhs) is { } knownPayload)
         {
             var payloadLit = new LitInt(knownPayload.ToString(CultureInfo.InvariantCulture), knownPayload) { Type = lhs.Type };
             return bind is null ? new Seq(new List<CStmt>()) : bind(payloadLit);
@@ -405,7 +405,7 @@ internal sealed partial class ZigLowering
             {
                 return LowerFallbackArm(arm);
             }
-            if (knownOptional is not DefaultLit && ComptimeIntValue(knownOptional) is { } knownValue)
+            if (knownOptional is not DefaultLit && ComptimeLong(knownOptional) is { } knownValue)
             {
                 var payloadLit = new LitInt(knownValue.ToString(CultureInfo.InvariantCulture), knownValue) { Type = knownInner };
                 return bind is null ? new Seq(new List<CStmt>()) : bind(payloadLit);

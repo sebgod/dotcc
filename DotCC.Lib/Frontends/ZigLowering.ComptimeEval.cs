@@ -16,8 +16,7 @@ namespace DotCC.Frontends;
 // returned the raw source text of a string, another its decoded bytes, and the `++` fold and each comptime binding
 // map were resolved separately in each). TryEvalComptime is now the single reader of the binding maps
 // (_comptimeValues, _comptimeVars, _constStringLocals, _comptimeStringVars, _comptimeStrings, _ir.ComptimeGlobals),
-// and the string helpers (EvalComptimeValue, EvalComptimeStringArg, ComptimeStringArg, ComptimeName,
-// ComptimeByteText, ComptimeScalarOperand, IsComptimeStringRead) are projections over it.
+// and callers ask it plus an As* projection directly (the old one-line wrapper helpers are gone).
 //
 // A comptime string is the value IrModule gives a lowered string literal: a byte array, here viewed as a CtSlice
 // (so a window of it, `fmt[a..b]`, is the same shape). There is deliberately NO AsType projection: IrModule's value
@@ -82,7 +81,8 @@ internal sealed partial class ZigLowering
             // A byte-slice field of a comptime AGGREGATE the interpreter holds. Not a module-qualified constant in the
             // syntactic tier (see ComptimeTier): that folds at lowering time, in LowerExpr's Field case.
             case Zig.Field:
-                return TryComptimeAggregateString(item) is { } agg ? FromExpr(agg)
+                return TryEvalTypeInfoValue(item, tier) is { } info ? info
+                    : TryComptimeAggregateString(item) is { } agg ? FromExpr(agg)
                     : tier == ComptimeTier.Lowering ? EvalByLowering(item) : null;
             case Zig.CallArgs:
                 return tier == ComptimeTier.Lowering ? EvalByLowering(item) : null;
@@ -103,8 +103,28 @@ internal sealed partial class ZigLowering
         }
         if (_comptimeValues.TryGetValue(name, out var bound)) { return FromExpr(bound); }
         // Name-keyed and function-flat, so guarded on the name not being a real symbol.
-        return sym is null && _comptimeStrings.TryGetValue(name, out var text)
-            ? StringValue(Encoding.UTF8.GetBytes(text)) : null;
+        if (sym is null && _comptimeStrings.TryGetValue(name, out var text)) { return StringValue(Encoding.UTF8.GetBytes(text)); }
+        // A name bound to a comptime tag (`const signedness = @typeInfo(T).int.signedness;`): an enum literal.
+        return sym is null && _comptimeTagBindings.TryGetValue(name, out var tag) ? new IrModule.CtEnumLiteral(tag) : null;
+    }
+
+    /// <summary>A <c>@typeInfo</c> VALUE field (<c>bits</c>, <c>len</c>, <c>is_const</c>, <c>attrs.const</c>) as a comptime
+    /// value, through <see cref="TryFoldTypeInfoValue"/>. That fold raises a loud cut for a field it cannot recover; the
+    /// lowering tier lets it propagate, the syntactic (speculative) tier answers null. The typeInfo PAYLOAD stays in
+    /// <see cref="TryEvalTypeInfo"/>: a type is not a comptime value.</summary>
+    private IrModule.ComptimeValue? TryEvalTypeInfoValue(Item item, ComptimeTier tier)
+    {
+        try
+        {
+            using (EnterThrowawayHoist())
+            {
+                return TryFoldTypeInfoValue(item, out var folded) ? FromExpr(folded) : null;
+            }
+        }
+        catch (IrUnsupportedException) when (tier == ComptimeTier.Syntactic)
+        {
+            return null;
+        }
     }
 
     /// <summary><c>@typeName(T)</c> and <c>@tagName(x)</c> as comptime strings.</summary>
@@ -241,45 +261,12 @@ internal sealed partial class ZigLowering
     /// <summary>The name of a comptime enum literal (<c>.kw_if</c>), or null.</summary>
     private static string? AsTag(IrModule.ComptimeValue? v) => v is IrModule.CtEnumLiteral { Name: var n } ? n : null;
 
-    /// <summary>Evaluate an expression to a comptime value as an expression: a string as a literal, anything else spliced
-    /// back. A name bound in <see cref="_comptimeValues"/> yields the bound expression itself, whatever its kind.</summary>
-    private CExpr? EvalComptimeValue(Item item)
+    /// <summary>A comptime value spliced back as an expression: a string as a literal, anything else through
+    /// <see cref="IrModule.SpliceComptimeValue"/>. Null for a null value.</summary>
+    private CExpr? AsExpr(IrModule.ComptimeValue? v) => v switch
     {
-        while (item.Content is Zig.Grouped g) { item = g.Arg1; }
-        switch (item.Content)
-        {
-            case Zig.StrLit or Zig.IntLit:
-                return LowerExpr(item);
-            case Zig.Ident id:
-            {
-                var name = Tok(id.Arg0);
-                if (_symbols.Resolve(name) is { } sym && _comptimeStringVars.TryGetValue(sym, out var stringVar)) { return stringVar; }
-                if (_comptimeValues.TryGetValue(name, out var bound)) { return bound; }
-                break;
-            }
-        }
-        return TryEvalComptime(item) switch
-        {
-            null => null,
-            var v when AsBytes(v) is not null => AsLitStr(v),
-            var v => _ir.SpliceComptimeValue(v),
-        };
-    }
-
-    /// <summary>The comptime string a <c>comptime cs: []const u8</c> argument spells: any comptime string value, or
-    /// <c>&amp;.{ c0, c1 }</c> of comptime-known bytes (std.fmt.parse_float's <c>stream.firstIsLower(&amp;.{info.exp_char_lower})</c>).
-    /// The byte list is this caller's extra over the evaluator: elsewhere an anonymous list stays the tuple or array it is.</summary>
-    private LitStr? EvalComptimeStringArg(Item arg)
-        => AsLitStr(TryEvalComptime(arg))
-           ?? (arg.Content is Zig.PreAddrOf { Arg1.Content: Zig.AnonStructInit list } ? TryComptimeByteList(list.Arg2) : null);
-
-    /// <summary>A comptime string argument as a name (decoded bytes, read as UTF-8): a literal, a binding, a fold, a
-    /// member of a list. Null when the argument is not a comptime string.</summary>
-    private string? ComptimeStringArg(Item item) => AsString(TryEvalComptime(item, ComptimeTier.Lowering));
-
-    /// <summary>A comptime NAME: a comptime string or <c>@tagName(x)</c> of a comptime enum seed. Null otherwise.</summary>
-    private string? ComptimeName(Item item) => AsString(TryEvalComptime(item));
-
-    /// <summary>A comptime string as its bytes, one char per byte (see <see cref="AsByteString"/>).</summary>
-    private string? ComptimeByteText(Item item) => AsByteString(TryEvalComptime(item, ComptimeTier.Lowering));
+        null => null,
+        _ when AsBytes(v) is not null => AsLitStr(v),
+        _ => _ir.SpliceComptimeValue(v),
+    };
 }

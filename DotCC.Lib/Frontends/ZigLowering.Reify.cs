@@ -201,7 +201,7 @@ internal sealed partial class ZigLowering
         {
             throw new IrUnsupportedException($"zig `@FieldType`: {container.Describe()} is not a struct or union type");
         }
-        var name = ComptimeName(args[1]) ?? TryComptimeTagName(args[1])
+        var name = AsString(TryEvalComptime(args[1])) ?? TryComptimeTagName(args[1])
             ?? throw new IrUnsupportedException("zig `@FieldType`: the field name must be comptime-known");
         foreach (var agg in AggregatesOf(containerName))
         {
@@ -814,7 +814,7 @@ internal sealed partial class ZigLowering
                 return nameArgs.Count == 1 ? DiagnosticTypeName(nameArgs[0]) : null;
             }
             default:
-                return ComptimeStringArg(item);
+                return AsString(TryEvalComptime(item, ComptimeTier.Lowering));
         }
     }
 
