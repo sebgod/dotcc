@@ -1086,15 +1086,8 @@ internal sealed partial class ZigLowering
     /// caller then tries the array-literal fold or the loud cut.</summary>
     private LitStr? TryFoldStringConcat(Item leftItem, Item rightItem)
     {
-        if (EvalComptimeValue(leftItem) is LitStr ls && EvalComptimeValue(rightItem) is LitStr rs)
-        {
-            var segs = new List<string>(ls.Segments.Count + rs.Segments.Count);
-            segs.AddRange(ls.Segments);
-            segs.AddRange(rs.Segments);
-            DotCC.EmitHelpers.EncodeStringLiteral(segs, out var byteLen);
-            return new LitStr(segs) { Type = new CType.Array(CType.Char, byteLen) };
-        }
-        return null;
+        return AsBytes(TryEvalComptime(leftItem)) is { } left && AsBytes(TryEvalComptime(rightItem)) is { } right
+            ? AsLitStr(StringValue(left.Concat(right))) : null;
     }
 
     /// <summary>Lower a Zig comptime repeat <c>a ** n</c> with a comptime-integer count. V1 folds the
@@ -1134,44 +1127,6 @@ internal sealed partial class ZigLowering
             + "is lowered (road-to-zig-std S9); an untyped anon `.{…}` operand or a non-literal operand needs the fuller "
             + "comptime aggregate engine (S5–S6)");
     }
-
-    /// <summary>Evaluate an expression to a comptime VALUE, or null if it is not comptime-known in the
-    /// forms V1 handles (road-to-zig-std S5 seed). Today: a string literal (→ <see cref="LitStr"/>), an
-    /// integer literal (→ <see cref="LitInt"/>), a bare name bound to a comptime literal
-    /// (<see cref="_comptimeValues"/>), or a nested string <c>++</c>/<c>**</c> fold. Never throws — it
-    /// only lowers the pure literal forms and otherwise returns null, so it is safe to call
-    /// speculatively (incl. while recording a <c>const</c> binding in any pass). Consumed by the
-    /// <c>++</c>/<c>**</c> folds; the natural growth point as the comptime engine lands
-    /// (<c>@typeName</c>, aggregate values, comptime calls).</summary>
-    private CExpr? EvalComptimeValue(Item item) => item.Content switch
-    {
-        Zig.StrLit => LowerExpr(item),   // pure — → LitStr
-        Zig.IntLit => LowerExpr(item),   // pure — → LitInt (with a folded Value)
-        Zig.Ident id => _symbols.Resolve(Tok(id.Arg0)) is { } csym && _comptimeStringVars.TryGetValue(csym, out var csv)
-            ? csv
-            : _comptimeValues.GetValueOrDefault(Tok(id.Arg0)),
-        // `fmt[a..b]` / `fmt[a..]` over a comptime string with comptime bounds: the sub-string.
-        Zig.SliceRange sr => TrySliceComptimeString(sr.Arg0, sr.Arg2, sr.Arg4),
-        Zig.SliceOpen so => TrySliceComptimeString(so.Arg0, so.Arg2, null),
-        Zig.Grouped g => EvalComptimeValue(g.Arg1),   // `(expr)` — unwrap so a parenthesized fold composes
-        // `fmt[a..b].*` (a comptime slice deref'd to its array) and `&arr` of one (std.Io.Writer.print's
-        // `Placeholder.parse(&placeholder_array)`): the same bytes, still a comptime string.
-        Zig.Deref d => EvalComptimeValue(d.Arg0) as LitStr,
-        Zig.PreAddrOf a => EvalComptimeValue(a.Arg1) as LitStr,
-        Zig.Concat c => TryFoldStringConcat(c.Arg0, c.Arg2),
-        Zig.Repeat r => TryFoldStringRepeat(r.Arg0, r.Arg2),
-        Zig.BuiltinCall { Arg2: not null } b => TryEvalTypeNameBuiltin(b),   // `@typeName(T)` → comptime string (else null)
-        // A byte-slice field of a comptime AGGREGATE the interpreter holds (std.Io.Writer.print's
-        // `placeholder.specifier_arg`, a `const placeholder = comptime Placeholder.parse(…)`).
-        Zig.Field => TryComptimeAggregateString(item),
-        // NOT a module-qualified constant (`builtin.link_libc`), deliberately: this runs during pass 0
-        // of module PREPARATION, and resolving a module path from here would prepare the target module
-        // as a side effect of merely RECORDING a const — the eager fan-out S2's laziness exists to
-        // prevent ("std.zig's 66 re-exports don't fan out at prepare time"). A cross-module constant
-        // folds at LOWERING time instead, in the Field case of LowerExpr and in the comptime-condition
-        // fold, where resolving another module is exactly what is wanted (road-to-zig-std S3a).
-        _ => null,
-    };
 
     /// <summary><c>a or b</c> / <c>a and b</c> whose LEFT side is a settled comptime question: zig never analyses the
     /// right side when the left decides the result (std.math.cast's <c>(is_comptime or maxInt(@TypeOf(x)) &gt; …)</c>,
@@ -1239,33 +1194,6 @@ internal sealed partial class ZigLowering
     /// at lowering time (<see cref="TryAssignComptimeVar"/>) and substituted where it is read.</summary>
     private readonly Dictionary<Symbol, LitStr> _comptimeStringVars = new();
 
-    /// <summary>A comptime slice of a comptime string (<c>fmt[start..end]</c>), or null when the base is not
-    /// a comptime string or a bound does not fold. Built from the decoded bytes, each spelled <c>\xNN</c>.</summary>
-    private LitStr? TrySliceComptimeString(Item baseItem, Item loItem, Item? hiItem)
-    {
-        if (EvalComptimeValue(baseItem) is not LitStr str) { return null; }
-        var bytes = DotCC.EmitHelpers.StringByteValues(str.Segments);
-        long? lo, hi;
-        using (EnterThrowawayHoist())
-        {
-            lo = _ir.ConstEval(LowerUsizeOperand(loItem));
-            hi = hiItem is { } h ? _ir.ConstEval(LowerUsizeOperand(h)) : bytes.Count;
-        }
-        if (lo is not { } l || hi is not { } e || l < 0 || e > bytes.Count || l > e) { return null; }
-        return ComptimeStringFromBytes(bytes.Skip((int)l).Take((int)(e - l)));
-    }
-
-    /// <summary>A string literal holding exactly <paramref name="bytes"/>, each spelled as a <c>\xNN</c> escape
-    /// (so any byte round-trips through the shared C-string decoder), typed as its NUL-terminated array.</summary>
-    /// <summary>The comptime string an anonymous list of comptime-known bytes spells (<c>.{ 'e', info.exp_char_lower }</c>),
-    /// or null when an element is not positional or does not evaluate to a byte at compile time.</summary>
-    /// <summary>The comptime string a <c>comptime cs: []const u8</c> argument spells: any comptime string value, or
-    /// <c>&amp;.{ c0, c1 }</c> of comptime-known bytes (std.fmt.parse_float's <c>stream.firstIsLower(&amp;.{info.exp_char_lower})</c>).
-    /// Only at such a parameter: elsewhere an anonymous list stays the tuple or array it is.</summary>
-    private LitStr? EvalComptimeStringArg(Item arg)
-        => EvalComptimeValue(arg) as LitStr
-           ?? (arg.Content is Zig.PreAddrOf { Arg1.Content: Zig.AnonStructInit list } ? TryComptimeByteList(list.Arg2) : null);
-
     private LitStr? TryComptimeByteList(Item fieldInits)
     {
         var bytes = new List<int>();
@@ -1288,10 +1216,30 @@ internal sealed partial class ZigLowering
 
     private static LitStr ComptimeStringFromBytes(IEnumerable<int> bytes)
     {
+        // Printable ASCII is spelled as itself (an emitted program reads "foobar"); any other byte is a hex escape, and a
+        // raw character after one starts a new quoted segment, since a hex escape would swallow a following hex digit.
+        var segs = new List<string>();
         var sb = new System.Text.StringBuilder("\"");
-        foreach (var b in bytes) { sb.Append("\\x").Append(b.ToString("X2", System.Globalization.CultureInfo.InvariantCulture)); }
-        sb.Append('"');
-        var segs = new List<string> { sb.ToString() };
+        var afterEscape = false;
+        foreach (var b in bytes)
+        {
+            if (b is >= 0x20 and <= 0x7E && b != '"' && b != '\\')
+            {
+                if (afterEscape)
+                {
+                    segs.Add(sb.Append('"').ToString());
+                    sb.Clear().Append('"');
+                    afterEscape = false;
+                }
+                sb.Append((char)b);
+            }
+            else
+            {
+                sb.Append("\\x").Append(b.ToString("X2", System.Globalization.CultureInfo.InvariantCulture));
+                afterEscape = true;
+            }
+        }
+        segs.Add(sb.Append('"').ToString());
         DotCC.EmitHelpers.EncodeStringLiteral(segs, out var byteLen);
         return new LitStr(segs) { Type = new CType.Array(CType.Char, byteLen) };
     }
@@ -1306,24 +1254,6 @@ internal sealed partial class ZigLowering
         if (Tok(b.Arg0) != "@typeName") { return null; }
         var args = Flatten(b.Arg2);
         return args.Count == 1 && ZigTypeSpelling(args[0]) is { } spelling ? ZigStringLiteral(spelling) : null;
-    }
-
-    /// <summary>Fold <c>a ** n</c> when the operand is a comptime STRING value and the count a comptime
-    /// integer — the string-repeat counterpart of <see cref="TryFoldStringConcat"/>, used both by
-    /// <see cref="LowerRepeat"/> and by <see cref="EvalComptimeValue"/> (so a nested `s ** n` inside a
-    /// larger fold resolves). Returns null when the operand is not a comptime string or the count not a
-    /// valid comptime integer.</summary>
-    private LitStr? TryFoldStringRepeat(Item leftItem, Item countItem)
-    {
-        if (EvalComptimeValue(leftItem) is LitStr ls
-            && EvalComptimeValue(countItem) is LitInt { Value: { } n } && n >= 0 && n <= MaxRepeat)
-        {
-            var segs = new List<string>(ls.Segments.Count * (int)n);
-            for (var i = 0; i < n; i++) { segs.AddRange(ls.Segments); }
-            DotCC.EmitHelpers.EncodeStringLiteral(segs, out var byteLen);
-            return new LitStr(segs) { Type = new CType.Array(CType.Char, byteLen) };
-        }
-        return null;
     }
 
     /// <summary>Recognize an ARRAY-SHAPED operand of a comptime <c>++</c>/<c>**</c> fold and yield its

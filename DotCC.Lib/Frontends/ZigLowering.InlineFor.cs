@@ -373,38 +373,4 @@ internal sealed partial class ZigLowering
             _ => false,
         };
     }
-
-    /// <summary>Read a comptime STRING argument — a source string literal, or a name bound to one by
-    /// an <c>inline for</c> capture. This is what lets <c>@field(x, field_name)</c> and
-    /// <c>@hasField(T, field_name)</c> work INSIDE an unrolled loop, which is the whole point of
-    /// iterating <c>field_names</c>. Returns null when the argument is neither, so each caller keeps
-    /// its own "must be a comptime string" error.</summary>
-    private string? ComptimeStringArg(Item item)
-    {
-        switch (item.Content)
-        {
-            case Zig.Grouped g:
-                return ComptimeStringArg(g.Arg1);
-            case Zig.StrLit s:
-                return UnquoteStringLiteral(Tok(s.Arg0));
-            // A local `const` bound to a comptime string (std.enums.EnumSet.init's `const tag = @tagName(key);`).
-            case Zig.Ident cid when _symbols.Resolve(Tok(cid.Arg0)) is { } constSym
-                                    && _constStringLocals.TryGetValue(constSym, out var constText):
-                return constText;
-            case Zig.BuiltinCall { Arg2: not null } tb when Tok(tb.Arg0) == "@tagName" && Flatten(tb.Arg2) is [var tagged]:
-                return TryComptimeTagName(tagged);
-            // Guarded on the name NOT naming a real symbol, for the same reason every other
-            // name-keyed comptime lookup here is: the map is function-flat.
-            case Zig.Ident id when _symbols.Resolve(Tok(id.Arg0)) is null
-                                   && _comptimeStrings.TryGetValue(Tok(id.Arg0), out var text):
-                return text;
-            // A member list at a comptime index (std.Io.Writer.print's `@field(args, field_names[arg_to_print])`).
-            case Zig.Index ix when TryFoldTypeInfoList(ix.Arg0, out var names) && names.Strings is { } nameList:
-                return nameList[ComptimeListIndex(names, ix.Arg2)];
-            // Any other comptime string: a comptime const, a `++` fold.
-            default:
-                try { return ComptimeName(item); }
-                catch (IrUnsupportedException) { return null; }
-        }
-    }
 }
