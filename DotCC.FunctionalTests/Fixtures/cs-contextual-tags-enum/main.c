@@ -9,6 +9,7 @@ enum var { var_v = 5 };
 enum nint { nint_v = 6 };
 enum nuint { nuint_v = 7 };
 enum unmanaged { unmanaged_v = 8 };
+enum extension { extension_v = 9 };
 
 #define USE(T) { enum T e = T##_v; enum T *p = &e; total += (int)*p + (int)sizeof(enum T); }
 
@@ -23,6 +24,7 @@ int main(void)
     USE(nint)
     USE(nuint)
     USE(unmanaged)
+    USE(extension)
     printf("%d\n", total);
     return 0;
 }

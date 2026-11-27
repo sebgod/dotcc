@@ -13,6 +13,7 @@ struct var { int m; };
 struct nint { int m; };
 struct nuint { int m; };
 struct unmanaged { int m; };
+struct extension { int m; };
 
 #define USE(T, k) { struct T x; struct T *p = &x; p->m = k; total += x.m + (int)sizeof(struct T); }
 
@@ -27,6 +28,7 @@ int main(void)
     USE(nint, 6)
     USE(nuint, 7)
     USE(unmanaged, 8)
+    USE(extension, 9)
     printf("%d\n", total);
     return 0;
 }
