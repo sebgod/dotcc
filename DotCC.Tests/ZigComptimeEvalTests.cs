@@ -199,4 +199,38 @@ public sealed class ZigComptimeEvalTests
             """);
         cs.ShouldContain("abab");
     }
+
+    [Fact]
+    public void A_typeInfo_bits_read_is_an_Int_width_and_a_comptime_int()
+    {
+        var cs = EmitZig("""
+            fn widen(comptime T: type) type {
+                const bits = @typeInfo(T).int.bits;
+                return @Int(.unsigned, bits);
+            }
+            pub fn main() u8 {
+                const n = @typeInfo(u8).int.bits + 1;
+                var x: widen(u16) = 3;
+                _ = &x;
+                return @intCast(n);
+            }
+            """);
+        cs.ShouldNotBeNull();
+    }
+
+    [Fact]
+    public void A_bound_signedness_tag_compares_against_signed()
+    {
+        var cs = EmitZig("""
+            fn isSigned(comptime T: type) bool {
+                const s = @typeInfo(T).int.signedness;
+                return s == .signed;
+            }
+            pub fn main() u8 {
+                if (isSigned(i32) and !isSigned(u32)) { return 1; }
+                return 0;
+            }
+            """);
+        cs.ShouldNotBeNull();
+    }
 }

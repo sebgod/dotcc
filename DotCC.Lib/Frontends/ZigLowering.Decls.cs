@@ -2018,8 +2018,8 @@ internal sealed partial class ZigLowering
             // many-item pointer (std.bit_set's `masks: [*]MaskInt = empty_masks_ptr` with `empty_masks_ptr =
             // empty_masks_data[1..2]`, task #130): the slice's own pointer. Runtime bounds make a slice, which does not.
             case Zig.SliceRange psr when sink?.Unqualified is CType.Pointer
-                                        && ComptimeIntValue(LowerExpr(psr.Arg2)) is not null
-                                        && ComptimeIntValue(LowerExpr(psr.Arg4)) is not null
+                                        && ComptimeLong(LowerExpr(psr.Arg2)) is not null
+                                        && ComptimeLong(LowerExpr(psr.Arg4)) is not null
                                         && LowerExpr(expr) is { Type.Unqualified: CType.Slice { Element: var pse } } pslice:
                 return new Member(pslice, "Ptr", false) { Type = new CType.Pointer(pse) };
             // `try .initEmpty(a, n)` at a struct sink (std.bit_set.DynamicBitSet.initEmpty's `.unmanaged = try

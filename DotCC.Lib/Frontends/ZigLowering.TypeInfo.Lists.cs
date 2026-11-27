@@ -270,7 +270,7 @@ internal sealed partial class ZigLowering
         long? align = null;
         if (a.Align is { } alignItem)
         {
-            align = a.Owner.ComptimeIntValue(a.Owner.LowerExpr(alignItem))
+            align = a.Owner.ComptimeLong(a.Owner.LowerExpr(alignItem))
                 ?? throw new IrUnsupportedException(
                     $"the alignment of '{structName}.{fieldName}' is not a comptime-known integer");
         }
@@ -459,7 +459,7 @@ internal sealed partial class ZigLowering
         }
         // A string literal, or a name bound to one by an `inline for` capture (road-to-zig-std S6) —
         // `inline for (field_names) |f| { if (@hasField(T, f)) … }` is the shape this serves.
-        if (ComptimeStringArg(args[1]) is not { } member)
+        if (AsString(TryEvalComptime(args[1], ComptimeTier.Lowering)) is not { } member)
         {
             throw new IrUnsupportedException(
                 $"zig `{name}`: the member name must be a comptime string — a literal, or an `inline for` capture "
@@ -504,7 +504,7 @@ internal sealed partial class ZigLowering
         }
         // As for `@hasField`: a literal, or an `inline for` capture over `field_names` — which is
         // exactly the `inline for (field_names) |f| … @field(x, f) …` idiom S6 exists to serve.
-        if (ComptimeStringArg(bargs[1]) is not { } fieldName)
+        if (AsString(TryEvalComptime(bargs[1], ComptimeTier.Lowering)) is not { } fieldName)
         {
             throw new IrUnsupportedException(
                 "zig `@field`: the field name must be a comptime string — a literal, or an `inline for` capture "

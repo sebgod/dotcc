@@ -112,7 +112,7 @@ internal sealed partial class ZigLowering
         {
             return new ZigAggField(null, null, nested);
         }
-        if (EvalComptimeValue(value) is { } scalar) { return new ZigAggField(null, scalar, null); }
+        if (AsExpr(TryEvalComptime(value)) is { } scalar) { return new ZigAggField(null, scalar, null); }
         // `true` / `false` are the one shape the scalar folder does not carry (it handles ints and
         // strings), and `link_libc` / `single_threaded` are exactly that — 145 uses between them.
         return value.Content switch

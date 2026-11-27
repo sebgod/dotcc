@@ -400,7 +400,7 @@ internal sealed partial class ZigLowering
         // A comptime STRING var: `literal = literal ++ fmt[start..end];` folds to its new value.
         if (_comptimeStringVars.ContainsKey(sym))
         {
-            if (op is not null || EvalComptimeValue(valueItem) is not LitStr newStr)
+            if (op is not null || AsLitStr(TryEvalComptime(valueItem)) is not LitStr newStr)
             {
                 throw new IrUnsupportedException(
                     $"zig: `comptime var {sym.Name}` (a comptime string) can only be assigned a compile-time-known string");

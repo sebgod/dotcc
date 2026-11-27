@@ -695,7 +695,7 @@ internal sealed partial class ZigLowering
                 if (TryFoldTypeInfoListValue(expr, out var tiIdx)) { return tiIdx; }
                 // `fmt[i]` over a comptime STRING with a comptime index (std.Io.Writer.print's format scan)
                 // is that byte, a comptime value, so a `switch (fmt[i])` over it folds.
-                if (EvalComptimeValue(ix.Arg0) is LitStr cstr)
+                if (AsLitStr(TryEvalComptime(ix.Arg0)) is LitStr cstr)
                 {
                     CExpr ciExpr;
                     using (EnterThrowawayHoist()) { ciExpr = LowerUsizeOperand(ix.Arg2); }
@@ -1107,7 +1107,7 @@ internal sealed partial class ZigLowering
                 + " (a non-constant count needs the comptime aggregate engine, S5–S6)");
         }
         // String fold — the operand resolved to a comptime string value, segments repeated.
-        if (EvalComptimeValue(leftItem) is LitStr ls)
+        if (AsLitStr(TryEvalComptime(leftItem)) is LitStr ls)
         {
             var segs = new List<string>(ls.Segments.Count * (int)n);
             for (var i = 0; i < n; i++) { segs.AddRange(ls.Segments); }
