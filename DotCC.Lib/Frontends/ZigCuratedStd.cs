@@ -319,8 +319,31 @@ internal static class ZigCuratedStd
     /// <summary>The number of rows that are scaffolding: the burn-down count of #231 rule 2.</summary>
     public static int ScaffoldCount { get; } = Rows.Count(r => r.Kind == CuratedKind.Scaffold);
 
+    /// <summary>The number of rows that are platform floor (kept for good).</summary>
+    public static int PlatformFloorCount { get; } = Rows.Count(r => r.Kind == CuratedKind.PlatformFloor);
+
+    /// <summary>The report text of the burn-down (#231 rule 2): the <c>curated :</c> summary line (aligned with the
+    /// probe's <c>parse-clean :</c> and <c>failing     :</c> lines), then the ledger, i.e. scaffold rows grouped by
+    /// retirement condition. Conditions are ordered ordinally and the paths of a condition keep registration order, so the
+    /// text is stable. It reads static registry data only: no lowering runs.</summary>
+    public static string ReportText()
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.Append($"curated     : {Rows.Count} rows ({ScaffoldCount} scaffold, {PlatformFloorCount} platform floor)\n");
+        sb.Append('\n');
+        sb.Append("## Curated std ledger (scaffold rows by retirement condition)\n");
+        foreach (var group in Rows.Where(r => r.Kind == CuratedKind.Scaffold)
+                     .GroupBy(r => r.RetiresWith, StringComparer.Ordinal)
+                     .OrderBy(g => g.Key, StringComparer.Ordinal))
+        {
+            sb.Append($"{group.Key} ({group.Count()})\n");
+            foreach (var row in group) { sb.Append($"  {row.Path}\n"); }
+        }
+        return sb.ToString();
+    }
+
     /// <summary>The row for <paramref name="path"/>, or null.</summary>
-    public static CuratedStdEntry? Find(string path) => ByPath.GetValueOrDefault(path);
+    public static CuratedStdEntry? Find(string path) =>ByPath.GetValueOrDefault(path);
 
     /// <summary>The row for <paramref name="path"/> when it has shape <paramref name="shape"/>, or null.</summary>
     public static CuratedStdEntry? Find(string path, CuratedShape shape)

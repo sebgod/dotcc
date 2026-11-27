@@ -123,4 +123,34 @@ public sealed partial class ZigCuratedStdRegistryTests
         ZigCuratedStd.Find("std.ArrayList.empty", CuratedShape.DeclLiteral).ShouldNotBeNull();
         ZigCuratedStd.IsOwnedPath("std.ArrayList.append").ShouldBeFalse();
     }
+
+    /// <summary>The report text (#233): the summary line's format, its counts equal to the table's, and the ledger listing
+    /// every scaffold row once under its retirement condition.</summary>
+    [Fact]
+    public void ReportText_summary_line_and_ledger_match_the_table()
+    {
+        var text = ZigCuratedStd.ReportText();
+        var rows = ZigCuratedStd.Rows;
+        var scaffold = rows.Count(r => r.Kind == CuratedKind.Scaffold);
+        var floor = rows.Count(r => r.Kind == CuratedKind.PlatformFloor);
+
+        var match = Regex.Match(text, @"^curated     : (\d+) rows \((\d+) scaffold, (\d+) platform floor\)$", RegexOptions.Multiline);
+        match.Success.ShouldBeTrue(text);
+        int.Parse(match.Groups[1].Value).ShouldBe(rows.Count);
+        int.Parse(match.Groups[2].Value).ShouldBe(scaffold);
+        int.Parse(match.Groups[3].Value).ShouldBe(floor);
+        (scaffold + floor).ShouldBe(rows.Count);
+        ZigCuratedStd.ScaffoldCount.ShouldBe(scaffold);
+
+        var ledger = text[text.IndexOf("## Curated std ledger (scaffold rows by retirement condition)", StringComparison.Ordinal)..];
+        foreach (var row in rows)
+        {
+            var listed = Regex.Count(ledger, "^  " + Regex.Escape(row.Path) + "$", RegexOptions.Multiline);
+            listed.ShouldBe(row.Kind == CuratedKind.Scaffold ? 1 : 0, row.Path);
+        }
+        foreach (var condition in rows.Where(r => r.Kind == CuratedKind.Scaffold).Select(r => r.RetiresWith).Distinct())
+        {
+            ledger.ShouldContain(condition);
+        }
+    }
 }

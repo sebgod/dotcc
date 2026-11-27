@@ -1,12 +1,95 @@
 # dotcc Zig-std parse-probe (road-to-zig-std.md S0)
-generated: 2026-11-18T11:17:59Z (UTC)
+generated: 2026-11-27T19:25:28Z (UTC)
 std dir : C:/Users/SebastianGodelet/AppData/Local/Programs/Zig/lib\std  (found via DOTCC_ZIG_LIB_DIR=<lib>/std)
 grammar : DotCC.Lib/zig.lalr.yaml
 files   : 553
 parse-clean : 553 (100.0%)
 failing     : 0
+curated     : 72 rows (69 scaffold, 3 platform floor)
 
 ## Parse-failure buckets (ranked by file count) — the S9 worklist
 count  signature
 
 ## Failing files
+
+## Curated std ledger (scaffold rows by retirement condition)
+G2 / #172: compiles from std's heap/FixedBufferAllocator.zig (3)
+  std.heap.FixedBufferAllocator
+  std.heap.FixedBufferAllocator.init
+  std.heap.FixedBufferAllocator.allocator
+G2 / #172: compiles from std's heap/arena_allocator.zig (4)
+  std.heap.ArenaAllocator
+  std.heap.ArenaAllocator.init
+  std.heap.ArenaAllocator.allocator
+  std.heap.ArenaAllocator.deinit
+G2 / #172: compiles from std's mem/Alignment.zig (7)
+  std.mem.Alignment
+  std.mem.Alignment.toByteUnits
+  std.mem.Alignment.forward
+  std.mem.Alignment.backward
+  std.mem.Alignment.check
+  std.mem.Alignment.fromByteUnits
+  std.mem.Alignment.of
+G2 / #172: compiles from std's mem/Allocator.zig with the interface (1)
+  std.mem.Allocator.VTable
+G2 / #172: std.mem compiles from source; the byte views also wait on `@Pointer` / CopyPtrAttrs reification (no issue yet) (10)
+  std.mem.eql
+  std.mem.copyForwards
+  std.mem.span
+  std.mem.zeroes
+  std.mem.asBytes
+  std.mem.sliceAsBytes
+  std.mem.bytesAsValue
+  std.mem.bytesToValue
+  std.mem.bytesAsSlice
+  std.mem.sliceTo
+G2 / #172: the allocator interface compiles from std's mem/Allocator.zig (1)
+  std.mem.Allocator
+G2 / #172: the allocator interface compiles from std's mem/Allocator.zig; its methods go with the curated type (15)
+  std.mem.Allocator.alloc
+  std.mem.Allocator.alignedAlloc
+  std.mem.Allocator.dupe
+  std.mem.Allocator.dupeSentinel
+  std.mem.Allocator.allocSentinel
+  std.mem.Allocator.free
+  std.mem.Allocator.create
+  std.mem.Allocator.destroy
+  std.mem.Allocator.realloc
+  std.mem.Allocator.resize
+  std.mem.Allocator.remap
+  std.mem.Allocator.rawAlloc
+  std.mem.Allocator.rawResize
+  std.mem.Allocator.rawRemap
+  std.mem.Allocator.rawFree
+G3 / #172: std.fmt runs at comptime from source (needs the comptime evaluator of #232) (1)
+  std.fmt.comptimePrint
+G3 / #172: std.testing compiles from source over the real std.fmt (5)
+  std.testing.expect
+  std.testing.expectEqual
+  std.testing.expectError
+  std.testing.expectEqualStrings
+  std.testing.expectEqualSlices
+G4 / #172: std.ArrayList compiles from source; its members go with the curated type (21)
+  std.ArrayList.append
+  std.ArrayList.appendSlice
+  std.ArrayList.pop
+  std.ArrayList.deinit
+  std.ArrayList.clearRetainingCapacity
+  std.ArrayList.insert
+  std.ArrayList.insertSlice
+  std.ArrayList.appendNTimes
+  std.ArrayList.appendNTimesAssumeCapacity
+  std.ArrayList.replaceRange
+  std.ArrayList.replaceRangeAssumeCapacity
+  std.ArrayList.orderedRemove
+  std.ArrayList.swapRemove
+  std.ArrayList.getLast
+  std.ArrayList.ensureTotalCapacity
+  std.ArrayList.ensureUnusedCapacity
+  std.ArrayList.appendAssumeCapacity
+  std.ArrayList.shrinkRetainingCapacity
+  std.ArrayList.items
+  std.ArrayList.capacity
+  std.ArrayList.empty
+G4 / #172: std.ArrayList compiles from source; may stay a fast path only with a differential test against it (1)
+  std.ArrayList

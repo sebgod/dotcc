@@ -1369,6 +1369,12 @@ Each goal = compile a real upstream std slice from source, validate against the
 zig oracle differentially, and demote the corresponding curated path to a
 peephole (or delete it):
 
+**The burn-down metric (#231 rules 2 and 3, #233).** Every curated std path is a row of the registry
+(`DotCC.Lib/Frontends/ZigCuratedStd.cs`) with its kind (platform floor or scaffold) and the condition that retires it.
+The std probe report prints `curated : N rows (S scaffold, F platform floor)` next to parse coverage, then the ledger:
+scaffold rows grouped by retirement condition. A G-goal is done when its ledger group is empty. On 2026-11-27 the
+count is 72 rows, 69 scaffold and 3 platform floor; the scaffold count must only fall, and a new row must be platform floor.
+
 - **G1 `std.ascii`** (pure leaf, minimal comptime) — the first whole-module
   compile. Needs S1–S3 + a few S9 bricks. Success = a fixture calling
   `std.ascii.toUpper`/`isDigit` from SOURCE, oracle-identical.
