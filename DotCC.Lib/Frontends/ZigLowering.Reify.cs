@@ -793,8 +793,8 @@ internal sealed partial class ZigLowering
     /// tells the reader the program deliberately rejected this instantiation.</summary>
     private const string UnreadableMessage = "(the message is not a comptime-readable string here)";
 
-    /// <summary>Read a comptime message string as PLAIN text. The literal and captured-name cases are
-    /// <see cref="ComptimeStringArg"/>'s; this adds the two shapes a diagnostic message is actually
+    /// <summary>Read a comptime message string as PLAIN text. Anything <see cref="TryEvalComptime"/> reads
+    /// as a string is answered by it; this walks the two shapes it cannot, and so is not a one-line projection: it adds the two shapes a diagnostic message is actually
     /// built from — <c>"prefix " ++ x</c> concatenation and <c>@typeName(T)</c> — so the type that
     /// failed appears in the error the way the author wrote it. Null when some part is not readable,
     /// so the caller substitutes rather than throws a second, less useful error.</summary>
