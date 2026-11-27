@@ -46,8 +46,6 @@ public sealed class ErrnoDeclarationTests
         cs.ShouldContain("errno = 0;");
         cs.ShouldContain("return errno;");
         cs.ShouldNotContain("extern int errno");
-        // The program's own part declares nothing for it (the runtime's property is the only errno).
-        cs.ShouldNotContain("extern int errno");
         cs.ShouldNotContain("DotCcGlobals.errno");
     }
 
@@ -58,6 +56,18 @@ public sealed class ErrnoDeclarationTests
         cs.ShouldContain("errno = 3;");
     }
 
+    /// <summary>The errno slot's address: the constant a bare read of errno loads from.</summary>
+    private static string ErrnoSlot()
+    {
+        var wat = Wat("#include <errno.h>\nint main(void) { return errno; }\n");
+        var m = System.Text.RegularExpressions.Regex.Match(wat, @"i32\.const (\d+)\s+i32\.load");
+        m.Success.ShouldBeTrue(wat);
+        return m.Groups[1].Value;
+    }
+
+    private static int Uses(string wat, string addr) =>
+        System.Text.RegularExpressions.Regex.Matches(wat, @"i32\.const " + addr + @"\b").Count;
+
     [Theory]
     [InlineData("int main(void) { return errno; }")]
     [InlineData("int main(void) { errno = 5; return 0; }")]
@@ -66,19 +76,25 @@ public sealed class ErrnoDeclarationTests
     [InlineData("int main(void) { int *p = &errno; *p = 1; return 0; }")]
     public void The_wat_emit_uses_the_errno_slot(string body)
     {
+        var addr = ErrnoSlot();
         var wat = Wat("#include <errno.h>\n" + body + "\n");
-        wat.ShouldContain("i32.const");
-        wat.ShouldContain("(func $main");
+        Uses(wat, addr).ShouldBeGreaterThanOrEqualTo(1, wat);
     }
 
     [Fact]
     public void The_wat_emit_addresses_one_slot_for_every_use()
     {
-        var wat = Wat("#include <errno.h>\nint main(void) { errno = 1; errno += 2; int *p = &errno; return errno + *p; }\n");
-        // One data slot: the same address constant is pushed by the store, the compound
-        // assignment, the address-of and the read.
-        var addr = System.Text.RegularExpressions.Regex.Matches(wat, @"i32\.const (\d+)")
-            .Select(m => m.Groups[1].Value).GroupBy(v => v).OrderByDescending(g => g.Count()).First();
-        addr.Count().ShouldBeGreaterThanOrEqualTo(4);
+        var addr = ErrnoSlot();
+        // store, compound assignment, ++, address-of and read: five uses of one slot
+        var wat = Wat("#include <errno.h>\nint main(void) { errno = 1; errno += 2; errno++; int *p = &errno; return errno + *p; }\n");
+        Uses(wat, addr).ShouldBeGreaterThanOrEqualTo(5, wat);
+    }
+
+    [Fact]
+    public void A_program_that_defines_its_own_errno_does_not_use_the_slot()
+    {
+        var addr = ErrnoSlot();
+        var wat = Wat("#include <errno.h>\nint errno;\nint main(void) { errno = 3; return errno; }\n");
+        Uses(wat, addr).ShouldBe(0, wat);
     }
 }
