@@ -83,6 +83,31 @@ public sealed class UndeclaredIdentifierTests
         Emit("#include <errno.h>\nint main(void) { return errno; }\n").ShouldContain("errno");
     }
 
+    /// <summary>The standard streams are declared by <c>&lt;stdio.h&gt;</c> on the C# target too
+    /// (they used to be declared for wat only, and the C# build relied on the unresolved-name
+    /// fallthrough, which broke Lua, chibi-scheme and the Goose samples).</summary>
+    [Fact]
+    public void The_standard_streams_need_stdio()
+    {
+        Message("int main(void) { return stderr != 0; }\n").ShouldContain("'stderr' undeclared");
+        var cs = Emit("#include <stdio.h>\nstatic FILE *s[3];\nint main(void) { s[0] = stdin; s[1] = stdout; s[2] = stderr; fprintf(stderr, \"x\\n\"); return 0; }\n");
+        cs.ShouldContain("s[0] = stdin;");
+        cs.ShouldContain("s[2] = stderr;");
+    }
+
+    /// <summary><c>&lt;math.h&gt;</c> declares <c>INFINITY</c>, <c>NAN</c>, <c>HUGE_VAL</c> and
+    /// <c>HUGE_VALF</c> for the C# target, typed as the runtime's CMath statics, including in a
+    /// file-scope initializer (chibi-scheme's sexp.c has one).</summary>
+    [Fact]
+    public void The_math_constants_need_math_h()
+    {
+        Message("int main(void) { double d = INFINITY; return d > 0; }\n").ShouldContain("'INFINITY' undeclared");
+        var cs = Emit("#include <math.h>\nstatic const double t[] = {INFINITY, NAN, HUGE_VAL};\n"
+            + "int main(void) { float f = HUGE_VALF; double d = NAN; return (f > 0) + isnan(d) + (t[0] > 0); }\n");
+        cs.ShouldContain("float f = HUGE_VALF;");
+        cs.ShouldContain("double d = NAN;");
+    }
+
     [Fact]
     public void Pre_c23_true_needs_stdbool()
     {
