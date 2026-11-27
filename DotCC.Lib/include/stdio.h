@@ -55,13 +55,12 @@ typedef long off_t;
 #define _IOLBF 1
 #define _IONBF 2
 
-/* The standard streams. On the wat target (__wasm__) they are the objects its libc defines;
-   for C# they resolve to Libc's, through `using static Libc;`. */
-#ifdef __wasm__
+/* The standard streams, declared on every target so a use binds to a declared symbol. On the
+   wat target (__wasm__) they are the objects its libc defines; the C# build prints the bare
+   name, which `using static Libc;` binds to Libc's properties. */
 extern FILE *const stdin;
 extern FILE *const stdout;
 extern FILE *const stderr;
-#endif
 
 /* Formatted output (to stdout / a buffer). */
 int printf(const char* fmt, ...);

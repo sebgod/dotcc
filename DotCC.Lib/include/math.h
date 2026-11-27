@@ -18,8 +18,8 @@
 #define M_LN2   0.6931471805599453
 #define M_LN10  2.302585092994046
 
-/* INFINITY, NAN and HUGE_VAL. For C# they resolve to CMath's statics through `using static`;
-   the wat target (__wasm__) has no runtime class to resolve them, so they are the constant
+/* INFINITY, NAN and HUGE_VAL. For C# they are declared objects whose bare names resolve to
+   CMath's statics through `using static` (typed as CMath types them); the wat target (__wasm__) has no runtime class to resolve them, so they are the constant
    expressions musl spells them as. */
 #ifdef __wasm__
 #define INFINITY  (1e5000f)
@@ -27,6 +27,11 @@
 #define HUGE_VALF INFINITY
 #define HUGE_VAL  ((double)INFINITY)
 #define HUGE_VALL ((long double)INFINITY)
+#else
+extern const double INFINITY;
+extern const double NAN;
+extern const double HUGE_VAL;
+extern const float HUGE_VALF;
 #endif
 
 /* Trigonometric. */
