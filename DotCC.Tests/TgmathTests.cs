@@ -95,7 +95,7 @@ public sealed class TgmathTests
     [Fact]
     public void Call_is_typed_from_the_selected_prototype()
     {
-        EmitMain("int a = sizeof(sqrt(1.0f));").ShouldContain("int a = 4;");
+        EmitMain("int a = sizeof(sqrt(1.0f));").ShouldContain("sizeof(float)");
         EmitMain("int a = _Generic(sqrt(1), double: 1, default: 0);").ShouldContain("int a = 1;");
         EmitMain("int a = _Generic(sqrt(1.0f), float: 1, default: 0);").ShouldContain("int a = 1;");
         EmitMain("int a = _Generic(pow(1.0f, 2), double: 1, default: 0);").ShouldContain("int a = 1;");
