@@ -13,6 +13,7 @@
 #define POLLOUT 0x004
 #define POLLERR 0x008
 #define POLLHUP 0x010
+#define POLLNVAL 0x020
 
 typedef unsigned long nfds_t;
 

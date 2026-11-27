@@ -96,7 +96,7 @@ public sealed class UndeclaredIdentifierTests
     }
 
     /// <summary><c>&lt;math.h&gt;</c> declares <c>INFINITY</c>, <c>NAN</c>, <c>HUGE_VAL</c> and
-    /// <c>HUGE_VALF</c> for the C# target, typed as the runtime's CMath statics, including in a
+    /// <c>HUGE_VALF</c> for the C# target, typed as the runtime's Libc statics, including in a
     /// file-scope initializer (chibi-scheme's sexp.c has one).</summary>
     [Fact]
     public void The_math_constants_need_math_h()
