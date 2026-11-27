@@ -113,7 +113,9 @@ internal static class ZigCuratedStd
     private const string MemRetire = "G2 / #172: std.mem compiles from source; the byte views also wait on `@Pointer` / CopyPtrAttrs reification (no issue yet)";
     private const string FloorRetire = "S8 / #167: platform floor, redirected to the BCL for good";
 
-    /// <summary>All rows, in registration order.</summary>
+    /// <summary>All rows, in registration order. Static initializers run in textual order, and every derived table below
+    /// (<c>ListPath</c>, <c>AllocatorPath</c>, <c>NamedPaths</c>, <c>ByPath</c>, the counts) reads this one: keep it the
+    /// first static field, and declare any new derived table after it.</summary>
     public static IReadOnlyList<CuratedStdEntry> Rows { get; } =
     [
         new("std.mem.Allocator", CuratedShape.Type, CuratedKind.Scaffold,
@@ -322,6 +324,44 @@ internal static class ZigCuratedStd
     /// <summary>The number of rows that are platform floor (kept for good).</summary>
     public static int PlatformFloorCount { get; } = Rows.Count(r => r.Kind == CuratedKind.PlatformFloor);
 
+    private static readonly System.Text.RegularExpressions.Regex GoalOrIssue =
+        new(@"\b(G[1-5]|S8)\b|#\d+", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    private static readonly System.Text.RegularExpressions.Regex FloorCondition =
+        new(@"\bS8\b|#167", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    private static readonly System.Text.RegularExpressions.Regex ScaffoldCondition =
+        new(@"\bG[1-5]\b|#\d+", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    /// <summary>The problems with <paramref name="rows"/>: a blank or uncited retirement condition, a kind that cites the
+    /// wrong thing (a scaffold cites a G-goal or an issue, a platform floor cites S8 or #167), a duplicate path. The rule
+    /// of #231 lives here with the table, so a tool or the tests can run it; empty means the table is sound.</summary>
+    public static List<string> Validate(IEnumerable<CuratedStdEntry> rows)
+    {
+        var problems = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var row in rows)
+        {
+            if (!seen.Add(row.Path)) { problems.Add($"{row.Path}: duplicate path"); }
+            if (!Enum.IsDefined(row.Kind)) { problems.Add($"{row.Path}: no kind"); }
+            if (string.IsNullOrWhiteSpace(row.RetiresWith))
+            {
+                problems.Add($"{row.Path}: no retirement condition");
+                continue;
+            }
+            if (!GoalOrIssue.IsMatch(row.RetiresWith)) { problems.Add($"{row.Path}: the retirement condition cites no G1-G5, S8 or issue"); }
+            if (row.Kind == CuratedKind.PlatformFloor && !FloorCondition.IsMatch(row.RetiresWith))
+            {
+                problems.Add($"{row.Path}: a platform floor row cites S8 or #167");
+            }
+            if (row.Kind == CuratedKind.Scaffold && !ScaffoldCondition.IsMatch(row.RetiresWith))
+            {
+                problems.Add($"{row.Path}: a scaffold row cites a G-goal or an issue");
+            }
+        }
+        return problems;
+    }
+
     /// <summary>The report text of the burn-down (#231 rule 2): the <c>curated :</c> summary line (aligned with the
     /// probe's <c>parse-clean :</c> and <c>failing     :</c> lines), then the ledger, i.e. scaffold rows grouped by
     /// retirement condition. Conditions are ordered ordinally and the paths of a condition keep registration order, so the
@@ -343,7 +383,7 @@ internal static class ZigCuratedStd
     }
 
     /// <summary>The row for <paramref name="path"/>, or null.</summary>
-    public static CuratedStdEntry? Find(string path) =>ByPath.GetValueOrDefault(path);
+    public static CuratedStdEntry? Find(string path) => ByPath.GetValueOrDefault(path);
 
     /// <summary>The row for <paramref name="path"/> when it has shape <paramref name="shape"/>, or null.</summary>
     public static CuratedStdEntry? Find(string path, CuratedShape shape)

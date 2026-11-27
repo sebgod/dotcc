@@ -13,35 +13,7 @@ namespace DotCC.Tests;
 /// test is shown to bite.</summary>
 public sealed partial class ZigCuratedStdRegistryTests
 {
-    private static readonly Regex GoalOrIssue = new(@"\b(G[1-5]|S8)\b|#\d+", RegexOptions.CultureInvariant);
-
-    /// <summary>The problems with <paramref name="rows"/>: a blank or uncited retirement condition, a kind that cites the
-    /// wrong thing (a scaffold cites a G-goal or an issue, a platform floor cites S8 or #167), a duplicate path.</summary>
-    private static List<string> Validate(IEnumerable<CuratedStdEntry> rows)
-    {
-        var problems = new List<string>();
-        var seen = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var row in rows)
-        {
-            if (!seen.Add(row.Path)) { problems.Add($"{row.Path}: duplicate path"); }
-            if (!Enum.IsDefined(row.Kind)) { problems.Add($"{row.Path}: no kind"); }
-            if (string.IsNullOrWhiteSpace(row.RetiresWith))
-            {
-                problems.Add($"{row.Path}: no retirement condition");
-                continue;
-            }
-            if (!GoalOrIssue.IsMatch(row.RetiresWith)) { problems.Add($"{row.Path}: the retirement condition cites no G1-G5, S8 or issue"); }
-            if (row.Kind == CuratedKind.PlatformFloor && !Regex.IsMatch(row.RetiresWith, @"\bS8\b|#167"))
-            {
-                problems.Add($"{row.Path}: a platform floor row cites S8 or #167");
-            }
-            if (row.Kind == CuratedKind.Scaffold && !Regex.IsMatch(row.RetiresWith, @"\bG[1-5]\b|#\d+"))
-            {
-                problems.Add($"{row.Path}: a scaffold row cites a G-goal or an issue");
-            }
-        }
-        return problems;
-    }
+    private static List<string> Validate(IEnumerable<CuratedStdEntry> rows) => ZigCuratedStd.Validate(rows);
 
     /// <summary>The real table passes the validation.</summary>
     [Fact]
