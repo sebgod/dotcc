@@ -46,6 +46,7 @@ public static partial class Compiler
         }
         foreach (var name in ir.ExternDataReferenced)
         {
+            if (ir.ExternDataFromSystemHeader.Contains(name)) { continue; }
             Diagnostics.WriteLine(
                 $"dotcc: warning: extern data import '{name}' is not supported (import mode binds functions only)");
         }

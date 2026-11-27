@@ -82,6 +82,15 @@ public sealed class ImportModeTests
     // ---- dynamic import: GOT-style fn-ptr table ---------------------------
 
     [Fact]
+    public void errno_from_the_builtin_header_is_not_an_unsupported_data_import()
+    {
+        var (_, stderr) = EmitWithImports(
+            "#include <errno.h>\nint main(void){ errno = 0; return errno; }",
+            Dynamic("blobby"));
+        stderr.ShouldNotContain("extern data import");
+    }
+
+    [Fact]
     public void dynamic_import_emits_native_fnptr_field_and_binding()
     {
         var (emit, _) = EmitWithImports(

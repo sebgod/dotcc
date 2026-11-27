@@ -2336,6 +2336,13 @@ internal sealed partial class WatBackend
         }
     }
 
+    /// <summary>True for a reference to <c>errno</c>: the file-scope <c>extern int errno;</c> that
+    /// dotcc's &lt;errno.h&gt; declares and no unit defines. It has no global slot (a program's own
+    /// <c>int errno</c> is a defined object and is not matched); <see cref="EmitErrnoAddr"/> gives
+    /// it its own.</summary>
+    private static bool IsErrno(CExpr e) =>
+        e is VarRef { Sym: { Name: "errno", Kind: SymKind.Var, Storage: Storage.Extern, IsGlobal: true } };
+
     /// <summary>The address of <c>errno</c>'s slot, placed in the data area on first use.</summary>
     private int ErrnoAddr()
     {
@@ -2762,6 +2769,10 @@ internal sealed partial class WatBackend
             case EnumConstRef ec:
                 Line($"{ValType(e.Type)}.const {ec.Sym.ConstValue}");
                 break;
+            case VarRef when IsErrno(e):
+                EmitErrnoAddr();
+                Line("i32.load");
+                break;
             case VarRef v:
                 EmitVarRead(v);
                 break;
@@ -2834,10 +2845,6 @@ internal sealed partial class WatBackend
                 break;
             case LitU32Str u32:
                 Line($"i32.const {InternUnits(DotCC.EmitHelpers.StringU32Values(u32.Segments), 4)}");
-                break;
-            case NameRef { RawName: "errno" }:
-                EmitErrnoAddr();
-                Line("i32.load");
                 break;
             case DefaultLit when !IsAddressValued(e.Type):
                 // C23 `{}` of a scalar: its zero.
@@ -3175,7 +3182,7 @@ internal sealed partial class WatBackend
         }
 
         // Memory lvalue: a frame-resident variable, *p, a[i], or s.f / p->f.
-        if (a.Target is not (VarRef or Index or Member or Unary { Op: UnOp.Deref } or NameRef { RawName: "errno" }))
+        if (a.Target is not (VarRef or Index or Member or Unary { Op: UnOp.Deref }))
         {
             throw new IrUnsupportedException($"the wat target cannot assign to {a.Target.GetType().Name}");
         }
@@ -3922,14 +3929,14 @@ internal sealed partial class WatBackend
             case Paren p:
                 EmitAddress(p.Inner);
                 break;
+            case VarRef when IsErrno(lv):
+                EmitErrnoAddr();
+                break;
             case VarRef { Sym.Kind: SymKind.Func } fn:
                 Line($"i32.const {TableIndex(fn.Sym)}");
                 break;
             case VarRef { Sym.IsGlobal: true } g:
                 EmitGlobalAddr(g.Sym);
-                break;
-            case NameRef { RawName: "errno" }:
-                EmitErrnoAddr();
                 break;
             case Cast scalar when !IsAggregate(scalar.Type) && _literalSlots.TryGetValue(scalar, out var scalarSlot):
                 // A scalar compound literal: its value, stored in its slot, which is the address.
