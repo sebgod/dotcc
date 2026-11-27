@@ -13,6 +13,7 @@
     int *: "int *", default: "other")
 
 #define my_sqrt(x) _Generic((x), float: sqrtf(x), default: sqrt(x))
+#define my_cbrt(X) _Generic((X), float: cbrtf, default: cbrt)(X)
 
 int main(void) {
     int i = 0; double d = 0; float f = 0; long l = 0; unsigned u = 0;
@@ -20,6 +21,8 @@ int main(void) {
     printf("%s %s %s %s %s %s %s %s\n", typename(i), typename(d), typename(f),
            typename(l), typename(u), typename(p), typename("str"), typename(i + d));
     printf("%.1f %.1f\n", (double)my_sqrt(9.0f), my_sqrt(16.0));
+    printf("%.1f %.1f %.1f
+", (double)my_cbrt(27.0f), my_cbrt(64.0), my_cbrt(8));
     int arr[3] = {1, 2, 3};
     printf("decay=%d qual=%d\n", _Generic(arr, int *: 1, default: 0),
            _Generic((const int){5}, int: 1, default: 0));

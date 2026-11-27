@@ -1818,7 +1818,20 @@ internal sealed partial class IrBuilder
     /// an enum-typed controlling expression falls back to its integer backing when
     /// no association names the enum itself (C leaves the compatible integer type
     /// implementation-defined; dotcc's enums are int-backed).</summary>
-    private CExpr BuildGenericSelect(C.GenericSelect g, Item it)
+    private CExpr BuildGenericSelect(C.GenericSelect g, Item it) =>
+        SelectGenericArm(g, it) is { } arm ? BuildExpr(arm) : GenericErrorRecovery();
+
+    /// <summary>Error-recovery value after a `_Generic` with no matching association
+    /// (the compile still fails on the diagnostic).</summary>
+    private static CExpr GenericErrorRecovery() => new LitInt("0", 0) { Type = CType.Int };
+
+    /// <summary>The association choice of a `_Generic` selection, shared by
+    /// <see cref="BuildGenericSelect"/> and the callee path of <see cref="BuildCall"/>
+    /// (C11 6.5.1.1p4: the selection is a function designator when its arm is one).
+    /// Builds the controlling expression for its type only, reports the collected
+    /// constraint diagnostics, and returns the selected association's expression item,
+    /// or null after the no-match error.</summary>
+    private Item? SelectGenericArm(C.GenericSelect g, Item it)
     {
         Gate(2011, "_Generic", it);
         // Building the controlling expr may touch builder side-state (AddressTaken,
@@ -1871,21 +1884,21 @@ internal sealed partial class IrBuilder
 
         foreach (var (t, expr, _) in typed)
         {
-            if (ctrl.Equals(t)) { return BuildExpr(expr); }
+            if (ctrl.Equals(t)) { return expr; }
         }
         // Enum fallback: `_Generic(color, int: …)` — the enum's backing integer.
         if (ctrl is CType.Enum en)
         {
             foreach (var (t, expr, _) in typed)
             {
-                if (en.Underlying.Unqualified.Equals(t)) { return BuildExpr(expr); }
+                if (en.Underlying.Unqualified.Equals(t)) { return expr; }
             }
         }
-        if (defaultArm is not null) { return BuildExpr(defaultArm); }
+        if (defaultArm is not null) { return defaultArm; }
         Diagnostics.Add(new Diagnostic(Severity.Error,
             $"'_Generic' selector of type '{ctrl.Describe()}' is not compatible with any association",
             SrcPos.From(it), _file));
-        return new LitInt("0", 0) { Type = CType.Int }; // error recovery — compile still fails on the diagnostic
+        return null;
     }
 
     /// <summary>C11 §6.3.2.1 lvalue conversion, as `_Generic` applies it to the
@@ -3267,6 +3280,22 @@ internal sealed partial class IrBuilder
     {
         var args = new List<CExpr>();
         if (argList is { } al) { FlattenArgs(al, x => args.Add(BuildExpr(x))); }
+
+        // C11 6.5.1.1p4: a `_Generic` whose selected arm is a function designator is
+        // one, so peel parentheses and selections down to the arm; a plain name then
+        // takes the direct-call path below. Any other arm keeps the indirect path.
+        for (var peeling = true; peeling;)
+        {
+            switch (calleeItem.Content)
+            {
+                case C.Paren p: calleeItem = p.Arg1; break;
+                case C.GenericSelect g:
+                    if (SelectGenericArm(g, calleeItem) is not { } arm) { return GenericErrorRecovery(); }
+                    calleeItem = arm;
+                    break;
+                default: peeling = false; break;
+            }
+        }
 
         // A simple named callee — a function, a fn-ptr variable, or a libc builtin.
         if (TryCalleeName(calleeItem, out var name))
