@@ -81,7 +81,8 @@ internal sealed partial class ZigLowering
             // A byte-slice field of a comptime AGGREGATE the interpreter holds. Not a module-qualified constant in the
             // syntactic tier (see ComptimeTier): that folds at lowering time, in LowerExpr's Field case.
             case Zig.Field:
-                return TryEvalTypeInfoValue(item, tier) is { } info ? info
+                return (tier == ComptimeTier.Lowering || IsTypeInfoValueField(Tok(((Zig.Field)item.Content).Arg2)))
+                        && TryEvalTypeInfoValue(item, tier) is { } info ? info
                     : TryComptimeAggregateString(item) is { } agg ? FromExpr(agg)
                     : tier == ComptimeTier.Lowering ? EvalByLowering(item) : null;
             case Zig.CallArgs:
@@ -89,6 +90,14 @@ internal sealed partial class ZigLowering
             default:
                 return null;
         }
+    }
+
+    /// <summary>A comptime integer: what <see cref="TryEvalComptime"/> reads, else anything the const-folder settles
+    /// (<c>1 + 1</c>, a <c>const</c> whose initializer folded). Null when it is not comptime-known.</summary>
+    private long? ComptimeFoldedLong(Item item)
+    {
+        if (AsLong(TryEvalComptime(item)) is { } read) { return read; }
+        using (EnterThrowawayHoist()) { return ComptimeLong(LowerExpr(item)); }
     }
 
     /// <summary>A name bound in one of the comptime maps, as a comptime value.</summary>
@@ -107,6 +116,11 @@ internal sealed partial class ZigLowering
         // A name bound to a comptime tag (`const signedness = @typeInfo(T).int.signedness;`): an enum literal.
         return sym is null && _comptimeTagBindings.TryGetValue(name, out var tag) ? new IrModule.CtEnumLiteral(tag) : null;
     }
+
+    /// <summary>The field names <see cref="TryFoldTypeInfoValue"/> answers with a value. The syntactic tier tries the fold
+    /// only for these, so an ordinary member read pays for no throwaway hoist scope.</summary>
+    private static bool IsTypeInfoValueField(string field) =>
+        field is "bits" or "len" or "is_const" or "is_tuple" or "const" or "volatile" or "field_names";
 
     /// <summary>A <c>@typeInfo</c> VALUE field (<c>bits</c>, <c>len</c>, <c>is_const</c>, <c>attrs.const</c>) as a comptime
     /// value, through <see cref="TryFoldTypeInfoValue"/>. That fold raises a loud cut for a field it cannot recover; the

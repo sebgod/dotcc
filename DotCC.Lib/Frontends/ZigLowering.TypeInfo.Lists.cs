@@ -541,12 +541,7 @@ internal sealed partial class ZigLowering
     {
         // A literal or comptime binding, else any index the const-folder settles (a `const` whose
         // initializer folded, std.Io.Writer.print's `arg_to_print`).
-        var folded = AsLong(TryEvalComptime(indexItem));
-        if (folded is null)
-        {
-            using (EnterThrowawayHoist()) { folded = ComptimeLong(LowerExpr(indexItem)); }
-        }
-        if (folded is not { } n)
+        if (ComptimeFoldedLong(indexItem) is not { } n)
         {
             throw new IrUnsupportedException(
                 $"zig `{list.Label}[i]`: the index must be comptime-known (a literal or a comptime `const`) — a member "

@@ -1100,7 +1100,7 @@ internal sealed partial class ZigLowering
     private CExpr LowerRepeat(Item leftItem, Item countItem)
     {
         // The count resolves to a comptime integer (a literal or a `const` bound to one).
-        if (AsLong(TryEvalComptime(countItem)) is not { } n || n < 0 || n > MaxRepeat)
+        if (ComptimeFoldedLong(countItem) is not { } n || n < 0 || n > MaxRepeat)
         {
             throw new IrUnsupportedException(
                 $"zig `a ** n`: the repeat count must be a comptime integer in [0, {MaxRepeat}]"
