@@ -982,6 +982,7 @@ internal sealed partial class IrBuilder
         }
         _symbols.BeginFunction();
         _setjmpCalls.Clear(); // per-function stray-setjmp tracking (see the field)
+        _undeclaredReported.Clear();
         _currentFnName = sig.Name; // drives the `__func__` predefined identifier
         _currentRet = (funcSym.Type as CType.Func)?.Return; // drives return const-discard
         _symbols.EnterScope(); // parameter scope
@@ -3100,21 +3101,10 @@ internal sealed partial class IrBuilder
     /// (<c>static assertion failed: "msg"</c>).</summary>
     private void CheckStaticAssert(Item exprItem, Item? msgItem, SrcPos pos)
     {
-        _firstUndeclared = null;
         var cond = BuildExpr(exprItem);
         switch (ConstEval(cond))
         {
             case null:
-                // An undeclared identifier is the likely cause; report it first, as gcc
-                // does (a header's missing macro reads as an unknown name here).
-                if (_firstUndeclared is { } undeclared)
-                {
-                    Diagnostics.Add(new Diagnostic(Severity.Error,
-                        _symbols.AtFileScope
-                            ? $"'{undeclared}' undeclared here (not in a function)"
-                            : $"'{undeclared}' undeclared (first use in this function)",
-                        SrcPos.From(exprItem), _file));
-                }
                 Diagnostics.Add(new Diagnostic(Severity.Error,
                     "expression in static assertion is not constant", pos, _file));
                 break;
@@ -3240,11 +3230,10 @@ internal sealed partial class IrBuilder
             DotCC.EmitHelpers.EncodeStringLiteral(fnSegs, out var fnLen);
             return new LitStr(fnSegs) { Type = new CType.Array(CType.Char, fnLen) };
         }
-        // Unresolved (a macro-substituted token, a builtin not in a header). Surface
-        // the raw name; the backend escapes it and lets its compiler arbitrate. Slice
-        // code never hits this; it's a safety net during incremental growth. A
-        // constant-expression context reads the first such name to report it.
-        _firstUndeclared ??= name;
+        // Unresolved: no declaration in scope names it. C never had implicit variables,
+        // so this is an error in every dialect; binding goes on (typed int) so every
+        // undeclared name in the unit is collected.
+        UndeclaredIdentifier(name, SrcPos.From(v.Arg0));
         return new NameRef(name) { Type = CType.Int };
     }
 
@@ -3270,10 +3259,9 @@ internal sealed partial class IrBuilder
         finally { _refOwner = outer; }
     }
 
-    /// <summary>The first identifier <see cref="BuildVar"/> could not resolve since a
-    /// constant-expression context cleared it, so that context can report the
-    /// undeclared name (gcc's diagnostic) rather than only "not constant".</summary>
-    private string? _firstUndeclared;
+    /// <summary>The undeclared names already reported in the function being bound (gcc
+    /// reports a name once per function), or, at file scope, the positions already reported.</summary>
+    private readonly HashSet<string> _undeclaredReported = [];
 
     private CExpr BuildCall(Item calleeItem, Item? argList)
     {
@@ -3351,6 +3339,18 @@ internal sealed partial class IrBuilder
         // The function pointer's parameter types drive the same call-argument
         // coercion as a direct call's (GH #230: `s.fn(0)` passes `null`).
         return new IndirectCall(callee, args, calleeFn?.Params) { Type = calleeFn?.Return ?? CType.Int };
+    }
+
+    /// <summary>An identifier expression <paramref name="name"/> that no declaration in scope
+    /// names (C99 6.5.1p2, and C90 never had implicit variables): gcc's error in every dialect,
+    /// once per name per function, and once per position at file scope.</summary>
+    private void UndeclaredIdentifier(string name, SrcPos pos)
+    {
+        var atFile = _symbols.AtFileScope;
+        if (!_undeclaredReported.Add(atFile ? $"{name}@{pos.Line}:{pos.Column}" : name)) { return; }
+        Diagnostics.Add(new Diagnostic(Severity.Error,
+            atFile ? $"'{name}' undeclared here (not in a function)" : $"'{name}' undeclared (first use in this function)",
+            pos, _file));
     }
 
     /// <summary>A call to <paramref name="name"/>, which no declaration in scope names (and no

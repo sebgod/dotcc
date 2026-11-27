@@ -3492,8 +3492,8 @@ internal sealed partial class WatBackend
     {
         while (stream is Cast cast) { stream = cast.Operand; }
         // Zig's std.debug.print builds a VarRef to a synthesized `stderr` symbol; C's
-        // stdout/stderr resolve to a NameRef (dotcc's lenient path — they bind against
-        // Libc statics at C# compile time, with no wat-side declaration).
+        // stdout/stderr are declared in <stdio.h>, so they bind to a VarRef too. The
+        // NameRef arms stay as a guard for a stream name reaching here unresolved.
         return stream switch
         {
             VarRef { Sym.Name: "stdout" } or NameRef { RawName: "stdout" } => 1,
