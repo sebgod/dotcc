@@ -794,10 +794,11 @@ internal sealed partial class ZigLowering
     private const string UnreadableMessage = "(the message is not a comptime-readable string here)";
 
     /// <summary>Read a comptime message string as PLAIN text. Anything <see cref="TryEvalComptime"/> reads
-    /// as a string is answered by it; this walks the two shapes it cannot, and so is not a one-line projection: it adds the two shapes a diagnostic message is actually
-    /// built from — <c>"prefix " ++ x</c> concatenation and <c>@typeName(T)</c> — so the type that
-    /// failed appears in the error the way the author wrote it. Null when some part is not readable,
-    /// so the caller substitutes rather than throws a second, less useful error.</summary>
+    /// as a string is answered by it. This is not a one-line projection, because it also walks the
+    /// two shapes a diagnostic message is actually built from, <c>"prefix " ++ x</c> concatenation
+    /// and <c>@typeName(T)</c>, so the type that failed appears in the error the way the author
+    /// wrote it. Null when some part is not readable, so the caller substitutes rather than throws
+    /// a second, less useful error.</summary>
     private string? ComptimeMessageText(Item item)
     {
         switch (item.Content)
