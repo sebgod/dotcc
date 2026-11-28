@@ -26,12 +26,12 @@ public unsafe ref struct WSprintfBuilder
     private readonly char* _dst;
     private readonly int _capacity;   // n — max wide chars incl. the terminating NUL
 
-    internal WSprintfBuilder(char* dst, byte* utf8Fmt, int capacity)
+    internal WSprintfBuilder(char* dst, char* wfmt, int capacity)
     {
         _dst = dst;
         _capacity = capacity;
         _buf = new StringWriter();
-        _inner = new PrintfBuilder(_buf, utf8Fmt);
+        _inner = new PrintfBuilder(_buf, wfmt);
     }
 
     // Thin wrapper — every overload delegates to the inner PrintfBuilder. Arg(char*)

@@ -170,6 +170,7 @@ paren-fn-name
 pragma-pack
 predefined-ids
 preproc-cond
+printf-arg-order
 printf-format
 printf-octal
 ptr-arith-arrow
@@ -178,6 +179,7 @@ qsort-bsearch
 restrict-qualifier
 runtime-owned-structs
 runtime-type-name-clash
+scanf-arg-order
 setjmp-capture-if
 setjmp-cleanup
 setjmp-nested

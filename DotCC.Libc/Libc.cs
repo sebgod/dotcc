@@ -541,9 +541,9 @@ public static unsafe partial class Libc
     /// <c>fprintf(stream, fmt)</c> — the primitive. Start a fluent format
     /// chain that writes to <paramref name="stream"/>. Each
     /// <see cref="PrintfBuilder.Arg(int)"/> / <see cref="PrintfBuilder.Arg(double)"/>
-    /// / <see cref="PrintfBuilder.Arg(byte*)"/> consumes the next <c>%</c>
-    /// spec. Finish with <see cref="PrintfBuilder.Done()"/> which returns
-    /// the printf-style <c>int</c>.
+    /// / <see cref="PrintfBuilder.Arg(byte*)"/> records its argument;
+    /// <see cref="PrintfBuilder.Done()"/> formats them against the <c>%</c>
+    /// specs, writes the output and returns the printf-style <c>int</c>.
     /// </summary>
     /// <remarks>
     /// Fluent rather than <c>params object[]</c> because raw pointers can't
@@ -632,8 +632,8 @@ public static unsafe partial class Libc
     /// <c>fscanf(stream, fmt)</c> — start a fluent scan chain reading from
     /// <paramref name="stream"/>. Each <see cref="ScanfReader.Read(int*)"/>
     /// / <see cref="ScanfReader.Read(double*)"/> /
-    /// <see cref="ScanfReader.Read(byte*)"/> consumes the next <c>%</c>
-    /// spec and writes the parsed value. <see cref="ScanfReader.Done"/>
+    /// <see cref="ScanfReader.Read(byte*)"/> records its target;
+    /// <see cref="ScanfReader.Done"/> reads the input, stores the values and
     /// returns the count of successful matches.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -645,16 +645,10 @@ public static unsafe partial class Libc
 
     /// <summary>
     /// <c>sscanf(src, fmt)</c> — parse from the NUL-terminated UTF-8
-    /// byte buffer <paramref name="src"/> instead of a stream. Equivalent
-    /// to wrapping <paramref name="src"/> in a <see cref="StringReader"/>
-    /// and calling <see cref="fscanf"/>.
+    /// byte buffer <paramref name="src"/> instead of a stream. The buffer is
+    /// kept as a pointer and read in <see cref="ScanfReader.Done"/>, after every argument has been evaluated.
     /// </summary>
-    public static ScanfReader sscanf(byte* src, byte* fmt)
-    {
-        int len = strlen(src);
-        var s = System.Text.Encoding.UTF8.GetString(src, len);
-        return new ScanfReader(new StringReader(s), fmt);
-    }
+    public static ScanfReader sscanf(byte* src, byte* fmt) => new(src, fmt);
 
     // ---------------------------------------------------------------------
     // String literal lowering
