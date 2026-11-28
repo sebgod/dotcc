@@ -291,7 +291,7 @@ public unsafe ref struct ScanfReader
         return spec;
     }
 
-    private void SkipInputWs()
+    private static void SkipInputWs(TextReader r)
     {
         int c;
         while ((c = r.Peek()) != -1 && char.IsWhiteSpace((char)c)) { r.Read(); }
