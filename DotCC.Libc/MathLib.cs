@@ -211,7 +211,7 @@ public static unsafe partial class Libc
     /// <summary><c>ldexp(x, exp)</c>: <c>x·2^exp</c>, the inverse of <see cref="frexp(double, int*)"/>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static double ldexp(double x, int exp) => double.IsNaN(x) ? x : Math.ScaleB(x, exp);
-    /// <summary><c>ldexpf(x, exp)</c> : single-precision <see cref="ldexp(double, int)"/>.</summary>
+    /// <summary><c>ldexpf(x, exp)</c>: single-precision <see cref="ldexp(double, int)"/>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static float ldexpf(float x, int exp) => float.IsNaN(x) ? x : MathF.ScaleB(x, exp);
 
