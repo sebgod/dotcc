@@ -170,6 +170,7 @@ paren-fn-name
 pragma-pack
 predefined-ids
 preproc-cond
+printf-arg-order
 printf-format
 printf-octal
 ptr-arith-arrow
