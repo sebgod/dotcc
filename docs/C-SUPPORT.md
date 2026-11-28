@@ -380,7 +380,7 @@ Synthetic header at `DotCC.Lib/include/float.h` exposes the IEEE-754 limit macro
 
 ### `math.h`
 
-Every function exists as a `double` overload (routes to `System.Math`) **and** a `float` overload (routes to `System.MathF`); the explicit `…f`-suffix C99 forms (`sinf`, `cosf`, `sqrtf`, …) are wired alongside. Lives in `DotCC.Libc/MathLib.cs` as a `partial` extension of `Libc`. The same `.cs` file is **embedded into `DotCC.Lib.dll`** at build time (`<EmbeddedResource Include="..\DotCC.Libc\*.cs">`); `Compiler.LoadRuntimeBlock` splices it into every emitted program's type-decls section, and `using static Libc;` brings the methods into scope by bare name so user calls resolve through C# overload resolution. Single source of truth — no duplicated inline copy. Header lives at `DotCC.Lib/include/math.h` (also embedded — see "Synthetic system headers + runtime" below). Fixture `math-basic/` covers double-precision dispatch end-to-end with MSVC oracle validation.
+Every unsuffixed function takes and returns `double` (routes to `System.Math`), as C says whatever the argument, so `sqrt(2)` is 1.4142135623730951; the `…f`-suffix C99 forms (`sinf`, `cosf`, `sqrtf`, …) are single precision (route to `System.MathF`). Only the classification and comparison macros have `float` overloads. `<tgmath.h>` picks the form by `_Generic`. Lives in `DotCC.Libc/MathLib.cs` as a `partial` extension of `Libc`. The same `.cs` file is **embedded into `DotCC.Lib.dll`** at build time (`<EmbeddedResource Include="..\DotCC.Libc\*.cs">`); `Compiler.LoadRuntimeBlock` splices it into every emitted program's type-decls section, and `using static Libc;` brings the methods into scope by bare name so user calls resolve by bare name. Single source of truth — no duplicated inline copy. Header lives at `DotCC.Lib/include/math.h` (also embedded — see "Synthetic system headers + runtime" below). Fixture `math-basic/` covers double-precision dispatch end-to-end with MSVC oracle validation.
 
 | Function | Status | Notes |
 |---|---|---|
@@ -389,7 +389,7 @@ Every function exists as a `double` overload (routes to `System.Math`) **and** a
 | `sinh`, `cosh`, `tanh` (+ `…f`, C99) | ✅ | `Math.Sinh` / `MathF.Sinh` etc. |
 | `exp`, `log`, `log10`, `log2` (+ `…f`, C99) | ✅ | `Math.Exp` / `MathF.Exp` etc. |
 | `pow`, `sqrt`, `cbrt` (+ `…f`, C99) | ✅ | `Math.Pow` / `Sqrt` / `Cbrt` and MathF counterparts |
-| `frexp`, `ldexp` (+ `…f`) | ✅ | Mantissa/exponent split + recombine via `Math.ILogB`/`ScaleB` (and the `MathF` float overloads); `frexp` writes the exponent through its `int*`. Fixture `libc-frexp-ldexp-strcoll-ungetc/`. |
+| `frexp`, `ldexp` (+ `…f`) | ✅ | Mantissa/exponent split + recombine via `Math.ILogB`/`ScaleB` (and `MathF` for `frexpf`/`ldexpf`); `frexp` writes the exponent through its `int*`. Fixture `libc-frexp-ldexp-strcoll-ungetc/`. |
 | `ceil`, `floor`, `round`, `trunc` (+ `…f`, C99) | ✅ | `round` forced to `MidpointRounding.AwayFromZero` to match C99 (BCL default is banker's rounding, which diverges from MSVC). |
 | `fabs`, `fmod`, `fmin`, `fmax` (+ `…f`, C99) | ✅ | `Math.Abs` / native `%` for fmod (sign-of-x matches C99) / `Math.Min` / `Math.Max`. `fabsl` too (long double IS double in dotcc). |
 | `modf`, `hypot`, `copysign` (+ `…f`, C99) | ✅ | `modf` splits at `Math.Truncate` (the integral part keeps the sign, so `modf(-3.75)` is `-0.75` and `-3`); `hypot` is `double.Hypot` (no intermediate overflow); `copysign` is `Math.CopySign` (a negative zero sign is copied). |

@@ -1,6 +1,7 @@
 #nullable enable
 
 using System;
+using System.Linq;
 using Shouldly;
 using Xunit;
 using static DotCC.Libc.Libc;
@@ -8,12 +9,11 @@ using static DotCC.Libc.Libc;
 namespace DotCC.Tests;
 
 /// <summary>
-/// Unit tests for the <c>&lt;math.h&gt;</c> / <c>&lt;tgmath.h&gt;</c> surface
-/// in <see cref="DotCC.Libc.Libc"/>. Each function is exercised through both
-/// its <c>double</c> overload (routes to <see cref="Math"/>) and its
-/// <c>float</c> overload (routes to <see cref="MathF"/>) — the float pair
-/// is what <c>tgmath.h</c> dispatches to in real C via <c>_Generic</c>; in
-/// dotcc the same dispatch falls out of C# overload resolution.
+/// Unit tests for the <c>&lt;math.h&gt;</c> surface in <see cref="DotCC.Libc.Libc"/>.
+/// Each function is exercised through its unsuffixed <c>double</c> form (routes to
+/// <see cref="Math"/>) and its <c>…f</c> form (routes to <see cref="MathF"/>); the
+/// <c>…f</c> form is what <c>&lt;tgmath.h&gt;</c> selects for a <c>float</c> argument
+/// by <c>_Generic</c>. The runtime has no <c>float</c> overload of an unsuffixed function.
 /// </summary>
 [Collection("Runtime")]
 public sealed class LibcMathTests
@@ -29,7 +29,7 @@ public sealed class LibcMathTests
     public void sin_double_matches_Math_Sin() => sin(0.5).ShouldBe(Math.Sin(0.5), Eps);
 
     [Fact]
-    public void sin_float_matches_MathF_Sin() => sin(0.5f).ShouldBe(MathF.Sin(0.5f), EpsF);
+    public void sin_float_matches_MathF_Sin() => sinf(0.5f).ShouldBe(MathF.Sin(0.5f), EpsF);
 
     [Fact]
     public void sinf_routes_to_MathF_Sin() => sinf(0.5f).ShouldBe(MathF.Sin(0.5f), EpsF);
@@ -38,7 +38,7 @@ public sealed class LibcMathTests
     public void cos_double_matches_Math_Cos() => cos(0.5).ShouldBe(Math.Cos(0.5), Eps);
 
     [Fact]
-    public void cos_float_matches_MathF_Cos() => cos(0.5f).ShouldBe(MathF.Cos(0.5f), EpsF);
+    public void cos_float_matches_MathF_Cos() => cosf(0.5f).ShouldBe(MathF.Cos(0.5f), EpsF);
 
     [Fact]
     public void tan_double_matches_Math_Tan() => tan(0.3).ShouldBe(Math.Tan(0.3), Eps);
@@ -57,7 +57,7 @@ public sealed class LibcMathTests
 
     [Fact]
     public void atan2_float_full_quadrant() =>
-        atan2(1.0f, 1.0f).ShouldBe(MathF.PI / 4, EpsF);
+        atan2f(1.0f, 1.0f).ShouldBe(MathF.PI / 4, EpsF);
 
     // -----------------------------------------------------------------
     // Hyperbolic
@@ -70,7 +70,7 @@ public sealed class LibcMathTests
     public void cosh_double_matches_Math_Cosh() => cosh(1.0).ShouldBe(Math.Cosh(1.0), Eps);
 
     [Fact]
-    public void tanh_float_matches_MathF_Tanh() => tanh(0.5f).ShouldBe(MathF.Tanh(0.5f), EpsF);
+    public void tanh_float_matches_MathF_Tanh() => tanhf(0.5f).ShouldBe(MathF.Tanh(0.5f), EpsF);
 
     // -----------------------------------------------------------------
     // Exponentials and logarithms
@@ -96,7 +96,7 @@ public sealed class LibcMathTests
     public void pow_double_2_pow_10_is_1024() => pow(2.0, 10.0).ShouldBe(1024.0, Eps);
 
     [Fact]
-    public void pow_float_2_pow_10_is_1024() => pow(2.0f, 10.0f).ShouldBe(1024.0f, EpsF);
+    public void pow_float_2_pow_10_is_1024() => powf(2.0f, 10.0f).ShouldBe(1024.0f, EpsF);
 
     [Fact]
     public void powf_routes_to_MathF_Pow() => powf(2.0f, 10.0f).ShouldBe(1024.0f, EpsF);
@@ -105,7 +105,7 @@ public sealed class LibcMathTests
     public void sqrt_double_sqrt_of_2() => sqrt(2.0).ShouldBe(M_SQRT2, Eps);
 
     [Fact]
-    public void sqrt_float_sqrt_of_2() => sqrt(2.0f).ShouldBe(MathF.Sqrt(2.0f), EpsF);
+    public void sqrt_float_sqrt_of_2() => sqrtf(2.0f).ShouldBe(MathF.Sqrt(2.0f), EpsF);
 
     [Fact]
     public void cbrt_double_cube_root_of_27_is_3() => cbrt(27.0).ShouldBe(3.0, Eps);
@@ -140,7 +140,7 @@ public sealed class LibcMathTests
     public void fabs_double_negative_input() => fabs(-3.5).ShouldBe(3.5);
 
     [Fact]
-    public void fabs_float_negative_input() => fabs(-3.5f).ShouldBe(3.5f);
+    public void fabs_float_negative_input() => fabsf(-3.5f).ShouldBe(3.5f);
 
     [Fact]
     public void fmod_double_positive_dividend() => fmod(7.5, 2.0).ShouldBe(1.5, Eps);
@@ -199,4 +199,35 @@ public sealed class LibcMathTests
 
     [Fact]
     public void INFINITY_is_positive_infinity() => double.IsPositiveInfinity(INFINITY).ShouldBeTrue();
+
+    // -----------------------------------------------------------------
+    // Guard: unsuffixed math functions are double only
+    // -----------------------------------------------------------------
+
+    /// <summary>C computes an unsuffixed function in double; a float overload would let C# overload resolution compute <c>sqrt(f)</c> in single precision.</summary>
+    [Fact]
+    [Trait("Category", "Invariant")]
+    public void no_float_overload_of_an_unsuffixed_function()
+    {
+        var macros = new System.Collections.Generic.HashSet<string>
+        {
+            "isnan", "isinf", "isfinite", "signbit", "isnormal", "fpclassify",
+            "isgreater", "isgreaterequal", "isless", "islessequal", "islessgreater", "isunordered",
+        };
+        var methods = typeof(DotCC.Libc.Libc).GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+        var offenders = methods
+            .Where(m => m.GetParameters().Length > 0 && m.GetParameters()[0].ParameterType == typeof(float))
+            .Select(m => m.Name)
+            .Where(n => !n.EndsWith("f", StringComparison.Ordinal) && !macros.Contains(n))
+            .Distinct()
+            .ToList();
+        offenders.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void classification_macros_keep_float_overloads()
+    {
+        isnan(float.NaN).ShouldBe(1);
+        fpclassify(1e-40f).ShouldBe(3);
+    }
 }

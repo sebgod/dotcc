@@ -10,8 +10,9 @@ namespace DotCC.Libc;
 /// <c>exp2</c> / <c>expm1</c> / <c>log1p</c> / <c>logb</c> / <c>ilogb</c> / <c>scalbn</c>, the
 /// remainder and difference functions, <c>fma</c>, the nearest-integer family, <c>nextafter</c>,
 /// <c>nan</c>, the classification macros, and every function's <c>long double</c> <c>…l</c> form
-/// (<c>long double</c> is <c>double</c> in dotcc). Each has a <c>double</c> and a <c>float</c>
-/// overload, as MathLib's do, so <c>&lt;tgmath.h&gt;</c> dispatches on them too.
+/// (<c>long double</c> is <c>double</c> in dotcc). Each computes in <c>double</c> under its C
+/// name and has an explicit <c>…f</c> single-precision form, as MathLib's do. Only the
+/// classification and comparison macros are overloaded for <c>float</c>.
 /// </summary>
 /// <remarks>
 /// <c>expm1</c> and <c>log1p</c> exist for their accuracy near zero, which the naive
@@ -26,20 +27,14 @@ public static unsafe partial class Libc
 
     /// <summary><c>acosh(x)</c> (C99): inverse hyperbolic cosine.</summary>
     public static double acosh(double x) => Math.Acosh(x);
-    /// <inheritdoc cref="acosh(double)"/>
-    public static float acosh(float x) => MathF.Acosh(x);
     /// <summary><c>acoshf(x)</c>.</summary>
     public static float acoshf(float x) => MathF.Acosh(x);
     /// <summary><c>asinh(x)</c> (C99): inverse hyperbolic sine.</summary>
     public static double asinh(double x) => Math.Asinh(x);
-    /// <inheritdoc cref="asinh(double)"/>
-    public static float asinh(float x) => MathF.Asinh(x);
     /// <summary><c>asinhf(x)</c>.</summary>
     public static float asinhf(float x) => MathF.Asinh(x);
     /// <summary><c>atanh(x)</c> (C99): inverse hyperbolic tangent.</summary>
     public static double atanh(double x) => Math.Atanh(x);
-    /// <inheritdoc cref="atanh(double)"/>
-    public static float atanh(float x) => MathF.Atanh(x);
     /// <summary><c>atanhf(x)</c>.</summary>
     public static float atanhf(float x) => MathF.Atanh(x);
 
@@ -47,8 +42,6 @@ public static unsafe partial class Libc
 
     /// <summary><c>exp2(x)</c> (C99): 2 raised to <paramref name="x"/>, exact for an integer.</summary>
     public static double exp2(double x) => Math.Pow(2.0, x);
-    /// <inheritdoc cref="exp2(double)"/>
-    public static float exp2(float x) => MathF.Pow(2f, x);
     /// <summary><c>exp2f(x)</c>.</summary>
     public static float exp2f(float x) => MathF.Pow(2f, x);
 
@@ -64,8 +57,6 @@ public static unsafe partial class Libc
         if (um1 == -1.0) { return -1.0; }
         return um1 * x / Math.Log(u);
     }
-    /// <inheritdoc cref="expm1(double)"/>
-    public static float expm1(float x) => (float)expm1((double)x);
     /// <summary><c>expm1f(x)</c>.</summary>
     public static float expm1f(float x) => (float)expm1((double)x);
 
@@ -78,8 +69,6 @@ public static unsafe partial class Libc
         if (u == 1.0) { return x; }                       // and +-0 keeps its sign
         return Math.Log(u) * x / (u - 1.0);
     }
-    /// <inheritdoc cref="log1p(double)"/>
-    public static float log1p(float x) => (float)log1p((double)x);
     /// <summary><c>log1pf(x)</c>.</summary>
     public static float log1pf(float x) => (float)log1p((double)x);
 
@@ -87,8 +76,6 @@ public static unsafe partial class Libc
     /// floating value; <c>-inf</c> for zero, <c>+inf</c> for an infinity, NaN for NaN.</summary>
     public static double logb(double x) =>
         double.IsNaN(x) ? x : double.IsInfinity(x) ? double.PositiveInfinity : x == 0 ? double.NegativeInfinity : Math.ILogB(x);
-    /// <inheritdoc cref="logb(double)"/>
-    public static float logb(float x) => (float)logb((double)x);
     /// <summary><c>logbf(x)</c>.</summary>
     public static float logbf(float x) => (float)logb((double)x);
 
@@ -97,22 +84,16 @@ public static unsafe partial class Libc
     /// for an infinity.</summary>
     public static int ilogb(double x) =>
         double.IsNaN(x) || x == 0 ? int.MinValue : double.IsInfinity(x) ? int.MaxValue : Math.ILogB(x);
-    /// <inheritdoc cref="ilogb(double)"/>
-    public static int ilogb(float x) => ilogb((double)x);
     /// <summary><c>ilogbf(x)</c>.</summary>
     public static int ilogbf(float x) => ilogb((double)x);
 
     /// <summary><c>scalbn(x, n)</c> (C99): <c>x * 2^n</c>, computed exactly by exponent.</summary>
     public static double scalbn(double x, int n) => Math.ScaleB(x, n);
-    /// <inheritdoc cref="scalbn(double, int)"/>
-    public static float scalbn(float x, int n) => MathF.ScaleB(x, n);
     /// <summary><c>scalbnf(x, n)</c>.</summary>
     public static float scalbnf(float x, int n) => MathF.ScaleB(x, n);
     /// <summary><c>scalbln(x, n)</c> (C99): <see cref="scalbn(double, int)"/> with a <c>long</c>
     /// exponent, clamped to the range where the result is still decided.</summary>
     public static double scalbln(double x, long n) => Math.ScaleB(x, (int)Math.Clamp(n, -100000L, 100000L));
-    /// <inheritdoc cref="scalbln(double, long)"/>
-    public static float scalbln(float x, long n) => MathF.ScaleB(x, (int)Math.Clamp(n, -100000L, 100000L));
     /// <summary><c>scalblnf(x, n)</c>.</summary>
     public static float scalblnf(float x, long n) => MathF.ScaleB(x, (int)Math.Clamp(n, -100000L, 100000L));
 
@@ -121,8 +102,6 @@ public static unsafe partial class Libc
     /// <summary><c>remainder(x, y)</c> (C99): the IEEE remainder <c>x - n*y</c>, <c>n</c> the
     /// integer nearest <c>x/y</c> (ties to even).</summary>
     public static double remainder(double x, double y) => Math.IEEERemainder(x, y);
-    /// <inheritdoc cref="remainder(double, double)"/>
-    public static float remainder(float x, float y) => MathF.IEEERemainder(x, y);
     /// <summary><c>remainderf(x, y)</c>.</summary>
     public static float remainderf(float x, float y) => MathF.IEEERemainder(x, y);
 
@@ -140,25 +119,18 @@ public static unsafe partial class Libc
         }
         return r;
     }
-    /// <inheritdoc cref="remquo(double, double, int*)"/>
-    public static float remquo(float x, float y, int* quo) => (float)remquo((double)x, (double)y, quo);
     /// <summary><c>remquof(x, y, quo)</c>.</summary>
     public static float remquof(float x, float y, int* quo) => (float)remquo((double)x, (double)y, quo);
 
     /// <summary><c>fdim(x, y)</c> (C99): <c>x - y</c> when <c>x &gt; y</c>, else <c>+0</c>; NaN
     /// when either is.</summary>
     public static double fdim(double x, double y) => double.IsNaN(x) || double.IsNaN(y) ? x + y : x > y ? x - y : 0.0;
-    /// <inheritdoc cref="fdim(double, double)"/>
-    public static float fdim(float x, float y) => float.IsNaN(x) || float.IsNaN(y) ? x + y : x > y ? x - y : 0f;
     /// <summary><c>fdimf(x, y)</c>.</summary>
-    public static float fdimf(float x, float y) => fdim(x, y);
+    public static float fdimf(float x, float y) => float.IsNaN(x) || float.IsNaN(y) ? x + y : x > y ? x - y : 0f;
 
     /// <summary><c>fma(x, y, z)</c> (C99): <c>x * y + z</c> rounded once.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static double fma(double x, double y, double z) => Math.FusedMultiplyAdd(x, y, z);
-    /// <inheritdoc cref="fma(double, double, double)"/>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static float fma(float x, float y, float z) => MathF.FusedMultiplyAdd(x, y, z);
     /// <summary><c>fmaf(x, y, z)</c>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static float fmaf(float x, float y, float z) => MathF.FusedMultiplyAdd(x, y, z);
@@ -168,39 +140,27 @@ public static unsafe partial class Libc
     /// <summary><c>rint(x)</c> (C99): <paramref name="x"/> rounded in the current mode (to
     /// nearest, ties to even).</summary>
     public static double rint(double x) => Math.Round(x, MidpointRounding.ToEven);
-    /// <inheritdoc cref="rint(double)"/>
-    public static float rint(float x) => MathF.Round(x, MidpointRounding.ToEven);
     /// <summary><c>rintf(x)</c>.</summary>
     public static float rintf(float x) => MathF.Round(x, MidpointRounding.ToEven);
     /// <summary><c>nearbyint(x)</c> (C99): <see cref="rint(double)"/> (no floating-point exception
     /// state is kept, so the two are one).</summary>
     public static double nearbyint(double x) => Math.Round(x, MidpointRounding.ToEven);
-    /// <inheritdoc cref="nearbyint(double)"/>
-    public static float nearbyint(float x) => MathF.Round(x, MidpointRounding.ToEven);
     /// <summary><c>nearbyintf(x)</c>.</summary>
     public static float nearbyintf(float x) => MathF.Round(x, MidpointRounding.ToEven);
     /// <summary><c>lrint(x)</c> (C99): <see cref="rint(double)"/> as a <c>long</c>.</summary>
     public static long lrint(double x) => (long)Math.Round(x, MidpointRounding.ToEven);
-    /// <inheritdoc cref="lrint(double)"/>
-    public static long lrint(float x) => (long)MathF.Round(x, MidpointRounding.ToEven);
     /// <summary><c>lrintf(x)</c>.</summary>
     public static long lrintf(float x) => (long)MathF.Round(x, MidpointRounding.ToEven);
     /// <summary><c>llrint(x)</c> (C99): <see cref="lrint(double)"/>, <c>long long</c> being 64-bit too.</summary>
     public static long llrint(double x) => (long)Math.Round(x, MidpointRounding.ToEven);
-    /// <inheritdoc cref="llrint(double)"/>
-    public static long llrint(float x) => (long)MathF.Round(x, MidpointRounding.ToEven);
     /// <summary><c>llrintf(x)</c>.</summary>
     public static long llrintf(float x) => (long)MathF.Round(x, MidpointRounding.ToEven);
     /// <summary><c>lround(x)</c> (C99): <paramref name="x"/> rounded half away from zero, as a <c>long</c>.</summary>
     public static long lround(double x) => (long)Math.Round(x, MidpointRounding.AwayFromZero);
-    /// <inheritdoc cref="lround(double)"/>
-    public static long lround(float x) => (long)MathF.Round(x, MidpointRounding.AwayFromZero);
     /// <summary><c>lroundf(x)</c>.</summary>
     public static long lroundf(float x) => (long)MathF.Round(x, MidpointRounding.AwayFromZero);
     /// <summary><c>llround(x)</c> (C99): <see cref="lround(double)"/>.</summary>
     public static long llround(double x) => (long)Math.Round(x, MidpointRounding.AwayFromZero);
-    /// <inheritdoc cref="llround(double)"/>
-    public static long llround(float x) => (long)MathF.Round(x, MidpointRounding.AwayFromZero);
     /// <summary><c>llroundf(x)</c>.</summary>
     public static long llroundf(float x) => (long)MathF.Round(x, MidpointRounding.AwayFromZero);
 
@@ -210,11 +170,9 @@ public static unsafe partial class Libc
     /// toward <paramref name="y"/>; <paramref name="y"/> when they are equal, NaN when either is.</summary>
     public static double nextafter(double x, double y) =>
         double.IsNaN(x) || double.IsNaN(y) ? x + y : x == y ? y : x < y ? Math.BitIncrement(x) : Math.BitDecrement(x);
-    /// <inheritdoc cref="nextafter(double, double)"/>
-    public static float nextafter(float x, float y) =>
-        float.IsNaN(x) || float.IsNaN(y) ? x + y : x == y ? y : x < y ? MathF.BitIncrement(x) : MathF.BitDecrement(x);
     /// <summary><c>nextafterf(x, y)</c>.</summary>
-    public static float nextafterf(float x, float y) => nextafter(x, y);
+    public static float nextafterf(float x, float y) =>
+        float.IsNaN(x) || float.IsNaN(y) ? x + y : x == y ? y : x < y ? MathF.BitIncrement(x) : MathF.BitDecrement(x);
     /// <summary><c>nexttoward(x, y)</c> (C99): <see cref="nextafter(double, double)"/> with a
     /// <c>long double</c> target, which is <c>double</c> here.</summary>
     public static double nexttoward(double x, double y) => nextafter(x, y);

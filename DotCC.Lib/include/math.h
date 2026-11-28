@@ -5,10 +5,10 @@
    single-precision ("…f" suffix) function families. The actual
    implementations live in DotCC.Libc.Libc (MathLib.cs) and are inlined
    into every emitted program by Compiler.BuildShell into a CMath
-   static class, surfaced via `using static CMath;` — so both
-   `sin(double)` and `sin(float)` resolve at the C# overload-resolution
-   step. That same overload mechanism is what makes <tgmath.h> work
-   without needing C11 _Generic: see tgmath.h. */
+   static class, surfaced via `using static CMath;`. An unsuffixed
+   function such as `sin` takes and returns double, as C says, whatever
+   the argument; `sinf` is the single-precision form. Type-generic
+   dispatch is <tgmath.h>'s job, done there with C11 _Generic macros. */
 
 /* Math constants. Real C ifdef-gates these under _USE_MATH_DEFINES (on
    MSVC) or always-on (glibc); dotcc just always exposes them. */
@@ -90,7 +90,8 @@ int isfinite(double x);
 
 /* The rest of C99 7.12 (DotCC.Libc/MathC99Lib.cs). C's classification and
    comparison macros are functions here, overloaded for float and double in the
-   runtime as the ones above are. long double is double in dotcc, so each `l`
+   runtime (the one place a float overload exists, since C makes them
+   type-generic). long double is double in dotcc, so each `l`
    form takes and gives a double. erf, erfc, tgamma and lgamma are not provided
    (no .NET primitive). */
 #define FP_NAN       0
