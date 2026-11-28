@@ -79,6 +79,61 @@ public sealed unsafe class FormatArgumentOrderTests
         finally { free(dst); }
     }
 
+    [Fact]
+    public void Sscanf_computes_a_later_target_address_before_any_store()
+    {
+        var arr = stackalloc int[4];
+        var i = 0;
+        var n = sscanf(L("3 9\0"u8), L("%d %d\0"u8)).Read(&i).Read(&arr[i]).Done();
+        n.ShouldBe(2);
+        i.ShouldBe(3);
+        arr[0].ShouldBe(9);
+        arr[3].ShouldBe(0);
+    }
+
+    [Fact]
+    public void Sscanf_reads_its_source_after_every_argument_is_evaluated()
+    {
+        var src = (byte*)malloc(8);
+        try
+        {
+            strcpy(src, L("1\0"u8));
+            int* v = stackalloc int[1];
+            int* Rewrite() { strcpy(src, L("42\0"u8)); return v; }
+            var n = sscanf(src, L("%d\0"u8)).Read(Rewrite()).Done();
+            n.ShouldBe(1);
+            v[0].ShouldBe(42);
+        }
+        finally { free(src); }
+    }
+
+    [Fact]
+    public void Swscanf_reads_its_source_after_every_argument_is_evaluated()
+    {
+        var src = (char*)malloc(8 * sizeof(char));
+        try
+        {
+            src[0] = '1'; src[1] = '\0';
+            int* v = stackalloc int[1];
+            int* Rewrite() { src[0] = '4'; src[1] = '2'; src[2] = '\0'; return v; }
+            fixed (char* fmt = "%d\0")
+            {
+                var n = swscanf(src, fmt).Read(Rewrite()).Done();
+                n.ShouldBe(1);
+                v[0].ShouldBe(42);
+            }
+        }
+        finally { free(src); }
+    }
+
+    [Fact]
+    public void A_scan_chain_never_finished_stores_nothing()
+    {
+        var v = 5;
+        _ = sscanf(L("9\0"u8), L("%d\0"u8)).Read(&v);
+        v.ShouldBe(5);
+    }
+
     /// <summary>Run <paramref name="action"/> with stdout captured.</summary>
     private static string CaptureStdout(Action action)
     {

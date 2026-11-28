@@ -179,6 +179,7 @@ qsort-bsearch
 restrict-qualifier
 runtime-owned-structs
 runtime-type-name-clash
+scanf-arg-order
 setjmp-capture-if
 setjmp-cleanup
 setjmp-nested

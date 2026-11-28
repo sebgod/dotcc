@@ -632,8 +632,8 @@ public static unsafe partial class Libc
     /// <c>fscanf(stream, fmt)</c> — start a fluent scan chain reading from
     /// <paramref name="stream"/>. Each <see cref="ScanfReader.Read(int*)"/>
     /// / <see cref="ScanfReader.Read(double*)"/> /
-    /// <see cref="ScanfReader.Read(byte*)"/> consumes the next <c>%</c>
-    /// spec and writes the parsed value. <see cref="ScanfReader.Done"/>
+    /// <see cref="ScanfReader.Read(byte*)"/> records its target;
+    /// <see cref="ScanfReader.Done"/> reads the input and stores the values. <see cref="ScanfReader.Done"/>
     /// returns the count of successful matches.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -649,12 +649,7 @@ public static unsafe partial class Libc
     /// to wrapping <paramref name="src"/> in a <see cref="StringReader"/>
     /// and calling <see cref="fscanf"/>.
     /// </summary>
-    public static ScanfReader sscanf(byte* src, byte* fmt)
-    {
-        int len = strlen(src);
-        var s = System.Text.Encoding.UTF8.GetString(src, len);
-        return new ScanfReader(new StringReader(s), fmt);
-    }
+    public static ScanfReader sscanf(byte* src, byte* fmt) => new(src, fmt);
 
     // ---------------------------------------------------------------------
     // String literal lowering

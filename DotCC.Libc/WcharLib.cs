@@ -520,7 +520,7 @@ public static unsafe partial class Libc
     /// <summary><c>swscanf(src, fmt, …)</c> — wide formatted input from the wide
     /// string <paramref name="src"/> (wrapped in a reader, like sscanf).</summary>
     public static ScanfReader swscanf(char* src, char* fmt) =>
-        new ScanfReader(new StringReader(new string(src, 0, wcslen(src))), WideFmtToUtf8(fmt));
+        new ScanfReader(src, WideFmtToUtf8(fmt));
 
     /// <summary>The UTF-8 encoding C's multibyte strings use, rejecting an invalid sequence rather than
     /// replacing it, as <c>mbstowcs</c> / <c>wcstombs</c> report one.</summary>
