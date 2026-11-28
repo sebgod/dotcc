@@ -186,4 +186,144 @@ public sealed class GenericTests
         }
         finally { File.Delete(src); }
     }
+
+    private const string CalleePrelude = """
+        float gcf(float v) { return v + 0.5f; }
+        double gcd(double v) { return v + 0.25; }
+        #define sel(X) _Generic((X), float: gcf, default: gcd)
+        """ + "\n";
+
+    [Fact]
+    public void Generic_callee_is_a_direct_call_of_the_selected_function()
+    {
+        var src = WriteTemp(CalleePrelude + """
+            int main(void) {
+                float f = 1.0f;
+                int i = 2;
+                float a = _Generic((f), float: gcf, default: gcd)(f);
+                double b = _Generic((i), float: gcf, default: gcd)(i);
+                return (int)(a + b);
+            }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("gcf(f)");
+            emitted.ShouldContain("gcd(i)");
+            emitted.ShouldNotContain("delegate*<float, float>");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Generic_callee_call_has_the_selected_return_type()
+    {
+        var src = WriteTemp(CalleePrelude + """
+            int main(void) {
+                float f = 1.0f;
+                int fs = _Generic(sel(f)(f), float: 1, default: 0);
+                int ds = _Generic(sel(1)(1), double: 1, default: 0);
+                int sz = (int)sizeof(sel(f)(f));
+                return fs + ds + sz;
+            }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("int fs = 1;");
+            emitted.ShouldContain("int ds = 1;");
+            emitted.ShouldContain("int sz = unchecked((int)((ulong)(sizeof(float))));");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Generic_callee_coerces_the_argument_to_the_selected_parameter()
+    {
+        var src = WriteTemp(CalleePrelude + """
+            int main(void) {
+                int i = 3;
+                float f = 1.0f;
+                return (int)_Generic((f), float: gcf, default: gcd)(i);
+            }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            // The int argument converts to the selected float parameter (C#'s implicit
+            // int-to-float at the direct call); the double arm would take it as gcd(i).
+            emitted.ShouldContain("(int)gcf(i)");
+            emitted.ShouldNotContain("gcd(i)");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Parenthesised_generic_callee_is_a_direct_call()
+    {
+        var src = WriteTemp(CalleePrelude + """
+            int main(void) {
+                float f = 1.0f;
+                return (int)(_Generic((f), float: gcf, default: gcd))(f);
+            }
+            """);
+        try
+        {
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("gcf(f)");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Generic_callee_in_wat_is_a_direct_call()
+    {
+        var src = WriteTemp(CalleePrelude + """
+            int main(void) {
+                float f = 1.0f;
+                return (int)_Generic((f), float: gcf, default: gcd)(f);
+            }
+            """);
+        try
+        {
+            var wat = Compiler.EmitWat(new[] { src });
+            wat.ShouldContain("call $gcf");
+            wat.ShouldNotContain("call_indirect");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Undeclared_selected_callee_is_an_implicit_declaration_error()
+    {
+        var src = WriteTemp("""
+            double gcd(double v) { return v; }
+            int main(void) {
+                float f = 1.0f;
+                return (int)_Generic((f), float: nosuchfn, default: gcd)(f);
+            }
+            """);
+        try
+        {
+            Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { src }))
+                .Message.ShouldContain("implicit declaration of function 'nosuchfn'");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Undeclared_unselected_callee_stays_unbound()
+    {
+        var src = WriteTemp("""
+            double gcd(double v) { return v; }
+            int main(void) {
+                float f = 1.0f;
+                return (int)_Generic((f), float: gcd, default: nosuchfn)(f);
+            }
+            """);
+        try
+        {
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("gcd(f)");
+        }
+        finally { File.Delete(src); }
+    }
 }

@@ -383,13 +383,11 @@ public static partial class Compiler
             // ---- DotCC.Libc runtime (embedded source) ----------------
             // The Libc class (declared at file end, spliced in from the
             // ../DotCC.Libc/*.cs sources) holds every libc function +
-            // every <math.h>/<tgmath.h> entry — each one with both
-            // float and double overloads. Importing it statically here
-            // means `sin(x)` / `printf("…")` / `malloc(n)` in user code
-            // resolve by bare name to the matching method, and overload
-            // resolution picks the right form. That's exactly what
-            // <tgmath.h>'s _Generic macros do in real C; we get the
-            // same dispatch for free without preprocessor machinery.
+            // every <math.h> entry: an unsuffixed function is double only
+            // and the f-suffixed one is single precision, as in C. Importing
+            // it statically here means `sin(x)` / `printf("…")` / `malloc(n)`
+            // in user code resolve by bare name to the matching method.
+            // <tgmath.h> picks the form by C11 _Generic, resolved at lowering.
             using static Libc;
             // ---- File-scope variables + user functions ----------------
             // C globals are static fields of `DotCcGlobals`; user functions are

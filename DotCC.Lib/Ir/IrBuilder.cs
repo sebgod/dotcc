@@ -203,8 +203,8 @@ internal sealed partial class IrBuilder
     /// <summary>Flag a feature introduced in <paramref name="era"/> (ISO year) when
     /// the active dialect predates it. No-op when the gate is off or new enough.</summary>
     // A library unit's dialect is the library's business, not the program's -std=.
-    private void Gate(int era, string feature, Item it) { if (!_libraryUnit) { _gate?.RequireMin(era, feature, it.Position.Line); } }
-    private void Gate(int era, string feature, SrcPos pos) { if (!_libraryUnit) { _gate?.RequireMin(era, feature, pos.Line); } }
+    private void Gate(int era, string feature, Item it) { if (!_libraryUnit && it.Position.Line < SrcPos.SyntheticLineBase) { _gate?.RequireMin(era, feature, it.Position.Line); } }
+    private void Gate(int era, string feature, SrcPos pos) { if (!_libraryUnit && pos.Line < SrcPos.SyntheticLineBase) { _gate?.RequireMin(era, feature, pos.Line); } }
     /// <summary>Gate a feature, then return an already-built value — for gating in
     /// expression-bodied switch arms (the value is built eagerly; gating only
     /// records, so evaluation order is irrelevant).</summary>
@@ -1818,7 +1818,20 @@ internal sealed partial class IrBuilder
     /// an enum-typed controlling expression falls back to its integer backing when
     /// no association names the enum itself (C leaves the compatible integer type
     /// implementation-defined; dotcc's enums are int-backed).</summary>
-    private CExpr BuildGenericSelect(C.GenericSelect g, Item it)
+    private CExpr BuildGenericSelect(C.GenericSelect g, Item it) =>
+        SelectGenericArm(g, it) is { } arm ? BuildExpr(arm) : GenericErrorRecovery();
+
+    /// <summary>Error-recovery value after a `_Generic` with no matching association
+    /// (the compile still fails on the diagnostic).</summary>
+    private static CExpr GenericErrorRecovery() => new LitInt("0", 0) { Type = CType.Int };
+
+    /// <summary>The association choice of a `_Generic` selection, shared by
+    /// <see cref="BuildGenericSelect"/> and the callee path of <see cref="BuildCall"/>
+    /// (C11 6.5.1.1p4: the selection is a function designator when its arm is one).
+    /// Builds the controlling expression for its type only, reports the collected
+    /// constraint diagnostics, and returns the selected association's expression item,
+    /// or null after the no-match error.</summary>
+    private Item? SelectGenericArm(C.GenericSelect g, Item it)
     {
         Gate(2011, "_Generic", it);
         // Building the controlling expr may touch builder side-state (AddressTaken,
@@ -1871,21 +1884,21 @@ internal sealed partial class IrBuilder
 
         foreach (var (t, expr, _) in typed)
         {
-            if (ctrl.Equals(t)) { return BuildExpr(expr); }
+            if (ctrl.Equals(t)) { return expr; }
         }
         // Enum fallback: `_Generic(color, int: …)` — the enum's backing integer.
         if (ctrl is CType.Enum en)
         {
             foreach (var (t, expr, _) in typed)
             {
-                if (en.Underlying.Unqualified.Equals(t)) { return BuildExpr(expr); }
+                if (en.Underlying.Unqualified.Equals(t)) { return expr; }
             }
         }
-        if (defaultArm is not null) { return BuildExpr(defaultArm); }
+        if (defaultArm is not null) { return defaultArm; }
         Diagnostics.Add(new Diagnostic(Severity.Error,
             $"'_Generic' selector of type '{ctrl.Describe()}' is not compatible with any association",
             SrcPos.From(it), _file));
-        return new LitInt("0", 0) { Type = CType.Int }; // error recovery — compile still fails on the diagnostic
+        return null;
     }
 
     /// <summary>C11 §6.3.2.1 lvalue conversion, as `_Generic` applies it to the
@@ -3268,6 +3281,22 @@ internal sealed partial class IrBuilder
         var args = new List<CExpr>();
         if (argList is { } al) { FlattenArgs(al, x => args.Add(BuildExpr(x))); }
 
+        // C11 6.5.1.1p4: a `_Generic` whose selected arm is a function designator is
+        // one, so peel parentheses and selections down to the arm; a plain name then
+        // takes the direct-call path below. Any other arm keeps the indirect path.
+        for (var peeling = true; peeling;)
+        {
+            switch (calleeItem.Content)
+            {
+                case C.Paren p: calleeItem = p.Arg1; break;
+                case C.GenericSelect g:
+                    if (SelectGenericArm(g, calleeItem) is not { } arm) { return GenericErrorRecovery(); }
+                    calleeItem = arm;
+                    break;
+                default: peeling = false; break;
+            }
+        }
+
         // A simple named callee — a function, a fn-ptr variable, or a libc builtin.
         if (TryCalleeName(calleeItem, out var name))
         {
@@ -3855,8 +3884,10 @@ internal sealed partial class IrBuilder
     {
         var raw = Tok(f.Arg0);
         if (raw.Length >= 2 && raw[0] == '0' && raw[1] is 'x' or 'X') { Gate(1999, "hex float literal", f.Arg0); }
-        // §6.4.4.2: f/F suffix → float; otherwise double (long double IS double here).
-        var type = raw.Length > 0 && raw[^1] is 'f' or 'F' ? CType.Float : CType.Double;
+        // §6.4.4.2: f/F suffix → float, l/L → long double (spelled double in C#, but typed apart so
+        // `1.0 + 1.0L` and <tgmath.h> see it); otherwise double.
+        var last = raw.Length > 0 ? raw[^1] : ' ';
+        var type = last is 'f' or 'F' ? CType.Float : last is 'l' or 'L' ? CType.LongDouble : CType.Double;
         return new LitFloat(LowerFloat(raw)) { Type = type };
     }
 

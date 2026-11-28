@@ -4,3 +4,9 @@ sqrt(2d)  = 1.414214
 sqrtf(4f) = 2.000000
 sinf(0f)  = 0.000000
 cosf(0f)  = 1.000000
+sqrt(1.0f) float: 1
+sqrt(1) double: 1
+sqrt(1.0L) long double: 1
+pow(1.0f, 2) double: 1
+pow(1.0f, 2.0f) float: 1
+sqrt(4f) = 2.000000

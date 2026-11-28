@@ -36,10 +36,10 @@ public sealed unsafe class LibcAddedSurfaceTests
     }
 
     [Fact]
-    public void frexp_float_overload_routes_to_MathF()
+    public void frexpf_routes_to_MathF()
     {
         int e;
-        float m = frexp(12.0f, &e);
+        float m = frexpf(12.0f, &e);
         m.ShouldBe(0.75f);
         e.ShouldBe(4);
     }

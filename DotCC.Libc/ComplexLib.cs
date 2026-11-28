@@ -54,4 +54,17 @@ public static unsafe partial class Libc
     [MethodImpl(MethodImplOptions.AggressiveInlining)] public static Complex csinh(Complex z) => Complex.Sinh(z);
     [MethodImpl(MethodImplOptions.AggressiveInlining)] public static Complex ccosh(Complex z) => Complex.Cosh(z);
     [MethodImpl(MethodImplOptions.AggressiveInlining)] public static Complex ctanh(Complex z) => Complex.Tanh(z);
+
+    /// <summary>C99 <c>cacosh</c>: acosh(z) = log(z + sqrt(z+1) * sqrt(z-1)); .NET's Complex has no Acosh. The
+    /// product of the two square roots (not sqrt(z*z-1)) keeps the principal branch for every z.</summary>
+    public static Complex cacosh(Complex z) =>
+        Complex.Log(z + Complex.Sqrt(z + Complex.One) * Complex.Sqrt(z - Complex.One));
+
+    /// <summary>C99 <c>casinh</c>: asinh(z) = log(z + sqrt(z*z + 1)); .NET's Complex has no Asinh.</summary>
+    public static Complex casinh(Complex z) =>
+        Complex.Log(z + Complex.Sqrt(z * z + Complex.One));
+
+    /// <summary>C99 <c>catanh</c>: atanh(z) = (log(1+z) - log(1-z)) / 2; .NET's Complex has no Atanh.</summary>
+    public static Complex catanh(Complex z) =>
+        (Complex.Log(Complex.One + z) - Complex.Log(Complex.One - z)) / 2.0;
 }
