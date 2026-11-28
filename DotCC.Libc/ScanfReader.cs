@@ -42,10 +42,16 @@ public unsafe ref struct ScanfReader
     private TextReader? _r;   // the stream, or null until Done builds it from a string source
     private readonly byte* _src;   // sscanf's source, read at Done (null otherwise)
     private readonly char* _wsrc;   // swscanf's source, read at Done (null otherwise)
-    private byte* _fmt;
+    private byte* _fmt;   // the narrow format, walked in Done (null for a wide one until Done transcodes it)
+    private readonly char* _wfmt;   // the w*scanf format, transcoded to UTF-8 in Done (null otherwise)
     private int _matched;
-    private (Kind Kind, nint Ptr)[]? _targets;   // recorded by Read, in order; allocated by the first one
+    private (Kind Kind, nint Ptr)[]? _targets;   // recorded by Read, in order; the thread's cached array or a new one
     private int _n;
+
+    /// <summary>The target array a finished reader hands back, so the next scan on this thread records without
+    /// allocating. A reader takes it on its first <c>Read</c> and leaves null behind, so a scan nested in an argument
+    /// expression allocates its own.</summary>
+    [ThreadStatic] private static (Kind Kind, nint Ptr)[]? s_targets;
 
     internal ScanfReader(TextReader r, byte* fmt)
     {
@@ -53,6 +59,17 @@ public unsafe ref struct ScanfReader
         _src = null;
         _wsrc = null;
         _fmt = fmt;
+        _matched = 0;
+    }
+
+    /// <summary>A reader over the stream <paramref name="r"/> with the wide format <paramref name="wfmt"/>
+    /// (<c>fwscanf</c>), which is read in <see cref="Done"/>.</summary>
+    internal ScanfReader(TextReader r, char* wfmt)
+    {
+        _r = r;
+        _src = null;
+        _wsrc = null;
+        _wfmt = wfmt;
         _matched = 0;
     }
 
@@ -67,21 +84,29 @@ public unsafe ref struct ScanfReader
         _matched = 0;
     }
 
-    /// <summary>A reader over the NUL-terminated wide string <paramref name="src"/>, read at <see cref="Done"/>.</summary>
-    internal ScanfReader(char* src, byte* fmt)
+    /// <summary>A reader over the NUL-terminated wide string <paramref name="src"/> with the wide format
+    /// <paramref name="wfmt"/> (<c>swscanf</c>), both read at <see cref="Done"/>.</summary>
+    internal ScanfReader(char* src, char* wfmt)
     {
         _r = null;
         _src = null;
         _wsrc = src;
-        _fmt = fmt;
+        _wfmt = wfmt;
         _matched = 0;
     }
 
+    /// <summary>Record the next target, in the thread's cached array (else a new one).</summary>
     private void Record(Kind kind, nint ptr)
     {
-        _targets ??= new (Kind, nint)[4];
-        if (_n == _targets.Length) { Array.Resize(ref _targets, _n * 2); }
-        _targets[_n++] = (kind, ptr);
+        var t = _targets;
+        if (t == null)
+        {
+            t = s_targets ?? new (Kind, nint)[8];
+            s_targets = null;
+            _targets = t;
+        }
+        else if (_n == t.Length) { Array.Resize(ref t, _n * 2); _targets = t; }
+        t[_n++] = (kind, ptr);
     }
 
     /// <summary>Records an <c>int*</c> target for the next conversion; nothing is read or stored until <see cref="Done"/>.</summary>
@@ -239,8 +264,8 @@ public unsafe ref struct ScanfReader
         if (written > 0) { _matched++; }
     }
 
-    /// <summary>Reads the input and stores every conversion into its recorded target, in order, and returns the
-    /// match count. An unsupported or mismatched conversion throws <see cref="FormatException"/> here.</summary>
+    /// <summary>Reads the format and the input and stores every conversion into its recorded target, in order, and
+    /// returns the match count. An unsupported or mismatched conversion throws <see cref="FormatException"/> here.</summary>
     public int Done()
     {
         TextReader r = _r ?? new StringReader(_src != null
@@ -248,19 +273,42 @@ public unsafe ref struct ScanfReader
             : new string(_wsrc, 0, Libc.wcslen(_wsrc)));
         if (_targets is { } targets)
         {
-            for (int i = 0; i < _n; i++)
+            if (_wfmt != null)
             {
-                var (kind, ptr) = targets[i];
-                switch (kind)
+                var wide = PrintfBuilder.RentUtf8(_wfmt, out _);
+                fixed (byte* f = wide)
                 {
-                    case Kind.Int: ScanInt(r, (int*)ptr); break;
-                    case Kind.Double: ScanDouble(r, (double*)ptr); break;
-                    case Kind.Bytes: ScanBytes(r, (byte*)ptr); break;
-                    default: ScanWide(r, (char*)ptr); break;
+                    _fmt = f;
+                    ScanAll(r, targets);
                 }
+                System.Buffers.ArrayPool<byte>.Shared.Return(wide);
             }
+            else
+            {
+                ScanAll(r, targets);
+            }
+            Array.Clear(targets, 0, _n);
+            s_targets = targets;
+            _targets = null;
+            _n = 0;
         }
         return _matched;
+    }
+
+    /// <summary>Store each recorded target's conversion, read from <paramref name="r"/>, in order.</summary>
+    private void ScanAll(TextReader r, (Kind Kind, nint Ptr)[] targets)
+    {
+        for (int i = 0; i < _n; i++)
+        {
+            var (kind, ptr) = targets[i];
+            switch (kind)
+            {
+                case Kind.Int: ScanInt(r, (int*)ptr); break;
+                case Kind.Double: ScanDouble(r, (double*)ptr); break;
+                case Kind.Bytes: ScanBytes(r, (byte*)ptr); break;
+                default: ScanWide(r, (char*)ptr); break;
+            }
+        }
     }
 
     /// <summary>Consume the next <c>%</c> spec from the format: skip leading fmt

@@ -57,6 +57,56 @@ public sealed unsafe class FormatArgumentOrderTests
     }
 
     [Fact]
+    public void A_later_argument_that_lengthens_the_format_is_seen()
+    {
+        var buf = (byte*)malloc(32);
+        var fmt = (byte*)malloc(16);
+        try
+        {
+            strcpy(fmt, L("%d\0"u8));
+            int Lengthen() { strcpy(fmt, L("%d-%d\0"u8)); return 1; }
+            var n = sprintf(buf, fmt).Arg(Lengthen()).Arg(2).Done();
+            n.ShouldBe(3);
+            System.Text.Encoding.ASCII.GetString(buf, n).ShouldBe("1-2");
+        }
+        finally { free(buf); free(fmt); }
+    }
+
+    [Fact]
+    public void A_later_argument_that_lengthens_a_wide_format_is_seen()
+    {
+        var dst = (char*)malloc(16 * sizeof(char));
+        var fmt = (char*)malloc(16 * sizeof(char));
+        try
+        {
+            "%d\0".AsSpan().CopyTo(new Span<char>(fmt, 16));
+            int Lengthen() { "%d-%d\0".AsSpan().CopyTo(new Span<char>(fmt, 16)); return 1; }
+            var n = swprintf(dst, 16, fmt).Arg(Lengthen()).Arg(2).Done();
+            n.ShouldBe(3);
+            new string(dst, 0, n).ShouldBe("1-2");
+        }
+        finally { free(dst); free(fmt); }
+    }
+
+    [Fact]
+    public void A_nested_printf_in_an_argument_keeps_both_calls_arguments_apart()
+    {
+        var outer = (byte*)malloc(32);
+        var inner = (byte*)malloc(32);
+        try
+        {
+            int Nested() => sprintf(inner, L("%d,%d\0"u8)).Arg(8).Arg(9).Done();
+            var n = sprintf(outer, L("%d %d %d\0"u8)).Arg(1).Arg(Nested()).Arg(4).Done();
+            System.Text.Encoding.ASCII.GetString(outer, n).ShouldBe("1 3 4");
+            System.Text.Encoding.ASCII.GetString(inner, 3).ShouldBe("8,9");
+            // The next call on the thread reuses a cached record array and must start empty.
+            n = sprintf(outer, L("%d\0"u8)).Arg(5).Done();
+            System.Text.Encoding.ASCII.GetString(outer, n).ShouldBe("5");
+        }
+        finally { free(outer); free(inner); }
+    }
+
+    [Fact]
     public void Snprintf_with_no_destination_still_measures()
     {
         var n = snprintf(null, 0, L("%d-%s\0"u8)).Arg(12).Arg(L("ab\0"u8)).Done();

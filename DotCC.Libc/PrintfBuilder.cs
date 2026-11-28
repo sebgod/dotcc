@@ -9,11 +9,11 @@ namespace DotCC.Libc;
 
 /// <summary>
 /// Fluent printf-format consumer. Each <c>Arg</c> overload only records its
-/// argument, in order; <see cref="Done"/> then walks the format, formats every
+/// argument, in order; <see cref="Done"/> then reads the format, formats every
 /// recorded value per C99 <c>printf</c> rules (flags, width, precision, length
-/// modifier) and writes the whole output to the bound <see cref="TextWriter"/>
-/// in one write. Nothing is written, and nothing read through an argument
-/// pointer, before <see cref="Done"/>, so the side effects of the argument
+/// modifier) and hands the whole output to the bound <see cref="TextWriter"/>.
+/// Nothing is written, and nothing read through an argument pointer (the format
+/// included), before <see cref="Done"/>, so the side effects of the argument
 /// expressions land before the output (C11 6.5.2.2p10, dotcc #249).
 /// </summary>
 /// <remarks>
@@ -38,17 +38,29 @@ namespace DotCC.Libc;
 public unsafe ref struct PrintfBuilder
 {
     private readonly TextWriter _w;
-    private ReadOnlySpan<byte> _fmt;   // the format not consumed yet, up to (not including) its NUL
+    private readonly byte* _fmtPtr;   // a C format, measured and read only in Done (null for a span format)
+    private readonly char* _wfmtPtr;   // a wide format, transcoded only in Done (null otherwise)
+    private ReadOnlySpan<byte> _fmt;  // the format not consumed yet, up to (not including) its NUL
     private StringBuilder? _sb;   // the buffer Done formats into
     private Rec[]? _args;   // the recorded arguments, allocated by the first Arg
     private int _n;   // how many are recorded
     private int _count;   // UTF-8 bytes written so far — printf's return value (C99 §7.21.6.3)
 
-    /// <summary>A builder over the NUL-terminated format at <paramref name="fmt"/>.</summary>
+    /// <summary>A builder over the NUL-terminated format at <paramref name="fmt"/>. The format is a pointer argument like
+    /// any other, so it is only measured and read in <see cref="Done"/>, after every argument has been evaluated.</summary>
     public PrintfBuilder(TextWriter writer, byte* fmt)
     {
         _w = writer;
-        _fmt = System.Runtime.InteropServices.MemoryMarshal.CreateReadOnlySpanFromNullTerminated(fmt);
+        _fmtPtr = fmt;
+        _count = 0;
+    }
+
+    /// <summary>A builder over the NUL-terminated wide (UTF-16) format at <paramref name="wfmt"/>, for the
+    /// <c>w*printf</c> family: transcoded to UTF-8 in <see cref="Done"/>, so its spec grammar parses as the narrow one.</summary>
+    internal PrintfBuilder(TextWriter writer, char* wfmt)
+    {
+        _w = writer;
+        _wfmtPtr = wfmt;
         _count = 0;
     }
 
@@ -457,9 +469,9 @@ public unsafe ref struct PrintfBuilder
     }
 
     /// <summary>One recorded argument: what <c>Arg</c> was handed, tagged by how <see cref="Done"/> formats it. <c>i</c> int,
-    /// <c>l</c> long, <c>u</c> ulong, <c>d</c> double (bits in <c>A</c>), <c>F</c> Float128 (boxed), <c>H</c> Int128 beyond 64 bits
+    /// <c>l</c> long, <c>u</c> ulong, <c>d</c> double (bits in <c>A</c>), <c>F</c> Float128 (<c>A</c> low bits, <c>B</c> high), <c>H</c> Int128 beyond 64 bits
     /// (<c>A</c> low, <c>B</c> high), <c>s</c> byte* and <c>w</c> char* (the address in <c>A</c>, read only in Done),
-    /// <c>S</c> a byte slice (<c>A</c> pointer, <c>B</c> length), <c>B</c> a copied NUL-terminated span (<c>Obj</c> a byte[]).</summary>
+    /// <c>S</c> a byte slice (<c>A</c> pointer, <c>B</c> length), <c>B</c> a copied NUL-terminated span (<c>Obj</c> a byte[] rented from the shared pool).</summary>
     private struct Rec
     {
         public char Kind;
@@ -468,11 +480,21 @@ public unsafe ref struct PrintfBuilder
         public object? Obj;
     }
 
-    /// <summary>Record <paramref name="r"/> as the next argument. The array is allocated on the first one.</summary>
+    /// <summary>The record array a finished builder hands back, so the next call on this thread records without
+    /// allocating. A builder takes it on its first <c>Arg</c> and leaves null behind, so a printf nested in an argument
+    /// expression allocates its own.</summary>
+    [ThreadStatic] private static Rec[]? s_recs;
+
+    /// <summary>Record <paramref name="r"/> as the next argument, in the thread's cached array (else a new one).</summary>
     private void Push(Rec r)
     {
         var a = _args;
-        if (a == null) { a = _args = new Rec[4]; }
+        if (a == null)
+        {
+            a = s_recs ?? new Rec[8];
+            s_recs = null;
+            _args = a;
+        }
         else if (_n == a.Length) { Array.Resize(ref a, a.Length * 2); _args = a; }
         a[_n++] = r;
     }
@@ -492,8 +514,13 @@ public unsafe ref struct PrintfBuilder
     /// <summary>Record a <c>double</c>.</summary>
     public PrintfBuilder Arg(double v) { Push(new Rec { Kind = 'd', A = BitConverter.DoubleToInt64Bits(v) }); return this; }
 
-    /// <summary>Record a <c>_Float128</c>.</summary>
-    public PrintfBuilder Arg(Float128 v) { Push(new Rec { Kind = 'F', Obj = v }); return this; }
+    /// <summary>Record a <c>_Float128</c> by its bits (<c>A</c> low, <c>B</c> high), so nothing is boxed.</summary>
+    public PrintfBuilder Arg(Float128 v)
+    {
+        var bits = System.Runtime.CompilerServices.Unsafe.BitCast<Float128, System.UInt128>(v);
+        Push(new Rec { Kind = 'F', A = unchecked((long)(ulong)bits), B = unchecked((long)(ulong)(bits >> 64)) });
+        return this;
+    }
 
     /// <summary>A zig <c>comptime_int</c> value: recorded as the 64-bit overload that holds it, else as its two halves.</summary>
     public PrintfBuilder Arg(System.Int128 v)
@@ -511,13 +538,16 @@ public unsafe ref struct PrintfBuilder
     public PrintfBuilder Arg(Slice<byte> v) => Arg((ConstSlice<byte>)v);
 
     /// <summary>A string argument as a span: the C# backend's form for a string literal passed to <c>printf</c>
-    /// (a literal, which a program cannot change). A ref struct cannot keep a span, so the bytes up to the first NUL are
-    /// copied and treated as <see cref="Arg(byte*)"/> treats a C string.</summary>
+    /// (a literal, which a program cannot change). A ref struct cannot keep a variable number of spans, so the bytes up
+    /// to the first NUL are copied, NUL-terminated, into an array rented from the shared pool (returned in
+    /// <see cref="Done"/>) and treated as <see cref="Arg(byte*)"/> treats a C string.</summary>
     public PrintfBuilder Arg(ReadOnlySpan<byte> v)
     {
         var nul = v.IndexOf((byte)0);
-        var copy = new byte[(nul >= 0 ? nul : v.Length) + 1];
-        v[..(copy.Length - 1)].CopyTo(copy);
+        var len = nul >= 0 ? nul : v.Length;
+        var copy = System.Buffers.ArrayPool<byte>.Shared.Rent(len + 1);
+        v[..len].CopyTo(copy);
+        copy[len] = 0;
         Push(new Rec { Kind = 'B', Obj = copy });
         return this;
     }
@@ -543,14 +573,24 @@ public unsafe ref struct PrintfBuilder
     [ThreadStatic] private static StringBuilder? s_cache;
 
     /// <summary>
-    /// Format every recorded argument, in order, into a private buffer, then write the whole output to the sink in one write
-    /// (as POSIX printf holds the stream for the call) and return the number of UTF-8 bytes it is: printf's C99 7.21.6.3
-    /// return value. Nothing was written, and nothing read through an argument pointer, before this, so the side effects of
-    /// the argument expressions have all happened (C11 6.5.2.2p10). dotcc never signals the negative output-error case; the
-    /// sinks are managed writers that throw.
+    /// Read the format, format every recorded argument, in order, into a private buffer, then hand the whole output to the
+    /// sink and return the number of UTF-8 bytes it is: printf's C99 7.21.6.3 return value. Nothing was written, and
+    /// nothing read through an argument pointer (the format's included), before this, so the sink gets the output only
+    /// after every argument expression has been evaluated and its side effects have happened (C11 6.5.2.2p10). dotcc never
+    /// signals the negative output-error case; the sinks are managed writers that throw.
     /// </summary>
     public int Done()
     {
+        byte[]? wideFmt = null;
+        if (_fmtPtr != null)
+        {
+            _fmt = System.Runtime.InteropServices.MemoryMarshal.CreateReadOnlySpanFromNullTerminated(_fmtPtr);
+        }
+        else if (_wfmtPtr != null)
+        {
+            wideFmt = RentUtf8(_wfmtPtr, out var len);
+            _fmt = wideFmt.AsSpan(0, len);
+        }
         var sb = s_cache ?? new StringBuilder();
         s_cache = null;
         sb.Clear();
@@ -565,7 +605,10 @@ public unsafe ref struct PrintfBuilder
                 case 'l': FmtLong(r.A); break;
                 case 'u': FmtULong(unchecked((ulong)r.A)); break;
                 case 'd': FmtDouble(BitConverter.Int64BitsToDouble(r.A)); break;
-                case 'F': FmtF128(r.Obj is Float128 f ? f : default); break;
+                case 'F':
+                    var f128 = new System.UInt128(unchecked((ulong)r.B), unchecked((ulong)r.A));
+                    FmtF128(System.Runtime.CompilerServices.Unsafe.BitCast<System.UInt128, Float128>(f128));
+                    break;
                 case 'H': FmtInt128(new System.Int128(unchecked((ulong)r.B), unchecked((ulong)r.A))); break;
                 case 'S': FmtSlice((byte*)r.A, r.B); break;
                 case 's': FmtBytePtr((byte*)r.A); break;
@@ -589,7 +632,32 @@ public unsafe ref struct PrintfBuilder
         if (sb.Length > 0) { _w.Write(sb); }
         _sb = null;
         s_cache = sb;
+        if (args != null)
+        {
+            // The rented span copies go back to the pool, the record array, cleared, back to the thread.
+            for (var i = 0; i < _n; i++)
+            {
+                if (args[i].Obj is byte[] rented) { System.Buffers.ArrayPool<byte>.Shared.Return(rented); }
+            }
+            Array.Clear(args, 0, _n);
+            s_recs = args;
+            _args = null;
+            _n = 0;
+        }
+        if (wideFmt != null) { System.Buffers.ArrayPool<byte>.Shared.Return(wideFmt); }
         return _count;
+    }
+
+    /// <summary>The NUL-terminated wide string at <paramref name="w"/> as UTF-8 in an array rented from the shared pool,
+    /// with a NUL after its <paramref name="len"/> bytes; the caller returns the array. The wide printf and scanf forms
+    /// read their format through it at <c>Done</c>, as the narrow forms read theirs.</summary>
+    internal static byte[] RentUtf8(char* w, out int len)
+    {
+        var units = new ReadOnlySpan<char>(w, Libc.wcslen(w));
+        var buf = System.Buffers.ArrayPool<byte>.Shared.Rent(Encoding.UTF8.GetMaxByteCount(units.Length) + 1);
+        len = Encoding.UTF8.GetBytes(units, buf);
+        buf[len] = 0;
+        return buf;
     }
 
     private Spec ConsumeUntilSpec()
