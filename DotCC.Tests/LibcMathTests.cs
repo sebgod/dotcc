@@ -218,7 +218,10 @@ public sealed class LibcMathTests
         var offenders = methods
             .Where(m => m.GetParameters().Length > 0 && m.GetParameters()[0].ParameterType == typeof(float))
             .Select(m => m.Name)
-            .Where(n => !n.EndsWith("f", StringComparison.Ordinal) && !macros.Contains(n))
+            // A name ending in f is the single-precision form only when its stem exists as a double function.
+            .Where(n => !macros.Contains(n)
+                && !(n.EndsWith("f", StringComparison.Ordinal)
+                    && methods.Any(m => m.Name == n[..^1] && m.GetParameters().Length > 0 && m.GetParameters()[0].ParameterType == typeof(double))))
             .Distinct()
             .ToList();
         offenders.ShouldBeEmpty();

@@ -322,7 +322,7 @@ public sealed class GenericTests
             """);
         try
         {
-            Compiler.EmitCSharp(new[] { src }).ShouldContain("gcd(");
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("gcd(f)");
         }
         finally { File.Delete(src); }
     }

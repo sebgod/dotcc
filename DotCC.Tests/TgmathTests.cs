@@ -33,6 +33,19 @@ public sealed class TgmathTests
         finally { File.Delete(path); }
     }
 
+    /// <summary>tgmath.h is a C99 header: its internal <c>_Generic</c> must not trip the C11 gate under -std=c99 -pedantic-errors.</summary>
+    [Fact]
+    public void Tgmath_compiles_under_c99_pedantic_errors()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"dotcc-tgmath-{System.Guid.NewGuid():N}.c");
+        File.WriteAllText(path, "#include <tgmath.h>\nint main(void) {\ndouble d = sqrt(4.0);\nreturn (int)d;\n}\n");
+        try
+        {
+            Compiler.EmitCSharp(new[] { path }, dialect: CDialect.Parse("c99"), warnings: WarningFlags.Default | WarningFlags.PedanticErrors).ShouldContain("sqrt(");
+        }
+        finally { File.Delete(path); }
+    }
+
     [Fact]
     public void Float_argument_calls_the_f_function()
     {

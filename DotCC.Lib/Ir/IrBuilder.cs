@@ -203,8 +203,8 @@ internal sealed partial class IrBuilder
     /// <summary>Flag a feature introduced in <paramref name="era"/> (ISO year) when
     /// the active dialect predates it. No-op when the gate is off or new enough.</summary>
     // A library unit's dialect is the library's business, not the program's -std=.
-    private void Gate(int era, string feature, Item it) { if (!_libraryUnit) { _gate?.RequireMin(era, feature, it.Position.Line); } }
-    private void Gate(int era, string feature, SrcPos pos) { if (!_libraryUnit) { _gate?.RequireMin(era, feature, pos.Line); } }
+    private void Gate(int era, string feature, Item it) { if (!_libraryUnit && it.Position.Line < SrcPos.SyntheticLineBase) { _gate?.RequireMin(era, feature, it.Position.Line); } }
+    private void Gate(int era, string feature, SrcPos pos) { if (!_libraryUnit && pos.Line < SrcPos.SyntheticLineBase) { _gate?.RequireMin(era, feature, pos.Line); } }
     /// <summary>Gate a feature, then return an already-built value — for gating in
     /// expression-bodied switch arms (the value is built eagerly; gating only
     /// records, so evaluation order is irrelevant).</summary>
