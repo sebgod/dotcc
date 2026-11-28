@@ -111,6 +111,7 @@ public unsafe ref struct PrintfBuilder
     private static string AltOctal(string s, Spec spec) =>
         spec.Alt && s.Length > 0 && s[0] != '0' ? "0" + s : s;
 
+    /// <summary>Format an <c>int</c> for <c>%d %i %u %x %X %o %c</c> and the float specs.</summary>
     private void FmtInt(int v)
     {
         var spec = ConsumeUntilSpec();
@@ -135,6 +136,7 @@ public unsafe ref struct PrintfBuilder
         Emit(ApplyWidth(s, spec));
     }
 
+    /// <summary>Format a <c>double</c> for the float specs (and an integer spec, as C would print its bits as a number).</summary>
     private void FmtDouble(double v)
     {
         var spec = ConsumeUntilSpec();
@@ -290,8 +292,6 @@ public unsafe ref struct PrintfBuilder
         return sb.ToString();
     }
 
-    /// <summary>Float gets promoted to double — real C vararg rule.</summary>
-
     /// <summary>
     /// <c>_Float128</c> (binary128). The <c>L</c> length modifier is parsed and
     /// ignored by <see cref="ParseSpec"/> (this overload already carries the
@@ -319,17 +319,6 @@ public unsafe ref struct PrintfBuilder
         Emit(ApplyWidth(s, spec));
     }
 
-    /// <summary>
-    /// <c>bool</c> → 1/0 for <c>%d</c> and friends. Without this overload,
-    /// C# would route <c>_w.Write(bool)</c> to the <c>Boolean.ToString()</c>
-    /// form ("True"/"False"), which is wrong for C printf semantics.
-    /// </summary>
-
-    /// <summary>
-    /// Long overload for the extended integer type family. Format logic
-    /// mirrors <see cref="Arg(int)"/> but with <c>long.ToString</c> so the
-    /// full 64-bit value survives.
-    /// </summary>
     /// <summary>A zig <c>comptime_int</c> value (C# <see cref="System.Int128"/>, e.g. <c>const g = std.math.gcd(48, 180);</c>):
     /// formatted by the 64-bit overload that holds it, else as its full decimal / hex digits.</summary>
     private void FmtInt128(System.Int128 v)
@@ -345,6 +334,7 @@ public unsafe ref struct PrintfBuilder
         Emit(ApplyWidth(s, spec));
     }
 
+    /// <summary>Format a <c>long</c> (the extended integer family) at full 64-bit width.</summary>
     private void FmtLong(long v)
     {
         var spec = ConsumeUntilSpec();
@@ -367,6 +357,7 @@ public unsafe ref struct PrintfBuilder
         Emit(ApplyWidth(s, spec));
     }
 
+    /// <summary>Format an <c>unsigned long</c> for <c>%u %d %x %X %o</c>.</summary>
     private void FmtULong(ulong v)
     {
         var spec = ConsumeUntilSpec();
@@ -386,12 +377,6 @@ public unsafe ref struct PrintfBuilder
         Emit(ApplyWidth(s, spec));
     }
 
-    /// <summary>
-    /// <c>uint</c> → routed through <see cref="Arg(long)"/>. The implicit
-    /// promotion preserves the full 32-bit range; printf semantics don't
-    /// distinguish signed/unsigned at the format-string level.
-    /// </summary>
-
     /// <summary>A zig byte slice for <c>%s</c> (<c>std.debug.print("{s}", .{slice})</c>): exactly <c>Len</c> bytes, with no
     /// NUL to look for, as zig's <c>{s}</c> prints; a precision still caps it.</summary>
     private void FmtSlice(byte* ptr, long len)
@@ -402,8 +387,7 @@ public unsafe ref struct PrintfBuilder
         Emit(ApplyWidth(s, spec));
     }
 
-    /// <summary>A mutable zig byte slice for <c>%s</c>: as <see cref="Arg(ConstSlice{byte})"/>.</summary>
-
+    /// <summary>A C string or any pointer: <c>%s</c> reads the NUL-terminated bytes, <c>%p</c> prints the address.</summary>
     private void FmtBytePtr(byte* v)
     {
         var spec = ConsumeUntilSpec();
@@ -443,21 +427,12 @@ public unsafe ref struct PrintfBuilder
     }
 
     /// <summary>
-    /// A <c>void*</c> (or any typed <c>T*</c>, which implicitly converts to
-    /// <c>void*</c>) argument — typically a <c>%p</c> spec. Reuses the
-    /// <see cref="Arg(byte*)"/> path (glibc-shaped <c>0x…</c>/<c>(nil)</c> for
-    /// <c>%p</c>, address-print for other non-<c>%s</c> specs). A dedicated overload
-    /// is required because <c>void*</c> does NOT implicitly convert to <c>byte*</c>
-    /// in C#, so without it a <c>%p</c> pointer arg fails to bind.
-    /// </summary>
-
-    /// <summary>
     /// A wide-string (<c>wchar_t*</c> = C# <c>char*</c>) argument — the wide
     /// <c>%s</c> / <c>%ls</c> spec used by <c>wprintf</c>/<c>fwprintf</c>/<c>swprintf</c>
     /// (whose format is transcoded to UTF-8, so the spec is parsed identically; only
     /// the argument is UTF-16). Reads the NUL-terminated UTF-16 string and writes it,
     /// honoring precision. Narrow <c>printf</c> never passes a <c>char*</c> (its
-    /// <c>%s</c> is a <c>byte*</c>), so this overload is wide-only.
+    /// <c>%s</c> is a <c>byte*</c>), so this is wide-only.
     /// </summary>
     private void FmtCharPtr(char* v)
     {
@@ -611,11 +586,12 @@ public unsafe ref struct PrintfBuilder
             }
             WriteUtf8Codepoint();
         }
-        if (sb.Length > 0) { _w.Write(sb.ToString()); }
+        if (sb.Length > 0) { _w.Write(sb); }
         _sb = null;
         s_cache = sb;
         return _count;
     }
+
     private Spec ConsumeUntilSpec()
     {
         while (At(0) != 0)

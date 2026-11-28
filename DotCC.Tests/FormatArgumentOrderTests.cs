@@ -64,7 +64,7 @@ public sealed unsafe class FormatArgumentOrderTests
     }
 
     [Fact]
-    public void Swprintf_formats_after_its_arguments()
+    public void Swprintf_formats_and_counts()
     {
         var dst = (char*)malloc(16 * sizeof(char));
         try

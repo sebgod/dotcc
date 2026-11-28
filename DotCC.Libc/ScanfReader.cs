@@ -97,7 +97,7 @@ public unsafe ref struct ScanfReader
     /// <c>w*scanf</c> family; narrow <c>scanf</c> never targets a <c>char*</c>.</summary>
     public ScanfReader Read(char* dst) { Record(Kind.Wide, (nint)dst); return this; }
 
-    private void ScanInt(int* dst)
+    private void ScanInt(TextReader r, int* dst)
     {
         var spec = ExpectSpec(out int width);
         int @base = spec switch
@@ -107,25 +107,25 @@ public unsafe ref struct ScanfReader
             (byte)'o' => 8,
             _ => throw Unsupported(spec, "an int (%d %i %u %x %X %o)"),
         };
-        SkipInputWs();
+        SkipInputWs(r);
         int consumed = 0;
         bool neg = false;
-        int peek = _r!.Peek();
+        int peek = r.Peek();
         if ((peek == '-' || peek == '+') && (width < 0 || consumed < width))
         {
             neg = peek == '-';
-            _r!.Read();
+            r.Read();
             consumed++;
         }
         long val = 0;
         bool any = false;
-        while ((width < 0 || consumed < width) && (peek = _r!.Peek()) != -1)
+        while ((width < 0 || consumed < width) && (peek = r.Peek()) != -1)
         {
             int d = DigitValue(peek, @base);
             if (d < 0) { break; }
             val = val * @base + d;
             any = true;
-            _r!.Read();
+            r.Read();
             consumed++;
         }
         if (any)
@@ -135,7 +135,7 @@ public unsafe ref struct ScanfReader
         }
     }
 
-    private void ScanDouble(double* dst)
+    private void ScanDouble(TextReader r, double* dst)
     {
         var spec = ExpectSpec(out int width);
         if (spec != (byte)'f' && spec != (byte)'e' && spec != (byte)'g'
@@ -143,29 +143,29 @@ public unsafe ref struct ScanfReader
         {
             throw Unsupported(spec, "a double (%f %e %g)");
         }
-        SkipInputWs();
+        SkipInputWs(r);
         int consumed = 0;
         var sb = new StringBuilder();
-        int peek = _r!.Peek();
+        int peek = r.Peek();
         if ((peek == '-' || peek == '+') && (width < 0 || consumed < width))
         {
-            sb.Append((char)_r!.Read());
+            sb.Append((char)r.Read());
             consumed++;
         }
         bool sawDigit = false;
         bool sawDot = false;
         bool sawExp = false;
-        while ((width < 0 || consumed < width) && (peek = _r!.Peek()) != -1)
+        while ((width < 0 || consumed < width) && (peek = r.Peek()) != -1)
         {
-            if (peek >= '0' && peek <= '9') { sawDigit = true; sb.Append((char)_r!.Read()); consumed++; }
-            else if (peek == '.' && !sawDot && !sawExp) { sawDot = true; sb.Append((char)_r!.Read()); consumed++; }
+            if (peek >= '0' && peek <= '9') { sawDigit = true; sb.Append((char)r.Read()); consumed++; }
+            else if (peek == '.' && !sawDot && !sawExp) { sawDot = true; sb.Append((char)r.Read()); consumed++; }
             else if ((peek == 'e' || peek == 'E') && sawDigit && !sawExp && (width < 0 || consumed < width))
             {
                 sawExp = true;
-                sb.Append((char)_r!.Read());
+                sb.Append((char)r.Read());
                 consumed++;
-                int p2 = _r!.Peek();
-                if ((p2 == '-' || p2 == '+') && (width < 0 || consumed < width)) { sb.Append((char)_r!.Read()); consumed++; }
+                int p2 = r.Peek();
+                if ((p2 == '-' || p2 == '+') && (width < 0 || consumed < width)) { sb.Append((char)r.Read()); consumed++; }
             }
             else { break; }
         }
@@ -176,7 +176,7 @@ public unsafe ref struct ScanfReader
         }
     }
 
-    private void ScanBytes(byte* dst)
+    private void ScanBytes(TextReader r, byte* dst)
     {
         var spec = ExpectSpec(out int width);
         if (spec != (byte)'s' && spec != (byte)'c')
@@ -185,7 +185,7 @@ public unsafe ref struct ScanfReader
         }
         // %c: default field width 1 (read exactly one byte); %s: unbounded unless capped.
         int max = width >= 0 ? width : (spec == (byte)'c' ? 1 : int.MaxValue);
-        if (spec != (byte)'c') { SkipInputWs(); }
+        if (spec != (byte)'c') { SkipInputWs(r); }
         // Hoisted once — CA2014 (no per-iteration stackalloc inside the loop).
         Span<char> chBuf = stackalloc char[1];
         Span<byte> b = stackalloc byte[4];
@@ -193,12 +193,12 @@ public unsafe ref struct ScanfReader
         int count = 0;
         while (count < max)
         {
-            int peek = _r!.Peek();
+            int peek = r.Peek();
             if (peek == -1) { break; }
             if (spec == (byte)'s' && char.IsWhiteSpace((char)peek)) { break; }
             // ASCII fast path — caller's buffer is byte* (UTF-8). For
             // multi-byte chars, encode via Encoding.UTF8.
-            int ch = _r!.Read();
+            int ch = r.Read();
             count++;
             if (ch < 0x80)
             {
@@ -218,7 +218,7 @@ public unsafe ref struct ScanfReader
     /// <summary>Wide <c>%s</c> / <c>%c</c> scan: stores UTF-16 code units straight from the reader (no
     /// UTF-8 encoding); <c>%s</c> stops at whitespace/EOF and NUL-terminates, <c>%c</c> reads a single
     /// unit (or <c>width</c> units).</summary>
-    private void ScanWide(char* dst)
+    private void ScanWide(TextReader r, char* dst)
     {
         var spec = ExpectSpec(out int width);
         if (spec != (byte)'s' && spec != (byte)'c')
@@ -226,14 +226,14 @@ public unsafe ref struct ScanfReader
             throw Unsupported(spec, "a wide string/char (%ls %lc)");
         }
         int max = width >= 0 ? width : (spec == (byte)'c' ? 1 : int.MaxValue);
-        if (spec != (byte)'c') { SkipInputWs(); }
+        if (spec != (byte)'c') { SkipInputWs(r); }
         int written = 0;
         while (written < max)
         {
-            int peek = _r!.Peek();
+            int peek = r.Peek();
             if (peek == -1) { break; }
             if (spec == (byte)'s' && char.IsWhiteSpace((char)peek)) { break; }
-            dst[written++] = (char)_r!.Read();
+            dst[written++] = (char)r.Read();
         }
         if (spec != (byte)'c') { dst[written] = '\0'; }
         if (written > 0) { _matched++; }
@@ -243,18 +243,21 @@ public unsafe ref struct ScanfReader
     /// match count. An unsupported or mismatched conversion throws <see cref="FormatException"/> here.</summary>
     public int Done()
     {
-        _r ??= new StringReader(_src != null
+        TextReader r = _r ?? new StringReader(_src != null
             ? System.Text.Encoding.UTF8.GetString(_src, Libc.strlen(_src))
             : new string(_wsrc, 0, Libc.wcslen(_wsrc)));
-        for (int i = 0; i < _n; i++)
+        if (_targets is { } targets)
         {
-            var (kind, ptr) = _targets![i];
-            switch (kind)
+            for (int i = 0; i < _n; i++)
             {
-                case Kind.Int: ScanInt((int*)ptr); break;
-                case Kind.Double: ScanDouble((double*)ptr); break;
-                case Kind.Bytes: ScanBytes((byte*)ptr); break;
-                default: ScanWide((char*)ptr); break;
+                var (kind, ptr) = targets[i];
+                switch (kind)
+                {
+                    case Kind.Int: ScanInt(r, (int*)ptr); break;
+                    case Kind.Double: ScanDouble(r, (double*)ptr); break;
+                    case Kind.Bytes: ScanBytes(r, (byte*)ptr); break;
+                    default: ScanWide(r, (char*)ptr); break;
+                }
             }
         }
         return _matched;
@@ -291,7 +294,7 @@ public unsafe ref struct ScanfReader
     private void SkipInputWs()
     {
         int c;
-        while ((c = _r!.Peek()) != -1 && char.IsWhiteSpace((char)c)) { _r!.Read(); }
+        while ((c = r.Peek()) != -1 && char.IsWhiteSpace((char)c)) { r.Read(); }
     }
 
     /// <summary>The value of ASCII digit <paramref name="c"/> in <paramref name="base"/>,
