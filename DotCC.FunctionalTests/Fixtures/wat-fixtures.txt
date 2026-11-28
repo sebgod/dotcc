@@ -150,6 +150,7 @@ malloc-promote-keyword-var
 malloc-stack-promote
 malloc-stackalloc
 math-basic
+math-float-args
 multi-decl
 multi-declarator
 multi-tu-struct
